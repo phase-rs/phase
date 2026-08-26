@@ -720,7 +720,7 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
-fn restore_continuation_trigger_firing(
+pub(super) fn restore_continuation_trigger_firing(
     state: &mut GameState,
     continuation_firing: Option<crate::types::identifiers::TriggerFiring>,
 ) {

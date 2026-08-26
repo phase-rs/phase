@@ -227,6 +227,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         // ---- read-free: concrete ids / cast-time snapshots / flags / links,
         //      none of which express a resolution-time dynamic read ----
         targets: _,                // concrete announced target refs (already resolved)
+        attach_target_bindings: _, // concrete attachment role bindings, no dynamic read
         source_id: _,              // object id
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
         noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read

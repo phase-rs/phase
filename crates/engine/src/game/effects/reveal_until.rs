@@ -265,6 +265,7 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -317,6 +318,7 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -352,6 +354,7 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -394,6 +397,7 @@ pub fn resolve(
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
                     manifested_for_continuation: None,
+                    kept_delivery: Default::default(),
                 },
             );
             return Ok(());

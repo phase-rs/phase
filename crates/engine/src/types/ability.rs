@@ -26707,11 +26707,51 @@ pub enum DetachedRemainder {
     HoldsPublisher,
 }
 
+/// The two semantic roles of an [`Effect::Attach`] instruction's object targets.
+///
+/// `targets` remains the compatibility/chain anaphor projection. This narrow
+/// binding preserves which selected object is the attachment and which is the
+/// host across resolution-time choices, where appending a selected Equipment to
+/// the generic target vector would otherwise make the two roles ambiguous.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttachTargetBindings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachment_targets: Vec<TargetRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_target: Option<TargetRef>,
+}
+
+impl AttachTargetBindings {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.attachment_targets.is_empty() && self.host_target.is_none()
+    }
+
+    pub(crate) fn attachment_targets(&self) -> &[TargetRef] {
+        &self.attachment_targets
+    }
+
+    pub(crate) fn host_target(&self) -> Option<&TargetRef> {
+        self.host_target.as_ref()
+    }
+
+    pub(crate) fn bind_attachment(&mut self, target: TargetRef) {
+        self.attachment_targets.push(target);
+    }
+
+    pub(crate) fn bind_host(&mut self, target: TargetRef) {
+        self.host_target = Some(target);
+    }
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
+    /// Semantic bindings for `Effect::Attach` target roles. Defaulted for
+    /// serialized abilities created before role-aware attachment resolution.
+    #[serde(default, skip_serializing_if = "AttachTargetBindings::is_empty")]
+    pub(crate) attach_target_bindings: AttachTargetBindings,
     /// Attribution only. Triggered abilities additionally carry the exact
     /// context below; callers must never use this raw id to rebind a departed
     /// source to a newer incarnation.
@@ -27092,6 +27132,7 @@ impl ResolvedAbility {
         Self {
             effect,
             targets,
+            attach_target_bindings: AttachTargetBindings::default(),
             source_id,
             controller,
             original_controller: None,
@@ -27149,6 +27190,22 @@ impl ResolvedAbility {
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
         }
+    }
+
+    pub(crate) fn bind_attach_attachment_target(&mut self, target: TargetRef) {
+        self.attach_target_bindings.bind_attachment(target);
+    }
+
+    pub(crate) fn bind_attach_host_target(&mut self, target: TargetRef) {
+        self.attach_target_bindings.bind_host(target);
+    }
+
+    pub(crate) fn attach_attachment_targets(&self) -> &[TargetRef] {
+        self.attach_target_bindings.attachment_targets()
+    }
+
+    pub(crate) fn attach_host_target(&self) -> Option<&TargetRef> {
+        self.attach_target_bindings.host_target()
     }
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {

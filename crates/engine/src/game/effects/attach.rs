@@ -119,14 +119,16 @@ pub fn resolve(
     let mut target_slots = ability.targets.iter();
     let attachment_id = if matches!(attachment_filter, TargetFilter::ParentTarget) {
         resolve_parent_target_attachment_from_trigger(state)
+            .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
     } else if attachment_filter_uses_explicit_target_slot(attachment_filter) {
-        resolve_object_filter(state, ability, attachment_filter, &mut target_slots)
+        resolve_bound_attachment_target(state, ability, attachment_filter)
+            .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
     }
     .ok_or_else(|| EffectError::MissingParam("No attachment for Attach".to_string()))?;
-    let target_id = resolve_object_filter(state, ability, target_filter, &mut target_slots)
+    let target_id = resolve_attach_target(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
     // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
@@ -450,9 +452,83 @@ pub(crate) fn complete_resolution_attachment_choice(
         choice_ability
             .targets
             .push(TargetRef::Object(attachment_id));
+        choice_ability.bind_attach_attachment_target(TargetRef::Object(attachment_id));
         resolve(state, &choice_ability, events)?;
     }
     Ok(())
+}
+
+/// Resolve an explicitly chosen attachment through its role binding before the
+/// generic target projection. Resolution-time attachment choices append to
+/// `targets` after their event-context host, so position alone cannot identify
+/// the Equipment without this binding.
+fn resolve_bound_attachment_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<ObjectId> {
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(ability, filter);
+    ability
+        .attach_attachment_targets()
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id)
+                if ability.target_pin_is_current(*id, state)
+                    && matches_target_filter(state, *id, &effective, &ctx) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        })
+}
+
+/// Resolve the host role of an attachment instruction. A
+/// role-bound host wins; otherwise preserve the legacy parent-target anaphor
+/// while excluding attachment-role objects, then use the captured battlefield
+/// event as the final event-context fallback. This keeps an event host and a
+/// resolution-time selected Equipment from swapping roles.
+fn resolve_attach_target<'a>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    target_slots: &mut impl Iterator<Item = &'a TargetRef>,
+) -> Option<ObjectId> {
+    if !matches!(filter, TargetFilter::ParentTarget) {
+        return resolve_object_filter(state, ability, filter, target_slots);
+    }
+    if let Some(TargetRef::Object(id)) = ability.attach_host_target() {
+        if ability.target_pin_is_current(*id, state) {
+            return Some(*id);
+        }
+    }
+    let attachment_ids: Vec<_> = ability
+        .attach_attachment_targets()
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    ability
+        .live_object_targets(state)
+        .into_iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) if !attachment_ids.contains(&id) => Some(id),
+            _ => None,
+        })
+        .or_else(|| resolve_parent_target_host_from_trigger(state))
+}
+
+fn resolve_parent_target_host_from_trigger(state: &GameState) -> Option<ObjectId> {
+    match state.current_trigger_event.as_ref()? {
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    }
 }
 
 fn explicit_attachment_target_chosen(

@@ -5282,6 +5282,93 @@ pub struct CloakExileMember {
     pub attachments: Vec<ObjectId>,
 }
 
+/// The settled subset of a Dig's chosen cards. The choice itself is not an
+/// outcome: replacements may redirect or prevent individual zone changes, so
+/// downstream "this way" instructions must consume only this carrier.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigKeptDeliveryOutcome {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
+}
+
+impl DigKeptDeliveryOutcome {
+    pub fn pending(state: &GameState, selected: Vec<ObjectId>, destination: Zone) -> Self {
+        Self {
+            selected: selected
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect(),
+            completed: Vec::new(),
+            destination: Some(destination),
+            settled: false,
+        }
+    }
+
+    pub fn settle_from_logical_group(&mut self, group: &LogicalZoneChangeGroup) {
+        let Some(destination) = self.destination.filter(|_| !self.settled) else {
+            return;
+        };
+        let moved: BTreeSet<_> = group
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| match &occurrence.event {
+                GameEvent::ZoneChanged { object_id, to, .. } if *to == destination => {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.completed = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|identity| moved.contains(&identity.object_id))
+            .collect();
+        self.settled = true;
+    }
+
+    pub fn selected_ids(&self) -> Vec<ObjectId> {
+        self.selected
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+
+    pub fn completed_ids(&self) -> Vec<ObjectId> {
+        self.completed
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+}
+
+/// Stamp a Dig delivery completion with its exact settled zone-change members.
+/// Only the zone pipeline owns a complete logical group, so this is the single
+/// seam where a selected pile becomes an actual delivery outcome.
+pub(crate) fn settle_dig_kept_delivery_outcome(
+    completion: &mut BatchCompletion,
+    group: &LogicalZoneChangeGroup,
+) {
+    match completion {
+        BatchCompletion::DigKeptDeliveryComplete { kept_delivery, .. }
+        | BatchCompletion::RevealRestPile { kept_delivery, .. } => {
+            kept_delivery.settle_from_logical_group(group);
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
     /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
@@ -5433,6 +5520,11 @@ pub enum BatchCompletion {
         rest_order: DigRestOrder,
         publish_tracked_set: Vec<ObjectId>,
         continuation_targets: Vec<ObjectId>,
+        /// The exact selected identities that completed their requested
+        /// delivery. This survives a replacement-ordering pause so a Dig's
+        /// "this way" continuation never observes merely selected cards.
+        #[serde(default)]
+        kept_delivery: DigKeptDeliveryOutcome,
     },
     /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
     /// settled, so its tracked-set extension and next-member prompt can run.
@@ -5510,6 +5602,10 @@ pub enum BatchCompletion {
         /// pile. `None` for every non-manifest rest pile.
         #[serde(default)]
         manifested_for_continuation: Option<ObjectId>,
+        /// Dig's selected-delivery carrier, retained when a battlefield entry
+        /// re-parks the rest-pile completion. Empty for non-Dig callers.
+        #[serde(default)]
+        kept_delivery: DigKeptDeliveryOutcome,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,

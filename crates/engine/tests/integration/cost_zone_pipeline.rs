@@ -23,7 +23,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
+    CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
     PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind,
     WaitingFor, ZoneDeliveryExileTracking,
@@ -535,9 +535,10 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
     assert_eq!(mass_tracked, &vec![selected_a, selected_b]);
 }
 
-/// W-R2: A `RevealRestPile` already deferred behind a kept-card replacement can
-/// itself start a Library-bottom batch that re-pauses while draining. Its cleanup
-/// must survive both pause boundaries and publish exactly once at the true end.
+/// W-R2: A Dig's deferred completion can itself start a Library-bottom batch
+/// that re-pauses while draining. Its cleanup must survive both pause boundaries
+/// and publish exactly once at the true end, regardless of which completion
+/// carrier owns the kept-card delivery.
 #[test]
 fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     let mut scenario = GameScenario::new();
@@ -609,13 +610,13 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         kept_pause.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(matches!(
+    assert!(
         runner
             .state()
             .active_batch_delivery()
-            .and_then(|pending| pending.completion.as_ref()),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+            .is_some_and(|pending| pending.completion.is_some()),
+        "the kept-card pause must retain a completion for the deferred rest pile"
+    );
 
     let rest_pause = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -629,10 +630,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
     assert_eq!(first_rest_park.remaining.len(), 1);
-    assert!(matches!(
-        first_rest_park.completion.as_ref(),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+    assert!(
+        first_rest_park.completion.is_some(),
+        "the first rest redirect must retain the Dig completion"
+    );
     assert!(runner.state().chain_tracked_set_id.is_none());
 
     let reparking = runner
@@ -642,13 +643,13 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         reparking.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(matches!(
+    assert!(
         runner
             .state()
             .active_batch_delivery()
-            .and_then(|pending| pending.completion.as_ref()),
-        Some(BatchCompletion::RevealRestPile { .. })
-    ));
+            .is_some_and(|pending| pending.completion.is_some()),
+        "the re-parked rest delivery must retain its completion"
+    );
     assert!(runner.state().chain_tracked_set_id.is_none());
 
     for redirect_source in library_redirect_sources {

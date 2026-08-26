@@ -3951,7 +3951,10 @@ fn assign_attach_attachment_selected_slots(
                 "Missing required target".to_string(),
             ));
         }
-        ability.targets.extend(window.iter().flatten().cloned());
+        for target in window.iter().flatten().cloned() {
+            ability.targets.push(target.clone());
+            ability.bind_attach_attachment_target(target);
+        }
         *next_slot = end_slot;
     } else {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
@@ -3960,7 +3963,10 @@ fn assign_attach_attachment_selected_slots(
             ));
         };
         match selected_slot {
-            Some(target) => ability.targets.push(target.clone()),
+            Some(target) => {
+                ability.targets.push(target.clone());
+                ability.bind_attach_attachment_target(target.clone());
+            }
             None if allow_skip => {}
             None => {
                 return Err(EngineError::InvalidAction(
@@ -4021,6 +4027,7 @@ fn assign_attach_attachment_declared_targets(
         for slot_index in 0..attachment_window {
             if let Some(target) = targets.get(*next_target) {
                 ability.targets.push(target.clone());
+                ability.bind_attach_attachment_target(target.clone());
                 *next_target += 1;
             } else if slot_index < bounds.min {
                 return Err(EngineError::InvalidAction(
@@ -4032,6 +4039,7 @@ fn assign_attach_attachment_declared_targets(
         }
     } else if let Some(target) = targets.get(*next_target) {
         ability.targets.push(target.clone());
+        ability.bind_attach_attachment_target(target.clone());
         *next_target += 1;
     } else if !allow_skip {
         return Err(EngineError::InvalidAction(
@@ -6704,6 +6712,7 @@ fn assign_targets_recursive(
             if attach_host_filter_needs_target_slot(&target) {
                 if let Some(target) = targets.get(*next_target) {
                     ability.targets.push(target.clone());
+                    ability.bind_attach_host_target(target.clone());
                     *next_target += 1;
                 } else if !ability.optional_targeting {
                     return Err(EngineError::InvalidAction(
@@ -7067,7 +7076,10 @@ fn assign_selected_slots_recursive(
                     ));
                 };
                 match selected_slot {
-                    Some(target) => ability.targets.push(target.clone()),
+                    Some(target) => {
+                        ability.targets.push(target.clone());
+                        ability.bind_attach_host_target(target.clone());
+                    }
                     None if ability.optional_targeting => {}
                     None => {
                         return Err(EngineError::InvalidAction(
