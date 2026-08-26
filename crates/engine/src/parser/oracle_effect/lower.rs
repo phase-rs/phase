@@ -4468,9 +4468,11 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
-/// Strip a prepositional player-scoped imperative while preserving the ordinary
-/// imperative body. This is the narrow form that must precede generic `for each`
-/// quantity parsing; subject-form player scopes retain their existing route.
+/// CR 101.4 + CR 608.2c + CR 109.5: Strip a prepositional player-scoped
+/// imperative, map its player set to `PlayerFilter`, and preserve the ordinary
+/// imperative body for the per-player resolution that follows. This is the narrow
+/// form that must precede generic `for each` quantity parsing; subject-form player
+/// scopes retain their existing route.
 pub(super) fn strip_prepositional_player_scope_subject(
     text: &str,
 ) -> (Option<PlayerFilter>, String) {
