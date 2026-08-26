@@ -6402,7 +6402,7 @@ mod tests {
         // Illegal division first: wrong total (4 != 5). It reaches apply() and
         // is rejected by the engine, proving candidate removal does not weaken
         // structural validation.
-        let illegal = mgr.handle_action(
+        let illegal = mgr.handle_action_with_card_db_outcome(
             &code,
             &token,
             GameAction::AssignCombatDamage {
@@ -6411,11 +6411,16 @@ mod tests {
                 trample_damage: 0,
                 controller_damage: 0,
             },
+            None,
         );
         match illegal {
-            Err(e) => assert!(
-                e.starts_with("Engine error:"),
-                "wrong-total division must be rejected by apply(), not the gate, got: {e}"
+            Err(SessionActionError::Rejected(rejection)) => assert_eq!(
+                rejection.code,
+                engine::types::action_rejection::ActionRejectionCode::InvalidAction,
+                "wrong-total division must be rejected by apply(), not the gate"
+            ),
+            Err(error) => panic!(
+                "wrong-total division must be rejected by apply(), not the gate, got: {error:?}"
             ),
             Ok(_) => panic!("wrong-total combat damage division must be rejected"),
         }
