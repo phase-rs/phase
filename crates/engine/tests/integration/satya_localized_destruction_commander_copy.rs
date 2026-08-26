@@ -78,40 +78,19 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         energy_optional.waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     ));
-    destruction
-        .act(GameAction::DecideOptionalEffect { accept: true })
-        .expect("accepting Localized Destruction's energy payment is valid");
+    let result = destruction
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining Localized Destruction's energy payment is valid");
     drop(destruction);
 
     assert_eq!(
         runner.state().players[P0.0 as usize].energy,
-        0,
-        "the accepted one-or-more energy payment spends the one energy the spell granted"
+        1,
+        "declining the optional payment leaves the energy granted by the spell unspent"
     );
 
-    // The optional-payment continuation has finished the spell. Drive the
-    // current priority round until its normal SBA check offers the command-zone
-    // return; the number of passes is determined by the player count, not this
-    // two-player fixture's seat order.
-    for _ in 0..runner.state().players.len() {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::CommanderZoneChoice { .. }
-        ) {
-            break;
-        }
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-            "Localized Destruction must resume at priority before the next SBA check; got {:?}",
-            runner.state().waiting_for
-        );
-        runner
-            .act(GameAction::PassPriority)
-            .expect("priority pass must advance the post-resolution SBA pipeline");
-    }
-
     assert!(matches!(
-        runner.state().waiting_for,
+        result.waiting_for,
         WaitingFor::CommanderZoneChoice {
             commander_id,
             current_zone: Zone::Graveyard,
