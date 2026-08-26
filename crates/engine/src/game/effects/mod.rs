@@ -2892,11 +2892,10 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
-            // CR 608.2c: a resolution-time instruction can still consume an
-            // object selected by its parent. `ParentTarget` is not a fresh
-            // choice, so retain the already-bound target for continuations
-            // such as Cass's reattach and The Seventh Doctor's free cast.
-            || effect_refs_parent_target(&sub.effect)
+            // CR 608.2c + CR 701.3a: an Attach continuation that names the
+            // parent's target consumes that already-bound host; it is not a
+            // fresh Resolution-time choice.
+            || resolution_attach_uses_parent_target(sub)
             // CR 608.2c + CR 303.4f: TargetOnly → ChangeZone[+Attach ParentTarget]
             // (Necrotic Plague) stamps Resolution on the return clause, but the
             // chosen host is still the parent's bound target — propagate it so
@@ -2907,6 +2906,19 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_refs_parent_target(&sub.effect))
+}
+
+/// CR 701.3a + CR 608.2c: only a direct `Attach` to `ParentTarget` consumes
+/// the parent's already-selected host while resolving. Other resolution-time
+/// effects must keep their own empty target list for their independent choice.
+fn resolution_attach_uses_parent_target(sub: &ResolvedAbility) -> bool {
+    matches!(
+        &sub.effect,
+        Effect::Attach {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
 }
 
 /// CR 701.3a + CR 303.4f: `forward_result` ChangeZone nesting Attach→ParentTarget

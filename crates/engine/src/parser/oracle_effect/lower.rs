@@ -1741,7 +1741,10 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         // Equip's attachment is always `SelfRef`, so it remains a stack-time
         // target even though the keyword's reminder text isn't in this fragment.
         Effect::Attach { attachment, .. } => !attachment.is_context_ref(),
-        Effect::CastFromZone { .. } => true,
+        // CR 608.2c: a cast that names `ParentTarget` consumes the object
+        // selected by the preceding instruction; only other cast-from-zone
+        // forms make an independent choice while resolving.
+        Effect::CastFromZone { target, .. } => !matches!(target, TargetFilter::ParentTarget),
         _ => false,
     };
     if has_untargeted_resolution_choice {
