@@ -713,7 +713,7 @@ impl GameSession {
             // `debug_mode` unconditionally for single-player. The sandbox
             // *format* flag stays false, so own-library name exposure
             // (`engine::game::visibility`) and the host grant/revoke flow
-            // (rejected above with "Sandbox mode is not enabled") remain
+            // (rejected above as ActionNotAllowed) remain
             // closed — this grants the debug panel, not a shared sandbox.
             //
             // Human seats only. An AI seat has no client and never submits a
@@ -4896,7 +4896,10 @@ mod tests {
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
-        assert!(owner_error.contains("invalid owner player id"));
+        assert_eq!(
+            owner_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!owner_error.contains("card database"));
 
         let session = &mgr.sessions[&code];
@@ -5719,7 +5722,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("host"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -5735,7 +5738,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("own"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -5751,7 +5754,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("Sandbox"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -6708,10 +6711,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, witness.clone())
             .expect_err("the table is voting; the state must not move");
-        assert!(
-            error.contains("takeback request is pending"),
-            "unexpected: {error}"
-        );
+        assert_eq!(error, "That action is not allowed right now.");
         assert_eq!(
             mgr.sessions[&code].state.active_interaction_slots,
             before_slots
