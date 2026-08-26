@@ -1,0 +1,171 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 81,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Strive — This spell costs {2}{U} more to cast for each target beyond the first."
+      },
+      "node": {
+        "StriveCost": {
+          "type": "Cost",
+          "shards": [
+            "Blue"
+          ],
+          "generic": 2
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 82,
+          "end_byte": 162,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Any number of target creatures each get +1/+1 and gain flying until end of turn."
+      },
+      "node": {
+        "Spell": {
+          "source_text": "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 79,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Any number of target creatures each get +1/+1 and gain flying until end of turn"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GenericEffect",
+                    "static_abilities": [
+                      {
+                        "mode": "Continuous",
+                        "affected": {
+                          "type": "ParentTarget"
+                        },
+                        "modifications": [
+                          {
+                            "type": "AddPower",
+                            "value": 1
+                          },
+                          {
+                            "type": "AddToughness",
+                            "value": 1
+                          },
+                          {
+                            "type": "AddKeyword",
+                            "keyword": "Flying"
+                          }
+                        ],
+                        "condition": null,
+                        "affected_zone": null,
+                        "effect_zone": null,
+                        "active_zones": [],
+                        "characteristic_defining": false,
+                        "description": "get +1/+1 and gain flying"
+                      }
+                    ],
+                    "duration": "UntilEndOfTurn",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": null,
+                      "properties": []
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": {
+                    "min": 0,
+                    "max": null
+                  },
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Any number of target creatures each get +1/+1 and gain flying until end of turn."
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "source_text": "Strive — This spell costs {2}{U} more to cast for each target beyond the first.\nAny number of target creatures each get +1/+1 and gain flying until end of turn.",
+  "card_name": "Aerial Formation"
+}

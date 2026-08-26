@@ -12,7 +12,7 @@
 //! (the default), so a declined optional parent would swallow the following
 //! mode and the pump would never apply.
 //!
-//! CR 700.2d + CR 608.2c + CR 609.3.
+//! CR 700.2d + CR 608.2c + CR 608.2d.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::mana::ManaCost;

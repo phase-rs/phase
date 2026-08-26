@@ -620,10 +620,14 @@ fn parses_wayta_damage_caused_doubler() {
             cause: TriggerCause::ControlledCreatureDealtDamage
         }
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'a permanent you control' must not add a redundant affected filter"
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "bare 'a permanent you control' must preserve its permanent source scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 /// CR 603.2d + CR 601.2 + CR 707.10: Cast-or-copy-caused trigger doubler
@@ -645,10 +649,14 @@ fn parses_veyran_cast_or_copy_caused_doubler() {
             }
         }
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'a permanent you control' must not add a redundant affected filter"
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "Veyran must preserve its permanent source scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 /// CR 603.2d: Source-restricted trigger doubler (Splinter, Radical Rat).
@@ -770,12 +778,11 @@ fn harmonic_prodigy_disjunctive_source_doubles_shaman_or_wizard() {
     );
 }
 
-/// CR 603.6a: Panharmonicon's source is the unrestricted "a permanent you
-/// control" — controller match alone suffices, so `affected` stays `None`.
-/// Regression guard: the source-filter extraction must NOT populate
-/// `affected` for a bare controlled-permanent source.
+/// CR 603.6a: Panharmonicon's source is "a permanent you control". Preserve
+/// that permanent-domain restriction so its controller check cannot admit a
+/// spell-source trigger.
 #[test]
-fn panharmonicon_doubler_has_no_source_filter() {
+fn panharmonicon_doubler_preserves_permanent_source_filter() {
     let def = parse_static_line(
             "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
         )
@@ -790,11 +797,46 @@ fn panharmonicon_doubler_has_no_source_filter() {
         "expected EntersBattlefield cause, got {:?}",
         def.mode
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'permanent you control' source must leave affected None, got {:?}",
-        def.affected
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "bare 'permanent you control' source must preserve its scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+}
+
+/// CR 603.2d + CR 603.6a + CR 603.6c: Gandalf the White — legendary OR
+/// artifact entering/leaving doubles controlled triggers (issue #5332).
+#[test]
+fn gandalf_the_white_doubler_static() {
+    let def = parse_static_line(
+        "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Gandalf the White");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: true,
+                qualifiers: vec![
+                    ZoneChangeQualifier::Supertype(Supertype::Legendary),
+                    ZoneChangeQualifier::CoreType(CoreType::Artifact),
+                ],
+            }
+        },
+        "Gandalf must parse as legendary-or-artifact battlefield transition doubling"
     );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "Gandalf's permanent source must preserve its scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 #[test]
@@ -1055,6 +1097,31 @@ fn grand_master_of_flowers_becomes_777_dragon_god_creature() {
         def.condition.is_some(),
         "expected a HasCounters condition (loyalty counter threshold); got None"
     );
+}
+
+#[test]
+fn goddric_celebration_grants_complete_dragon_characteristics() {
+    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, ~ is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)";
+    let def = parse_static_line(text).expect("Goddric Celebration static must parse");
+    let mods = &def.modifications;
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Dragon".to_string()
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::Flying
+    }));
+    assert!(mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantAbility { definition }
+            if definition.kind == AbilityKind::Activated
+    )));
+    assert!(!mods.contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(def.condition.is_some());
 }
 
 /// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): "she's a" gendered pronoun

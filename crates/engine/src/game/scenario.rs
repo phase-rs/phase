@@ -15,7 +15,7 @@ use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, EffectKind, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerDefinition,
 };
@@ -66,7 +66,7 @@ fn build_face_from_oracle(
     let subtype_strings: Vec<String> = obj.card_types.subtypes.clone();
 
     // Build keyword name hints if the caller didn't provide them.
-    // The parser's `extract_keyword_line` requires keyword name hints to identify
+    // The parser's `extract_granted_keyword_list` requires keyword name hints to identify
     // keyword-only lines (returns None when hints are empty). Pre-scan each line
     // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
     //
@@ -187,11 +187,24 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with an explicit `FormatConfig` (the format axis), a
+    /// player count, and a seed. This is the general constructor; `new_n_player`
+    /// is its standard-format specialization. Enables team formats — e.g.
+    /// `FormatConfig::two_headed_giant()` — in scenario-driven tests so team
+    /// combat (CR 805.10) can be exercised through the production apply pipeline.
+    pub fn new_with_format(
+        format_config: crate::types::format::FormatConfig,
+        player_count: u8,
+        seed: u64,
+    ) -> Self {
+        GameScenario {
+            state: GameState::new(format_config, player_count, seed),
+        }
+    }
+
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
-        GameScenario {
-            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
-        }
+        Self::new_with_format(crate::types::format::FormatConfig::standard(), count, seed)
     }
 
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,
@@ -295,7 +308,7 @@ impl GameScenario {
     /// appending is equivalent to replacing.
     pub fn with_mana_pool(&mut self, player: PlayerId, mana: Vec<ManaUnit>) -> &mut Self {
         for unit in mana {
-            self.state.add_mana_to_pool(player, unit);
+            let _ = self.state.add_mana_to_pool(player, unit);
         }
         self
     }
@@ -547,6 +560,60 @@ impl GameScenario {
         }
     }
 
+    /// Add a land card to a player's graveyard (CR 404). Returns a `CardBuilder`
+    /// for fluent chaining. Mirrors [`Self::add_creature_to_graveyard`] — used to
+    /// stage `nonland`/type-restricted graveyard-exile controls.
+    pub fn add_land_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add a creature card to a player's exile. Returns a `CardBuilder` for
+    /// fluent chaining. Used to stage cards tracked by source-linked exile
+    /// effects.
+    pub fn add_creature_to_exile(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Exile,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     // --- Oracle text convenience constructors ---
 
     /// Add a creature to the battlefield with abilities parsed from Oracle text.
@@ -559,6 +626,170 @@ impl GameScenario {
         oracle_text: &str,
     ) -> CardBuilder<'_> {
         let mut builder = self.add_creature(player, name, power, toughness);
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle
+    /// text. Mirrors `add_creature_from_oracle`; no existing helper places a
+    /// land on the battlefield with parsed Oracle text (`add_basic_land` wires a
+    /// hard-coded mana ability; `add_land_to_hand` places in `Zone::Hand`).
+    pub fn add_land_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_creature`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a nonland, noncreature permanent (e.g. an enchantment) to the
+    /// battlefield with abilities parsed from Oracle text. Mirrors
+    /// `add_land_from_oracle`; needed for permanents whose own triggered/
+    /// static abilities (not a cast) are under test — e.g. a Hideaway
+    /// enchantment's beginning-of-combat trigger.
+    pub fn add_enchantment_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_land_from_oracle`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// CR 301.1: Add an artifact to the battlefield with abilities parsed from
+    /// Oracle text. Mirrors [`Self::add_enchantment_from_oracle`]; needed when
+    /// an artifact's own registered activated ability (not a cast) is under
+    /// test — e.g. Scroll of Fate's "{T}: Manifest a card from your hand."
+    pub fn add_artifact_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let entered_turn = self.state.turn_number.saturating_sub(1);
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        obj.entered_battlefield_turn = Some(entered_turn);
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders (CR 302.6 gates only creatures).
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// CR 306.1 + CR 306.5b: Add a planeswalker to the battlefield with its
+    /// loyalty abilities parsed from Oracle text and `loyalty` loyalty counters
+    /// already on it.
+    ///
+    /// Mirrors [`Self::add_enchantment_from_oracle`], plus the two things a
+    /// planeswalker needs that no other permanent does: the loyalty counters
+    /// (CR 306.5b — a planeswalker with none is put into its owner's graveyard
+    /// as a state-based action, so a fixture without them evaporates), and the
+    /// `Gideon`-style planeswalker subtype the caller supplies.
+    pub fn add_planeswalker_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        subtype: &str,
+        loyalty: u32,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.card_types.subtypes.push(subtype.to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders. CR 302.6 gates only creatures, but a
+        // planeswalker animated by its own ability would otherwise inherit the
+        // flag.
+        obj.summoning_sick = false;
+        // CR 306.5b: a planeswalker's loyalty IS the count of loyalty counters on
+        // it, but the engine keeps a `loyalty` field alongside the counter map —
+        // the activation gate reads the counters (CR 606.3) while the
+        // zero-loyalty state-based action reads the field (CR 704.5i). Seed BOTH
+        // so they start in sync; seeding only one produces a planeswalker that
+        // can be activated but can never die.
+        obj.loyalty = Some(loyalty);
+        obj.counters
+            .insert(crate::types::counter::CounterType::Loyalty, loyalty);
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
         builder.from_oracle_text(oracle_text);
         builder
     }
@@ -604,6 +835,44 @@ impl GameScenario {
         obj.card_types.core_types.push(core_type);
         obj.base_card_types = obj.card_types.clone();
         // Instants/sorceries have no power/toughness (unlike creatures)
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// CR 301.1: Add an artifact card to hand with abilities parsed from Oracle
+    /// text.
+    ///
+    /// Distinct from `add_spell_to_hand_from_oracle(..) + as_artifact()`: that
+    /// pair leaves the Sorcery core type in place, producing a card that
+    /// resolves to the graveyard as a spell and therefore never enters the
+    /// battlefield — so no ETB trigger fires. Any Equipment/artifact test that
+    /// needs an enters-the-battlefield ability must start here.
+    ///
+    /// Subtypes (e.g. Equipment, CR 301.5) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_artifact_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 301.1: artifacts have no power/toughness unless they are also creatures.
 
         let mut builder = CardBuilder {
             state: &mut self.state,
@@ -861,18 +1130,18 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach a trigger definition (mode only, no execute).
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        let trigger = TriggerDefinition::new(mode);
-        let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
-        Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
-        self
+        self.with_trigger_definition(TriggerDefinition::new(mode))
     }
 
     /// Attach a fully constructed trigger definition (with execute, zones, etc.).
+    ///
+    /// Appends to the printed base set and re-materializes so the live entry
+    /// carries a real `Printed` occurrence ref — never the `Unmaterialized`
+    /// fixture sentinel, which is unserializable by design.
     pub fn with_trigger_definition(&mut self, trigger: TriggerDefinition) -> &mut Self {
         let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
         Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        obj.materialize_base_trigger_definitions();
         self
     }
 
@@ -908,10 +1177,18 @@ impl<'a> CardBuilder<'a> {
 
     pub fn as_enchantment(&mut self) -> &mut Self {
         let obj = self.obj();
-        obj.card_types
-            .core_types
-            .retain(|t| *t != CoreType::Creature);
-        obj.card_types.core_types.push(CoreType::Enchantment);
+        // Permanent enchantment spells staged from `add_spell_to_hand` keep the
+        // Instant/Sorcery seed until stripped here — same shape as
+        // `as_creature` / `as_planeswalker_with_loyalty`.
+        obj.card_types.core_types.retain(|t| {
+            !matches!(
+                t,
+                CoreType::Creature | CoreType::Instant | CoreType::Sorcery
+            )
+        });
+        if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
+            obj.card_types.core_types.push(CoreType::Enchantment);
+        }
         self.sync_base_card_types();
         self
     }
@@ -966,6 +1243,34 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 306: Make this card a planeswalker with a printed loyalty number.
+    /// If the object is already on the battlefield, mirror the printed loyalty
+    /// into counters to model a pre-existing planeswalker fixture.
+    pub fn as_planeswalker_with_loyalty(&mut self, subtype: &str, loyalty: u32) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types.core_types.retain(|t| {
+            !matches!(
+                t,
+                CoreType::Creature | CoreType::Instant | CoreType::Sorcery
+            )
+        });
+        if !obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+        obj.card_types.subtypes = vec![subtype.to_string()];
+        obj.power = None;
+        obj.toughness = None;
+        obj.base_power = None;
+        obj.base_toughness = None;
+        obj.loyalty = Some(loyalty);
+        obj.base_loyalty = Some(loyalty);
+        if obj.zone == Zone::Battlefield {
+            obj.counters.insert(CounterType::Loyalty, loyalty);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
     /// on the type line; CR 205.4d: a permanent with the legendary supertype is
     /// subject to the "legend rule" state-based action).
@@ -979,6 +1284,57 @@ impl<'a> CardBuilder<'a> {
     }
 
     // --- Special modifiers ---
+
+    /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
+    /// moving it to the command zone (unlike `GameScenario::with_commander`,
+    /// which forces `Zone::Command`).
+    ///
+    /// CR 903.3d resolves "controlling a commander" against a permanent ON THE
+    /// BATTLEFIELD, so every "you control your/a commander" gate — Lieutenant
+    /// statics, Lieutenant triggers, activation restrictions, and
+    /// resolution-time gates alike — needs a battlefield commander to be
+    /// reachable at all. This is that building block.
+    pub fn commander(&mut self) -> &mut Self {
+        self.obj().is_commander = true;
+        self
+    }
+
+    /// CR 613.1b (Layer 2: control-changing effects) + CR 109.5: put this object
+    /// under `player`'s control while leaving `owner` unchanged — the
+    /// owner/controller divergence a stolen permanent has.
+    ///
+    /// This is the only way to exercise the two conjuncts of
+    /// `game::commander::controls_own_commander` (owner, then controller)
+    /// independently, which CR 903.3 makes observable: the commander designation
+    /// is an attribute of the card, so a stolen commander is still its owner's.
+    ///
+    /// Sets BOTH fields on purpose: Layer 2 recomputes `obj.controller` from
+    /// `base_controller.unwrap_or(owner)` on every `evaluate_layers` pass, so
+    /// setting `controller` alone is silently reverted by the first layer pass a
+    /// cast pipeline runs. `controller` is set too so the state is coherent
+    /// before any layer pass.
+    ///
+    /// Battlefield-only: `state.battlefield` is a flat list with no per-player
+    /// split, so no zone-list bookkeeping is needed. Do NOT use this for
+    /// hand/library/graveyard objects, whose zone lists are keyed by owner —
+    /// the `debug_assert_eq!` below ENFORCES that precondition rather than
+    /// merely documenting it, so a misapplied call fails loudly at the fixture
+    /// that wrote it instead of desynchronizing an owner-keyed zone list and
+    /// surfacing somewhere unrelated.
+    pub fn controlled_by(&mut self, player: PlayerId) -> &mut Self {
+        let obj = self.obj();
+        debug_assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "CardBuilder::controlled_by is battlefield-only: object {:?} is in {:?}, whose \
+             zone list is keyed by OWNER, so diverging the controller would corrupt the fixture",
+            obj.id,
+            obj.zone,
+        );
+        obj.base_controller = Some(player);
+        obj.controller = player;
+        self
+    }
 
     /// Mark this creature as having summoning sickness (entered this turn).
     pub fn with_summoning_sickness(&mut self) -> &mut Self {
@@ -1017,6 +1373,15 @@ impl<'a> CardBuilder<'a> {
     /// Set an additional cost on this card (kicker, blight, "or pay").
     pub fn with_additional_cost(&mut self, cost: AdditionalCost) -> &mut Self {
         self.obj().additional_cost = Some(cost);
+        self
+    }
+
+    /// Pin a Strive-style per-target cost surcharge (CR 207.2c + CR 601.2f) on
+    /// this card directly, bypassing Oracle-text parsing. Use when the parser's
+    /// recognition of the surcharge clause is out of scope for the test (e.g. a
+    /// card whose printed text predates the "Strive —" ability-word template).
+    pub fn with_strive_cost(&mut self, cost: crate::types::mana::ManaCost) -> &mut Self {
+        self.obj().strive_cost = Some(cost);
         self
     }
 
@@ -1125,6 +1490,29 @@ impl GameRunner {
 
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        // Test scenarios historically modelled the transition out of precombat
+        // main as directly reaching DeclareAttackers. CR 507.2 now exposes the
+        // intervening priority window, so preserve that test-driver shorthand
+        // by passing the window only when a scenario submits its declaration.
+        // Live callers use `engine::apply` and must act during that window.
+        if matches!(&action, GameAction::DeclareAttackers { .. })
+            && self.state.phase == Phase::BeginCombat
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+            && self.state.stack.is_empty()
+        {
+            let mut pass_events = Vec::new();
+            while self.state.phase == Phase::BeginCombat
+                && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+                && self.state.stack.is_empty()
+            {
+                pass_events
+                    .extend(apply_as_current(&mut self.state, GameAction::PassPriority)?.events);
+            }
+            let mut result = apply_as_current(&mut self.state, action)?;
+            pass_events.append(&mut result.events);
+            result.events = pass_events;
+            return Ok(result);
+        }
         apply_as_current(&mut self.state, action)
     }
 
@@ -1271,8 +1659,8 @@ impl GameRunner {
         self.advance_to_phase(Phase::Upkeep);
     }
 
-    /// Declare attackers (CR 508.1). Must be called when the engine is at
-    /// `WaitingFor::DeclareAttackers` (use [`GameRunner::advance_to_combat`]).
+    /// Declare attackers (CR 508.1). Accepts the scenario driver's established
+    /// shorthand for passing an empty beginning-of-combat priority window.
     /// Each entry is `(attacker, defender)` where `defender` is an
     /// [`AttackTarget`](crate::game::combat::AttackTarget) — a player,
     /// planeswalker, or battle (CR 508.1b).
@@ -1280,13 +1668,39 @@ impl GameRunner {
         &mut self,
         attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
     ) -> Result<ActionResult, EngineError> {
-        apply_as_current(
-            &mut self.state,
-            GameAction::DeclareAttackers {
-                attacks: attacks.to_vec(),
-                bands: vec![],
-            },
-        )
+        self.act(GameAction::DeclareAttackers {
+            attacks: attacks.to_vec(),
+            bands: vec![],
+        })
+    }
+
+    /// CR 702.103b: put `attachment` onto `host` in its BESTOWED AURA FORM —
+    /// the shape a real bestow cast produces.
+    ///
+    /// > 702.103b ... As a spell cast bestowed is put onto the stack, it becomes
+    /// > an Aura enchantment and gains enchant creature.
+    ///
+    /// Routes through `casting::apply_bestow_aura_form`, the engine's single
+    /// authority for that form, so a fixture cannot drift from production: it
+    /// removes the `Creature` core type, adds the `Aura` subtype, and grants
+    /// `enchant creature`.
+    ///
+    /// Hand-setting `attached_to` on a printed creature instead produces a state
+    /// production never creates, and CR 704.5p sentence 1
+    /// (`sba::check_illegal_attachment_unattach`) correctly sweeps it away on the
+    /// next state-based-action check — so a bestow fixture that skips this helper
+    /// silently loses its attachment.
+    pub fn attach_as_bestowed_aura(&mut self, attachment: ObjectId, host: ObjectId) {
+        if let Some(obj) = self.state.objects.get_mut(&attachment) {
+            super::casting::apply_bestow_aura_form(obj);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(host));
+        }
+        if let Some(host_obj) = self.state.objects.get_mut(&host) {
+            if !host_obj.attachments.contains(&attachment) {
+                host_obj.attachments.push(attachment);
+            }
+        }
+        self.state.layers_dirty.mark_full();
     }
 
     /// Declare blockers (CR 509.1). Must be called when the engine is at
@@ -1377,6 +1791,36 @@ impl GameRunner {
             // with an empty stack while triggers wait to be dispatched.
             if matches!(self.state.waiting_for, WaitingFor::OrderTriggers { .. }) {
                 super::triggers::drain_order_triggers_with_identity(&mut self.state);
+                continue;
+            }
+            // CR 401.4: mass library-bottom placement parks `EffectZoneChoice` even
+            // when the stack is empty (Teferi's Puzzle Box draw-step trigger). Tests
+            // that drive phase advancement without an explicit `.effect_zone()` policy
+            // submit the engine-listed card order so resolution can finish.
+            if let WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                up_to,
+                effect_kind,
+                ..
+            } = &self.state.waiting_for
+            {
+                if *effect_kind != EffectKind::PutAtLibraryPosition {
+                    break;
+                }
+                if *up_to || cards.len() < *min_count {
+                    break;
+                }
+                let chosen: Vec<_> = cards.iter().take(*count).copied().collect();
+                if chosen.len() != *count {
+                    break;
+                }
+                if apply_as_current(&mut self.state, GameAction::SelectCards { cards: chosen })
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
             if self.state.stack.is_empty() {
@@ -1477,9 +1921,15 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
+            WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
+            WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
+            WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
+            WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
@@ -1489,12 +1939,14 @@ impl GameRunner {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
@@ -1521,6 +1973,7 @@ impl GameRunner {
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
             WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
@@ -1588,6 +2041,10 @@ impl GameRunner {
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
             WaitingFor::PairChoice { .. } => "PairChoice",
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::LoopShortcut { .. } => "LoopShortcut",
+            WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
+            WaitingFor::PrecastCopyShortcutOffer { .. } => "PrecastCopyShortcutOffer",
+            WaitingFor::RespondToPrecastCopyShortcut { .. } => "RespondToPrecastCopyShortcut",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
@@ -1649,11 +2106,14 @@ impl GameRunner {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
+            WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
+            WaitingFor::KeepExactPermanentsChoice { .. } => "KeepExactPermanentsChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
@@ -1737,6 +2197,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
@@ -1744,6 +2205,7 @@ pub struct SpellCast<'a> {
     cost_objects: Vec<ObjectId>,
     distribution: Option<Vec<(TargetRef, u32)>>,
     convoke_with: Vec<ObjectId>,
+    delve_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
     modal_back_face: Option<bool>,
@@ -1763,6 +2225,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            free_cast: false,
             modes: None,
             x: None,
             target_players: Vec::new(),
@@ -1770,6 +2233,7 @@ impl<'a> SpellCast<'a> {
             cost_objects: Vec::new(),
             distribution: None,
             convoke_with: Vec::new(),
+            delve_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
             modal_back_face: None,
@@ -1797,7 +2261,7 @@ impl<'a> SpellCast<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    /// (CR 608.2d / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
         self
@@ -1827,6 +2291,15 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Elect the free `HandPermission` option at a `CastingVariantChoice` without
+    /// having to name the granting source's `ObjectId` (CR 118.9 / CR 118.9a). The
+    /// driver picks the first `CastingVariant::HandPermission` option the menu
+    /// offers — the Omniscience-class "cast without paying its mana cost" branch.
+    pub fn free_cast(mut self) -> Self {
+        self.free_cast = true;
         self
     }
 
@@ -1949,6 +2422,13 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Exile these cards from the caster's graveyard to pay generic mana via
+    /// Delve (CR 702.66a).
+    pub fn delve_with(mut self, cards: &[ObjectId]) -> Self {
+        self.delve_with.extend_from_slice(cards);
+        self
+    }
+
     /// Drive the cast pipeline until the spell is committed to the stack and a
     /// priority window opens (CR 601.2i). Use this when a test must inspect the
     /// live stack object before resolution.
@@ -1964,6 +2444,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            free_cast,
             modes,
             x,
             target_players,
@@ -1971,6 +2452,7 @@ impl<'a> SpellCast<'a> {
             cost_objects,
             distribution,
             convoke_with,
+            delve_with,
             optional,
             search_pick,
             modal_back_face,
@@ -2005,12 +2487,19 @@ impl<'a> SpellCast<'a> {
             &mut events,
         )?;
 
-        // Intent the driver matches as it walks slots: object targets are
-        // consumed one per slot (most slots are object slots), while player
-        // targets are reusable across slots (one player may be targeted by
-        // several modes — see `pick_slot_target`).
+        // Intent the driver matches as it walks slots. Object targets are
+        // always consumed one per slot. Player declarations are consumed only
+        // by a multi-target run so `.target_players(&[a, b])` can express two
+        // distinct targets while a single declaration remains reusable across
+        // independent modal slots.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
+        // CR 603.3d: triggered-ability targets are chosen after the trigger is
+        // put on the stack, independently of the spell's own target slots.
+        // Keep a separate object-intent pool so the same declared object can
+        // satisfy a trigger target and a later resolution target.
+        let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
+        let mut remaining_multi_target_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
 
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
@@ -2063,21 +2552,38 @@ impl<'a> SpellCast<'a> {
                     )?;
                 }
                 WaitingFor::CastingVariantChoice { options, .. } => {
-                    let variant = casting_variant.unwrap_or_else(|| {
-                        panic!(
-                            "SpellCast reached WaitingFor::CastingVariantChoice but no \
-                             .casting_variant(..) was declared — declare the intended cast variant"
-                        )
-                    });
-                    let index = options
-                        .iter()
-                        .position(|option| option.variant == variant)
-                        .unwrap_or_else(|| {
+                    // CR 118.9 / CR 118.9a: `.free_cast()` elects the first
+                    // `HandPermission` option without naming the source id;
+                    // otherwise match the explicitly declared `.casting_variant(..)`.
+                    let index = if free_cast {
+                        options
+                            .iter()
+                            .position(|option| {
+                                matches!(option.variant, CastingVariant::HandPermission { .. })
+                            })
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast .free_cast() found no HandPermission option in {:?}",
+                                    options
+                                )
+                            })
+                    } else {
+                        let variant = casting_variant.unwrap_or_else(|| {
                             panic!(
-                                "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                variant, options
+                                "SpellCast reached WaitingFor::CastingVariantChoice but no \
+                                 .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
+                        options
+                            .iter()
+                            .position(|option| option.variant == variant)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
+                                    variant, options
+                                )
+                            })
+                    };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(
                         runner,
@@ -2111,6 +2617,18 @@ impl<'a> SpellCast<'a> {
                     let pay = matches!(optional, OptionalPolicy::Accept);
                     act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
                 }
+                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
+                // Sole-opponent games auto-latch and never raise this prompt.
+                WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                    let opponent = candidates.first().copied().unwrap_or_else(|| {
+                        panic!("ChooseGiftRecipient raised with empty candidates")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseGiftRecipient { opponent },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2f / CR 118.3: additional non-mana costs that require
                 // selecting objects, such as sacrificing a creature.
                 WaitingFor::PayCost {
@@ -2142,42 +2660,66 @@ impl<'a> SpellCast<'a> {
                         &mut events,
                     )?;
                 }
-                // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                // CR 702.51a / CR 702.66a / CR 601.2g–h: mana payment, possibly
+                // via convoke or delve.
                 //
                 // Most pool-funded casts auto-pay and never surface this window.
-                // But a Convoke (CR 702.51) spell always opens a `ManaPayment
-                // { convoke_mode }` window to offer tapping creatures — even when
-                // the controller intends to pay entirely from their pool. With no
-                // convoke creatures declared, the convoke loop is a no-op and the
-                // trailing `PassPriority` finalizes the remaining cost from the
-                // pool (the engine auto-allocates pool mana, incl. the generic
-                // portion). If the pool can't cover it, `PassPriority` errors and
-                // the `.expect` below fails loudly — fund the pool in the scenario.
-                WaitingFor::ManaPayment { .. } => {
-                    for &creature in &convoke_with {
-                        // CR 702.51b: pay one mana of the creature's color, or
-                        // colorless toward the generic portion of the cost.
-                        let mana_type = runner
-                            .state
-                            .objects
-                            .get(&creature)
-                            .and_then(|obj| obj.color.first().copied())
-                            .map(ManaType::from)
-                            .unwrap_or(ManaType::Colorless);
+                // Convoke (CR 702.51) and Delve (CR 702.66a) each open a
+                // `ManaPayment { convoke_mode }` window even when the controller
+                // intends to pay entirely from their pool. With no declared
+                // contributors, their loops are no-ops and the trailing
+                // `PassPriority` finalizes the remaining cost from the pool. If
+                // the pool can't cover it, `PassPriority` errors and the `.expect`
+                // below fails loudly — fund the pool in the scenario.
+                WaitingFor::ManaPayment { convoke_mode, .. } => {
+                    let only_delve = matches!(convoke_mode, Some(ConvokeMode::Delve));
+                    for &card in &delve_with {
                         act_collect(
                             runner,
                             GameAction::TapForConvoke {
-                                object_id: creature,
-                                mana_type,
+                                object_id: card,
+                                mana_type: ManaType::Colorless,
                             },
                             &mut events,
                         )?;
                     }
+                    if !only_delve {
+                        for &creature in &convoke_with {
+                            // CR 702.51b: pay one mana of the creature's color, or
+                            // colorless toward the generic portion of the cost.
+                            let mana_type = runner
+                                .state
+                                .objects
+                                .get(&creature)
+                                .and_then(|obj| obj.color.first().copied())
+                                .map(ManaType::from)
+                                .unwrap_or(ManaType::Colorless);
+                            act_collect(
+                                runner,
+                                GameAction::TapForConvoke {
+                                    object_id: creature,
+                                    mana_type,
+                                },
+                                &mut events,
+                            )?;
+                        }
+                    }
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
                     act_collect(runner, GameAction::PassPriority, &mut events)?;
                 }
+                WaitingFor::ManaSourceSelection { options, .. } => {
+                    let selection = options.first().cloned().unwrap_or_else(|| {
+                        panic!("ManaSourceSelection must offer at least one source")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ActivateManaSource { selection },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
+                    pending_cast,
                     target_slots,
                     selection,
                     ..
@@ -2186,6 +2728,34 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
+                        pending_cast
+                            .ability
+                            .multi_target
+                            .as_ref()
+                            .map(|_| &mut remaining_multi_target_players),
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )?;
+                }
+                // CR 603.3d: triggered abilities choose targets after they are
+                // put on the stack. Their object intents are independent of
+                // the spell's target slots, while player intents remain
+                // reusable across both prompts.
+                WaitingFor::TriggerTargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_trigger_objects,
+                        None,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2285,6 +2855,34 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Submit an action while this cast remains committed on the stack.
+    ///
+    /// This keeps response tests on the same `apply()` pipeline as the live
+    /// game, while preserving the committed cast's hand and target baselines.
+    pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        self.runner.act(action)
+    }
+
+    /// Start another fluent cast while this committed spell waits on the stack.
+    ///
+    /// Used by response tests to cast a counterspell or other instant before
+    /// resolving the committed spell and its triggers.
+    pub fn cast(&mut self, spell: ObjectId) -> SpellCast<'_> {
+        self.runner.cast(spell)
+    }
+
+    /// Mutate the board WHILE the committed spell is still on the stack.
+    ///
+    /// The spell has been announced (CR 601.2a-i) but not resolved (CR 608.2), which
+    /// is the only window in which "did this value LOCK at announcement, or is it
+    /// re-read at resolution?" is answerable. A test that merely casts and resolves
+    /// against a static board cannot tell a locked snapshot from a live re-read —
+    /// both produce the same number. Changing the board here and then resolving is
+    /// what discriminates them.
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.runner.state
+    }
+
     /// The cast variant option selected during `CastingVariantChoice`, if the
     /// cast surfaced that prompt.
     pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {
@@ -2355,15 +2953,17 @@ impl<'a> CastCommit<'a> {
 /// matching CR 601.2c (targets declared one per slot, in written order).
 ///
 /// Object intent is *consumed* (each declared object satisfies at most one
-/// slot, so distinct exile/destroy targets never alias). Player intent is
-/// *reusable* — the same player is routinely targeted by several modes of one
-/// modal spell (e.g. Kozilek's Command mode 1 scries *and* draws for the same
-/// target player), so a declared player may satisfy multiple player slots.
+/// slot, so distinct exile/destroy targets never alias). A multi-target run
+/// consumes player declarations in order when available; otherwise, player
+/// intent is reusable, letting the same declared player satisfy independent
+/// modal slots (e.g. Kozilek's Command mode 1 scries *and* draws for the same
+/// target player).
 /// Falls back to `None` for optional slots; panics for an unsatisfiable
 /// required slot.
 fn pick_slot_target(
     slot: &crate::types::game_state::TargetSelectionSlot,
     remaining_objects: &mut Vec<ObjectId>,
+    remaining_multi_target_players: Option<&mut Vec<PlayerId>>,
     declared_players: &[PlayerId],
     slot_index: usize,
 ) -> Option<TargetRef> {
@@ -2372,6 +2972,14 @@ fn pick_slot_target(
         .position(|&o| slot.legal_targets.contains(&TargetRef::Object(o)))
     {
         return Some(TargetRef::Object(remaining_objects.remove(pos)));
+    }
+    if let Some(remaining_players) = remaining_multi_target_players {
+        if let Some(pos) = remaining_players
+            .iter()
+            .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
+        {
+            return Some(TargetRef::Player(remaining_players.remove(pos)));
+        }
     }
     if let Some(&player) = declared_players
         .iter()
@@ -2397,6 +3005,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
     // borrow-free match. Kept in sync with `GameRunner::waiting_for_kind`.
     match waiting {
         WaitingFor::ManaPayment { .. } => "ManaPayment",
+        WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
         WaitingFor::ChooseXValue { .. } => "ChooseXValue",
         WaitingFor::TargetSelection { .. } => "TargetSelection",
         WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
@@ -2406,8 +3015,10 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::Priority { .. } => "Priority",
         WaitingFor::OrderTriggers { .. } => "OrderTriggers",
         WaitingFor::ScryChoice { .. } => "ScryChoice",
+        WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+        WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
         WaitingFor::CastOffer { .. } => "CastOffer",
         WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
         WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
@@ -2588,7 +3199,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Decline optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). This is already the default; provided for
+    /// (CR 608.2d / CR 601.2f). This is already the default; provided for
     /// explicitness at call sites.
     pub fn decline_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Decline;
@@ -2596,7 +3207,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
+    /// (CR 608.2d / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
     /// opt-in accept, for abilities whose payoff is gated behind a "you may".
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
@@ -2689,6 +3300,7 @@ impl<'a> AbilityActivation<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
+                        None,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2802,7 +3414,7 @@ pub enum SearchPolicy {
 }
 
 /// What the resolution driver does at an optional "you may" decision
-/// (`OptionalEffectChoice` per CR 609.3, `OptionalCostChoice` per CR 601.2f).
+/// (`OptionalEffectChoice` per CR 608.2d, `OptionalCostChoice` per CR 601.2f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalPolicy {
     /// Accept the optional effect / pay the optional cost.
@@ -2880,6 +3492,12 @@ fn drive_resolution(
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                cards, keep_on_top, ..
+            } => {
+                let keep: Vec<_> = cards.iter().take(*keep_on_top).copied().collect();
+                act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
+            }
             // CR 701.25a: default surveil policy keeps all looked-at cards on
             // top, mirroring the scry default.
             WaitingFor::SurveilChoice { cards, .. } => {
@@ -2907,6 +3525,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
+                    None,
                     declared_players,
                     selection.current_slot,
                 );
@@ -2928,6 +3547,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
+                    None,
                     declared_players,
                     selection.current_slot,
                 );
@@ -2998,7 +3618,7 @@ fn drive_resolution(
                     )?;
                 }
             },
-            // CR 609.3: accept or decline an optional ("you may") effect.
+            // CR 608.2d: accept or decline an optional ("you may") effect.
             WaitingFor::OptionalEffectChoice { .. } => {
                 let accept = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(
@@ -3019,6 +3639,17 @@ fn drive_resolution(
             WaitingFor::OptionalCostChoice { .. } => {
                 let pay = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+            }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("ChooseGiftRecipient raised with empty candidates"));
+                act_collect(
+                    runner,
+                    GameAction::ChooseGiftRecipient { opponent },
+                    &mut events,
+                )?;
             }
             WaitingFor::ReplacementChoice { .. } => {
                 let Some(index) = policy.replacement_choice else {
@@ -3091,6 +3722,9 @@ fn drive_resolution(
                 )?;
             }
             WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                // No pick declared → halt so the caller can assert the offered
+                // options and the prompt boundary via `final_waiting_for()`
+                // (mirrors SpellbookDraft / NamedChoice / ReplacementChoice).
                 let Some(target) = policy.copy_target else {
                     break;
                 };
@@ -4299,7 +4933,10 @@ mod tests {
         let obj = &runner.state().objects[&id];
 
         assert!(!obj.trigger_definitions.is_empty());
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::ChangesZone
+        );
     }
 
     #[test]
@@ -4364,12 +5001,13 @@ mod tests {
             .trigger_definitions
             .iter_all()
             .find(|t| {
-                t.description
+                t.definition
+                    .description
                     .as_deref()
                     .is_some_and(|d| d.contains("poison counters"))
             })
             .expect("ixhel end-step trigger");
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         assert!(
             matches!(
                 &*execute.effect,

@@ -1,7 +1,7 @@
 //! One-off perf probe for the turn-40 squirrel board (Cryptolith Rite + ~700
 //! Squirrel tokens). Loads a saved frontend game-state JSON and measures where
 //! the `legal_actions` clone-storm bites. Run with:
-//!   SQUIRREL_STATE=/path/to/state.json cargo test -p engine --test integration -- --nocapture --ignored squirrel_perf_probe
+//!   SQUIRREL_STATE=/path/to/state.json cargo test -p phase-engine --test integration -- --nocapture --ignored squirrel_perf_probe
 //! Diagnostic only; ignored by default so it never runs in CI.
 
 use std::time::Instant;
@@ -101,6 +101,7 @@ fn probe_squirrel_board() {
         player: active,
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     measure("declare-attackers", &da);

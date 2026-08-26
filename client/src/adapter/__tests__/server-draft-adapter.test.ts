@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
-import type { GameLogEntry, GameState } from "../types";
+import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction } from "../types";
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -66,6 +67,8 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
+    pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -74,9 +77,11 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     timer_remaining_ms: null,
     standings: [],
     current_round: 0,
+    next_pairing_round: 1,
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
     ...overrides,
   };
 }
@@ -88,6 +93,7 @@ function debugLogEntry(value: string): GameLogEntry {
     phase: "PreCombatMain",
     category: "Debug",
     segments: [{ type: "Text", value }],
+    presentation: { importance: "Diagnostic", tone: "Diagnostic", boundary: "None", visibility: "Public" },
   };
 }
 
@@ -102,6 +108,21 @@ function matchState(label: string): GameState {
     objects: {},
   } as unknown as GameState;
 }
+
+const viewerInteraction = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+  authorizedSubmitters: [0],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [],
+  attachmentFans: {},
+  attachmentViews: {},
+  availability: { type: "inputRequired" },
+} as LegalActionsResult["viewerInteraction"];
+
+const objectActions: Record<string, ObjectAction[]> = {
+  "42": [{ type: "PassPriority" }],
+};
 
 describe("ServerDraftAdapter", () => {
   let adapter: ServerDraftAdapter;
@@ -295,6 +316,48 @@ describe("ServerDraftAdapter", () => {
     );
   });
 
+  it("caches GameStarted interaction and per-object action data", async () => {
+    const state = matchState("server-draft-started");
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state,
+          your_player: 0,
+          legal_actions_by_object: objectActions,
+          viewer_interaction: viewerInteraction,
+        },
+      }),
+    );
+
+    await expect(adapter.getLegalActions()).resolves.toMatchObject({
+      legalActionsByObject: objectActions,
+      viewerInteraction,
+    });
+  });
+
+  it("caches StateUpdate interaction and per-object action data", async () => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "StateUpdate",
+        data: {
+          state: matchState("server-draft-update"),
+          events: [],
+          legal_actions_by_object: objectActions,
+          viewer_interaction: viewerInteraction,
+        },
+      }),
+    );
+
+    await expect(adapter.getLegalActions()).resolves.toMatchObject({
+      legalActionsByObject: objectActions,
+      viewerInteraction,
+    });
+  });
+
   it("does not send ReportMatchResult on GameOver", () => {
     // Enter match phase.
     ws.dispatchSynthetic(
@@ -427,5 +490,109 @@ describe("ServerDraftAdapter", () => {
     );
 
     expect(adapter.currentPhase).toBe("deckbuilding");
+  });
+
+  // Issue #5913, fourth transport. `ServerDraftAdapter` is a full
+  // `EngineAdapter` once the pod's game starts, so the engine's stale verdict
+  // must classify here exactly as it does for WASM, WebSocket and P2P — a
+  // generic ACTION_REJECTED would leave a server-hosted draft player seeing the
+  // red error every other seat no longer sees (`dispatchAction` suppresses only
+  // STALE_ACTION).
+  describe("game-phase action rejections", () => {
+    beforeEach(() => {
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "DraftMatchStart",
+          data: {
+            match_id: "r1-t0",
+            round: 1,
+            game_code: "GAME01",
+            player_token: "gametok",
+            your_player: 0,
+            opponent_name: "Bob",
+          },
+        }),
+      );
+    });
+
+    it("classifies a stale ReorderHand rejection as STALE_ACTION", async () => {
+      const pending = adapter.submitAction(
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
+        0,
+      );
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "STALE_ACTION",
+        recoverable: false,
+      });
+    });
+
+    it("still surfaces a non-stale rejection as a recoverable ACTION_REJECTED", async () => {
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: something genuinely wrong" },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      });
+    });
+
+    // The preview path answers against the same engine state an action would,
+    // so it can carry the same stale verdict and must classify identically.
+    it("classifies a stale mana-payment preview rejection as STALE_ACTION", async () => {
+      const pending = adapter.previewManaPayment(
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
+        0,
+      );
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreviewRejected",
+          data: {
+            request_id: sent.data.request_id,
+            reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+          },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "STALE_ACTION",
+        recoverable: false,
+      });
+    });
+
+    it("still surfaces a non-stale preview rejection as a recoverable ACTION_REJECTED", async () => {
+      const pending = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreviewRejected",
+          data: { request_id: sent.data.request_id, reason: "Engine error: no mana sources" },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      });
+    });
   });
 });

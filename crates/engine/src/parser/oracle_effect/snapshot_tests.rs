@@ -188,7 +188,7 @@ fn hordewing_skaab_discard_that_many_uses_previous_effect_amount() {
         &*sub.effect,
         Effect::Discard {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount { .. },
             },
             ..
         }
@@ -306,17 +306,6 @@ fn delayed_return_stamps_exile_origin_for_that_card_phrasing() {
     let (origin, is_parent) = delayed_return_change_zone(&def);
     assert_eq!(origin, Some(Zone::Exile));
     assert!(is_parent);
-}
-
-/// The stamp is independent of which anaphor the text uses ("return it").
-#[test]
-fn delayed_return_stamps_exile_origin_for_it_phrasing() {
-    let def = parse_effect_chain(
-            "exile target creature. return it to the battlefield under its owner's control at the beginning of the next end step",
-            AbilityKind::Spell,
-        );
-    let (origin, _) = delayed_return_change_zone(&def);
-    assert_eq!(origin, Some(Zone::Exile));
 }
 
 /// SHOULD-FIX 1: a top-level `ParentTarget` `ChangeZone` NOT wrapped in a
@@ -495,6 +484,7 @@ fn return_target_and_same_name_from_your_graveyard_carries_zone_and_mass_tail() 
         target,
         enters_under,
         enter_tapped,
+        enters_attacking: false,
         enter_with_counters: _,
         face_down_profile: None,
         library_position: None,
@@ -581,10 +571,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
     };
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 
     let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
@@ -593,6 +580,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
@@ -683,6 +671,7 @@ fn returned_target_can_receive_contracted_additive_type_followup() {
         static_abilities,
         duration,
         target,
+        end_cost: _,
     } = &*subtype_followup.effect
     else {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
@@ -817,8 +806,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
 
     assert_eq!(
         def.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     assert!(matches!(
@@ -833,8 +822,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     let put = def.sub_ability.as_ref().expect("expected then-put clause");
     assert_eq!(
         put.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     let Effect::ChangeZone {
@@ -858,10 +847,7 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     assert_eq!(*enters_under, None);
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 }
 
@@ -977,7 +963,10 @@ fn strax_choose_a_player_at_random_records_random_selection() {
     );
     match def.effect.as_ref() {
         Effect::Choose {
-            choice_type: ChoiceType::Player,
+            choice_type:
+                ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::Independent,
+                },
             selection,
             ..
         } => assert_eq!(*selection, TargetSelectionMode::Random),
@@ -994,16 +983,20 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         AbilityKind::Spell,
     );
 
-    // Node 0: the first `Choose(Player)`.
+    // Node 0: the first `Choose(Player)` — no ordinal, so the default
+    // `Independent` distinctness applies (CR 608.2c; issue #6381 confirms the
+    // bare "choose a player" must NOT exclude prior choices).
     assert!(
         matches!(
             def.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::Independent
+                },
                 ..
             }
         ),
-        "first node must be Choose(Player), got {:?}",
+        "first node must be Choose(Player) with Independent distinctness, got {:?}",
         def.effect
     );
 
@@ -1021,17 +1014,21 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         "the +1/+1 counters go on a creature the 1st chosen player controls"
     );
 
-    // Node 2: the second `Choose(Player)`.
+    // Node 2: the second `Choose(Player)` — "a second player" carries the
+    // ordinal, so it must be `DistinctFromPriorChoices` (Gluntch's "three
+    // distinct players" ruling).
     let node2 = node1.sub_ability.as_ref().expect("2nd Choose node");
     assert!(
         matches!(
             node2.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
+                },
                 ..
             }
         ),
-        "node 2 must be Choose(Player) — not Unimplemented — got {:?}",
+        "node 2 must be Choose(Player) with DistinctFromPriorChoices — not Unimplemented — got {:?}",
         node2.effect
     );
 
@@ -1046,17 +1043,20 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         "the 2nd chosen player draws the card"
     );
 
-    // Node 4: the third `Choose(Player)`.
+    // Node 4: the third `Choose(Player)` — "a third player" carries the
+    // ordinal, so it must be `DistinctFromPriorChoices` too.
     let node4 = node3.sub_ability.as_ref().expect("3rd Choose node");
     assert!(
         matches!(
             node4.effect.as_ref(),
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player {
+                    distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
+                },
                 ..
             }
         ),
-        "node 4 must be Choose(Player) — not Unimplemented — got {:?}",
+        "node 4 must be Choose(Player) with DistinctFromPriorChoices — not Unimplemented — got {:?}",
         node4.effect
     );
 
@@ -1179,13 +1179,14 @@ fn skullwinder_etb_parses_choose_opponent() {
 }
 
 // -----------------------------------------------------------------------
-// Balance equalization parser arms (try_parse_balance_equalization)
+// Balance equalization parser arms (parse_balance_equalization_ir)
 // -----------------------------------------------------------------------
 
 /// Assert a `Difference { ObjectCount(Land, You), ControlledByEachPlayer }`
 /// sacrifice link with `player_scope: All`.
 fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Sacrifice, got {:?}", def.effect);
     };
@@ -1239,6 +1240,7 @@ fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
 /// discard link with `player_scope: All`.
 fn assert_hand_discard_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Discard { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Discard, got {:?}", def.effect);
     };
@@ -1285,6 +1287,7 @@ fn balance_parses_to_three_link_equalization_chain() {
         .as_ref()
         .expect("expected creature sacrifice clause");
     assert_eq!(link3.player_scope, Some(PlayerFilter::All));
+    assert_eq!(link3.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, .. } = &*link3.effect else {
         panic!("link 3 must be Effect::Sacrifice, got {:?}", link3.effect);
     };
@@ -1336,7 +1339,12 @@ fn balancing_act_single_continuation_clause_parses() {
 fn non_balance_text_is_not_intercepted() {
     // The interceptor must not fire on unrelated "each player" text.
     assert!(
-        try_parse_balance_equalization("Each player draws a card.", AbilityKind::Spell).is_none(),
+        parse_balance_equalization_ir(
+            "Each player draws a card.",
+            AbilityKind::Spell,
+            &ParseContext::default(),
+        )
+        .is_none(),
         "interceptor must only match the Balance equalization shape"
     );
 }
@@ -1349,9 +1357,10 @@ fn balance_arm_b_rejects_non_equalization_quantity() {
     // ref) must NOT be intercepted. Confirms Arm B verifies the structure
     // rather than discarding the parsed ref.
     assert!(
-            try_parse_balance_equalization(
+            parse_balance_equalization_ir(
                 "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"

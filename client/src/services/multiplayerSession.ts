@@ -9,9 +9,16 @@ export interface WsHostSessionData {
   matchType: MatchType;
 }
 
+/** Exact server-issued identity for a resumable Full session. */
+export interface FullSessionKey {
+  game_code: string;
+  generation: number;
+}
+
 export interface WsSessionData {
   gameCode: string;
   playerToken: string;
+  fullKey: FullSessionKey;
   serverUrl: string;
   timestamp: number;
   hostSession?: WsHostSessionData;
@@ -28,7 +35,13 @@ export function loadWsSession(): WsSessionData | null {
     if (!raw) return null;
 
     const session = JSON.parse(raw) as WsSessionData;
-    if (!isWsSessionValid(session)) {
+    if (
+      !isWsSessionValid(session)
+      || !session.fullKey
+      || session.fullKey.game_code !== session.gameCode
+      || !Number.isInteger(session.fullKey.generation)
+      || session.fullKey.generation < 1
+    ) {
       clearWsSession();
       return null;
     }

@@ -1,0 +1,33 @@
+:root {
+  color: #e5e7eb;
+  background: #111827;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+}
+
+main {
+  text-align: center;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+}
+
+p {
+  margin: 0 0 1rem;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  color: inherit;
+  background: #1f2937;
+  border: 1px solid #4b5563;
+  border-radius: 0.375rem;
+  cursor: pointer;
+}

@@ -17,7 +17,9 @@
 //!    `SetTapState`), and a spread of formerly-wildcarded variants now proven
 //!    to return `Contextual`.
 
-use engine::types::ability::{Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter};
+use engine::types::ability::{
+    Effect, EffectScope, EventCounterReproductionCount, QuantityExpr, TapStateChange, TargetFilter,
+};
 use engine::types::counter::CounterType;
 use engine::types::zones::{EtbTapState, Zone};
 
@@ -80,6 +82,34 @@ fn beneficial_classifications_unchanged() {
         }),
         EffectPolarity::Beneficial
     );
+}
+
+/// CR 122.1: `ReproduceEventCounters` is Contextual across its whole design space,
+/// not a static self-buff. The reproduced kind is event-derived (can be harmful)
+/// and the target may be another creature (Aragorn's "up to one other target
+/// creature"), so neither the sign nor the recipient is knowable at classify time.
+/// Discriminating coverage over both axes — target {SelfRef, other} × per-kind
+/// {SameNumber, PerKind} — guards against a regression that re-hardcodes any form
+/// to Beneficial/Harmful.
+#[test]
+fn reproduce_event_counters_is_contextual_across_axes() {
+    for target in [TargetFilter::SelfRef, TargetFilter::Any] {
+        for per_kind_count in [
+            EventCounterReproductionCount::SameNumber,
+            EventCounterReproductionCount::PerKind(1),
+        ] {
+            let effect = Effect::ReproduceEventCounters {
+                target: target.clone(),
+                per_kind_count,
+            };
+            assert_eq!(
+                effect_polarity(&effect),
+                EffectPolarity::Contextual,
+                "{effect:?} must classify as Contextual (event-derived kind, \
+                 possibly non-self target)",
+            );
+        }
+    }
 }
 
 #[test]

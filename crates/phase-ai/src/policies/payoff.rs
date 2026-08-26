@@ -169,6 +169,7 @@ fn matches_lifegain_source(object: &GameObject) -> bool {
     let trigger_borne_source = object
         .trigger_definitions
         .iter_unchecked()
+        .map(|entry| &entry.definition)
         .any(crate::features::lifegain::is_lifegain_source_trigger);
     crate::features::lifegain::is_lifegain_source_parts(&object.keywords, &effects)
         || trigger_borne_source
@@ -307,6 +308,7 @@ fn matches_equipment_payoff(object: &GameObject) -> bool {
         || object
             .trigger_definitions
             .iter_unchecked()
+            .map(|entry| &entry.definition)
             .any(crate::features::equipment::trigger_references_equipment)
         || object
             .abilities
@@ -316,6 +318,7 @@ fn matches_equipment_payoff(object: &GameObject) -> bool {
                 object
                     .trigger_definitions
                     .iter_unchecked()
+                    .map(|entry| &entry.definition)
                     .filter_map(|trigger| trigger.execute.as_deref())
                     .flat_map(collect_chain_effects),
             )
@@ -369,11 +372,15 @@ fn blink_activation(features: &DeckFeatures) -> Option<f32> {
 fn matches_blink_flicker(object: &GameObject) -> bool {
     object.abilities.iter().any(|ability| {
         crate::features::blink::effects_include_flicker(&collect_chain_effects(ability))
-    }) || object.trigger_definitions.iter_unchecked().any(|trigger| {
-        trigger.execute.as_deref().is_some_and(|execute| {
-            crate::features::blink::effects_include_flicker(&collect_chain_effects(execute))
+    }) || object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            trigger.execute.as_deref().is_some_and(|execute| {
+                crate::features::blink::effects_include_flicker(&collect_chain_effects(execute))
+            })
         })
-    })
 }
 
 // CR 603.6a: a value-ETB creature is a re-triggerable payoff.
@@ -382,6 +389,7 @@ fn matches_blink_etb_payoff(object: &GameObject) -> bool {
         && object
             .trigger_definitions
             .iter_unchecked()
+            .map(|entry| &entry.definition)
             .any(crate::features::blink::trigger_is_value_etb)
 }
 
@@ -440,6 +448,7 @@ fn reanimator_effects(object: &GameObject) -> Vec<&Effect> {
             object
                 .trigger_definitions
                 .iter_unchecked()
+                .map(|entry| &entry.definition)
                 .filter_map(|trigger| trigger.execute.as_deref())
                 .flat_map(collect_chain_effects),
         )
@@ -507,14 +516,18 @@ fn matches_opponent_mill(object: &GameObject) -> bool {
             .iter()
             .copied()
             .any(crate::features::mill::effect_is_opponent_mill)
-    }) || object.trigger_definitions.iter_unchecked().any(|trigger| {
-        trigger.execute.as_deref().is_some_and(|execute| {
-            collect_chain_effects(execute)
-                .iter()
-                .copied()
-                .any(crate::features::mill::effect_is_opponent_mill)
+    }) || object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            trigger.execute.as_deref().is_some_and(|execute| {
+                collect_chain_effects(execute)
+                    .iter()
+                    .copied()
+                    .any(crate::features::mill::effect_is_opponent_mill)
+            })
         })
-    })
 }
 
 fn mill_cast_bonus(p: &PolicyPenalties) -> f64 {
@@ -574,12 +587,16 @@ fn energy_is_producer(object: &GameObject) -> bool {
         .abilities
         .iter()
         .any(crate::features::energy::chain_includes_energy_gain)
-        || object.trigger_definitions.iter_unchecked().any(|trigger| {
-            trigger
-                .execute
-                .as_deref()
-                .is_some_and(crate::features::energy::chain_includes_energy_gain)
-        })
+        || object
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| &entry.definition)
+            .any(|trigger| {
+                trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(crate::features::energy::chain_includes_energy_gain)
+            })
 }
 
 fn energy_is_sink(object: &GameObject) -> bool {
@@ -587,12 +604,16 @@ fn energy_is_sink(object: &GameObject) -> bool {
         .abilities
         .iter()
         .any(crate::features::energy::ability_tree_pays_energy)
-        || object.trigger_definitions.iter_unchecked().any(|trigger| {
-            trigger
-                .execute
-                .as_deref()
-                .is_some_and(crate::features::energy::ability_tree_pays_energy)
-        })
+        || object
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| &entry.definition)
+            .any(|trigger| {
+                trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(crate::features::energy::ability_tree_pays_energy)
+            })
 }
 
 fn matches_energy_relevant(object: &GameObject) -> bool {

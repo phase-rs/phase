@@ -64,6 +64,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::TurnFaceUp,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    phase_tauri::run();
+    phase_tauri_lib::run();
 }

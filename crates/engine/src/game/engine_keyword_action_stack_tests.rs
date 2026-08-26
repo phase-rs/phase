@@ -17,7 +17,7 @@
 //! power) persist.
 
 use super::*;
-use crate::game::zones::create_object;
+use crate::game::zones::{create_object, move_to_zone};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -250,7 +250,7 @@ fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
     )
     .unwrap();
     assert!(
-        state.crew_activated_this_turn.contains(&vehicle_id),
+        crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
         "first crew records the vehicle as crewed this turn"
     );
 
@@ -269,6 +269,42 @@ fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
              rejected; got {second:?}"
     );
     let _ = creature_b;
+}
+
+// T-reentry (§3): the crew-cadence ledger is keyed to the exact object incarnation
+// (CR 400.7 + CR 602.5b), so a Vehicle that leaves and returns — a new object at a
+// higher incarnation — is no longer recorded as crewed and may be crewed again.
+// Fails if the ledger were keyed by bare `ObjectId`. The reach-guard (the positive
+// `contains` at incarnation N) proves the record was actually made, so the negative
+// is not vacuous. The end-to-end card-test (crew → blink → crew again through
+// `apply()`) lands in Phase 2A, which wires the production blink path; Phase 1
+// unit-tests the identity-keyed ledger directly.
+#[test]
+fn crew_reentry_new_incarnation_clears_activation_ledger() {
+    let mut state = setup_main_phase();
+    let vehicle_id = make_vehicle(&mut state, 1);
+
+    let n = state.objects[&vehicle_id].incarnation;
+    crate::game::engine::record_crew_activation(&mut state, vehicle_id);
+    assert!(
+        crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
+        "reach-guard: the crew activation is recorded at the current incarnation ({n})"
+    );
+
+    // CR 400.7: the Vehicle leaves and returns as a NEW object (higher incarnation).
+    state
+        .objects
+        .get_mut(&vehicle_id)
+        .unwrap()
+        .bump_incarnation();
+    assert!(
+        state.objects[&vehicle_id].incarnation > n,
+        "the re-entered object is a new incarnation"
+    );
+    assert!(
+        !crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
+        "after re-entry the incarnation-keyed ledger no longer matches → crewable again"
+    );
 }
 
 #[test]
@@ -586,10 +622,14 @@ fn crewed_trigger_matcher_fires_on_resolution_event_not_announcement() {
     .unwrap();
 
     let trigger = TriggerDefinition::new(TriggerMode::Crewed);
-    let fires_at_announce = announce
-        .events
-        .iter()
-        .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
+    let fires_at_announce = announce.events.iter().any(|e| {
+        match_vehicle_crewed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, vehicle_id),
+            &state,
+        )
+    });
     assert!(
         !fires_at_announce,
         "CR 702.122e: Crewed trigger must not fire at announcement"
@@ -597,10 +637,14 @@ fn crewed_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
-    let fires_at_resolve = resolve
-        .events
-        .iter()
-        .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
+    let fires_at_resolve = resolve.events.iter().any(|e| {
+        match_vehicle_crewed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, vehicle_id),
+            &state,
+        )
+    });
     assert!(
         fires_at_resolve,
         "CR 702.122e: Crewed trigger fires when the Crew ability resolves"
@@ -636,20 +680,24 @@ fn stationed_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     let trigger = TriggerDefinition::new(TriggerMode::Stationed);
     assert!(
-        !announce
-            .events
-            .iter()
-            .any(|e| match_stationed(e, &trigger, spacecraft_id, &state)),
+        !announce.events.iter().any(|e| match_stationed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, spacecraft_id),
+            &state,
+        )),
         "CR 702.184a: Stationed trigger must not fire at announcement"
     );
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
     assert!(
-        resolve
-            .events
-            .iter()
-            .any(|e| match_stationed(e, &trigger, spacecraft_id, &state)),
+        resolve.events.iter().any(|e| match_stationed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, spacecraft_id),
+            &state,
+        )),
         "CR 702.184a: Stationed trigger fires when Station resolves"
     );
 }
@@ -683,20 +731,24 @@ fn saddled_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     let trigger = TriggerDefinition::new(TriggerMode::Saddled);
     assert!(
-        !announce
-            .events
-            .iter()
-            .any(|e| match_saddled(e, &trigger, mount_id, &state)),
+        !announce.events.iter().any(|e| match_saddled(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, mount_id),
+            &state,
+        )),
         "CR 702.171b: Saddled trigger must not fire at announcement"
     );
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
     assert!(
-        resolve
-            .events
-            .iter()
-            .any(|e| match_saddled(e, &trigger, mount_id, &state)),
+        resolve.events.iter().any(|e| match_saddled(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, mount_id),
+            &state,
+        )),
         "CR 702.171b: Saddled trigger fires when Saddle resolves"
     );
 }
@@ -742,7 +794,7 @@ fn equipped_effect_fires_on_resolution_event_not_announcement() {
             GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Equip,
                 source_id,
-            } if *source_id == equipment_id
+            ..} if *source_id == equipment_id
         )),
         "CR 702.6a: Equip resolution event fires when the ability resolves"
     );
@@ -806,9 +858,7 @@ fn equip_can_be_countered_by_stack_targeting_effect() {
 /// Issue #3660: deferred copy observers must not drop remaining paradigm offers.
 #[test]
 fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
-    use crate::game::triggers::{
-        PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
-    };
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::types::ability::{
         Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     };
@@ -827,38 +877,35 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
             name.to_string(),
             Zone::Battlefield,
         );
-        PendingTriggerContext {
-            pending: PendingTrigger {
-                source_id,
-                controller,
-                condition: None,
-                ability: {
-                    let mut ability = ResolvedAbility::new(
-                        Effect::Draw {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            target: TargetFilter::Controller,
-                        },
-                        vec![],
-                        source_id,
-                        controller,
-                    );
-                    ability.description = Some(name.to_string());
-                    ability
-                },
-                timestamp: 0,
-                target_constraints: Vec::new(),
-                distribute: None,
-                trigger_event: None,
-                modal: None,
-                mode_abilities: vec![],
-                description: Some(name.to_string()),
-                may_trigger_origin: None,
-                subject_match_count: None,
-                die_result: None,
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability: {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    controller,
+                );
+                ability.description = Some(name.to_string());
+                Box::new(ability)
             },
-            trigger_events: Vec::new(),
-            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-        }
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: Some(name.to_string()),
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        })
     }
 
     let mut state = GameState::new_two_player(42);
@@ -872,7 +919,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
         controller: player,
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Player,
@@ -880,7 +927,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
                 vec![TargetRef::Player(PlayerId(1))],
                 copy_id,
                 player,
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -926,6 +973,102 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
             .as_ref()
             .map(|pending| pending.offers.as_slice()),
         Some(remaining.as_slice()),
+    );
+}
+
+#[test]
+fn finalize_copy_retarget_refreshes_stale_same_id_object_pin() {
+    use crate::types::ability::{Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+    use crate::types::{TypeFilter, TypedFilter};
+
+    let mut state = setup_main_phase();
+    let target = create_object(
+        &mut state,
+        CardId(1501),
+        PlayerId(1),
+        "Copy Target".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Creature];
+    let copy_id = create_object(
+        &mut state,
+        CardId(1502),
+        PlayerId(0),
+        "Copy Probe".to_string(),
+        Zone::Stack,
+    );
+    let mut copy_ability = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }),
+            cant_regenerate: false,
+        },
+        vec![TargetRef::Object(target)],
+        copy_id,
+        PlayerId(0),
+    );
+    copy_ability.capture_target_incarnations_recursive(&state);
+    state.stack.push_back(StackEntry {
+        id: copy_id,
+        source_id: copy_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(1502),
+            ability: Some(Box::new(copy_ability)),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+    let mut zone_events = Vec::new();
+    move_to_zone(&mut state, target, Zone::Graveyard, &mut zone_events);
+    move_to_zone(&mut state, target, Zone::Battlefield, &mut zone_events);
+
+    let copy_ability_for_retarget = state.stack[0]
+        .ability()
+        .expect("copy ability on stack")
+        .clone();
+    crate::game::effects::copy_spell::open_copy_retarget_choice(
+        &mut state,
+        PlayerId(0),
+        copy_id,
+        &[TargetRef::Object(target)],
+        &copy_ability_for_retarget,
+        EffectKind::Destroy,
+        copy_id,
+    );
+    let WaitingFor::CopyRetarget { target_slots, .. } = &state.waiting_for else {
+        panic!("copy retarget choice must be opened");
+    };
+    assert!(
+        target_slots[0]
+            .legal_alternatives
+            .contains(&TargetRef::Object(target)),
+        "production target-slot builder must admit the creature target"
+    );
+    apply_action(
+        &mut state,
+        PlayerId(0),
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        },
+        None,
+    )
+    .expect("copy retarget choice must finalize through the action path");
+
+    let ability = state.stack[0].ability().expect("copy ability on stack");
+    assert!(
+        ability.selected_target_pin_is_current(target, &state),
+        "copy same-ID retarget must refresh the selected-target pin"
     );
 }
 

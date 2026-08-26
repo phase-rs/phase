@@ -5,12 +5,12 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
+import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
 import type { Plugin } from "vite";
 
-const OFFICIAL_MULTIPLAYER_SERVER_URL = "wss://lobby.phase-rs.dev/ws";
+
 
 // wasm-bindgen emits `import * as importN from "env"` for WASM host-environment
 // imports (LLVM intrinsics). These are provided at instantiation time by the JS
@@ -26,6 +26,33 @@ function wasmEnvShim(): Plugin {
     },
     load(id) {
       if (id === VIRTUAL_ID) return "export default {};";
+    },
+  };
+}
+
+// wasm-bindgen's web glue defaults to `new URL("engine_wasm_bg.wasm",
+// import.meta.url)`. Vite recognizes that static URL and emits the WASM asset
+// even when every caller supplies an R2 URL explicitly. For external builds,
+// replace only that generated fallback with the build-time URL so Rollup has no
+// local engine WASM asset to emit. Without ENGINE_WASM_URL this plugin leaves
+// the generated glue untouched, preserving local/self-hosted behavior.
+function externalEngineWasm(): Plugin {
+  const engineGlue = path.resolve(__dirname, "src/wasm/engine_wasm.js");
+  const bundledWasmUrl = "new URL('engine_wasm_bg.wasm', import.meta.url)";
+  return {
+    name: "external-engine-wasm",
+    apply: "build",
+    transform(code, id) {
+      if (!process.env.ENGINE_WASM_URL || id !== engineGlue) return;
+      if (!code.includes(bundledWasmUrl)) {
+        this.error(
+          "engine_wasm.js no longer contains the expected wasm-bindgen fallback URL",
+        );
+      }
+      return {
+        code: code.replace(bundledWasmUrl, "__ENGINE_WASM_URL__"),
+        map: null,
+      };
     },
   };
 }
@@ -103,15 +130,36 @@ function dataFileDefines(mode: string): Record<string, string> {
   const envVar = (name: string): string =>
     process.env[name] ?? fileEnv[name] ?? "";
   const base = process.env.DATA_BASE_URL || "";
+  const multiplayerServers = resolveMultiplayerServerUrls(envVar);
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
     __BUILD_HASH__: JSON.stringify(gitHash()),
+    // Preview deployment stamps this with the fingerprint of its signed native
+    // engine artifact. Local and release builds intentionally compile it as
+    // `undefined`, which keeps preview native routing on the WASM fallback.
+    __ENGINE_FINGERPRINT__: process.env.ENGINE_FINGERPRINT
+      ? JSON.stringify(process.env.ENGINE_FINGERPRINT)
+      : "undefined",
+    // Release/staging builds pin the engine binary to an immutable R2 object.
+    // Keep the local bundled WASM fallback when this is unset (dev, Tauri, and
+    // self-hosted builds).
+    __ENGINE_WASM_URL__: process.env.ENGINE_WASM_URL
+      ? JSON.stringify(process.env.ENGINE_WASM_URL)
+      : "undefined",
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
-    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
-      envVar("DEFAULT_MULTIPLAYER_SERVER_URL") || OFFICIAL_MULTIPLAYER_SERVER_URL,
-    ),
+    __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
+    // Channel-scoped official lobby (deploy.yml points preview at its own
+    // broker). DEFAULT falls back to the RESOLVED official value, not the
+    // hardcoded constant — chaining to the constant would leave DEFAULT on
+    // production while OFFICIAL moved to preview, and serverDetection.ts keys
+    // "is this a self-hosted build?" off DEFAULT !== OFFICIAL. That mismatch
+    // would prepend a bogus self-hosted preset holding the production URL and
+    // make it SERVER_PRESETS[0] — i.e. the default pick would become the one
+    // lobby a preview client cannot handshake with.
+    __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
@@ -140,6 +188,16 @@ function dataFileDefines(mode: string): Record<string, string> {
       process.env.CARD_DATA_LOCALE_URL_TEMPLATE ||
         (base ? `${base}/card-data.{lng}.json` : "/card-data.{lng}.json"),
     ),
+    // Per-locale card-ART map URL template ({lng} replaced at runtime). Maps an
+    // English Scryfall printing id to the same printing's localized sibling id,
+    // so the art the player already chose is re-rendered in their language. Same
+    // manifest/upload/strip lifecycle as the content sidecar above; a 404
+    // degrades to English art, which is also the per-card fallback whenever a
+    // printing has no localized sibling. An explicit env override still wins.
+    __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify(
+      process.env.SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE ||
+        (base ? `${base}/scryfall-images.{lng}.json` : "/scryfall-images.{lng}.json"),
+    ),
   };
   for (const filename of manifest) {
     // "card-names.json" → "__CARD_NAMES_URL__"; "card-data.de.json" →
@@ -162,11 +220,21 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     wasmEnvShim(),
+    externalEngineWasm(),
     trimManaFont(),
     react(),
     tailwindcss(),
     wasm(),
-    topLevelAwait(),
+    // NOTE: no `topLevelAwait()`. `build.target` is `esnext`, which emits and
+    // runs top-level await natively, and no source module has one — so the
+    // plugin transformed nothing useful. It DID wrap every chunk containing a
+    // dynamic `import()`, deferring that chunk's exports into a `__tla`
+    // microtask while leaving its *untransformed* importers un-awaited (it
+    // seeds propagation only from chunks with a *real* top-level await, so an
+    // importer with no TLA and no dynamic import of its own is never wrapped
+    // and never awaits). Such an importer reading a deferred export at
+    // module-evaluation time saw `undefined` and threw, killing the whole lazy
+    // route — see #7583.
     VitePWA({
       registerType: "autoUpdate",
       manifest: false, // Use public/manifest.json
@@ -220,7 +288,12 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /engine_wasm_bg-.*\.wasm$/,
+            // Workbox accepts cross-origin RegExpRoute matches only when they
+            // begin at index 0. The anchored R2 branch covers production and
+            // staging uploads; the existing unanchored branch preserves
+            // same-origin bundled-WASM behavior.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?wasm\/engine_wasm_bg-.*\.wasm$|engine_wasm_bg-.*\.wasm$)/,
             handler: "CacheFirst",
             options: {
               cacheName: "engine-wasm",
@@ -261,6 +334,31 @@ export default defineConfig(({ mode }) => ({
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "card-locale-sidecars",
+              expiration: { maxEntries: 6, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Per-locale card-ART maps (`scryfall-images.<lng>.json`), the image
+            // counterpart to the content sidecars above. The data-manifest rule
+            // below is an exact-name alternation that does not list these, and
+            // the precache glob covers only js/css/html — so without this rule a
+            // non-English PWA user would fall back to English art offline while
+            // their card *text* stayed localized. Same mutability and reasoning
+            // as card-locale-sidecars: regenerated each deploy, so
+            // StaleWhileRevalidate.
+            //
+            // Two anchored branches, mirroring the engine-WASM rule above.
+            // Workbox's RegExpRoute refuses a cross-origin match that does not
+            // begin at index 0 of the href, and in production these are served
+            // from R2 at DATA_BASE_URL — so a bare `…\.json$` suffix pattern
+            // silently never routes the very requests this rule exists for. The
+            // second branch keeps the same-origin path working in dev/Tauri,
+            // where the files are served from the site root.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.[a-z]{2}\.json$|\/scryfall-images\.[a-z]{2}\.json$)/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "card-art-locale-maps",
               expiration: { maxEntries: 6, maxAgeSeconds: 2592000 },
             },
           },
@@ -334,7 +432,7 @@ export default defineConfig(({ mode }) => ({
   ],
   define: dataFileDefines(mode),
   worker: {
-    plugins: () => [wasmEnvShim()],
+    plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
   // Vite's host-check rejects requests with a Host header outside its
   // known list — required to allow the Caddy proxy at local.phase-rs.dev

@@ -5,7 +5,7 @@ import { resolveOracleIdSync } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
+import { deduplicateEntries, expandParsedDeck, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   ACTIVE_DECK_KEY,
@@ -29,9 +29,14 @@ import type { CommanderBracket } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
+import { projectSignatureSpellForFormat } from "../../services/savedDeckProjection";
 import {
   commanderPartnerCandidates,
+  companionCandidates,
   isCardCommanderEligibleForFormat,
+  maxDeckCopies,
+  signatureSpellSelectionPolicy,
+  type DeckCopyLimit,
 } from "../../services/engineRuntime";
 
 const PRECON_PREFIX = "[Pre-built] ";
@@ -86,11 +91,15 @@ export function useDeckBuilder({
     ...deck.sideboard.map((entry) => entry.name),
     ...(deck.planar_deck ?? []),
     ...(deck.scheme_deck ?? []),
+    ...(deck.signature_spell ?? []),
+    ...(deck.companion ? [deck.companion] : []),
     ...commanders,
   ]);
 
   const [compatibility, setCompatibility] = useState<DeckCompatibilityResult | null>(null);
   const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string>>(new Set());
+  const [signatureSpellCandidates, setSignatureSpellCandidates] = useState<string[] | null>(null);
+  const [companionCandidateNames, setCompanionCandidateNames] = useState<string[] | null>(null);
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
@@ -126,6 +135,7 @@ export function useDeckBuilder({
     ...deck,
     commander: commanders.length > 0 ? commanders : undefined,
   }), [deck, commanders]);
+  const formatConfig = formatMetadata(format)?.default_config;
 
   // Stable key for deck contents to debounce compatibility evaluation
   const deckKey = useMemo(
@@ -137,6 +147,10 @@ export function useDeckBuilder({
       ...(deck.planar_deck ?? []),
       "//",
       ...(deck.scheme_deck ?? []),
+      "//",
+      ...(deck.signature_spell ?? []),
+      "//",
+      deck.companion ?? "",
       "//",
       ...commanders,
     ].join("|"),
@@ -164,7 +178,30 @@ export function useDeckBuilder({
     return () => { cancelled = true; clearTimeout(timer); };
   }, [currentDeck, deckKey, format]);
 
-  const formatConfig = formatMetadata(format)?.default_config;
+  useEffect(() => {
+    let cancelled = false;
+    const request = { ...expandParsedDeck(currentDeck), selected_format: format };
+    Promise.all([signatureSpellSelectionPolicy(request), companionCandidates(request)])
+      .then(([signaturePolicy, companionCandidates]) => {
+        if (cancelled) return;
+        setSignatureSpellCandidates(
+          signaturePolicy.type === "Required" ? signaturePolicy.data.candidates : null,
+        );
+        setCompanionCandidateNames(
+          formatConfig?.uses_commander ? companionCandidates : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSignatureSpellCandidates(null);
+          setCompanionCandidateNames(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentDeck, deckKey, format, formatConfig?.uses_commander]);
+
   const isCommander = formatConfig?.command_zone ?? false;
   const expectedDeckSize = formatConfig?.deck_size ?? 60;
 
@@ -299,6 +336,89 @@ export function useDeckBuilder({
     [],
   );
 
+  // CR 100.4a: the copy limit applies to the main deck, sideboard, and command
+  // zone combined, so the increment gate counts every slot a card can occupy.
+  const combinedCopyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const add = (name: string, n: number) =>
+      counts.set(name, (counts.get(name) ?? 0) + n);
+    for (const entry of deck.main) add(entry.name, entry.count);
+    for (const entry of deck.sideboard) add(entry.name, entry.count);
+    for (const name of commanders) add(name, 1);
+    for (const name of deck.signature_spell ?? []) add(name, 1);
+    if (deck.companion) add(deck.companion, 1);
+    return counts;
+  }, [deck, commanders]);
+
+  // Distinct names currently in the partition, as a stable key — the ceiling
+  // for a (name, format) pair never changes, so this only refetches when the
+  // set of names or the format actually changes, not on every count edit.
+  const copyLimitKey = useMemo(
+    () =>
+      [
+        ...new Set([...deck.main, ...deck.sideboard].map((entry) => entry.name)),
+      ]
+        .sort()
+        .join("|"),
+    [deck.main, deck.sideboard],
+  );
+
+  // CR 100.2a / CR 903.5b: the ceiling is engine-resolved per card and format
+  // (basic-land exemption, printed overrides like Relentless Rats or Seven
+  // Dwarves, four-of vs singleton default). The builder never re-derives it.
+  const [copyLimits, setCopyLimits] = useState<Map<string, DeckCopyLimit>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    const names = copyLimitKey ? copyLimitKey.split("|") : [];
+    if (names.length === 0) {
+      setCopyLimits(new Map());
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      names.map(async (name) => [name, await maxDeckCopies(name, format)] as const),
+    )
+      .then((results) => {
+        if (!cancelled) setCopyLimits(new Map(results));
+      })
+      .catch(() => {
+        // WASM may not be loaded yet; an empty map leaves increments open and
+        // the engine's compatibility warnings still flag any real violation.
+        if (!cancelled) setCopyLimits(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [copyLimitKey, format]);
+
+  const canIncrement = useCallback(
+    (name: string) => {
+      const limit = copyLimits.get(name);
+      if (!limit || limit.type === "Unlimited") return true;
+      return (combinedCopyCounts.get(name) ?? 0) < limit.data;
+    },
+    [copyLimits, combinedCopyCounts],
+  );
+
+  const handleIncrementCard = useCallback(
+    (name: string, section: "main" | "sideboard") => {
+      if (!canIncrement(name)) return;
+      setDirty(true);
+      setDeck((prev) => {
+        const entries = prev[section];
+        if (!entries.some((e) => e.name === name)) return prev;
+        return {
+          ...prev,
+          [section]: entries.map((e) =>
+            e.name === name ? { ...e, count: e.count + 1 } : e,
+          ),
+        };
+      });
+    },
+    [canIncrement],
+  );
+
   const handleMoveCard = useCallback(
     (name: string, from: "main" | "sideboard") => {
       const to: "main" | "sideboard" = from === "main" ? "sideboard" : "main";
@@ -334,17 +454,25 @@ export function useDeckBuilder({
     [],
   );
 
-  const applyDeckToEditor = useCallback((next: ParsedDeck) => {
+  const applyDeckToEditor = useCallback((next: ParsedDeck, targetFormat: GameFormat = format) => {
+    const projected = projectSignatureSpellForFormat(next, targetFormat);
+    const targetUsesCommander = formatMetadata(targetFormat)?.default_config.uses_commander ?? false;
+    const companionInDedicatedSlot = targetUsesCommander ? projected.companion : undefined;
+    const sideboard = !targetUsesCommander && projected.companion
+      && !projected.sideboard.some((entry) => entry.name === projected.companion)
+      ? [...projected.sideboard, { count: 1, name: projected.companion }]
+      : projected.sideboard;
     setDeck({
-      main: deduplicateEntries(next.main ?? []),
-      sideboard: deduplicateEntries(next.sideboard ?? []),
-      planar_deck: next.planar_deck ? [...next.planar_deck] : undefined,
-      scheme_deck: next.scheme_deck ? [...next.scheme_deck] : undefined,
-      companion: next.companion,
+      main: deduplicateEntries(projected.main ?? []),
+      sideboard: deduplicateEntries(sideboard ?? []),
+      planar_deck: projected.planar_deck ? [...projected.planar_deck] : undefined,
+      scheme_deck: projected.scheme_deck ? [...projected.scheme_deck] : undefined,
+      signature_spell: projected.signature_spell ? [...projected.signature_spell] : undefined,
+      companion: companionInDedicatedSlot,
     });
-    setCommanders(next.commander ?? []);
-    if (next.commander?.length && !isCommander) onFormatChange("Commander");
-  }, [isCommander, onFormatChange]);
+    setCommanders(projected.commander ?? []);
+    if (projected.commander?.length && !isCommander) onFormatChange("Commander");
+  }, [format, isCommander, onFormatChange]);
 
   const handleImport = useCallback((imported: ParsedDeck) => {
     applyDeckToEditor(imported);
@@ -367,7 +495,10 @@ export function useDeckBuilder({
       // matches what we're about to persist.
       applyDeckToEditor(resolved);
     }
-    const payload: Record<string, unknown> = { ...resolved, format };
+    const payload: Record<string, unknown> = {
+      ...projectSignatureSpellForFormat(resolved, format),
+      format,
+    };
     if (bracket !== null) payload.bracket = bracket;
     const data = JSON.stringify(payload);
     const nextName = deckName.trim();
@@ -420,7 +551,10 @@ export function useDeckBuilder({
     while (localStorage.getItem(STORAGE_KEY_PREFIX + cloneName) !== null) {
       cloneName = `${base} copy ${suffix++}`;
     }
-    const payload: Record<string, unknown> = { ...currentDeck, format };
+    const payload: Record<string, unknown> = {
+      ...projectSignatureSpellForFormat(currentDeck, format),
+      format,
+    };
     if (bracket !== null) payload.bracket = bracket;
     localStorage.setItem(STORAGE_KEY_PREFIX + cloneName, JSON.stringify(payload));
     stampDeckMeta(cloneName);
@@ -467,14 +601,16 @@ export function useDeckBuilder({
     }
     const persisted = JSON.parse(data) as ParsedDeck & { format?: string };
     const resolved = await resolveCommander(parsed);
-    applyDeckToEditor(resolved);
+    const savedFormat = persisted.format
+      ? DECK_CONSTRUCTION_FORMATS.find(
+          (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
+        )?.format
+      : undefined;
+    applyDeckToEditor(resolved, savedFormat);
     setActiveSurface("deck");
     setDirty(false);
-    if (persisted.format) {
-      const match = DECK_CONSTRUCTION_FORMATS.find(
-        (m) => m.format.toLowerCase() === persisted.format!.toLowerCase(),
-      );
-      if (match) onFormatChange(match.format);
+    if (savedFormat) {
+      onFormatChange(savedFormat);
     } else if (resolved.commander?.length) {
       onFormatChange("Commander");
     }
@@ -563,6 +699,64 @@ export function useDeckBuilder({
     }));
   }, []);
 
+  const moveOneMainCardToSpecialSlot = useCallback(
+    (cardName: string, slot: "signature_spell" | "companion") => {
+      setDirty(true);
+      setDeck((prev) => {
+        const selected = prev.main.find((entry) => entry.name === cardName);
+        if (!selected) return prev;
+        const prior = slot === "signature_spell" ? prev.signature_spell?.[0] : prev.companion;
+        const mainWithoutSelected = selected.count === 1
+          ? prev.main.filter((entry) => entry.name !== cardName)
+          : prev.main.map((entry) => entry.name === cardName
+            ? { ...entry, count: entry.count - 1 }
+            : entry);
+        const main = prior && prior !== cardName
+          ? deduplicateEntries([...mainWithoutSelected, { count: 1, name: prior }])
+          : mainWithoutSelected;
+        return slot === "signature_spell"
+          ? { ...prev, main, signature_spell: [cardName] }
+          : { ...prev, main, companion: cardName };
+      });
+    },
+    [],
+  );
+
+  const handleSetSignatureSpell = useCallback((cardName: string) => {
+    if (!signatureSpellCandidates?.includes(cardName)) return;
+    moveOneMainCardToSpecialSlot(cardName, "signature_spell");
+  }, [moveOneMainCardToSpecialSlot, signatureSpellCandidates]);
+
+  const handleRemoveSignatureSpell = useCallback(() => {
+    setDirty(true);
+    setDeck((prev) => {
+      const signature = prev.signature_spell?.[0];
+      if (!signature) return prev;
+      return {
+        ...prev,
+        signature_spell: [],
+        main: deduplicateEntries([...prev.main, { count: 1, name: signature }]),
+      };
+    });
+  }, []);
+
+  const handleSetCompanion = useCallback((cardName: string) => {
+    if (!companionCandidateNames?.includes(cardName)) return;
+    moveOneMainCardToSpecialSlot(cardName, "companion");
+  }, [companionCandidateNames, moveOneMainCardToSpecialSlot]);
+
+  const handleRemoveCompanion = useCallback(() => {
+    setDirty(true);
+    setDeck((prev) => {
+      if (!prev.companion) return prev;
+      return {
+        ...prev,
+        companion: undefined,
+        main: deduplicateEntries([...prev.main, { count: 1, name: prev.companion }]),
+      };
+    });
+  }, []);
+
   // Compute CMC and color arrays for ManaCurve
   const cmcValues: number[] = [];
   const colorValues: string[] = [];
@@ -579,6 +773,9 @@ export function useDeckBuilder({
   const cardCounts = new Map(deck.main.map((entry) => [entry.name, entry.count]));
   for (const commander of commanders) {
     cardCounts.set(commander, (cardCounts.get(commander) ?? 0) + 1);
+  }
+  for (const signatureSpell of deck.signature_spell ?? []) {
+    cardCounts.set(signatureSpell, (cardCounts.get(signatureSpell) ?? 0) + 1);
   }
 
   // Engine-driven validation — duplicate legality, color identity, and deck size
@@ -638,6 +835,8 @@ export function useDeckBuilder({
     handleAddCard,
     handleAddCardByName,
     handleRemoveCard,
+    handleIncrementCard,
+    canIncrement,
     handleMoveCard,
     handleImport,
     handleSave,
@@ -646,5 +845,11 @@ export function useDeckBuilder({
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
+    signatureSpellCandidates,
+    companionCandidateNames,
+    handleSetSignatureSpell,
+    handleRemoveSignatureSpell,
+    handleSetCompanion,
+    handleRemoveCompanion,
   };
 }

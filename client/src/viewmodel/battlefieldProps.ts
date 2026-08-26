@@ -1,4 +1,11 @@
-import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "../adapter/types";
+import type {
+  AttackerInfo,
+  CombatState,
+  GameObject,
+  ObjectCounterDisplay,
+  ObjectId,
+  PlayerId,
+} from "../adapter/types";
 import { publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
@@ -6,21 +13,28 @@ function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolea
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
   // non-bearer representative in a collapsed/stacked group display — render
   // them solo so the ring-bearer badge in PermanentCard is always visible.
-  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id);
+  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id) && !obj.face_down;
 }
 
-function groupKey(obj: GameObject): string {
+function groupKey(
+  obj: GameObject,
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
-  // counters is a known-shape Partial<Record<CounterType, number>>. Build the
-  // key from sorted entries rather than JSON.stringify — cheaper (no serialize
-  // allocation per permanent on every board rebuild) and order-independent, so
-  // two identical permanents always land in the same group regardless of the
-  // order their counters were applied (the old stringify could split them by
-  // insertion order; this matches the sorted keyword key above).
-  const counters = Object.entries(obj.counters ?? {})
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .map(([type, n]) => `${type}:${n}`)
+  // CR 122.1 + CR 732.2a: the group identity for counters is the engine's RENDERED rows, not the
+  // raw map — two permanents that render different pills must not collapse into one representative,
+  // and an `∞`-marked member must never hide behind an unmarked one. The engine already orders the
+  // rows deterministically (`∞` first, then CounterType order), so this is a straight join, never a
+  // sort. Zero-count entries are absent from the engine's rows (CR 122.1), so two permanents
+  // differing only by a `{charge: 0}` entry now group TOGETHER; they render identically, which is
+  // what this key is for.
+  const display = counterDisplay?.[String(obj.id)];
+  const counters = [
+    ...(display?.pills ?? []),
+    ...(display?.loyalty ? [display.loyalty] : []),
+  ]
+    .map((r) => `${r.counter}:${r.count}:${r.magnitude ?? "Finite"}`)
     .join(",");
   // Tokens that share a display name (e.g. SOS vs BLC Pest) differ by rules text
   // and/or preset art — include both so visually distinct tokens never stack.
@@ -44,6 +58,11 @@ export interface GroupedPermanent {
   ids: ObjectId[];
   count: number;
   representative: CardViewProps;
+  /**
+   * CR 732.2a: every member of this group is part of an accepted object-growth
+   * loop's engine-authored "∞ pile", so the group renders `∞` instead of `×N`.
+   */
+  isUnboundedPile: boolean;
 }
 
 export function partitionByType(objects: GameObject[]): BattlefieldPartition {
@@ -86,10 +105,20 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
 }
 
 const NO_RING_BEARERS: ReadonlySet<ObjectId> = new Set();
+const NO_UNBOUNDED_PILE: ReadonlySet<ObjectId> = new Set();
 
+/**
+ * `counterDisplay` is POSITIONALLY REQUIRED even though it accepts `undefined`: `ringBearerIds`
+ * and `unboundedPileIds` are *enrichment* inputs whose omission only degrades a badge, while
+ * `counterDisplay` is a *correctness* input to the group identity itself — a default would
+ * silently produce wrong grouping at any site that forgot it. Defaults are for enrichment;
+ * correctness inputs get the compiler.
+ */
 export function groupByName(
   objects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = NO_RING_BEARERS,
+  unboundedPileIds: ReadonlySet<ObjectId> = NO_UNBOUNDED_PILE,
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
 ): GroupedPermanent[] {
   const groups = new Map<string, GameObject[]>();
 
@@ -100,7 +129,7 @@ export function groupByName(
       continue;
     }
 
-    const key = groupKey(obj);
+    const key = groupKey(obj, counterDisplay);
     const existing = groups.get(key);
     if (existing) {
       existing.push(obj);
@@ -117,6 +146,12 @@ export function groupByName(
       ids: members.map((m) => m.id),
       count: members.length,
       representative: toCardProps(members[0]),
+      // `.every()` is the fail-safe direction: groupKey (above) already splits on
+      // tapped/power/toughness/counters/damage/summoning-sickness, so those never make
+      // a group heterogeneous in pile membership. Fields object_content_eq compares but
+      // groupKey omits could split membership within a visual group — in which case
+      // `.every()` correctly degrades to `×N` (never a false `∞`).
+      isUnboundedPile: members.every((m) => unboundedPileIds.has(m.id)),
     });
   }
 

@@ -2,6 +2,8 @@ pub mod ability_chain;
 pub mod auto_play;
 pub mod card_advantage;
 pub mod card_hints;
+// Every item in `card_value` is `pub(crate)`; the module follows.
+pub(crate) mod card_value;
 pub mod cast_facts;
 pub mod combat_ai;
 pub mod combo;
@@ -9,6 +11,7 @@ pub mod config;
 pub mod context;
 pub mod damage_reflection;
 pub mod decision_kind;
+pub mod decision_receipt;
 pub mod deck_knowledge;
 pub mod deck_profile;
 pub mod determinize;
@@ -27,6 +30,8 @@ pub mod session;
 pub mod strategy_profile;
 pub mod synergy;
 pub mod tactical_gate;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod threat_profile;
 pub mod tribute_eval;
 pub mod zone_eval;
@@ -37,6 +42,7 @@ pub use config::{
     create_config, create_config_for_players, AiConfig, AiDifficulty, AiProfile, OpponentModel,
     PlannerMode, Platform, SearchConfig,
 };
+pub use decision_receipt::{AiDecisionDiagnosticReceipt, AiDecisionReceiptStatus};
 pub use deck_profile::ArchetypeMultipliers;
 pub use draft_eval::{
     evaluate_draft_card, evaluate_draft_card_default, rarity_prior, DraftWeights,
@@ -48,7 +54,8 @@ pub use eval::{
     StrategicIntent,
 };
 pub use search::{
-    choose_action, choose_action_with_session, score_candidates, score_candidates_with_session,
-    softmax_select_pairs,
+    choose_action, choose_action_with_session, choose_action_with_session_diagnostic,
+    fallback_action, score_candidates, score_candidates_for_parallel_worker,
+    select_safe_action_from_scores, select_safe_action_index_from_scores,
 };
 pub use session::{deck_pools_fingerprint, AiSession, SessionCache};

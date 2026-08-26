@@ -260,6 +260,23 @@ describe("MyDecks", () => {
     ]);
   });
 
+  it("keeps the import tile available when a format has no decks", async () => {
+    render(
+      <MyDecks
+        mode="manage"
+        activeDeckName={null}
+        onCreateDeck={vi.fn()}
+        onEditDeck={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Pioneer" }));
+
+    expect(await screen.findByRole("button", { name: "Import Deck" })).toBeInTheDocument();
+  });
+
   it("uses trusted feed format metadata before background coverage filters unknown saved decks", async () => {
     saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
     saveDeck("Unknown User Deck", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });

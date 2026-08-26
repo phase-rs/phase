@@ -8,8 +8,8 @@ import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZon
 import { useGameStore } from "../../stores/gameStore.ts";
 import {
   type CommanderDamageEntry,
+  commandZoneLeaders,
   commanderDamageEntriesFor,
-  commandersInZone,
 } from "../../viewmodel/commanderColumn.ts";
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
 import { CommanderCardZone } from "./CommanderCardZone.tsx";
@@ -52,8 +52,8 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   const mode = useResolvedCommandZoneDisplay();
   const gameState = useGameStore((s) => s.gameState);
 
-  const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+  const commandZoneLeadersForPlayer = useMemo(
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
   const damageEntries = useMemo(
@@ -73,7 +73,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
 
   // Same content gate PlayerArea used for `hasSupportExtras` — render nothing
   // when the command zone is empty so it reserves no corner space.
-  const hasContent = commanders.length > 0 || emblemCount > 0 || damageEntries.length > 0;
+  const hasContent = commandZoneLeadersForPlayer.length > 0 || emblemCount > 0 || damageEntries.length > 0;
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
@@ -104,7 +104,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   return (
     <CompactCommandDock
       isMirrored={isMirrored}
-      commanders={commanders}
+      commanders={commandZoneLeadersForPlayer}
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}

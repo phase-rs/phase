@@ -196,6 +196,39 @@ pub enum AttackTargetFilter {
     /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
     /// planeswalker/battle is compared per CR 109.4.
     PlayerOrPermanents,
+    /// CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type attack whose
+    /// defending player must currently hold the monarch designation
+    /// (`state.monarch`). The monarch is a single dynamic player identity, so
+    /// unlike the other scope variants this cannot be evaluated by the pure type
+    /// matcher — it is resolved in the stateful `attack_target_matches` against
+    /// `state.monarch` (The Spear of Bashenga). If there is no monarch
+    /// (CR 725.1 — no monarch until an effect creates one), it never matches.
+    Monarch,
+}
+
+/// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
+/// planeswalk event. `From` binds the source to the plane/phenomenon walked away
+/// from, `To` binds it to the plane/phenomenon walked to (the encounter/arrival
+/// endpoint), and `Any` is source-independent — it fires for any planeswalk
+/// (CR 901.11), used by delayed "when a player planeswalks" triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlaneswalkRole {
+    From,
+    To,
+    Any,
+}
+
+/// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
+/// meta-trigger observes. The two points are distinct events with distinct
+/// timing consequences: an ability that triggers may still be countered
+/// (CR 701.5) or have its intervening-if fail (CR 603.4) and therefore never
+/// resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AbilityLifecyclePoint {
+    /// CR 603.2: the observed ability's trigger condition was met.
+    Triggered,
+    /// CR 608.2: the observed ability finished resolving.
+    Resolved,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).
@@ -425,6 +458,9 @@ pub enum TriggerMode {
     // Mana
     /// CR 106.4: Triggers when mana is added to a player's mana pool.
     ManaAdded,
+    /// CR 605.1b: Triggers once when a qualifying activated mana ability
+    /// resolves and produces mana, including non-tap mana abilities.
+    ManaAbilityProduced,
     ManaExpend,
 
     // Land
@@ -457,8 +493,16 @@ pub enum TriggerMode {
 
     // Planar
     PlanarDice,
-    PlaneswalkedFrom,
-    PlaneswalkedTo,
+    /// CR 701.31 + CR 701.31d + CR 901.11: planeswalk trigger, parameterized by
+    /// which endpoint of the `GameEvent::Planeswalked` event the trigger's source
+    /// must bind to. `role: From` = walked away from the source plane, `role: To`
+    /// = walked to (encounter) the source plane, `role: Any` = source-independent
+    /// "whenever a player planeswalks" (e.g. The Doctor's Childhood Barn's delayed
+    /// phase-in). All three share the same event and player-validity check; only
+    /// the endpoint binding differs.
+    Planeswalked {
+        role: PlaneswalkRole,
+    },
     ChaosEnsues,
 
     // Dice / coin
@@ -569,6 +613,30 @@ pub enum TriggerMode {
     /// `ExileLinkKind::Haunt` link. Matched by
     /// `game::haunt::match_haunted_creature_dies`.
     HauntedCreatureDies,
+
+    /// CR 714.2e: a meta-trigger on another permanent's FINAL chapter ability —
+    /// "whenever the final chapter ability of a Saga you control resolves"
+    /// (Narci, Fable Singer; Tom Bombadil) / "… triggers" (Historian's Boon).
+    /// CR 714.2e defines a Saga's final chapter ability as the chapter ability
+    /// whose chapter symbol carries its final chapter number (CR 714.2d).
+    ///
+    /// `lifecycle` is the one axis the printed class actually varies over. It is
+    /// deliberately NOT parameterized on *which* chapter ability is observed:
+    /// all three printed cards say "the final chapter ability", and an
+    /// unqualified "a chapter ability" observer could not be modeled correctly
+    /// here anyway. CR 714.2b makes each chapter symbol its own triggered
+    /// ability, so one lore-counter addition that crosses several chapter
+    /// numbers triggers that many chapter abilities — an observer of all of them
+    /// must fire once per crossed ability, which an event-keyed matcher reading
+    /// a single `CounterAdded` cannot express. Adding that scope needs an
+    /// occurrence-level chapter event first, not a wider enum.
+    ///
+    /// The Saga itself is constrained by the trigger's ordinary `valid_card`
+    /// filter ("a Saga you control"), so no Saga-specific filter axis is needed
+    /// here.
+    FinalSagaChapterAbility {
+        lifecycle: AbilityLifecyclePoint,
+    },
 
     /// Fallback for unrecognized trigger mode strings.
     Unknown(String),
@@ -684,6 +752,7 @@ impl FromStr for TriggerMode {
             "LifeLostAll" => TriggerMode::LifeLostAll,
             "LosesGame" => TriggerMode::LosesGame,
             "ManaAdded" => TriggerMode::ManaAdded,
+            "ManaAbilityProduced" => TriggerMode::ManaAbilityProduced,
             "ManaExpend" => TriggerMode::ManaExpend,
             "ManifestDread" => TriggerMode::ManifestDread,
             "Mentored" => TriggerMode::Mentored,
@@ -704,8 +773,15 @@ impl FromStr for TriggerMode {
             "PhaseOut" => TriggerMode::PhaseOut,
             "PhaseOutAll" => TriggerMode::PhaseOutAll,
             "PlanarDice" => TriggerMode::PlanarDice,
-            "PlaneswalkedFrom" => TriggerMode::PlaneswalkedFrom,
-            "PlaneswalkedTo" => TriggerMode::PlaneswalkedTo,
+            "PlaneswalkedFrom" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From,
+            },
+            "PlaneswalkedTo" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To,
+            },
+            "PlayerPlaneswalked" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any,
+            },
             "Proliferate" => TriggerMode::Proliferate,
             "Revealed" => TriggerMode::Revealed,
             "RingTemptsYou" => TriggerMode::RingTemptsYou,
@@ -833,6 +909,51 @@ mod tests {
             TriggerMode::from_str("LoyaltyAbilityActivated").unwrap(),
             TriggerMode::LoyaltyAbilityActivated
         );
+    }
+
+    /// CR 701.31 / CR 701.31d / CR 901.11: the parameterized planeswalk mode must
+    /// survive both the Forge-string `from_str` path and serde round-trips without
+    /// degrading to `Unknown` (a missing arm would silently no-fire the trigger).
+    /// The three legacy Forge strings each map onto a distinct `PlaneswalkRole`.
+    #[test]
+    fn planeswalked_roles_round_trip() {
+        // Forge-string import path: each legacy string resolves to the right role.
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedFrom").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From
+            }
+        );
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedTo").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        );
+        assert_eq!(
+            TriggerMode::from_str("PlayerPlaneswalked").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any
+            }
+        );
+
+        // Serde is the card-data persistence path. Externally-tagged struct
+        // variant → `{"Planeswalked":{"role":"..."}}`. Locking this format also
+        // documents the on-disk shape used by the integration-card fixture.
+        for (role, json) in [
+            (PlaneswalkRole::From, r#"{"Planeswalked":{"role":"From"}}"#),
+            (PlaneswalkRole::To, r#"{"Planeswalked":{"role":"To"}}"#),
+            (PlaneswalkRole::Any, r#"{"Planeswalked":{"role":"Any"}}"#),
+        ] {
+            let mode = TriggerMode::Planeswalked { role };
+            let serialized = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serialized, json);
+            assert_eq!(
+                serde_json::from_str::<TriggerMode>(json).unwrap(),
+                mode,
+                "serde round-trip must preserve the planeswalk role"
+            );
+        }
     }
 
     #[test]
@@ -972,6 +1093,7 @@ mod tests {
             "LosesGame",
             "LoyaltyAbilityActivated",
             "ManaAdded",
+            "ManaAbilityProduced",
             "ManaExpend",
             "ManifestDread",
             "Mentored",
@@ -995,6 +1117,7 @@ mod tests {
             "PlanarDice",
             "PlaneswalkedFrom",
             "PlaneswalkedTo",
+            "PlayerPlaneswalked",
             "Proliferate",
             "Revealed",
             "RingTemptsYou",

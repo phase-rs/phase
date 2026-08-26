@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Counter types serialize as flat strings so they can be used as JSON map keys
 /// in `HashMap<CounterType, u32>`. Without this, `Generic("quest")` would serialize
 /// as `{"Generic":"quest"}` which serde_json rejects as a map key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,
@@ -56,6 +56,11 @@ pub enum CounterType {
     /// counter from it"). One or more shield counters share this single pair of
     /// effects. See `game::replacement::consume_shield_counter`.
     Shield,
+    /// CR 122.1h: One or more finality counters create a single replacement
+    /// effect "If this permanent would be put into a graveyard from the
+    /// battlefield, exile it instead." Persistent (no counter removed, unlike
+    /// shield CR 122.1c). See `game::replacement::apply_finality_counter_replacement`.
+    Finality,
     /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
     /// first strike, deathtouch, lifelink, ...). Uses the parameterless
     /// `KeywordKind` discriminant — keyword counters never carry parameters
@@ -102,6 +107,7 @@ impl CounterType {
             CounterType::Fade => Cow::Borrowed("fade"),
             CounterType::Age => Cow::Borrowed("age"),
             CounterType::Shield => Cow::Borrowed("shield"),
+            CounterType::Finality => Cow::Borrowed("finality"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
@@ -140,6 +146,7 @@ impl CounterType {
             | CounterType::Fade
             | CounterType::Age
             | CounterType::Shield
+            | CounterType::Finality
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
         }
@@ -165,6 +172,8 @@ impl CounterType {
     /// - CR 702.32a: `Fade` (Fading duration).
     /// - CR 702.24a: `Age` (Cumulative upkeep).
     /// - CR 714.3 + CR 714.4: `Lore` (Saga chapter progression / sacrifice SBA).
+    /// - CR 122.1h: `Finality` (death→exile redirect — a state-gating
+    ///   replacement, not a monotone pump).
     /// - CR 122.1b: `Keyword(_)` (grants a keyword).
     /// - CR 122.1: `Generic(_)` (arbitrary tracked markers).
     pub fn is_monotone_loop_resource(&self) -> bool {
@@ -180,6 +189,7 @@ impl CounterType {
             | CounterType::Fade
             | CounterType::Age
             | CounterType::Shield
+            | CounterType::Finality
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => false,
         }
@@ -202,22 +212,21 @@ impl<'de> serde::Deserialize<'de> for CounterType {
 pub(crate) mod counter_map_serde {
     use super::*;
     use serde::de::{self, MapAccess, Visitor};
-    use serde::ser::SerializeMap;
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    pub(crate) fn serialize<S>(
-        map: &HashMap<CounterType, u32>,
+    pub(crate) fn serialize<S, H>(
+        map: &HashMap<CounterType, u32, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
-        for (counter_type, count) in map {
-            ser_map.serialize_entry(counter_type.as_str().as_ref(), count)?;
-        }
-        ser_map.end()
+        crate::types::deterministic_serde::serialize_sorted_map_entries(
+            map.iter(),
+            std::convert::identity,
+            serializer,
+        )
     }
 
     pub(crate) fn deserialize<'de, D>(
@@ -321,6 +330,7 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         "fade" | "FADE" => return Some(CounterType::Fade),
         "age" => return Some(CounterType::Age),
         "shield" => return Some(CounterType::Shield),
+        "finality" => return Some(CounterType::Finality),
         _ => {}
     }
     if let Some((power, toughness)) = parse_power_toughness_counter(trimmed) {
@@ -423,10 +433,58 @@ pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_positive_counters, parse_counter_type, positive_counter_entries,
+        counter_map_serde, has_positive_counters, parse_counter_type, positive_counter_entries,
         positive_counter_types, prune_zero_counters, try_parse_counter_type, CounterType,
     };
+    use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    #[derive(Serialize)]
+    struct AdversarialCounterMapFixture<'a> {
+        #[serde(serialize_with = "counter_map_serde::serialize")]
+        counters: &'a HashMap<CounterType, u32, ReverseBuildHasher>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct CounterMapFixture {
+        #[serde(with = "counter_map_serde")]
+        counters: HashMap<CounterType, u32>,
+    }
+
+    #[test]
+    fn counter_map_serializer_sorts_typed_keys_without_changing_its_object_shape() {
+        let counters = HashMap::with_hasher(ReverseBuildHasher);
+        let mut counters = counters;
+        counters.insert(CounterType::Loyalty, 3);
+        counters.insert(CounterType::Minus1Minus1, 2);
+        counters.insert(CounterType::Plus1Plus1, 1);
+
+        assert_eq!(
+            counters.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                CounterType::Loyalty,
+                CounterType::Minus1Minus1,
+                CounterType::Plus1Plus1,
+            ],
+            "hostile hasher must expose descending native iteration"
+        );
+        assert_eq!(
+            serde_json::to_string(&AdversarialCounterMapFixture {
+                counters: &counters
+            })
+            .expect("counter fixture should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+
+        let restored: CounterMapFixture =
+            serde_json::from_str(r#"{"counters":{"loyalty":3,"M1M1":2,"P1P1":1}}"#)
+                .expect("current counter object shape should deserialize");
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored counter map should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+    }
 
     #[test]
     fn parses_legacy_power_toughness_counter_deltas() {
@@ -469,12 +527,6 @@ mod tests {
 
     #[test]
     fn sums_legacy_duplicate_counter_keys_on_deserialize() {
-        #[derive(serde::Deserialize)]
-        struct CounterMapFixture {
-            #[serde(with = "super::counter_map_serde")]
-            counters: HashMap<CounterType, u32>,
-        }
-
         let fixture: CounterMapFixture =
             serde_json::from_str(r#"{"counters":{"P1P1":2,"p1p1":3,"M1M1":1,"m1m1":4}}"#).unwrap();
 
@@ -517,6 +569,29 @@ mod tests {
     }
 
     #[test]
+    fn finality_counter_parses_serializes_and_has_no_pt_delta() {
+        // CR 122.1h: "finality" is a first-class counter type, not a Generic.
+        // Serialized key is byte-identical to the legacy Generic("finality").
+        assert_eq!(parse_counter_type("finality"), CounterType::Finality);
+        assert_eq!(
+            parse_counter_type("finality counter"),
+            CounterType::Finality
+        );
+        assert_eq!(
+            try_parse_counter_type("finality"),
+            Some(CounterType::Finality)
+        );
+        assert_eq!(CounterType::Finality.as_str().as_ref(), "finality");
+        assert_eq!(
+            serde_json::to_string(&CounterType::Finality).unwrap(),
+            "\"finality\""
+        );
+        let back: CounterType = serde_json::from_str("\"finality\"").unwrap();
+        assert_eq!(back, CounterType::Finality);
+        assert_eq!(CounterType::Finality.power_toughness_delta(), None);
+    }
+
+    #[test]
     fn monotone_loop_resource_partition_is_exhaustive_and_correct() {
         use crate::types::keywords::KeywordKind;
         // CR 122.1a/613.4c, 306.5b, 310.4c: monotone => projected out.
@@ -540,6 +615,7 @@ mod tests {
             CounterType::Fade,
             CounterType::Age,
             CounterType::Shield,
+            CounterType::Finality,
             CounterType::Keyword(KeywordKind::Flying),
             CounterType::Generic("quest".to_string()),
         ] {

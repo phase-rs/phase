@@ -12,7 +12,7 @@
 //! this turn.
 //! CR 106.6: tag-scoped mana spend restriction (Quinjet).
 //! CR 500.7 + CR 514.2: Kang's extra-turn power-up prohibition.
-//! CR 603.1b: Marvel Boy's dual-condition trigger.
+//! CR 603.2c: Marvel Boy's dual-condition trigger fires once for each event.
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
@@ -593,11 +593,12 @@ fn set_tagged_mana(runner: &mut GameRunner, player: PlayerId, n: usize) {
 // 6. Marvel Boy trigger — fires on power-up activation only.
 // ---------------------------------------------------------------------------
 
-/// CR 602.1 + CR 603.1b: "whenever you activate a power-up ability" triggers.
+/// CR 602.1 + CR 603.2c: "whenever you activate a power-up ability" triggers
+/// once for each qualifying activation event.
 ///
 /// Revert-failing assertion: activating a power-up ability puts a +1/+1 counter
-/// on Marvel Boy; activating a NON-power-up ability does not. If the trigger arm
-/// is reverted, the parser drops the condition and no counter ever lands.
+/// on Marvel Boy; activating a NON-power-up ability does not. If the trigger
+/// registry entry is reverted, Marvel Boy is marked unsupported before play.
 #[test]
 fn marvel_boy_triggers_only_on_power_up_activation() {
     let mut scenario = GameScenario::new();
@@ -609,7 +610,7 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
             "Marvel Boy",
             2,
             2,
-            "Whenever you activate a power-up ability, put a +1/+1 counter on Marvel Boy.",
+            "Whenever another creature you control enters and whenever you activate a power-up ability, put a +1/+1 counter on Marvel Boy.",
         )
         .id();
     let hero = scenario
@@ -633,6 +634,10 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
 
     let mut runner = scenario.build();
 
+    assert!(
+        !runner.state().objects[&marvel].has_unimplemented_mechanics(),
+        "the production Marvel Boy Oracle must be fully supported"
+    );
     let before = p1p1_on(&runner, marvel);
 
     // Activate the NON-power-up ability first: must NOT trigger Marvel Boy.
@@ -655,9 +660,10 @@ fn marvel_boy_triggers_only_on_power_up_activation() {
     refill_colorless(&mut runner, P0, 1);
     runner.activate(hero, power_idx).resolve();
     runner.advance_until_stack_empty();
-    assert!(
-        p1p1_on(&runner, marvel) > before,
-        "a power-up activation must trigger Marvel Boy (+1/+1 counter)"
+    assert_eq!(
+        p1p1_on(&runner, marvel),
+        before + 1,
+        "CR 603.2c: one power-up activation event must trigger Marvel Boy exactly once"
     );
 }
 
@@ -804,7 +810,7 @@ fn kang_prohibits_power_up_during_extra_turn_only() {
     // Kang granted P0 an extra turn and added a power-up-scoped, pre-armed
     // prohibition.
     assert!(
-        runner.state().extra_turns.contains(&P0),
+        runner.state().extra_turns.iter().any(|et| et.player == P0),
         "Kang must grant its controller an extra turn"
     );
     let prohibition_is_prearmed = runner.state().restrictions.iter().any(|r| {

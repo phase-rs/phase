@@ -84,6 +84,43 @@ Key functions: `handle_cast_spell()`, `pay_and_push()`, `pay_mana_cost()`, `pay_
 
 ---
 
+## The X Channels — X Is Locked at ANNOUNCE, Never at Resolution
+
+**Rebinding X at resolution time is rules-wrong, not merely late.** CR 107.3c says the value
+of X may change while the spell or ability is on the stack; CR 601.2b (and CR 602.2b, which
+makes an activated ability's announcement identical to a spell's) fixes it at announcement.
+An effect that re-measures X when it resolves reads a *different, legal* board and produces
+a *different, wrong* number — and it does so silently.
+
+There are **three carriers**. They are not interchangeable, and choosing wrong reads the
+wrong X *by rule*, not merely a missing one:
+
+| Carrier | Where | Rule | What it holds |
+|---|---|---|---|
+| `GameObject::cost_x_paid` (`game/game_object.rs`) | on the OBJECT | **CR 107.3m** — the cast-X channel; read by `QuantityRef::CostXPaid` | X paid for the object's **mana cost** as it was cast |
+| `GameState::announced_source_x: Option<(ObjectId, u32)>` (`types/game_state.rs`) | on the STATE, keyed by object | **CR 107.3a** (activated ability) + **CR 107.3d** (special action: morph/suspend) | The X announced for an **in-flight cost**, so a trigger of that same object fired *by* the announcement reads the same X (CR 107.3i) |
+| `ResolvedAbility::chosen_x: Option<u32>` (`types/game_state.rs`) | on the ABILITY | **CR 107.3i** — all instances of X on an object have the same value | The object's single, published X channel. Every `QuantityRef::Variable("X")` reads it |
+
+**Do NOT reuse `cost_x_paid` for an activated ability's announced X.** CR 107.3k makes an
+activated ability's X *independent* of any other X chosen for that object — writing the
+announced X into the cast-X channel would answer with the wrong number by rule.
+
+**`publish_announced_x()` (`game/ability_utils.rs`) is the SINGLE publish authority.** It
+resolves the announce-time expression once and calls `set_chosen_x_recursive`, so the
+announced target count (CR 601.2c), the divided-damage pool (CR 601.2d), and every
+resolution-time amount all observe the *same* number. Two contracts you cannot break:
+
+- **Call it BEFORE target selection.** CR 601.2b precedes CR 601.2c;
+  `resolve_multi_target_bounds` fails closed rather than counting an unresolved X as 0.
+- **It is idempotent** (gated on `chosen_x.is_some()`), so a resumed/re-announced cast
+  cannot re-measure the count against a board that has since changed.
+
+If your effect carries a `QuantityExpr` that can hold X, it reads `chosen_x` — you do not
+add a new channel. If you find yourself computing X inside an effect handler, you are in the
+wrong layer.
+
+---
+
 ## Activated Ability Cost Payment — Building Blocks
 
 Three composable helpers handle all ability cost payment:
@@ -366,6 +403,9 @@ if let Some((_, rest)) = nom_on_lower(text, lower, tag("you may ")) {
 | New interactive state without `pending_continuation` support | Sub_ability chain breaks when player choice interrupts resolution |
 | Modifying `abilities[0]` selection in casting.rs | Changes which ability goes on stack for ALL spells |
 | Modal spell/ability targeting ignores modal target constraints | Illegal same-player or same-object selections slip through | Derive constraints with `target_constraints_from_modal()` and validate them during selection |
+| Re-measuring X when the ability resolves | Rules-wrong (CR 107.3c): X is fixed at announcement, and the resolving board is a *different, legal* board — silently wrong number | Publish once via `publish_announced_x()`; effects read `chosen_x` |
+| Writing an activated ability's announced X into `GameObject::cost_x_paid` | Reads the wrong X **by rule** — CR 107.3k makes an activated ability's X independent of the object's cast-X | Use `announced_source_x` (CR 107.3a/d); `cost_x_paid` is the CR 107.3m cast channel |
+| Publishing X after target selection | `resolve_multi_target_bounds` fails closed ("target count requires a resolved quantity") | CR 601.2b precedes CR 601.2c — publish before targeting |
 
 ---
 
@@ -373,11 +413,15 @@ if let Some((_, rest)) = nom_on_lower(text, lower, tag("you may ")) {
 
 ```bash
 rg -q "fn handle_cast_spell" crates/engine/src/game/casting.rs && \
-rg -q "fn pay_and_push" crates/engine/src/game/casting.rs && \
+rg -q "fn pay_and_push" crates/engine/src/game/casting_costs.rs && \
 rg -q "fn pay_mana_cost" crates/engine/src/game/casting.rs && \
-rg -q "fn pay_ability_cost" crates/engine/src/game/casting.rs && \
+rg -q "fn pay_ability_cost" crates/engine/src/game/costs.rs && \
 rg -q "fn requires_untapped" crates/engine/src/game/casting.rs && \
 rg -q "fn handle_ability_mode_choice" crates/engine/src/game/engine_modes.rs && \
+rg -q "fn publish_announced_x" crates/engine/src/game/ability_utils.rs && \
+rg -q "fn set_chosen_x_recursive" crates/engine/src/types/ability.rs && \
+rg -q "announced_source_x" crates/engine/src/types/game_state.rs && \
+rg -q "cost_x_paid" crates/engine/src/game/game_object.rs && \
 test -f crates/engine/src/game/engine_casting.rs && \
 test -f crates/engine/src/game/engine_resolution_choices.rs && \
 test -f crates/engine/src/game/engine_payment_choices.rs && \

@@ -67,16 +67,37 @@ fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Finds a spell's casting variant while it is on the stack or resolving.
+///
+/// Resolving spells leave `GameState::stack` before their chained instructions
+/// run, so the resolution carrier is also an authoritative source.
 fn stack_spell_casting_variant(
     state: &GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> Option<CastingVariant> {
-    state.stack.iter().find_map(|entry| match &entry.kind {
-        StackEntryKind::Spell {
-            casting_variant, ..
-        } if entry.id == obj_id => Some(*casting_variant),
-        _ => None,
-    })
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } if entry.id == obj_id => Some(*casting_variant),
+            _ => None,
+        })
+        .or_else(|| {
+            // CR 608.2m + CR 608.2n: resolving spells are popped from the live
+            // stack before their effect chain runs, but their casting variant stays
+            // authoritative in the resolution carrier until the chain completes.
+            state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| match &entry.kind {
+                    StackEntryKind::Spell {
+                        casting_variant, ..
+                    } if entry.id == obj_id => Some(*casting_variant),
+                    _ => None,
+                })
+        })
 }
 
 /// CR 400.6: Zone change — return target object to the destination zone
@@ -159,6 +180,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -238,6 +260,7 @@ pub fn resolve(
                     library_position: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -246,6 +269,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -331,6 +355,7 @@ pub fn resolve(
                     library_position: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -339,6 +364,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -391,6 +417,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -478,6 +505,7 @@ pub fn resolve_all(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -507,6 +535,7 @@ pub fn resolve_all(
                 library_position: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
+                duration: None,
             };
             return Ok(());
         }
@@ -528,7 +557,7 @@ pub fn resolve_all(
     //
     // CR 616.1: two simultaneous destination-redirects on one bounced permanent
     // surface an ordering choice. `move_objects_simultaneously` parks it and the
-    // undelivered tail in `state.pending_batch_deliveries`; the
+    // undelivered tail in the active `BatchDelivery` frame; the
     // replacement-choice resume path drains it. A single applicable redirect
     // never prompts (the realistic path), so the common mass bounce never
     // pauses. `state.last_effect_count` is set up front from the matched pool so
@@ -550,6 +579,7 @@ pub fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -798,6 +828,7 @@ mod tests {
                 source_name: "Ability Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

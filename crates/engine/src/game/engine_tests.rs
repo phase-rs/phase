@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::{BackFaceData, RoomDoor};
+use crate::game::scenario::{GameScenario, P0};
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
@@ -11,14 +12,39 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CardType;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
+use crate::types::events::PlayerActionKind;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::CastingVariant;
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::game_state::{
+    CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
+};
+use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
+
+fn tap_land_action(state: &GameState, object_id: ObjectId) -> GameAction {
+    let player = state
+        .waiting_for
+        .acting_player()
+        .expect("tap-land test requires one acting player");
+    super::mana_sources::activatable_mana_actions_for_player(state, player)
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == object_id)
+        })
+        .expect("land must expose a semantic mana action")
+}
+
+fn apply_tap_land_as_current(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Result<ActionResult, EngineError> {
+    let action = tap_land_action(state, object_id);
+    apply_as_current(state, action)
+}
 
 /// Create a simple test ability definition.
 fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
@@ -41,7 +67,12 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
         controller,
         kind: StackEntryKind::ActivatedAbility {
             source_id: object_id,
-            ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                object_id,
+                controller,
+            )),
         },
     }
 }
@@ -49,16 +80,65 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 #[test]
 fn cards_revealed_events_are_remembered_publicly() {
     let mut state = GameState::new_two_player(42);
-    let card_id = ObjectId(42);
+    let card_id = create_object(
+        &mut state,
+        CardId(42),
+        PlayerId(1),
+        "Known Card".to_string(),
+        Zone::Hand,
+    );
     let events = vec![GameEvent::CardsRevealed {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
     }];
+    let pre_state = state.clone();
 
-    remember_public_reveals(&mut state, &events);
+    remember_public_reveals(&mut state, &events, 0);
 
     assert!(state.public_revealed_cards.contains(&card_id));
+    let command = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.command {
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::Information(command)) => {
+                Some(command.clone())
+            }
+            _ => None,
+        })
+        .expect("published reveal must record its exact information command");
+    let mut replay = pre_state;
+    replay.apply_resolved_information(&command).unwrap();
+    assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+}
+
+#[test]
+fn assist_cancellation_rejects_committed_activation_held_by_waiting_for() {
+    let mut state = setup_game_at_main_phase();
+    let mut pending = PendingCast::new(
+        ObjectId(1),
+        CardId(1),
+        ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0)),
+        ManaCost::NoCost,
+    );
+    pending.activation_cost_committed = true;
+    state.waiting_for = WaitingFor::TargetSelection {
+        player: PlayerId(0),
+        pending_cast: Box::new(pending),
+        target_slots: vec![],
+        mode_labels: vec![],
+        selection: TargetSelectionProgress {
+            current_slot: 0,
+            selected_slots: vec![],
+            current_legal_targets: vec![],
+        },
+    };
+
+    assert!(matches!(
+        ensure_assist_cancellation_is_allowed(&state),
+        Err(EngineError::ActionNotAllowed(message)) if message == "Cannot cancel an activation after a cost is paid"
+    ));
 }
 
 /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
@@ -109,7 +189,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ability.clone(),
+        ability: Box::new(ability.clone()),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,
@@ -120,6 +200,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -136,10 +217,15 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             source_name: "Pinger".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
-    state.pending_trigger = Some(pending);
+    state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
+    state
+        .stack_trigger_firings
+        .insert(entry_id, TriggerFiring::Ordinary);
+    state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
     let stack_len_before = state.stack.len();
 
     let result = begin_pending_trigger_target_selection(&mut state);
@@ -190,7 +276,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(stack_ability),
+            ability: Some(Box::new(stack_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -273,6 +359,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
     let mut result = ActionResult {
@@ -301,6 +388,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let mut result = ActionResult {
         events: Vec::new(),
@@ -401,6 +489,71 @@ fn setup_game_at_main_phase() -> GameState {
         player: PlayerId(0),
     };
     state
+}
+
+#[test]
+fn shigeki_channel_x_zero_resolves_from_stack_without_zone_choice() {
+    let mut state = setup_game_at_main_phase();
+    let shigeki = create_object(
+        &mut state,
+        CardId(9200),
+        PlayerId(0),
+        "Shigeki, Jukai Visionary".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&shigeki).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+    }
+    apply_oracle_to_object(
+        &mut state,
+        shigeki,
+        "Shigeki, Jukai Visionary",
+        "{1}{G}, {T}, Return Shigeki to its owner's hand: Reveal the top four cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest into your graveyard.\nChannel — {X}{X}{G}{G}, Discard this card: Return X target nonlegendary cards from your graveyard to your hand.",
+    );
+    let rage = create_object(
+        &mut state,
+        CardId(9201),
+        PlayerId(0),
+        "Worldsoul's Rage".to_string(),
+        Zone::Graveyard,
+    );
+    let overlook = create_object(
+        &mut state,
+        CardId(9202),
+        PlayerId(0),
+        "Riveteers Overlook".to_string(),
+        Zone::Graveyard,
+    );
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: shigeki,
+            ability_index: 1,
+        },
+    )
+    .unwrap();
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+    apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+    assert!(state.stack.iter().any(|entry| entry.source_id == shigeki));
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.players[0].graveyard.contains(&rage));
+    assert!(state.players[0].graveyard.contains(&overlook));
+    assert!(state.players[0].graveyard.contains(&shigeki));
+    assert!(state.players[0].hand.is_empty());
 }
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
@@ -1434,6 +1587,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
         player: PlayerId(0),
         valid_attacker_ids: vec![bombardiers],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     apply_as_current(
@@ -1486,6 +1640,7 @@ fn room_back_face(name: &str) -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType::default(),
         mana_cost: ManaCost::default(),
@@ -1502,6 +1657,7 @@ fn room_back_face(name: &str) -> BackFaceData {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(crate::types::card::LayoutKind::Split),
+        parse_warnings: vec![],
     }
 }
 
@@ -1543,6 +1699,904 @@ fn unlock_room_door_special_action_marks_door_and_emits_trigger_event() {
     )));
 }
 
+/// CR 709.5h: unlocking a particular half triggers THAT half's "when you
+/// unlock this door" ability. The cast half (left, unlocked on entry) carries
+/// a GainLife-3 marker trigger; the locked right half carries GainLife 7.
+/// Paying the right door's unlock cost must put the RIGHT half's trigger on
+/// the stack — not re-fire the cast half's (Moldering Gym // Weight Room:
+/// paying Weight Room's {5}{G} ran Moldering Gym's land search a second time
+/// and Weight Room's ability never existed for the engine).
+#[test]
+fn unlocking_the_right_door_fires_the_right_halfs_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(901),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(front_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(front_trigger);
+        let mut back = room_back_face("Weight Room");
+        back.trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 7 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text
+        // (`reset_for_battlefield_entry` → `install_room_door_text`).
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![7],
+        "CR 709.5h: the just-unlocked RIGHT half's trigger (marker 7) must fire, \
+         and the cast half's (marker 3) must not"
+    );
+}
+
+/// CR 709.5e + CR 709.5j: doors are PRINTED halves, not live/back slots.
+/// After the back half was cast (`modal_back_face`), the LEFT door's unlock
+/// cost is the back_face's mana cost and its trigger is the back_face's —
+/// `room::live_face_door` is the shared orientation authority. Before the fix
+/// the cost lookup read `obj.mana_cost` for Left unconditionally (the WRONG
+/// half once the faces swapped), and the trigger re-fired the live half.
+#[test]
+fn after_casting_the_back_half_the_left_door_uses_the_front_halfs_cost_and_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(902),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        // The right (second printed) half was cast: faces are swapped.
+        obj.modal_back_face = true;
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let live_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(live_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(live_trigger);
+        let mut front = room_back_face("Moldering Gym");
+        front.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        front
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(front);
+        obj.reset_for_battlefield_entry(1, 1);
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    // Exactly the FRONT half's {G} in the pool: the unlock succeeds only if
+    // the Left door resolves to the back_face slot (the front-printed half).
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .expect("the left door's unlock cost is the front half's {G}");
+
+    assert!(state.objects[&room].room_unlocks.unwrap().left_unlocked);
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![3],
+        "CR 709.5h: the LEFT door's trigger is the front-printed half's (marker 3), \
+         not the live half's (marker 7)"
+    );
+}
+
+/// CR 709.5 + CR 709.5c: a locked half doesn't have its rules text, so the
+/// right half's static ability must not function until the right door is
+/// unlocked — and must stop again when that door is re-locked (CR 709.5g,
+/// Marina Vendrell class). The locked right half carries an
+/// AdditionalLandDrop static as a countable marker; the front (cast) half
+/// carries none.
+#[test]
+fn unlocking_the_right_door_turns_on_that_halfs_static() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(903),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let mut back = room_back_face("Weight Room");
+        back.static_definitions
+            .push(StaticDefinition::new(StaticMode::AdditionalLandDrop {
+                count: 2,
+            }));
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text.
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: the locked right half's static must not function"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: the unlocked right half's static must function"
+    );
+
+    // CR 709.5g: locking the half removes the designation — its text is gone again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Right
+    ));
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5g: a re-locked half's static must stop functioning"
+    );
+}
+
+/// CR 709.5d: a Room entering the battlefield without being cast enters with
+/// NEITHER unlocked designation — so even the live face's static (its printed
+/// rules text) must not function until a door is unlocked (CR 709.5).
+#[test]
+fn a_room_entering_uncast_has_no_functioning_static_until_unlocked() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(904),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+        obj.static_definitions.push(front_static.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5d + CR 709.5: with neither door unlocked, no half's static functions"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: unlocking the left door turns its half's static on"
+    );
+}
+
+/// CR 709.5: a locked half doesn't have its NAME. On the battlefield a Room's
+/// name is therefore the printed-order combination of its unlocked halves:
+/// neither → no name at all (CR 709.5d uncast entry), one → that half alone,
+/// both → "Left // Right". Re-locking (CR 709.5g) takes the name away again.
+#[test]
+fn a_rooms_battlefield_name_follows_its_unlock_designations() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(905),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "",
+        "CR 709.5d + CR 709.5: with both doors locked the permanent has neither half's name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym",
+        "CR 709.5c: one unlocked half contributes exactly its own name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: a fully unlocked Room has both halves' names, in printed order"
+    );
+
+    // CR 709.5g: re-locking the left door takes its half's name away again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Left
+    ));
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5g: a re-locked half's name is gone; the right half's remains"
+    );
+}
+
+/// CR 709.5d: the same name rule with the RIGHT half cast — `modal_back_face`
+/// swaps the faces, so the live face is the right door and the back face slot
+/// holds the FIRST printed half. The combined name must keep printed order,
+/// not face residency ("Moldering Gym // Weight Room", never the reverse).
+#[test]
+fn a_room_cast_from_its_right_half_keeps_printed_name_order() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(906),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.modal_back_face = true;
+        obj.back_face = Some(room_back_face("Moldering Gym"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The right (live) half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5d: only the cast (right) half's name exists"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: printed order wins — the left-printed half leads even though \
+         it lives in the back-face slot"
+    );
+}
+
+/// Build a battlefield Room with a stamped front-half marker static, entered
+/// UNCAST (both doors locked, CR 709.5d) so its own text contributes nothing.
+fn uncast_room_with_front_marker(
+    state: &mut GameState,
+    card: u64,
+    front: &str,
+    back: &str,
+) -> ObjectId {
+    let room = create_object(
+        state,
+        CardId(card),
+        PlayerId(0),
+        front.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&room).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Room".to_string());
+    // The copiable snapshot reads BASE characteristics — mirror the types
+    // there so the source is a Room in its copiable form too.
+    obj.base_card_types = obj.card_types.clone();
+    // CR 709.5e: give the LEFT half a real unlock cost ({1}) so a copy's
+    // unlock exercises the COPIED cost instead of succeeding for free.
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    obj.base_mana_cost = obj.mana_cost.clone();
+    let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+    obj.static_definitions.push(front_static.clone());
+    Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+    obj.back_face = Some(room_back_face(back));
+    obj.reset_for_battlefield_entry(1, 1);
+    room
+}
+
+/// CR 707.2 + CR 709.5 + CR 613.1a: an ordinary permanent under a copy effect
+/// of a Room takes the Room's COPIABLE form — both halves, door-gated. It has
+/// no unlocked designations of its own (designations are status, CR 709.5c),
+/// so it sits fully locked: no name, no functioning half text. Unlocking a
+/// door turns exactly that half on; copy expiry reverts everything.
+#[test]
+fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 907, "Moldering Gym", "Weight Room");
+    let bear = create_object(
+        &mut state,
+        CardId(908),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&bear)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert_eq!(
+        state.objects[&bear].name, "",
+        "CR 709.5c + CR 709.5: the copy has no unlocked designations, so it has \
+         neither half's name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: both the source's and the copy's halves are locked — no text functions"
+    );
+
+    // CR 709.5e + CR 707.2: the copy is a Room permanent; its controller pays
+    // the locked LEFT half's COPIED cost ({1}) — fund exactly that much and
+    // assert the unlock consumes it, so a copy path that drops the half cost
+    // or defaults it to free fails here.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.players[0].mana_pool.mana.len(),
+        0,
+        "CR 709.5e: the copied left half's {{1}} unlock cost must consume the mana"
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Moldering Gym",
+        "CR 709.5c: the unlocked left half contributes exactly its own (copied) name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5 + CR 707.2: the copied, now-unlocked front half's static functions"
+    );
+
+    // Copy expiry: the bear reverts wholesale; the lingering designation is
+    // harmless on a non-Room.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Plain Bear",
+        "copy expiry restores the recipient's own name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "copy expiry takes the copied half text with it"
+    );
+}
+
+/// CR 707.2 + CR 709.5c: a Room under a copy effect of ANOTHER Room keeps its
+/// own designations (status) but shows the COPIED halves' names through them
+/// — and reverts to its own halves when the copy expires.
+#[test]
+fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 909, "Bright Hall", "Dim Cellar");
+    let room = create_object(
+        &mut state,
+        CardId(910),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.back_face = Some(room_back_face("Weight Room"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        room,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: room },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall",
+        "CR 707.2 + CR 709.5c: the surviving left designation now shows the \
+         COPIED left half's name"
+    );
+
+    // CR 709.5e: unlock the right door — the copied right half's name joins.
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall // Dim Cellar",
+        "CR 709.5: both designations show the copied halves in printed order"
+    );
+
+    // Copy expiry: designations persist (status), the OWN halves return.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "copy expiry restores the object's own halves under its surviving designations"
+    );
+}
+
+/// CR 707.3: an object copying an ALREADY-COPIED Room uses the new copiable
+/// values — the snapshot a later copy takes must carry the COPIED halves, not
+/// the recipient's printed ones.
+#[test]
+fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 911, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(912),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // CR 707.3: the bear's CURRENT copiable values are the Room's — including
+    // the halves. `compute_current_copiable_values` is the snapshot every
+    // become-copy / conjure-duplicate resolution takes.
+    let snapshot = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the bear exists");
+    let halves = snapshot
+        .room_halves
+        .expect("CR 707.3: the copied Room halves are part of the new copiable values");
+    assert_eq!(halves.left.name, "Bright Hall");
+    assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 707.3: the copied left half's unlock cost is part of the new copiable values"
+    );
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar")
+    );
+}
+
+/// CR 707.9b + CR 709.5: an "except its name is X" copy exception is part of
+/// the COPIABLE values and is the copy's final name — the Room door gate
+/// removes locked HALves' names, never a separate name exception. The
+/// exception also propagates through a chained copy (CR 707.3).
+#[test]
+fn a_set_name_exception_survives_the_room_name_derivation() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 915, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(916),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![
+            crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            },
+            // CR 707.9b: the "except its name is X" rider follows CopyValues
+            // within the same effect, exactly as production installs it.
+            crate::types::ability::ContinuousModification::SetName {
+                name: "Wrong Turn".to_string(),
+            },
+        ],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the name exception is the copy's final name — the door          gate must not erase it while both halves are locked"
+    );
+
+    // CR 709.5e: unlocking a door changes the half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
+
+    // CR 707.3: a chained copy sees the overridden name as a copiable value.
+    let bear2 = create_object(
+        &mut state,
+        CardId(917),
+        PlayerId(0),
+        "Second Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let chained = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the copy exists");
+    assert_eq!(
+        chained.name, "Wrong Turn",
+        "CR 707.9b: the exception is part of the snapshot a later copy takes"
+    );
+    state.add_transient_continuous_effect(
+        bear2,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear2 },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(chained),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear2].name, "Wrong Turn",
+        "CR 707.3 + CR 707.9b: the chained copy keeps the exception name —          the door gate must not rename it to a half string"
+    );
+
+    // CR 613.1a: a LATER ordinary copy replaces the exception wholesale — the
+    // marker must reset with it, so the door gate applies again. The bear's
+    // left door is still unlocked from above, so the copied left name shows.
+    let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(plain),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Bright Hall",
+        "CR 613.1a: the later ordinary copy resets the exception marker"
+    );
+}
+
+/// CR 707.9b: a MATERIALIZED duplicate of an exception-named Room copy keeps
+/// the exception through every LATER layer pass — `base_name_origin` restores
+/// the runtime marker at each Step-1 seed, so the door gate never renames it.
+#[test]
+fn a_materialized_exception_name_survives_later_layer_passes() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 918, "Bright Hall", "Dim Cellar");
+    let mut values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    values.name = "Wrong Turn".to_string();
+    values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(919),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Battlefield,
+    );
+    crate::game::printed_cards::install_copiable_values_as_base(
+        state.objects.get_mut(&duplicate).unwrap(),
+        &values,
+    );
+
+    // A later full pass re-seeds from base — the exception must survive it.
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the materialized exception is base state and outlives the pass"
+    );
+
+    // CR 709.5e: unlocking a door changes half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: duplicate,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
+}
+
+/// CR 709.5b: a materialized duplicate of a Room (conjure — Endless Corridor
+/// conjures a duplicate of ITSELF) keeps both printed halves: the base slots
+/// hold the left half, a synthesized back face the right one, so
+/// `own_room_halves` round-trips identity, unlock costs, and door existence.
+#[test]
+fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 913, "Bright Hall", "Dim Cellar");
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(914),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&duplicate).unwrap();
+    crate::game::printed_cards::install_copiable_values_as_base(obj, &values);
+
+    let halves = crate::game::room::own_room_halves(obj);
+    assert_eq!(
+        halves.left.name, "Bright Hall",
+        "CR 709.5b: the duplicate's base slots hold the left half"
+    );
+    assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 709.5e: the left door's unlock cost survives materialization"
+    );
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar"),
+        "CR 709.5b: the right half survives as the synthesized back face"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
@@ -1568,11 +2622,14 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
         let obj = state.objects.get_mut(&room).unwrap();
         obj.card_types.subtypes.push("Room".to_string());
         obj.room_unlocks = Some(Default::default());
-        // CR 709.5e: left door's unlock cost is the object's mana cost ({R}).
+        // CR 709.5e: left door's unlock cost is the half's printed mana cost
+        // ({R}) — the half projection reads the BASE fields, as the card
+        // pipeline fills them.
         obj.mana_cost = ManaCost::Cost {
             shards: vec![crate::types::mana::ManaCostShard::Red],
             generic: 0,
         };
+        obj.base_mana_cost = obj.mana_cost.clone();
     }
 
     // Smoky Lounge's restricted {R}: only for casting Room spells OR unlocking
@@ -1699,8 +2756,14 @@ fn turn_face_up_restricted_mana_funds_special_action() {
         ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
     );
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph })
-        .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    )
+    .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
 
     assert!(
         !state.objects[&morph].face_down,
@@ -1739,7 +2802,13 @@ fn turn_face_up_empty_pool_cannot_pay_and_stays_face_down() {
     let mut state = setup_game_at_main_phase();
     let morph = setup_face_down_morph(&mut state, PlayerId(0));
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    );
     assert!(
         result.is_err(),
         "with no mana the {{3}} morph turn-up cost must be unpayable: {result:?}"
@@ -1772,7 +2841,13 @@ fn turn_face_up_rejects_unlock_door_restricted_mana() {
         ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
     );
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    );
     assert!(
         result.is_err(),
         "door-unlock-restricted mana must not pay a turn-face-up: {result:?}"
@@ -1824,12 +2899,14 @@ fn inquisitive_glimmer_reduces_room_unlock_cost() {
             let obj = state.objects.get_mut(&room).unwrap();
             obj.card_types.subtypes.push("Room".to_string());
             obj.room_unlocks = Some(Default::default());
-            // CR 709.5e: the left door's unlock cost is the object's mana
-            // cost — a flat {3} generic here.
+            // CR 709.5e: the left door's unlock cost is the half's printed
+            // mana cost — a flat {3} generic here, mirrored to BASE as the
+            // card pipeline fills it (the half projection reads base fields).
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![],
                 generic: 3,
             };
+            obj.base_mana_cost = obj.mana_cost.clone();
         }
         if with_glimmer {
             let glimmer = create_object(
@@ -1928,6 +3005,7 @@ fn unlock_door_restricted_mana_rejected_for_effect_and_spell_payments() {
         source_types: &["Artifact".to_string()],
         source_subtypes: &["Equipment".to_string()],
         ability_tag: None,
+        mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
     }));
     let _ = ManaType::Red;
 }
@@ -2007,6 +3085,52 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
 }
 
 #[test]
+fn set_priority_passing_mode_is_actor_scoped_sparse_and_any_state() {
+    use crate::types::game_state::PriorityPassingMode;
+
+    let mut state = setup_game_at_main_phase();
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let waiting = state.waiting_for.clone();
+    let passes = state.priority_passes.clone();
+    let auto_pass = state.auto_pass.clone();
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::SkipLowUseWindows,
+        },
+    )
+    .expect("non-priority actor may set their own mode");
+
+    assert_eq!(result.events, Vec::new());
+    assert_eq!(state.waiting_for, waiting);
+    assert_eq!(state.priority_passes, passes);
+    assert_eq!(state.auto_pass, auto_pass);
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(0)),
+        PriorityPassingMode::SkipLowUseWindows
+    );
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(1)),
+        PriorityPassingMode::Standard
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::Standard,
+        },
+    )
+    .expect("Standard removes the sparse preference entry");
+    assert!(state.priority_passing_modes.is_empty());
+}
+
+#[test]
 fn cancel_auto_pass_routes_by_actor() {
     // Regression: P0 had an auto-pass session; P1 holds priority and submits
     // CancelAutoPass on P0's behalf would previously cancel *P1's* session
@@ -2033,6 +3157,137 @@ fn cancel_auto_pass_routes_by_actor() {
     );
 }
 
+/// Actor-scoped preference mutations must not advance an already-active
+/// auto-pass session. Before admission moved into `apply`, server-core returned
+/// directly for these six actions; routing through the shared boundary must
+/// preserve that no-progression behavior.
+#[test]
+fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
+    let preferences = vec![
+        GameAction::CancelAutoPass,
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+        GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+        },
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::ClearAll,
+        },
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::ClearAll,
+        },
+        GameAction::SetTriggerOrderTemplate {
+            op: TriggerOrderTemplateOp::ClearAll,
+        },
+    ];
+
+    for action in preferences {
+        let mut state = setup_game_at_main_phase();
+        state.auto_pass.insert(
+            PlayerId(0),
+            crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        match &action {
+            GameAction::CancelAutoPass => {
+                state.auto_pass.insert(
+                    PlayerId(1),
+                    crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                        until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            GameAction::SetPriorityYield { .. } => state.add_priority_yield(
+                PlayerId(1),
+                crate::types::game_state::YieldTarget::AllCopies {
+                    card_id: CardId(1),
+                    trigger_description: None,
+                },
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => state.set_may_trigger_auto_choice(
+                may_trigger_key(PlayerId(1), ObjectId(1)),
+                crate::types::game_state::AutoMayChoice::Accept,
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => {
+                state.set_trigger_order_template(persistent_order_template(PlayerId(1), 1));
+            }
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. } => {}
+            _ => unreachable!("preference list is exhaustive"),
+        }
+        let waiting_for = state.waiting_for.clone();
+        let priority_passes = state.priority_passes.clone();
+
+        let result = apply(&mut state, PlayerId(1), action.clone())
+            .expect("actor-scoped preference should be accepted out of priority");
+
+        assert!(
+            result.events.is_empty(),
+            "{} must not auto-pass or emit game events",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.waiting_for,
+            waiting_for,
+            "{} advanced priority",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.priority_passes,
+            priority_passes,
+            "{} changed the priority-pass sequence",
+            action.variant_name()
+        );
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "{} consumed P0's active auto-pass session",
+            action.variant_name()
+        );
+        match action {
+            GameAction::CancelAutoPass => assert!(
+                !state.auto_pass.contains_key(&PlayerId(1)),
+                "CancelAutoPass must remove the actor's own session"
+            ),
+            GameAction::SetPhaseStops { stops } => assert_eq!(
+                state.phase_stops.get(&PlayerId(1)),
+                Some(&stops),
+                "SetPhaseStops must persist the actor's stops"
+            ),
+            GameAction::SetPriorityPassingMode { mode } => assert_eq!(
+                state.priority_passing_modes.get(&PlayerId(1)),
+                Some(&mode),
+                "SetPriorityPassingMode must persist the actor's mode"
+            ),
+            GameAction::SetPriorityYield { .. } => assert!(
+                !state
+                    .priority_yields
+                    .iter()
+                    .any(|yielded| yielded.player == PlayerId(1)),
+                "SetPriorityYield::ClearAll must clear the actor's yields"
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => assert!(
+                state
+                    .may_trigger_auto_choices
+                    .iter()
+                    .all(|record| record.selector.player() != PlayerId(1)),
+                "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => assert!(
+                state
+                    .decision_templates
+                    .iter()
+                    .all(|template| template.owner != PlayerId(1)),
+                "SetTriggerOrderTemplate::ClearAll must clear the actor's templates"
+            ),
+            _ => unreachable!("preference list is exhaustive"),
+        }
+    }
+}
+
 // --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
 
 /// Push a controller-owned `TriggeredAbility` entry onto the stack whose ability
@@ -2054,8 +3309,9 @@ fn push_token_trigger(
         source,
         controller,
     );
-    ability.source_incarnation = incarnation;
-    ability.source_card_id = card_id;
+    if let Some(incarnation) = incarnation {
+        ability.set_test_trigger_source_recursive(incarnation, card_id.unwrap_or(CardId(0)));
+    }
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     state.stack.push_back(StackEntry {
@@ -2071,6 +3327,7 @@ fn push_token_trigger(
             source_name: "Token".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     entry_id
@@ -2151,8 +3408,9 @@ fn set_priority_yield_add_no_op_without_matching_stack_entry() {
 /// G6 (CR 400.7): a `ThisObject` add on a trigger with no latched incarnation
 /// (a synthetic/delayed game-rule trigger) now STORES a `None`-incarnation yield
 /// through the real `SetPriorityYield` pipeline and that yield matches its own
-/// trigger — previously this add was a silent no-op. An `AllCopies` add on the
-/// same trigger also stores.
+/// trigger — previously this add was a silent no-op. An `AllCopies` add cannot
+/// bind without an exact source context, even if a synthetic fixture carries a
+/// display card id.
 #[test]
 fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
     let mut state = setup_game_at_main_phase();
@@ -2204,10 +3462,9 @@ fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
         },
     )
     .expect("legal");
-    assert_eq!(
-        state.priority_yields.len(),
-        1,
-        "AllCopies add stores when the card identity is present"
+    assert!(
+        state.priority_yields.is_empty(),
+        "AllCopies add requires the exact source context rather than a synthetic card id"
     );
 }
 
@@ -2277,14 +3534,16 @@ fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 1);
 
     apply(
         &mut state,
         PlayerId(0),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(key),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is legal in any state");
@@ -2309,7 +3568,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
     let p0_key = may_trigger_key(PlayerId(0), ObjectId(500));
     let p0_key2 = may_trigger_key(PlayerId(0), ObjectId(501));
     let p1_key = may_trigger_key(PlayerId(1), ObjectId(600));
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
     state.set_may_trigger_auto_choice(p0_key2, AutoMayChoice::Decline);
     state.set_may_trigger_auto_choice(p1_key, AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 3);
@@ -2329,7 +3588,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
         "ClearAll drops only the acting player's auto-choices"
     );
     assert_eq!(
-        state.may_trigger_auto_choices[0].key.player,
+        state.may_trigger_auto_choices[0].selector.player(),
         PlayerId(1),
         "another player's auto-choice survives an actor's ClearAll"
     );
@@ -2348,7 +3607,7 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let p0_key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
 
     // Reach-guard: a non-exempt action from P1 in P0's priority window errors,
     // proving the auth gate is live (so the exemption below is what lets P1 act).
@@ -2364,7 +3623,11 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
         &mut state,
         PlayerId(1),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key: p0_key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(
+                    p0_key.clone(),
+                ),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is exempt from the priority-holder gate");
@@ -2376,8 +3639,70 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
     );
 }
 
-/// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
-/// an opponent-controlled trigger tops the stack, so the player can respond.
+// --- GameAction::SetTriggerOrderTemplate (CR 603.3b) ---
+
+/// Build a persistent (`AllCopies`-keyed) ordering template for `owner` naming one card.
+fn persistent_order_template(
+    owner: PlayerId,
+    card_id: u64,
+) -> crate::analysis::decision_template::DecisionTemplate {
+    use crate::analysis::decision_template::{
+        DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+    };
+    use crate::types::game_state::YieldTarget;
+    let src = YieldTarget::AllCopies {
+        card_id: crate::types::identifiers::CardId(card_id),
+        trigger_description: None,
+    };
+    DecisionTemplate {
+        owner,
+        decisions: vec![PinnedDecision::Order {
+            source: src.clone(),
+            pos: 0,
+        }],
+        replay: ReplayMode::Static,
+        key: DecisionGroupKey::from_sources(&[src], DecisionKind::TriggerOrdering),
+    }
+}
+
+/// T5 (CR 603.3b): `SetTriggerOrderTemplate { ClearAll }` is actor-scoped — a player
+/// clears only THEIR OWN saved ordering templates, never another player's. Drives the
+/// real `apply()` pipeline; reverting the actor scoping (clearing by a client-supplied
+/// player) would drop P1's template and fail the surviving-template assertion.
+#[test]
+fn set_trigger_order_template_clear_all_is_actor_scoped() {
+    use crate::types::actions::TriggerOrderTemplateOp;
+
+    let mut state = setup_game_at_main_phase();
+    state.set_trigger_order_template(persistent_order_template(PlayerId(0), 100));
+    state.set_trigger_order_template(persistent_order_template(PlayerId(0), 101));
+    state.set_trigger_order_template(persistent_order_template(PlayerId(1), 200));
+    assert_eq!(state.decision_templates.len(), 3);
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetTriggerOrderTemplate {
+            op: TriggerOrderTemplateOp::ClearAll,
+        },
+    )
+    .expect("SetTriggerOrderTemplate is legal in any state");
+
+    assert_eq!(
+        state.decision_templates.len(),
+        1,
+        "ClearAll drops only the acting player's (P0's two) persistent templates — P1's op took effect on nobody else"
+    );
+    assert_eq!(
+        state.decision_templates[0].owner,
+        PlayerId(1),
+        "another player's saved template survives an actor's ClearAll"
+    );
+}
+
+/// CR 117.3d: an `UntilEndOfTurn` auto-pass session pauses (Break) when an
+/// opponent-controlled trigger tops the stack, so the player can respond while
+/// retaining the session for after the stack entry resolves.
 /// A matching yield keeps the session auto-passing (Pass) through that trigger;
 /// a non-yielded opponent trigger still Finishes.
 #[test]
@@ -2392,13 +3717,13 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
     let source = ObjectId(500);
     push_token_trigger(&mut state, source, PlayerId(1), Some(4), Some(CardId(77)));
 
-    // Without a yield: the opponent trigger ends the session.
+    // Without a yield: the opponent trigger pauses the session.
     assert!(
         matches!(
             priority_auto_pass_decision(&state, PlayerId(0)),
-            AutoPassDecision::Finish
+            AutoPassDecision::Break
         ),
-        "reach-guard: an un-yielded opponent top finishes the session"
+        "reach-guard: an un-yielded opponent top pauses the session"
     );
 
     // With a matching yield: keep auto-passing through it.
@@ -2418,7 +3743,7 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
         "CR 117.3d: a matching yield keeps the UntilEndOfTurn session passing"
     );
 
-    // A different, non-yielded opponent trigger still finishes.
+    // A different, non-yielded opponent trigger still pauses.
     state.stack.clear();
     push_token_trigger(
         &mut state,
@@ -2430,9 +3755,9 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
     assert!(
         matches!(
             priority_auto_pass_decision(&state, PlayerId(0)),
-            AutoPassDecision::Finish
+            AutoPassDecision::Break
         ),
-        "a non-yielded opponent trigger still finishes the session"
+        "a non-yielded opponent trigger still pauses the session"
     );
 }
 
@@ -2510,6 +3835,7 @@ fn concede_owner_of_waiting_for_advances_state() {
         player: PlayerId(1),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -3060,9 +4386,9 @@ fn thriving_grove_play_land_stays_tapped_after_color_choice() {
         result.waiting_for,
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::Color { .. },
-            source_id: Some(id),
+            source: Some(source),
             ..
-        } if id == grove
+        } if source.prompt.identity.reference.object_id == grove
     ));
     assert!(
         state.objects.get(&grove).unwrap().tapped,
@@ -3250,6 +4576,187 @@ fn apply_play_land_rejects_under_cant_play_land_transient_effect() {
 }
 
 #[test]
+fn apply_play_land_rejects_under_cant_play_lands_chosen_name_filter() {
+    // CR 305.1 + CR 116.2a + CR 201.2: Conjurer's Ban's land-play half —
+    // "lands with the chosen name can't be played". Filter-scoped sibling of
+    // `apply_play_land_rejects_under_cant_play_land` (the blanket static
+    // form): the restriction denies only the SPECIFICALLY NAMED land, not
+    // every land. The prohibiting object sits in the graveyard (as Conjurer's
+    // Ban, a sorcery, would after resolving) to prove the chosen-name
+    // `chosen_attributes` binding survives its own source's zone change —
+    // `HasChosenName` is a LIVE lookup against `source_id` at each
+    // evaluation, not a value snapshotted into the restriction.
+    use crate::types::ability::{
+        ChosenAttribute, GameRestriction, ProhibitedActivity, RestrictionExpiry,
+        RestrictionPlayerScope,
+    };
+
+    let mut state = setup_game_at_main_phase();
+
+    let forest_id = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+    let island_id = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Island".to_string(),
+        Zone::Hand,
+    );
+
+    // The (already-resolved) Conjurer's Ban, sitting in the graveyard with its
+    // chosen name still attached.
+    let source_id = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Conjurer's Ban".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&source_id)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CardName("Forest".to_string()));
+
+    state.restrictions.push(GameRestriction::ProhibitActivity {
+        source: source_id,
+        affected_players: RestrictionPlayerScope::AllPlayers,
+        expiry: RestrictionExpiry::EndOfTurn,
+        activity: ProhibitedActivity::PlayLands {
+            land_filter: Some(TargetFilter::HasChosenName),
+        },
+    });
+
+    let forest_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: forest_id,
+            card_id: CardId(1),
+        },
+    );
+    assert!(
+        forest_result.is_err(),
+        "the specifically-named land (Forest) must be rejected"
+    );
+
+    let island_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: island_id,
+            card_id: CardId(2),
+        },
+    );
+    assert!(
+        island_result.is_ok(),
+        "a differently-named land (Island) must NOT be blocked by a filter-scoped \
+         restriction — got {island_result:?}"
+    );
+}
+
+/// CR 305.1 + CR 116.2a + CR 601.2a + CR 201.2: Conjurer's Ban, driven through
+/// the REAL cast → resolve pipeline (`GameScenario`/`GameRunner`), not direct
+/// `GameState`/`GameRestriction` construction like the sibling test above.
+/// Proves `Effect::Choose` actually binds the chosen name onto the resolving
+/// sorcery's own source object, that `Effect::AddRestriction`'s sub_ability
+/// chain (`CastSpells` → `PlayLands`) is actually installed by real
+/// resolution (not hand-assembled), and that `handle_play_land`'s new gate —
+/// and the pre-existing `CastSpells` cast-prohibition gate, for the same
+/// resolved restriction — both see it, all after the sorcery has resolved
+/// into the graveyard. This test fails if either the `PlayLands` sub-ability
+/// or its production gate is reverted.
+#[test]
+fn conjurers_ban_full_cast_resolve_blocks_named_land_and_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Verbatim Oracle text (Scryfall).
+    let oracle = "Choose a card name. Until your next turn, spells with the chosen \
+                  name can't be cast and lands with the chosen name can't be played.\n\
+                  Draw a card.";
+    let ban = scenario
+        .add_spell_to_hand_from_oracle(P0, "Conjurer's Ban", false, oracle)
+        .id();
+
+    let forest_land = scenario.add_land_to_hand(P0, "Forest").id();
+    let island_land = scenario.add_land_to_hand(P0, "Island").id();
+    // A second card sharing the chosen name, but a SPELL this time — exercises
+    // the cast-prohibition half (the already-proven `CastSpells` machinery)
+    // against the exact same resolved restriction, not just the new land half.
+    let forest_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forest", true, "You gain 1 life.")
+        .id();
+    scenario.with_library_top(P0, &["Library Filler"]);
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec![
+        "Conjurer's Ban".to_string(),
+        "Forest".to_string(),
+        "Island".to_string(),
+    ]
+    .into();
+
+    let forest_land_card_id = runner.state().objects[&forest_land].card_id;
+    let island_card_id = runner.state().objects[&island_land].card_id;
+    let forest_spell_card_id = runner.state().objects[&forest_spell].card_id;
+
+    let outcome = runner.cast(ban).choose_option("Forest").resolve();
+    outcome.assert_hand_drawn(P0, 1);
+    outcome.assert_zone(&[ban], Zone::Graveyard);
+    assert!(
+        runner.state().objects[&ban].chosen_attributes.contains(
+            &crate::types::ability::ChosenAttribute::CardName("Forest".to_string())
+        ),
+        "the exact resolving source must retain the chosen name after its stack exit; \
+         source={:?}, relatch={:?}",
+        runner.state().objects[&ban],
+        runner.state().resolution_source_relatch,
+    );
+
+    // Land half: the specifically-named land is rejected...
+    let forest_land_result = runner.act(GameAction::PlayLand {
+        object_id: forest_land,
+        card_id: forest_land_card_id,
+    });
+    assert!(
+        forest_land_result.is_err(),
+        "Forest must be rejected while the chosen-name land-play ban is active, \
+         got {forest_land_result:?}"
+    );
+    // ...while a differently-named land remains legal (proves the ban is
+    // filter-scoped, not the blanket `CantPlayLand` static).
+    let island_result = runner.act(GameAction::PlayLand {
+        object_id: island_land,
+        card_id: island_card_id,
+    });
+    assert!(
+        island_result.is_ok(),
+        "Island must remain playable — got {island_result:?}"
+    );
+
+    // Spell half: a spell sharing the chosen name is rejected by the same
+    // resolved restriction (`ProhibitedActivity::CastSpells { HasChosenName }`,
+    // installed by the SAME `Effect::Choose` → `Effect::AddRestriction` chain
+    // as the land half above).
+    let forest_spell_result = runner.act(GameAction::CastSpell {
+        object_id: forest_spell,
+        card_id: forest_spell_card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::default(),
+    });
+    assert!(
+        forest_spell_result.is_err(),
+        "a spell named Forest must be rejected while the chosen-name cast ban \
+         is active, got {forest_spell_result:?}"
+    );
+}
+
+#[test]
 fn new_game_creates_two_player_state() {
     let state = new_game(42);
     assert_eq!(state.players.len(), 2);
@@ -3371,9 +4878,17 @@ fn integration_full_turn_cycle() {
         }
     ));
 
-    // Pass priority from player 1 (both passed, stack empty -> advance)
+    // Pass priority from player 1 (both passed, stack empty -> BeginCombat).
     let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // Should skip combat phases and land at PostCombatMain
+    assert_eq!(state.phase, Phase::BeginCombat);
+
+    // Beginning of combat has its own priority window. With no attackers, the
+    // subsequent forced empty declaration skips blockers and damage, then
+    // reaches the normal EndCombat priority window.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
     // Pass through post-combat main
@@ -3612,6 +5127,7 @@ fn engine_error_display() {
 #[test]
 fn apply_rejects_action_from_wrong_actor() {
     let mut state = setup_game_at_main_phase();
+    let before = state.clone();
     // `setup_game_at_main_phase` leaves P0 with priority.
     assert_eq!(
         turn_control::authorized_submitter(&state),
@@ -3624,6 +5140,10 @@ fn apply_rejects_action_from_wrong_actor() {
     assert!(
         matches!(result, Err(EngineError::WrongPlayer)),
         "expected WrongPlayer, got {result:?}"
+    );
+    assert_eq!(
+        state, before,
+        "authorization rejection must restore every boundary-side mutation"
     );
 
     // P0 submitting the same action must succeed.
@@ -3817,6 +5337,56 @@ fn apply_rejects_spoofed_concede() {
 }
 
 #[test]
+fn game_over_rejects_ordinary_actions_but_keeps_preferences_actor_scoped() {
+    let mut state = setup_game_at_main_phase();
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(PlayerId(0)),
+    };
+    let before = state.clone();
+
+    let pass = apply(&mut state, PlayerId(0), GameAction::PassPriority);
+    assert!(matches!(pass, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected ordinary action must not mutate GameOver"
+    );
+
+    let concede = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::Concede {
+            player_id: PlayerId(1),
+        },
+    );
+    assert!(matches!(concede, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected self-concede must not mutate GameOver"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .expect("preferences remain actor-scoped after GameOver");
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(
+        state.phase_stops.get(&PlayerId(1)),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
+        "actor-scoped preference must persist after GameOver"
+    );
+}
+
+#[test]
 fn tap_land_for_mana_produces_correct_color() {
     let mut state = setup_game_at_main_phase();
     state.priority_passes.insert(PlayerId(1));
@@ -3851,11 +5421,7 @@ fn tap_land_for_mana_produces_correct_color() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -3910,11 +5476,7 @@ fn tap_land_for_mana_uses_priority_player_during_opponents_turn() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -3965,11 +5527,7 @@ fn tapped_lands_produce_distinct_pip_ids() {
     }
 
     for land_id in land_ids {
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
     }
 
     let ids: Vec<u64> = state.players[0]
@@ -4049,7 +5607,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Tap the Forest. Land emits {G}; aura's trigger fires via
     // run_post_action_pipeline and adds another {G}.
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -4074,7 +5632,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Re-tap and re-untap to verify no compounding across cycles.
     for _ in 0..3 {
-        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        apply_tap_land_as_current(&mut state, forest).unwrap();
         assert_eq!(state.players[0].mana_pool.total(), 2);
         apply_as_current(
             &mut state,
@@ -4177,24 +5735,25 @@ fn attach_fertile_ground(state: &mut GameState, land_id: ObjectId, owner: Player
     obj.card_types.subtypes.push("Aura".to_string());
     obj.attached_to = Some(land_id.into());
     obj.entered_battlefield_turn = Some(1);
-    obj.trigger_definitions.push(
-        TriggerDefinition::new(TriggerMode::TapsForMana)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Database,
-                Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        color_options: crate::types::mana::ManaColor::ALL.to_vec(),
-                        contribution: ManaContribution::Additional,
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            ))
-            .valid_card(TargetFilter::AttachedTo),
-    );
+    obj.install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+        TriggerMode::TapsForMana,
+    )
+    .execute(AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                contribution: ManaContribution::Additional,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    ))
+    .valid_card(TargetFilter::AttachedTo)]))
+        .expect("Fertile Ground's base trigger must materialize");
     aura
 }
 
@@ -4266,6 +5825,317 @@ fn fertile_ground_auto_tap_threads_non_first_color_to_resolver() {
     );
 }
 
+/// CR 605.4a: Inline triggered mana abilities resolve without a stack entry,
+/// and each live trigger occurrence retains its independently planned color.
+#[test]
+fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
+    let mut state = setup_game_at_main_phase();
+    let forest = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&forest).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.subtypes.push("Forest".to_string());
+        object.entered_battlefield_turn = Some(1);
+    }
+    let other_forest = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Other Forest".to_string(),
+        Zone::Battlefield,
+    );
+
+    let any_color_trigger = TriggerDefinition::new(TriggerMode::TapsForMana)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Additional,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        ))
+        .valid_card(TargetFilter::AttachedTo);
+    let duplicate_source = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Duplicate Fertile Ground".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&duplicate_source).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![
+                any_color_trigger.clone(),
+                any_color_trigger,
+            ]))
+            .expect("two printed trigger slots must materialize");
+    }
+    let duplicate_triggers = crate::game::functioning_abilities::active_trigger_definitions(
+        &state,
+        &state.objects[&duplicate_source],
+    )
+    .collect::<Vec<_>>();
+    assert_eq!(
+        duplicate_triggers.len(),
+        2,
+        "both live occurrences must be active"
+    );
+    assert_eq!(
+        duplicate_triggers[0].definition, duplicate_triggers[1].definition,
+        "the hostile pair must have byte-identical payloads"
+    );
+    assert_ne!(
+        duplicate_triggers[0].definition_ref, duplicate_triggers[1].definition_ref,
+        "two printed slots must keep distinct live identities"
+    );
+
+    let fixed_mana_trigger = |color, valid_card: Option<TargetFilter>, valid_target| {
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::TapsForMana).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: ManaContribution::Additional,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            ));
+        if let Some(filter) = valid_card {
+            trigger = trigger.valid_card(filter);
+        }
+        if let Some(filter) = valid_target {
+            trigger = trigger.valid_target(filter);
+        }
+        trigger
+    };
+
+    let second_source = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(0),
+        "Wild Growth".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&second_source).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::Green,
+                Some(TargetFilter::AttachedTo),
+                None,
+            )]))
+            .expect("second source trigger slot must materialize");
+    }
+
+    let source_mismatch = create_object(
+        &mut state,
+        CardId(5),
+        PlayerId(0),
+        "Source Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source_mismatch)
+        .unwrap()
+        .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+            ManaColor::White,
+            None,
+            None,
+        )]))
+        .expect("source mismatch trigger slot must materialize");
+
+    let controller_mismatch = create_object(
+        &mut state,
+        CardId(6),
+        PlayerId(1),
+        "Controller Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&controller_mismatch).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::White,
+                Some(TargetFilter::AttachedTo),
+                Some(TargetFilter::Controller),
+            )]))
+            .expect("controller mismatch trigger slot must materialize");
+    }
+
+    let attachment_mismatch = create_object(
+        &mut state,
+        CardId(7),
+        PlayerId(0),
+        "Attachment Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&attachment_mismatch).unwrap();
+        object.attached_to = Some(other_forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::White,
+                Some(TargetFilter::AttachedTo),
+                None,
+            )]))
+            .expect("attachment mismatch trigger slot must materialize");
+    }
+    for sibling in [source_mismatch, controller_mismatch, attachment_mismatch] {
+        assert_eq!(
+            crate::game::functioning_abilities::active_trigger_definitions(
+                &state,
+                &state.objects[&sibling],
+            )
+            .count(),
+            1,
+            "the {sibling:?} mismatch sibling must reach the live trigger scan"
+        );
+    }
+
+    let cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Green,
+            ManaCostShard::Green,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+        ],
+        generic: 0,
+    };
+    let mut events = Vec::new();
+    let events_before = events.len();
+    casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
+
+    assert_eq!(
+        state.pending_taps_for_mana_overrides.len(),
+        3,
+        "the plan must retain one override per qualifying live occurrence"
+    );
+    let planned_colors = state
+        .pending_taps_for_mana_overrides
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Green)));
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Blue)));
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Black)));
+    assert!(
+        state
+            .pending_taps_for_mana_overrides
+            .keys()
+            .filter(|definition_ref| definition_ref.source.object_id == duplicate_source)
+            .count()
+            == 2,
+        "the two byte-identical duplicate-source occurrences must retain separate overrides"
+    );
+
+    let stack_before = state.stack.len();
+    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+
+    assert_eq!(state.players[0].mana_pool.total(), 4);
+    assert_eq!(
+        state.players[0].mana_pool.count_color(ManaType::Green),
+        2,
+        "the land and second source each contribute exactly one green mana"
+    );
+    assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+    assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    assert_eq!(
+        state.players[0].mana_pool.count_color(ManaType::White),
+        0,
+        "source, controller, and attachment mismatch siblings must remain excluded"
+    );
+    assert_eq!(
+        state.stack.len(),
+        stack_before,
+        "triggered mana abilities must not create a stack entry"
+    );
+    assert!(
+        state.pending_taps_for_mana_overrides.is_empty(),
+        "the synchronous inline-resolution tail must clear transient overrides"
+    );
+}
+
+#[test]
+fn inline_taps_for_mana_overrides_clear_when_no_trigger_matches() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(8),
+        PlayerId(0),
+        "Unmatched Trigger Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+            TriggerMode::TapsForMana,
+        )]))
+        .expect("unmatched trigger slot must materialize");
+    let definition_ref = crate::game::functioning_abilities::active_trigger_definitions(
+        &state,
+        &state.objects[&source],
+    )
+    .next()
+    .expect("the test trigger is active")
+    .definition_ref;
+    state.pending_taps_for_mana_overrides.insert(
+        definition_ref,
+        ProductionOverride::SingleColor(ManaType::Blue),
+    );
+    let serialized_with_override =
+        serde_json::to_value(&state).expect("game state with a transient override serializes");
+    let mut without_override = state.clone();
+    without_override.pending_taps_for_mana_overrides.clear();
+    assert_eq!(
+        serialized_with_override,
+        serde_json::to_value(&without_override)
+            .expect("game state without a transient override serializes"),
+        "the serde-skipped transient override map must not change the serialized game state"
+    );
+    let restored: GameState = serde_json::from_value(serialized_with_override)
+        .expect("serialized game state with transient overrides restores");
+    assert!(
+        restored.pending_taps_for_mana_overrides.is_empty(),
+        "a restored game state must not retain transient overrides"
+    );
+
+    let mut events = vec![GameEvent::TappedForMana {
+        player_id: PlayerId(0),
+        source_id: ObjectId(99_999),
+        produced: vec![ManaType::Green],
+        tap_state: ManaTapState::FromTap,
+    }];
+    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
+
+    assert!(
+        state.pending_taps_for_mana_overrides.is_empty(),
+        "the transient override map must clear even when the event has zero matches"
+    );
+}
+
 #[test]
 fn vorinclex_mana_doubling_trigger_fires_on_tap() {
     // Vorinclex, Voice of Hunger: "Whenever you tap a land for mana,
@@ -4320,7 +6190,7 @@ fn vorinclex_mana_doubling_trigger_fires_on_tap() {
     }
 
     // Tap the Forest — should produce {G} (land) + {G} (Vorinclex doubler).
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -4391,6 +6261,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
                                 }])],
                             duration: Some(duration.clone()),
                             target: Some(TargetFilter::TriggeringSource),
+                            end_cost: None,
                         },
                     )
                     .duration(duration),
@@ -4402,14 +6273,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
     }
 
     // Opponent taps the Forest
-    apply(
-        &mut state,
-        PlayerId(1),
-        GameAction::TapLandForMana {
-            object_id: opp_forest,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, opp_forest).unwrap();
     // The trigger should have been placed on the stack.
     assert!(
         !state.stack.is_empty() || !state.transient_continuous_effects.is_empty(),
@@ -4459,21 +6323,18 @@ fn tap_land_rejects_already_tapped() {
         let obj = state.objects.get_mut(&land_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.subtypes.push("Forest".to_string());
-        obj.tapped = true;
     }
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    );
+    let action = tap_land_action(&state, land_id);
+    state.objects.get_mut(&land_id).unwrap().tapped = true;
+    let before = state.clone();
+    let result = apply_as_current(&mut state, action);
 
     assert!(result.is_err());
+    assert_eq!(state, before, "hostile stale mana action must be pure");
 }
 
 #[test]
-fn multi_mana_land_rejects_tap_land_for_mana() {
-    // Dual lands with multiple mana abilities must use ActivateAbility to
-    // select which color — TapLandForMana is ambiguous for multi-option lands.
+fn multi_mana_land_exposes_one_semantic_action_per_option() {
     let mut state = setup_game_at_main_phase();
 
     let dual_id = create_object(
@@ -4520,14 +6381,17 @@ fn multi_mana_land_rejects_tap_land_for_mana() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: dual_id },
-    );
-    assert!(
-        result.is_err(),
-        "TapLandForMana should reject multi-mana lands"
-    );
+    let actions: Vec<_> =
+        super::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .filter(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+        if selection.source.object_id == dual_id)
+            })
+            .collect();
+    assert_eq!(actions.len(), 2);
+    apply_as_current(&mut state, actions[0].clone()).unwrap();
+    assert!(state.objects[&dual_id].tapped);
 }
 
 #[test]
@@ -4960,13 +6824,7 @@ fn full_turn_integration_with_mulligan() {
         .unwrap();
 
     // Tap land for mana
-    let _result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: land_on_bf,
-        },
-    )
-    .unwrap();
+    let _result = apply_tap_land_as_current(&mut state, land_on_bf).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -4977,7 +6835,14 @@ fn full_turn_integration_with_mulligan() {
     // Pass priority through the rest of the turn
     // PreCombatMain: P0 passes
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // PreCombatMain: P1 passes -> advances to PostCombatMain
+    // PreCombatMain: P1 passes -> BeginCombat priority.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::BeginCombat);
+    // BeginCombat: both pass. No attackers are declared, so Declare Blockers
+    // and Combat Damage are skipped before the EndCombat priority window.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
@@ -5853,6 +7718,7 @@ fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, 
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -6668,7 +8534,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -6676,14 +8542,18 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
+        pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
+        casting_permission_index: None,
         cast_timing_permission: None,
         distribute: None,
         origin_zone: crate::types::zones::Zone::Hand,
@@ -6699,11 +8569,16 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
+        alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -6739,6 +8614,40 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         );
     }
 
+    // CR 605.1b + CR 605.4a: Two simultaneous triggered mana abilities
+    // reproduce the ordering-shaped group from Leyline of Abundance /
+    // Badgermole Cub boards. They must resolve immediately, not pause the
+    // in-flight payment on OrderTriggers.
+    let multiplier = create_object(
+        &mut state,
+        CardId(102),
+        PlayerId(0),
+        "Mana Multiplier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&multiplier).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.entered_battlefield_turn = Some(1);
+        let trigger = || {
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::TriggerEventManaType,
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .valid_target(TargetFilter::Controller)
+        };
+        obj.trigger_definitions.push(trigger());
+        obj.trigger_definitions.push(trigger());
+    }
+
     let result = apply_as_current(
         &mut state,
         GameAction::ActivateAbility {
@@ -6763,6 +8672,11 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     assert!(state.stack.is_empty());
     // Object should be tapped
     assert!(state.objects.get(&obj_id).unwrap().tapped);
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "the base mana plus both triggered mana abilities must resolve inline"
+    );
 }
 
 #[test]
@@ -7057,7 +8971,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -7065,14 +8979,18 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
+        prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
+        pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
+        casting_permission_index: None,
         cast_timing_permission: None,
         distribute: None,
         origin_zone: crate::types::zones::Zone::Hand,
@@ -7088,11 +9006,16 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
+        activation_cost_committed: false,
+        alt_cost_grant_source: None,
+        activation_trigger_collection: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -7309,27 +9232,24 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
         .expect("Holdout Settlement should expose legal mana actions");
     assert!(holdout_actions.iter().any(|action| matches!(
         action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 0
-        } if *source_id == holdout
+        GameAction::TapLandForMana { selection }
+            if selection.source.object_id == holdout && selection.ability_index == Some(0)
     )));
-    assert!(holdout_actions.iter().any(|action| matches!(
-        action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 1
-        } if *source_id == holdout
-    )));
+    let green_action = holdout_actions
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == holdout
+                        && selection.ability_index == Some(1)
+                        && selection.mana_type == ManaType::Green
+            )
+        })
+        .cloned()
+        .expect("Holdout Settlement should expose its semantic green mana action");
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ActivateAbility {
-            source_id: holdout,
-            ability_index: 1,
-        },
-    )
-    .unwrap();
+    let result = apply_as_current(&mut state, green_action).unwrap();
 
     match result.waiting_for {
         WaitingFor::PayCost {
@@ -7358,28 +9278,12 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
     .unwrap();
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ChooseManaColor {
-            player: PlayerId(0),
-            ..
-        }
-    ));
-    assert!(state.objects.get(&holdout).unwrap().tapped);
-    assert!(state.objects.get(&creature).unwrap().tapped);
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        result.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
     ));
+    assert!(state.objects.get(&holdout).unwrap().tapped);
+    assert!(state.objects.get(&creature).unwrap().tapped);
     assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
 }
 
@@ -7932,11 +9836,7 @@ fn tap_land_records_in_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     let tracked = &state.lands_tapped_for_mana[&PlayerId(0)];
     assert!(tracked.contains(&land_id));
@@ -7947,11 +9847,7 @@ fn untap_land_removes_mana_and_untaps() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
         state.players[0]
@@ -7991,8 +9887,8 @@ fn untap_one_of_two_tapped_lands_preserves_other() {
     let land1 = create_forest(&mut state, PlayerId(0));
     let land2 = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land1 }).unwrap();
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land2 }).unwrap();
+    apply_tap_land_as_current(&mut state, land1).unwrap();
+    apply_tap_land_as_current(&mut state, land2).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -8026,11 +9922,7 @@ fn untap_rejects_when_mana_already_spent() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     state.players[0].mana_pool.spend(ManaType::Green);
     assert_eq!(state.players[0].mana_pool.total(), 0);
@@ -8047,11 +9939,7 @@ fn pass_priority_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
@@ -8063,13 +9951,7 @@ fn play_land_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let tapped_land = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: tapped_land,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, tapped_land).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     let hand_land = create_object(
@@ -8170,11 +10052,7 @@ fn untap_during_mana_payment_returns_mana_payment() {
     }) = &result
     {
         // Tap the land during ManaPayment
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
         assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
         // Untap it — should return ManaPayment, not Priority
@@ -8200,11 +10078,7 @@ fn zone_change_removes_stale_tracking() {
     let land_id = create_forest(&mut state, PlayerId(0));
 
     // Tap the land
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
     // Move the land to graveyard (e.g., destroyed)
@@ -8350,7 +10224,7 @@ fn learn_rummage_stashes_draw_continuation() {
     );
 
     // Pre-set pending_continuation to verify it's consumed normally
-    state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -8360,6 +10234,7 @@ fn learn_rummage_stashes_draw_continuation() {
             source,
             PlayerId(0),
         )),
+        &state,
     ));
 
     let learn_ability = ResolvedAbility::new(Effect::Learn, vec![], source, PlayerId(0));
@@ -8376,7 +10251,7 @@ fn learn_rummage_stashes_draw_continuation() {
     assert_eq!(state.players[0].hand.len(), 1);
     assert!(state.players[0].graveyard.contains(&hand_card));
     // The stashed continuation (GainLife) should have been consumed
-    assert!(state.pending_continuation.is_none());
+    assert!(state.active_ability_continuation().is_none());
     // Life should have increased by 1 (from the continuation)
     assert_eq!(state.players[0].life, 21);
     assert!(result.events.iter().any(|e| matches!(
@@ -8423,11 +10298,16 @@ fn reorder_hand_rejects_non_permutation() {
     let a = ObjectId(100);
     let b = ObjectId(101);
     state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+    let before = state.clone();
 
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "a reducer rejection must restore transient boundary state as well as the hand"
+    );
 
     // Right length, wrong contents.
     let stranger = ObjectId(999);
@@ -8440,6 +10320,10 @@ fn reorder_hand_rejects_non_permutation() {
     )
     .expect_err("stranger id must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "each rejected reducer attempt must leave the complete state unchanged"
+    );
 
     // Hand unchanged after rejected calls.
     assert_eq!(
@@ -8928,7 +10812,7 @@ fn disguise_face_down_has_ward_morph_does_not() {
 
     assert!(
         cast_face_down(crate::types::keywords::Keyword::Disguise(
-            ManaCost::generic(4)
+            ManaCost::generic(4).into()
         )),
         "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
     );
@@ -9082,6 +10966,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 play_mode: crate::types::ability::CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -9906,5 +11791,59 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
     assert!(
         obj.name.is_empty(),
         "CR 708.2a: a face-down spell has no name"
+    );
+}
+
+/// LOW-2 (CR 732.2a / CR 111.10): `derived_fodder_class` is the single-new-object gate that
+/// guarantees the boundary Tokens mint's per-cycle fodder count k ≡ 1. It returns `Some(class)`
+/// for a period that reproduced EXACTLY one new battlefield object, and `None` for a period that
+/// reproduced two+ (a non-certifiable multi-fodder shape ⇒ no `Tokens` stash ⇒ no k·N undercount).
+/// This is the structural proof behind the k≡1 annotation at the boundary mint and on the
+/// `PersistentAxisMaterialization::Tokens` variant.
+///
+/// REVERT-FAILING assertion: delete `if new_ids.next().is_some() { return None }` in
+/// `derived_fodder_class` (engine.rs) ⇒ the two-new-object case returns `Some(first)` ⇒ the
+/// `is_none()` assert below flips to FAIL. Non-vacuity: the paired one-new-object `Some` case is
+/// the positive reach-guard (the gate genuinely admits the k≡1 shape).
+#[test]
+fn derived_fodder_class_is_single_new_object_gate() {
+    let before = GameState::new_two_player(7);
+
+    // One new battlefield object across the period ⇒ Some(class) (the k≡1 certifiable shape).
+    let mut after_one = before.clone();
+    let saproling = create_object(
+        &mut after_one,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    let class = derived_fodder_class(&before, &after_one);
+    assert!(
+        class.as_ref().is_some_and(|o| o.id == saproling),
+        "reach-guard: one new battlefield object ⇒ the reproduced fodder class; got {class:?}"
+    );
+
+    // Two new battlefield objects across the period ⇒ None: a multi-fodder period is not this
+    // shape, so no `Tokens` stash is registered and the k>1 undercount is unreachable.
+    let mut after_two = before.clone();
+    create_object(
+        &mut after_two,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    create_object(
+        &mut after_two,
+        CardId(2),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    assert!(
+        derived_fodder_class(&before, &after_two).is_none(),
+        "single-new-object gate: two new battlefield objects ⇒ None (delete the second-`next` \
+         guard and this flips to Some)"
     );
 }

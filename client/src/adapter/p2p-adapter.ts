@@ -2,7 +2,11 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  AiProposalSubmission,
   EngineAdapter,
+  EngineSnapshot,
   FormatConfig,
   GameAction,
   GameEvent,
@@ -10,14 +14,22 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ObjectId,
   PlayerId,
+  PersistedGameState,
   SubmitResult,
   WaitingFor,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
-import { AdapterError, AdapterErrorCode } from "./types";
-import { WasmAdapter } from "./wasm-adapter";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
+import { getHostAdapter } from "./wasm-adapter";
+import {
+  WebSocketAdapter,
+  type NativeAiSeat,
+  type NativeSessionAttachment,
+} from "./ws-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
@@ -30,12 +42,32 @@ import type {
   SeatView,
 } from "../multiplayer/seatTypes";
 import type { BrokerClient } from "../services/brokerClient";
+import type { FullSessionKey } from "../services/multiplayerSession";
 import {
   clearP2PHostSession,
+  type NativeAiDriverFault,
+  type NativeP2PServerSession,
   type PersistedP2PHostSession,
+  saveGame,
   saveP2PHostSession,
 } from "../services/gamePersistence";
-import { saveP2PSession } from "../services/p2pSession";
+import {
+  claimP2PHostLease,
+  createP2PSessionKey,
+  ownsP2PHostLease,
+  releaseP2PHostLease,
+  clearP2PSession,
+  saveP2PSession,
+  type P2PAuthorityStamp,
+  type P2PSessionKey,
+} from "../services/p2pSession";
+import {
+  commitP2PTerminalResult,
+  isValidP2PTerminalResult,
+  p2pFinalStateCommitment,
+  type P2PTerminalResult,
+} from "../services/p2pTerminalResult";
+import { NativeEngineSocket } from "../services/nativeEngineSocket";
 
 /**
  * Adapter-level events emitted to the UI. Wire-protocol messages are
@@ -50,6 +82,8 @@ export type P2PAdapterEvent =
   | { type: "guestConnected" }
   | { type: "opponentDisconnected"; reason: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "terminalResult"; result: P2PTerminalResult }
+  | { type: "terminalUnavailable"; message: string }
   | { type: "error"; message: string }
   /**
    * Pre-game setup failure on the host side. Distinct from the catch-all
@@ -61,10 +95,15 @@ export type P2PAdapterEvent =
    */
   | { type: "hostingFailed"; reason: "room_still_claimed"; message: string }
   | {
+      /**
+       * The engine pair travels as ONE `EngineSnapshot` rather than separate
+       * `state`/`legalResult` fields: the two halves plus their ordering stamp
+       * stay inseparable by construction, so no consumer can pair a state from
+       * one engine version with legal actions from another.
+       */
       type: "stateChanged";
-      state: GameState;
+      snapshot: EngineSnapshot;
       events: GameEvent[];
-      legalResult: LegalActionsResult;
       logEntries?: GameLogEntry[];
     }
   // 3-4p multiplayer additions:
@@ -91,6 +130,8 @@ interface DeckSeatPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
+  signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: string;
@@ -102,6 +143,331 @@ interface DeckListPayload {
   ai_decks: DeckSeatPayload[];
   /** AI difficulty strings per seat. See `DeckList.ai_difficulties` in engine. */
   ai_difficulties?: string[];
+}
+
+/** The desktop host has already ensured this exact local phase-server binary
+ * before the lobby is advertised. Guests still connect only through PeerJS. */
+export interface NativeP2PHostOptions {
+  expectedServerVersion?: string;
+}
+
+/** Installed only by a pod-issued draft match binding. */
+export interface BoundP2PMatchConcede {
+  /** The authenticated game seat that chose to concede the whole match. */
+  onConcede(concedingPlayer: PlayerId): void | Promise<void>;
+}
+
+type NativeViewerUpdate = {
+  snapshot: EngineSnapshot;
+  events: GameEvent[];
+  logEntries?: GameLogEntry[];
+};
+
+/**
+ * Local-only multiplexor for a native authoritative P2P host. There is one
+ * loopback socket for every human P2P seat; the server authenticates each
+ * action from that socket while PeerJS remains the guest-facing transport.
+ */
+class NativeP2PBridge {
+  private readonly clients = new Map<PlayerId, WebSocketAdapter>();
+  private readonly playerTokens = new Map<PlayerId, string>();
+  private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
+  private readonly pendingViews = new Map<number, Map<PlayerId, NativeViewerUpdate>>();
+  private readonly startWaiters: Array<(update: NativeViewerUpdate) => void> = [];
+  /** Preserve the server's revision order while asynchronous PeerJS frame
+   * encoding runs; a terminal commitment must follow its final state frame. */
+  private revisionQueue: Promise<void> = Promise.resolve();
+  private deliveredRevision = -1;
+  private deliveredFaultIds = new Set<number>();
+  private readonly pendingFaults = new Map<number, { id: number; revision: number; message: string }>();
+  private gameCode: string | null = null;
+  private fullKey: FullSessionKey | null = null;
+
+  constructor(
+    private readonly hostDeck: DeckListPayload["player"],
+    private readonly hostDisplayName: string,
+    private readonly playerCount: number,
+    private readonly formatConfig: FormatConfig | undefined,
+    private readonly matchConfig: MatchConfig | undefined,
+    private readonly options: NativeP2PHostOptions,
+    private readonly onRevision: (revision: number, views: Map<PlayerId, NativeViewerUpdate>) => Promise<void>,
+    private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
+    private readonly resumeSession?: NativeP2PServerSession,
+  ) {}
+
+  async initializeHost(aiSeats: NativeAiSeat[]): Promise<NativeSessionAttachment> {
+    if (this.resumeSession) {
+      this.gameCode = this.resumeSession.gameCode;
+      this.fullKey = this.resumeSession.fullKey;
+      const hostToken = this.resumeSession.playerTokens[0];
+      if (!hostToken) {
+        throw new AdapterError("P2P_ERROR", "Native resume is missing the host token", false);
+      }
+      const hostAttachment = await this.reconnectClient(0, hostToken);
+      for (const [pidText, token] of Object.entries(this.resumeSession.playerTokens)) {
+        const playerId = Number(pidText);
+        if (playerId === 0) continue;
+        await this.reconnectClient(playerId, token);
+      }
+      return hostAttachment;
+    }
+    const host = new WebSocketAdapter(
+      "native-engine://phase-server",
+      "host",
+      this.hostDeck,
+      undefined,
+      undefined,
+      undefined,
+      this.hostDisplayName,
+      {
+        nativePregame: {
+          kind: "host",
+          socketFactory: () => new NativeEngineSocket(),
+          expectedServerVersion: this.options.expectedServerVersion,
+          playerCount: this.playerCount,
+          aiSeats,
+          formatConfig: this.formatConfig,
+          matchConfig: this.matchConfig,
+        },
+      },
+    );
+    const initialSlots = host.waitForPlayerSlots();
+    const attachment = await this.attachClient(host);
+    await initialSlots;
+    if (attachment.playerId !== 0) {
+      host.dispose();
+      throw new AdapterError("P2P_ERROR", "Native host was assigned a non-host seat", false);
+    }
+    this.gameCode = attachment.gameCode;
+    this.fullKey = attachment.fullKey;
+    return attachment;
+  }
+
+  async attachGuest(
+    p2pPlayerId: PlayerId,
+    deck: DeckListPayload["player"],
+    displayName: string,
+  ): Promise<NativeSessionAttachment> {
+    if (!this.gameCode) {
+      throw new AdapterError("P2P_ERROR", "Native host session has not been created", false);
+    }
+    const guest = new WebSocketAdapter(
+      "native-engine://phase-server",
+      "join",
+      deck,
+      this.gameCode,
+      undefined,
+      undefined,
+      displayName,
+      {
+        nativePregame: {
+          kind: "guest",
+          socketFactory: () => new NativeEngineSocket(),
+          expectedServerVersion: this.options.expectedServerVersion,
+        },
+      },
+    );
+    const hostSlots = this.clientFor(0).waitForPlayerSlots();
+    const attachment = await this.attachClient(guest);
+    await hostSlots;
+    if (attachment.playerId !== p2pPlayerId) {
+      guest.dispose();
+      throw new AdapterError(
+        "P2P_ERROR",
+        `Native seat mismatch: P2P seat ${p2pPlayerId} was assigned server seat ${attachment.playerId}`,
+        false,
+      );
+    }
+    return attachment;
+  }
+
+  async start(): Promise<SubmitResult> {
+    const host = this.clientFor(0);
+    const started = new Promise<NativeViewerUpdate>((resolve) => this.startWaiters.push(resolve));
+    const waits = [...this.clients.values()].map((client) => client.waitForGameStarted());
+    await host.sendSeatMutation({ type: "Start" });
+    await Promise.all(waits);
+    const hostUpdate = await started;
+    return { events: hostUpdate.events, log_entries: hostUpdate.logEntries };
+  }
+
+  async applySeatMutation(mutation: SeatMutation): Promise<void> {
+    await this.clientFor(0).sendSeatMutation(mutation);
+  }
+
+  async submitAction(action: GameAction, playerId: PlayerId): Promise<SubmitResult> {
+    return this.clientFor(playerId).submitAction(action, playerId);
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    playerId: PlayerId,
+  ): Promise<SubmitResult> {
+    return this.clientFor(playerId).submitInteraction(submission, playerId);
+  }
+
+  async previewManaPayment(action: GameAction, playerId: PlayerId): Promise<ObjectId[]> {
+    return this.clientFor(playerId).previewManaPayment(action, playerId);
+  }
+
+  async getState(): Promise<GameState> {
+    return this.clientFor(0).getState();
+  }
+
+  async getLegalActions(): Promise<LegalActionsResult> {
+    return this.clientFor(0).getLegalActions();
+  }
+
+  async getSnapshot(): Promise<EngineSnapshot> {
+    return this.clientFor(0).getSnapshot();
+  }
+
+  viewerSnapshot(playerId: PlayerId): EngineSnapshot {
+    const update = this.latestViews.get(playerId);
+    if (!update) {
+      throw new AdapterError("P2P_ERROR", `No native snapshot for seat ${playerId}`, false);
+    }
+    return update.snapshot;
+  }
+
+  async abandon(): Promise<void> {
+    const host = this.clients.get(0);
+    if (host) await host.sendAbandonGame();
+  }
+
+  detachGuest(playerId: PlayerId): void {
+    if (playerId === 0) return;
+    this.clients.get(playerId)?.dispose();
+    this.clients.delete(playerId);
+    this.playerTokens.delete(playerId);
+    this.latestViews.delete(playerId);
+  }
+
+  dispose(): void {
+    for (const client of this.clients.values()) client.dispose();
+    this.clients.clear();
+    this.playerTokens.clear();
+    this.latestViews.clear();
+    this.pendingViews.clear();
+  }
+
+  private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
+    client.onEvent((event) => {
+      if (event.type === "sessionAttached") {
+        // Register the exact authenticated seat before GameStarted/reconnect
+        // can release a local state frame. This membership is the barrier's
+        // recipient set for every following revision.
+        this.clients.set(event.attachment.playerId, client);
+        this.playerTokens.set(event.attachment.playerId, event.attachment.playerToken);
+        return;
+      }
+      if (event.type === "aiDriverFault") {
+        if (this.deliveredFaultIds.has(event.id)) return;
+        this.pendingFaults.set(event.id, { id: event.id, revision: event.revision, message: event.message });
+        this.enqueueFaultBarrier();
+        return;
+      }
+      if (event.type !== "stateChanged" || event.serverRevision === undefined) return;
+      const revision = event.serverRevision;
+      const playerId = client.playerId;
+      if (playerId === null) return;
+      const update: NativeViewerUpdate = {
+        snapshot: event.snapshot,
+        events: event.events,
+        logEntries: event.logEntries,
+      };
+      this.latestViews.set(playerId, update);
+      const views = this.pendingViews.get(revision) ?? new Map<PlayerId, NativeViewerUpdate>();
+      views.set(playerId, update);
+      this.pendingViews.set(revision, views);
+      if (views.size !== this.clients.size) return;
+      this.pendingViews.delete(revision);
+      this.revisionQueue = this.revisionQueue
+        .then(async () => {
+          await this.onRevision(revision, views);
+          this.deliveredRevision = Math.max(this.deliveredRevision, revision);
+          await this.releaseFaultsThroughDeliveredRevision();
+        })
+        .catch((error) => {
+          console.error("[NativeP2PBridge] revision fan-out failed:", error);
+        });
+      const hostUpdate = views.get(0);
+      if (hostUpdate) {
+        for (const resolve of this.startWaiters.splice(0)) resolve(hostUpdate);
+      }
+    });
+    const attachment = await client.initializePregame();
+    this.clients.set(attachment.playerId, client);
+    this.playerTokens.set(attachment.playerId, attachment.playerToken);
+    return attachment;
+  }
+
+  private enqueueFaultBarrier(): void {
+    this.revisionQueue = this.revisionQueue
+      .then(() => this.releaseFaultsThroughDeliveredRevision())
+      .catch((error) => console.error("[NativeP2PBridge] AI fault fan-out failed:", error));
+  }
+
+  private async releaseFaultsThroughDeliveredRevision(): Promise<void> {
+    for (const fault of [...this.pendingFaults.values()]) {
+      if (this.deliveredFaultIds.has(fault.id) || this.deliveredRevision < fault.revision) continue;
+      this.pendingFaults.delete(fault.id);
+      this.deliveredFaultIds.add(fault.id);
+      await this.onFault(fault);
+    }
+  }
+
+  persistence(): NativeP2PServerSession | null {
+    if (!this.gameCode || !this.fullKey) return null;
+    return {
+      gameCode: this.gameCode,
+      fullKey: this.fullKey,
+      playerTokens: Object.fromEntries(this.playerTokens),
+    };
+  }
+
+  private async reconnectClient(
+    playerId: PlayerId,
+    playerToken: string,
+  ): Promise<NativeSessionAttachment> {
+    if (!this.gameCode || !this.fullKey) {
+      throw new AdapterError("P2P_ERROR", "Native game code is unavailable for reconnect", false);
+    }
+    const client = new WebSocketAdapter(
+      "native-engine://phase-server",
+      "join",
+      { main_deck: [], sideboard: [] },
+      undefined,
+      undefined,
+      undefined,
+      `Player ${playerId + 1}`,
+      {
+        nativePregame: {
+          kind: "reconnect",
+          socketFactory: () => new NativeEngineSocket(),
+          expectedServerVersion: this.options.expectedServerVersion,
+          gameCode: this.gameCode,
+          playerId,
+          playerToken,
+          fullKey: this.fullKey,
+        },
+      },
+    );
+    const attachment = await this.attachClient(client);
+    if (attachment.playerId !== playerId) {
+      client.dispose();
+      throw new AdapterError("P2P_ERROR", "Native reconnect returned the wrong player seat", false);
+    }
+    return attachment;
+  }
+
+  private clientFor(playerId: PlayerId): WebSocketAdapter {
+    const client = this.clients.get(playerId);
+    if (!client) {
+      throw new AdapterError("P2P_ERROR", `No native socket for seat ${playerId}`, false);
+    }
+    return client;
+  }
 }
 
 function isDeckListPlayerShape(x: unknown): x is DeckListPayload["player"] {
@@ -123,7 +489,7 @@ function isDeckListPlayerShape(x: unknown): x is DeckListPayload["player"] {
  *   the dropped player reconnecting (see plan §6 DisconnectChoiceDialog
  *   semantics). Blocks `submitAction`.
  */
-type GameRunState = "running" | "paused-disconnect" | "paused-manual";
+type GameRunState = "running" | "paused-disconnect" | "paused-manual" | "terminal";
 
 /** Default grace window for guest auto-reconnect, in milliseconds. */
 const DEFAULT_GRACE_PERIOD_MS = 30_000;
@@ -141,6 +507,9 @@ const DEFAULT_GRACE_PERIOD_MS = 30_000;
  */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
+// A stale proposal leaves the prompt unchanged, so cap retries to prevent a
+// persistent authority race from becoming a tight host-loop spin.
+const MAX_AI_PROPOSAL_STALE_RETRIES = 3;
 
 function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): SeatState {
   return {
@@ -160,6 +529,7 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       commander_damage_threshold: null,
       range_of_influence: null,
       team_based: false,
+      sideboard_policy: { type: "Limited", data: 15 },
       uses_commander: false,
       allow_debug_actions: false,
     },
@@ -180,7 +550,7 @@ function occupiedSeatCount(state: SeatState): number {
   return state.seats.filter((seat) => seat.type !== "WaitingHuman").length;
 }
 
-function aiActorFromWaitingFor(
+export function aiActorFromWaitingFor(
   waitingFor: WaitingFor,
   seats: SeatState["seats"],
   authorizedSubmitter: PlayerId,
@@ -206,7 +576,14 @@ function aiActorFromWaitingFor(
   // multiplayer. This mirrors the `aiController.ts` fix for #2012. With no
   // turn-control effect, `priority_player === data.player` for every
   // single-acting state, so this is a no-op.
-  return "player" in waitingFor.data ? authorizedSubmitter : null;
+  // CR 732.2a: LoopShortcut's data field is `proposer`, not `player`; route to
+  // the engine-derived authorized submitter (priority_player) exactly like the
+  // `player in` states so an AI-owned controller seat drives the declare.
+  return "player" in waitingFor.data
+    || waitingFor.type === "LoopShortcut"
+    || waitingFor.type === "PrecastCopyShortcutOffer"
+    ? authorizedSubmitter
+    : null;
 }
 
 export function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
@@ -229,24 +606,99 @@ function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<strin
   console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
+function isZeroCountDebugCreate(action: GameAction): boolean {
+  if (action.type !== "Debug") return false;
+  switch (action.data.type) {
+    case "CreateCard":
+    case "CreateToken":
+    case "CreateTokenCopy":
+      return action.data.data.count === 0;
+    default:
+      return false;
+  }
+}
+
+/**
+ * The host session, if any, that currently owns the engine's game state.
+ *
+ * On a memory-constrained device `getHostAdapter()` hands every host the tab's
+ * shared engine worker, so "who installed the state that is there now?" stops
+ * being answerable from the adapter's own fields. The claim is recorded only
+ * once an engine call has *accepted* it (after `initializeGame` on the fresh
+ * start arm, after `resumeMultiplayerHostState` on the resume arm) — claiming
+ * earlier would let a refused resume's teardown wipe a live local game it never
+ * owned. Teardown clears engine state only for the current claimant, so a stale
+ * or never-started host cannot clobber the live one.
+ *
+ * Holds each host's claim token rather than the adapter itself, so a claim can
+ * never keep a torn-down host — with its guest sessions and deck payloads —
+ * resident in a module-level reference.
+ */
+let sharedEngineHost: symbol | null = null;
+
+/**
+ * Fail-loud contract for a disposed host. With a private worker, `dispose()`
+ * tore the engine down and every later call threw `assertInitialized`. A shared
+ * worker survives disposal, so a use-after-dispose host would silently operate
+ * on the live shared engine instead.
+ */
+function hostDisposedError(): AdapterError {
+  return new AdapterError("P2P_ERROR", "P2P host adapter has been disposed", false);
+}
+
 /**
  * Host-side P2P adapter.
  *
- * Hub-and-spoke topology: the host runs the authoritative WASM engine and
- * maintains one `PeerSession` per guest. State updates are filtered per-seat
- * via `wasm.getFilteredState(pid)` and fanned out to each guest. Guest
- * actions are routed through the host's WASM and re-broadcast as filtered
- * state.
+ * Hub-and-spoke topology: the host runs the authoritative engine (WASM by
+ * default, or a local native phase-server when configured) and maintains one
+ * `PeerSession` per guest. State updates are filtered per-seat and fanned out
+ * to each guest. Guest actions are authenticated by their host-owned session
+ * before reaching the selected authority.
  *
  * The host does NOT destroy the parent `Peer` on per-session disconnects —
  * that lifetime is owned by `dispose()`. Per-session cleanup releases only
  * the `DataConnection` (see `peer.ts` `onSessionEnd` contract).
  */
 export class P2PHostAdapter implements EngineAdapter {
-  private wasm = new WasmAdapter();
+  private wasm = getHostAdapter();
+  private nativeBridge: NativeP2PBridge | null = null;
+  private nativeInitialSetupPending = false;
   private listeners: P2PAdapterEventListener[] = [];
+  /**
+   * Mirrors WasmAdapter's initialization contract: setup runs exactly once,
+   * and concurrent callers share its in-flight promise. The lobby initializes
+   * the host before advertising it; the game-page handoff later calls
+   * initialize again while seeding gameStore.
+   */
+  private initialized = false;
+  private initPromise: Promise<void> | null = null;
+  /**
+   * Set synchronously by `dispose()`. Read by every engine entry point (so a
+   * disposed host fails loud even when its engine is the shared worker that
+   * outlives it) and re-checked after each await in the init/start paths, so a
+   * teardown that lands mid-flight cannot be overtaken by a resumed claim.
+   * Deliberately not `ownsAuthority()`: `dispose()` releases the host lease, so
+   * the lease says nothing about *this* adapter having been torn down.
+   */
+  private disposed = false;
+  /** This session's identity in `sharedEngineHost`. */
+  private readonly engineClaim = Symbol("p2p-host-engine-claim");
 
   private guestSessions = new Map<PlayerId, PeerSession>();
+  /**
+   * A reconnecting transport has proved its token but is not a game session
+   * until its complete reconnect acknowledgement has been written. This is
+   * deliberately adapter-ephemeral: persisting an in-flight channel would
+   * make a reload retain a connection that cannot exist any more.
+   */
+  private pendingReconnectSessions = new Map<PlayerId, PeerSession>();
+  /** Native snapshots become reconnectable only after their matching server
+   * revision has completed the PeerJS fan-out. */
+  private nativeDeliveredViews = new Map<PlayerId, { revision: number; snapshot: EngineSnapshot }>();
+  /** Serializes every state-bearing delivery with reconnect promotion. A
+   * reconnect cannot acknowledge an older view while a state fan-out is in
+   * flight and would otherwise miss that update after becoming active. */
+  private deliveryQueue: Promise<void> = Promise.resolve();
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private aiDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private playerTokens = new Map<PlayerId, string>();
@@ -269,6 +721,21 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   private eliminatedSeats = new Set<PlayerId>();
   private gameRunState: GameRunState = "running";
+  /** Monotonic authority revision for WASM hosts; native hosts replace this
+   * with the local phase-server's revision before fan-out. */
+  private authoritativeRevision = 0;
+  /** First committed terminal statement fences every subsequent action and
+   * reconnect. Its id is immutable for this adapter incarnation. */
+  private terminalResult: P2PTerminalResult | null = null;
+  /** Native AI faults are terminal and must also be replayed to a guest that
+   * reconnects after the live PeerJS fan-out completed. */
+  private nativeAiDriverFault: NativeAiDriverFault | null = null;
+  /** The local host must render a restored native fault once the bridge has
+   * delivered its fenced final snapshot. Keep this separate from the durable
+   * fault itself: rehydration sets the latter before the bridge replays it. */
+  private deliveredNativeAiDriverFault: NativeAiDriverFault | null = null;
+  readonly supportsMatchConcede: true | undefined;
+  private matchConcedeSent = false;
 
   private gameStarted = false;
   private guestDeckResolvers: Array<() => void> = [];
@@ -281,10 +748,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private pregameOpQueue: Promise<void> = Promise.resolve();
   private resolvePregameReady!: () => void;
   private rejectPregameReady!: (err: unknown) => void;
-  private readonly pregameReady: Promise<void> = new Promise((resolve, reject) => {
-    this.resolvePregameReady = resolve;
-    this.rejectPregameReady = reject;
-  });
+  private pregameReady!: Promise<void>;
   private allowPartialStart = false;
 
   /**
@@ -296,6 +760,9 @@ export class P2PHostAdapter implements EngineAdapter {
   private readonly gameId: string | null;
   /** Bare 5-char room code without PEER_ID_PREFIX — persisted in the session record. */
   private readonly roomCode: string | null;
+  /** Stable identity is retained on resume; the incarnation fences old hosts. */
+  private readonly sessionKey: P2PSessionKey;
+  private readonly authority: P2PAuthorityStamp;
   /** True when the adapter was constructed from a persisted session (resume flow). */
   private readonly isResume: boolean;
   /**
@@ -305,7 +772,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * than threaded through `initialize()` so the EngineAdapter interface
    * stays uniform across fresh/resume flows.
    */
-  private resumeGameState: GameState | null = null;
+  private resumeGameState: PersistedGameState | null = null;
 
   constructor(
     private readonly hostDeckData: unknown,
@@ -353,9 +820,12 @@ export class P2PHostAdapter implements EngineAdapter {
       gameId: string;
       roomCode: string;
       hostDisplayName?: string;
-      resumeData?: { state: GameState; session: PersistedP2PHostSession };
+      resumeData?: { state?: PersistedGameState; session: PersistedP2PHostSession };
     },
+    native?: NativeP2PHostOptions,
+    private readonly boundMatchConcede?: BoundP2PMatchConcede,
   ) {
+    this.supportsMatchConcede = boundMatchConcede ? true : undefined;
     if (playerCount < 2 || playerCount > 6) {
       throw new AdapterError(
         "P2P_PLAYER_COUNT",
@@ -374,14 +844,63 @@ export class P2PHostAdapter implements EngineAdapter {
     this.pregameSeatView = seatStateToView(this.pregameSeatState);
     this.gameId = persistence?.gameId ?? null;
     this.roomCode = persistence?.roomCode ?? null;
+    this.sessionKey = persistence?.resumeData?.session.sessionKey ?? createP2PSessionKey();
+    this.authority = claimP2PHostLease(this.sessionKey);
     this.hostDisplayName = persistence?.hostDisplayName ?? null;
     this.isResume = persistence?.resumeData !== undefined;
 
     if (persistence?.resumeData) {
-      this.resumeGameState = persistence.resumeData.state;
+      this.resumeGameState = persistence.resumeData.state ?? null;
       this.rehydrateFromPersistedSession(persistence.resumeData.session);
       this.pregameSeatView = seatStateToView(this.pregameSeatState);
     }
+    const nativeResume = persistence?.resumeData?.session.nativeSession;
+    if (native && persistence?.resumeData && !nativeResume) {
+      throw new AdapterError(
+        "P2P_ERROR",
+        "Native P2P sessions cannot resume through a persisted WASM snapshot",
+        false,
+      );
+    }
+    if (!native && nativeResume) {
+      throw new AdapterError(
+        "P2P_ERROR",
+        "This hosted game must reconnect to its local native engine",
+        false,
+      );
+    }
+    if (native) {
+      this.nativeBridge = new NativeP2PBridge(
+        (hostDeckData as DeckListPayload).player,
+        this.hostDisplayName ?? "Host",
+        playerCount,
+        formatConfig,
+        matchConfig,
+        native,
+        (revision, views) => this.enqueueDelivery(
+          () => this.handleNativeRevision(revision, views),
+        ),
+        (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
+        nativeResume,
+      );
+    } else {
+      this.attachBrowserAiDecisionDiagnostics();
+    }
+  }
+
+  /**
+   * Installs the local-only diagnostics capability once this host is backed by
+   * browser WASM. It deliberately remains an instance property: native hosts
+   * and P2P guests must fail capability detection rather than receive a no-op.
+   */
+  private attachBrowserAiDecisionDiagnostics(): void {
+    if (this.nativeBridge) return;
+    Object.assign(this, {
+      setAiDecisionDiagnosticsEnabled: (enabled: boolean) =>
+        this.wasm.setAiDecisionDiagnosticsEnabled(enabled),
+      subscribeAiDecisionDiagnostics: (listener: (receipt: AiDecisionDiagnosticReceipt) => void) =>
+        this.wasm.subscribeAiDecisionDiagnostics(listener),
+    });
   }
 
   /**
@@ -416,6 +935,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.eliminatedSeats.add(pid);
     }
     this.gameStarted = session.gameStarted;
+    this.nativeAiDriverFault = session.nativeAiDriverFault ?? null;
 
     // Every persisted guest is "disconnected" from the resumed host's
     // POV until they dial back in. Arming a grace window for each means
@@ -432,7 +952,9 @@ export class P2PHostAdapter implements EngineAdapter {
     // Mid-game resume: the game is paused until at least one guest
     // reconnects. Pre-game resume (lobby): state stays "running" since
     // `initializeGame` hasn't been called yet.
-    if (this.gameStarted && this.disconnectedSeats.size > 0) {
+    if (this.nativeAiDriverFault !== null) {
+      this.gameRunState = "terminal";
+    } else if (this.gameStarted && this.disconnectedSeats.size > 0) {
       this.gameRunState = "paused-disconnect";
     }
   }
@@ -456,6 +978,7 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   private buildPersistedSession(): PersistedP2PHostSession | null {
     if (!this.gameId || !this.roomCode) return null;
+    const nativeSession = this.nativeBridge?.persistence();
     const playerTokens: Record<number, string> = {};
     for (const [pid, token] of this.playerTokens.entries()) {
       playerTokens[pid] = token;
@@ -471,6 +994,7 @@ export class P2PHostAdapter implements EngineAdapter {
     return {
       gameId: this.gameId,
       roomCode: this.roomCode,
+      sessionKey: this.sessionKey,
       brokerGameCode: this.brokerGameCode,
       useBroker: this.broker !== undefined,
       playerTokens,
@@ -484,6 +1008,8 @@ export class P2PHostAdapter implements EngineAdapter {
       hostDeckData: this.hostDeckData,
       gameStarted: this.gameStarted,
       seatState: this.pregameSeatState,
+      ...(this.nativeAiDriverFault ? { nativeAiDriverFault: this.nativeAiDriverFault } : {}),
+      ...(nativeSession ? { nativeSession } : {}),
     };
   }
 
@@ -494,6 +1020,10 @@ export class P2PHostAdapter implements EngineAdapter {
       teamInfo: this.pregameSeatView.teamInfo?.[playerId] ?? undefined,
       name: this.displayNameForSeat(playerId, kind),
     }));
+  }
+
+  usesNativeEngine(): boolean {
+    return this.nativeBridge !== null;
   }
 
   private displayNameForSeat(playerId: number, kind: SeatKind): string {
@@ -535,10 +1065,88 @@ export class P2PHostAdapter implements EngineAdapter {
    * snapshot, not a crash.
    */
   private saveSession(): void {
+    if (!this.ownsAuthority()) return;
     if (!this.gameId) return;
     const snapshot = this.buildPersistedSession();
     if (!snapshot) return;
     void saveP2PHostSession(this.gameId, snapshot);
+  }
+
+  /** Persist the host authority as the engine's opaque trusted envelope. */
+  private persistAuthoritativeState(): void {
+    if (!this.ownsAuthority()) return;
+    if (this.nativeBridge) return;
+    if (!this.gameId) return;
+    void this.wasm
+      .exportPersistenceState()
+      .then((json) => saveGame(this.gameId!, JSON.parse(json) as PersistedGameState))
+      .catch((err) => {
+        console.warn("[P2PHost] trusted state export failed:", err);
+      });
+  }
+
+  /**
+   * The persisted lease is checked at every authority boundary. This is a
+   * fence, not advisory bookkeeping: a resumed host with the same session key
+   * has already superseded this adapter and its delayed work must become inert.
+   */
+  private ownsAuthority(): boolean {
+    const owns = ownsP2PHostLease(this.authority);
+    if (!owns) traceAdapter("Host", "lease-fenced", { sessionKey: this.sessionKey });
+    return owns;
+  }
+
+  /** Engine entry-point guard — see `hostDisposedError`. */
+  private assertNotDisposed(): void {
+    if (this.disposed) throw hostDisposedError();
+  }
+
+  /**
+   * Abandon an in-flight init/start that a `dispose()` overtook, leaving
+   * nothing owning the engine.
+   *
+   * `claimed` must be true whenever a state-installing call
+   * (`initializeMultiplayerHostGame`, `resumeMultiplayerHostState`) already
+   * resolved, and false otherwise — including on every rejection, since the
+   * engine claims itself only on a successful install and a failed call leaves
+   * it untouched. Get it wrong in the `true` direction and a shared engine is
+   * reset out from under whoever does own it; wrong in the `false` direction
+   * and the flag plus the ownerless game it installed sit on the shared engine
+   * forever — `clear_game_state` does not clear the multiplayer flag and local
+   * games never touch it, so the residue would refuse undo in every later local
+   * game and refuse every hosted resume. The release is routed through
+   * `releaseHostSession` rather than a direct `setMultiplayerMode(false)`
+   * because the private/desktop adapter has already been disposed by then and
+   * would throw `assertInitialized`, turning a clean bail into an unhandled
+   * rejection.
+   */
+  private async bailDisposed(claimed: boolean, during: string): Promise<never> {
+    await this.wasm.releaseHostSession(claimed);
+    throw new AdapterError("P2P_ERROR", `Host session disposed during ${during}`, true);
+  }
+
+  private send(session: PeerSession, message: P2PMessage): Promise<boolean> {
+    if (!this.ownsAuthority()) return Promise.resolve(false);
+    return session.send({ ...message, authority: this.authority });
+  }
+
+  /** Keep state fan-out, terminal delivery, and reconnect acknowledgement /
+   * promotion in one ordered critical section. PeerJS reconnects arrive
+   * independently of both the native revision stream and browser WASM action
+   * fan-out; without this fence either path can skip a pending session while
+   * the reconnect acknowledges an older snapshot. */
+  private enqueueDelivery<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.deliveryQueue.then(operation, operation);
+    this.deliveryQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private rejectSuperseded(session: PeerSession): void {
+    void session.send({ type: "reconnect_rejected", reason: "Host session superseded" });
+    session.close("Host session superseded");
   }
 
   /**
@@ -591,8 +1199,9 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private broadcastSeatSnapshot(): void {
+    if (!this.ownsAuthority()) return;
     for (const session of this.guestSessions.values()) {
-      session.send({ type: "seat_snapshot", view: this.pregameSeatView });
+      void this.send(session, { type: "seat_snapshot", view: this.pregameSeatView });
     }
     this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
   }
@@ -613,6 +1222,7 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private syncLobbyMetadata(consumedReservationTokens: string[] = []): void {
+    if (!this.ownsAuthority()) return;
     const currentPlayers = occupiedSeatCount(this.pregameSeatState);
     const maxPlayers = this.pregameSeatState.seats.length;
     this.emit({ type: "lobbyProgress", joined: currentPlayers, total: maxPlayers });
@@ -628,6 +1238,8 @@ export class P2PHostAdapter implements EngineAdapter {
 
   async applySeatMutation(mutation: SeatMutation): Promise<void> {
     await this.enqueuePregameOp(async () => {
+      this.assertNotDisposed();
+      if (!this.ownsAuthority()) return;
       if (this.gameStarted) {
         throw new AdapterError("P2P_ERROR", "Pregame seats can no longer be edited", false);
       }
@@ -645,7 +1257,7 @@ export class P2PHostAdapter implements EngineAdapter {
           if (seatToken !== token) continue;
           const session = this.guestSessions.get(pid);
           if (session) {
-            session.send({ type: "kick", reason: "Removed from the room by the host" });
+            void this.send(session, { type: "kick", reason: "Removed from the room by the host" });
             try {
               session.close("Removed by host");
             } catch {
@@ -653,6 +1265,7 @@ export class P2PHostAdapter implements EngineAdapter {
             }
           }
           this.guestSessions.delete(pid);
+          this.nativeBridge?.detachGuest(pid);
           this.playerTokens.delete(pid);
           this.guestDecks.delete(pid);
           this.guestNames.delete(pid);
@@ -683,10 +1296,13 @@ export class P2PHostAdapter implements EngineAdapter {
       }
 
       this.pregameSeatState = result.state;
+      if (this.nativeBridge) {
+        await this.nativeBridge.applySeatMutation(mutation);
+      }
       await this.refreshPregameSeatView();
       this.saveSession();
       for (const session of this.guestSessions.values()) {
-        session.send({ type: "seat_mutate", mutation });
+        void this.send(session, { type: "seat_mutate", mutation });
       }
       this.broadcastSeatSnapshot();
       this.syncLobbyMetadata();
@@ -698,9 +1314,19 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private async runAiLoop(): Promise<void> {
+    if (!this.ownsAuthority()) return;
+    if (this.nativeBridge) return;
     if (!this.gameStarted) return;
 
+    let staleRetries = 0;
     for (;;) {
+      if (!this.ownsAuthority()) return;
+      // A disposed host must stop driving the engine. With a private worker
+      // the next call threw `assertInitialized` and ended the loop; a shared
+      // worker would happily keep applying AI actions to whatever game is
+      // there now.
+      if (this.disposed) return;
+      if (this.gameRunState !== "running") return;
       const state = await this.wasm.getState();
       if (!state || typeof state !== "object" || !("waiting_for" in state)) {
         return;
@@ -724,19 +1350,33 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!aiSeat || aiSeat.type !== "Ai") {
         return;
       }
-      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, actor);
-      if (!action) {
+      const proposal = await this.wasm.getAiActionProposal(aiSeat.data.difficulty, actor);
+      if (!proposal) {
         return;
       }
-      const result = await this.wasm.submitAction(action, actor);
+      const outcome = await this.wasm.submitAiActionProposal(proposal);
+      if (outcome.status === "stale") {
+        staleRetries += 1;
+        if (staleRetries > MAX_AI_PROPOSAL_STALE_RETRIES) {
+          throw new AdapterError(
+            "P2P_ERROR",
+            `AI proposal repeatedly stale: ${outcome.reason}`,
+            true,
+          );
+        }
+        continue;
+      }
+      if (outcome.status === "rejected") {
+        throw new AdapterError("P2P_ERROR", `AI proposal rejected: ${outcome.reason}`, false);
+      }
+      staleRetries = 0;
+      const result = outcome.result;
       await this.broadcastStateUpdate(result.events, result.log_entries);
-      const nextState = await this.wasm.getState();
-      const legalResult = await this.wasm.getLegalActions();
+      this.persistAuthoritativeState();
       this.emit({
         type: "stateChanged",
-        state: nextState,
+        snapshot: await this.wasm.getSnapshot(),
         events: result.events,
-        legalResult,
         logEntries: result.log_entries,
       });
     }
@@ -755,7 +1395,36 @@ export class P2PHostAdapter implements EngineAdapter {
     }
   }
 
+  private resetPregameReady(): void {
+    this.pregameReady = new Promise((resolve, reject) => {
+      this.resolvePregameReady = resolve;
+      this.rejectPregameReady = reject;
+    });
+    // Initialization can fail before a guest arrives to await this gate. Keep
+    // that rejection observable to a queued guest while preventing it from
+    // becoming an unhandled rejection when no guest exists yet.
+    void this.pregameReady.catch(() => {});
+  }
+
+  private unsubscribeHostConnections(): void {
+    this.hostConnectionUnsub?.();
+    this.hostConnectionUnsub = null;
+  }
+
   async initialize(): Promise<void> {
+    this.assertNotDisposed();
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+    this.resetPregameReady();
+    const pending = this.initializeInner();
+    this.initPromise = pending;
+    pending.catch(() => {
+      if (this.initPromise === pending) this.initPromise = null;
+    });
+    return pending;
+  }
+
+  private async initializeInner(): Promise<void> {
     traceAdapter("Host", "initialize-start", { isResume: this.isResume });
     // Subscribe SYNCHRONOUSLY before any `await`. `hostRoom()` buffers
     // inbound guest connections that arrived between peer-open and the
@@ -764,29 +1433,67 @@ export class P2PHostAdapter implements EngineAdapter {
     // registration + adapter construction held this call off for hundreds
     // of ms while `wasm.initialize()` was cold-loading.
     this.hostConnectionUnsub = this.onGuestConnected((conn) => {
+      if (!this.ownsAuthority()) {
+        const session = createPeerSession(conn, {});
+        this.rejectSuperseded(session);
+        return;
+      }
       traceAdapter("Host", "handle-connection-event", { connOpen: conn.open });
       this.handleNewConnection(conn);
     });
 
     try {
       await this.wasm.initialize();
+      if (this.nativeBridge) {
+        try {
+          await this.nativeBridge.initializeHost([]);
+          this.saveSession();
+        } catch (err) {
+          if (this.isResume) {
+            // A resumed native game already has phase-server as its sole
+            // authority. Falling back to a fresh WASM engine here would fork
+            // the game from the state guests are reconnecting to.
+            throw err;
+          }
+          // No P2P guest has been accepted yet: abandon the partial local
+          // server session and retain the established WASM authority path.
+          // Once Start has succeeded, switching authority would diverge.
+          console.warn("[P2PHost] native engine setup failed; using WASM host", err);
+          await this.nativeBridge.abandon().catch(() => {
+            /* best-effort cleanup before local fallback */
+          });
+          this.nativeBridge.dispose();
+          this.nativeBridge = null;
+          this.attachBrowserAiDecisionDiagnostics();
+        }
+      }
+      // A teardown may have landed while `wasm.initialize()` (and the native
+      // handshake above) were in flight. Bail before installing anything:
+      // nothing has been claimed yet, so there is nothing to undo.
+      if (this.disposed) await this.bailDisposed(false, "initialization");
       // Resume path: load the persisted GameState with a fresh RNG seed
-      // and atomic multiplayer-flag flip. `resumeMultiplayerHostState`
-      // mirrors server-core's `from_persisted` pattern. Fresh-host path:
-      // just flip the flag; engine state is populated by the guests
-      // joining + `initializeGame`.
+      // and atomic multiplayer-flag claim. `resumeMultiplayerHostState`
+      // mirrors server-core's `from_persisted` pattern, and
+      // `initializeMultiplayerHostGame` is its fresh-start sibling — both
+      // refuse an engine that is already in use and claim the flag themselves
+      // in the same call that installs the state. No client code sets the flag,
+      // so an open lobby leaves zero engine footprint.
       if (this.isResume && this.resumeGameState) {
         await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
         this.resumeGameState = null;
+        // The engine now holds both this game's state and the multiplayer
+        // flag. Its await window is the widest in the adapter (the full card
+        // DB load happens inside), so re-check before recording the claim.
+        if (this.disposed) await this.bailDisposed(true, "resume");
+        sharedEngineHost = this.engineClaim;
         traceAdapter("Host", "initialize-resume", {
           tokens: this.playerTokens.size,
           gameStarted: this.gameStarted,
         });
-      } else {
-        await this.wasm.setMultiplayerMode(true);
       }
       this.resolvePregameReady();
     } catch (err) {
+      this.unsubscribeHostConnections();
       this.rejectPregameReady(err);
       throw err;
     }
@@ -798,9 +1505,15 @@ export class P2PHostAdapter implements EngineAdapter {
       });
     }
     traceAdapter("Host", "initialize-complete", {});
+    this.initialized = true;
   }
 
   private handleNewConnection(conn: DataConnection): void {
+    if (!this.ownsAuthority()) {
+      const session = createPeerSession(conn, {});
+      this.rejectSuperseded(session);
+      return;
+    }
     traceAdapter("Host", "handle-new-connection", { connOpen: conn.open });
     // Reconnect path: the first message determines whether this is a fresh
     // join or a reconnect. We attach a one-shot pre-handler to peek at the
@@ -816,6 +1529,7 @@ export class P2PHostAdapter implements EngineAdapter {
             return;
           }
         }
+        this.clearPendingReconnectReservation(session);
       },
     });
 
@@ -825,9 +1539,43 @@ export class P2PHostAdapter implements EngineAdapter {
       identified = true;
       unsub();
 
+      // Host-side wire-version gate. A guest that stamps a version unequal
+      // to ours cannot be paired, so refuse it here — before a seat or a deck
+      // is allocated — through the rejection affordance this gate already
+      // has. `reconnect_rejected` is `{ type, reason }` only, so even a guest
+      // on an older bundle can decode it.
+      //
+      // ABSENT MEANS ADMIT. The version is bumped only on a
+      // non-backward-compatible change, so {guests on an older bundle}
+      // strictly contains {guests that are wire-incompatible}: an absent
+      // field reports bundle age, not incompatibility, and refusing on it
+      // would drop guests that pair fine today with a reason that is
+      // factually false for them. The consequence, stated rather than
+      // implied: this host cannot distinguish a compatible old bundle from
+      // an incompatible one. `P2PGuestAdapter.handleHostMessage` is the
+      // authority for the latter. This mirrors the call `acceptsHostAuthority`
+      // already makes for its own additive stamp. What this gate buys is
+      // prospective: once both sides ship, every future bump is caught
+      // host-side at first contact.
+      const guestVersion =
+        msg.type === "guest_deck" || msg.type === "reconnect" ? msg.wireProtocolVersion : undefined;
+      if (guestVersion !== undefined && guestVersion !== WIRE_PROTOCOL_VERSION) {
+        // Reaches the refused guest's user RAW, the same way the guest-side
+        // reason at `handleHostMessage` does. `i18n/README.md` asks for `t()`
+        // on frontend-authored strings; this one is new text on that raw path
+        // and is written unkeyed deliberately, to match the incumbent
+        // wording rather than split the pair. Noted, not fixed: the raw-string
+        // path is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: guest sent v${guestVersion}, this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+        traceAdapter("Host", "first-message-version-mismatch", { type: msg.type, guestVersion });
+        void this.send(session, { type: "reconnect_rejected", reason });
+        session.close("Wire protocol mismatch");
+        return;
+      }
+
       if (msg.type === "reconnect") {
         traceAdapter("Host", "first-message", { type: msg.type });
-        this.handleReconnect(session, msg.playerToken);
+        this.handleReconnect(session, msg.playerToken, msg.sessionKey);
       } else if (msg.type === "guest_deck") {
         traceAdapter("Host", "first-message", { type: msg.type });
         void this.handleNewGuest(
@@ -839,13 +1587,13 @@ export class P2PHostAdapter implements EngineAdapter {
           traceAdapter("Host", "new-guest-error", {
             error: err instanceof Error ? err.message : String(err),
           });
-          session.send({ type: "kick", reason: "Host failed to add player" });
+          void this.send(session, { type: "kick", reason: "Host failed to add player" });
           session.close("Host failed to add player");
         });
       } else {
         traceAdapter("Host", "first-message", { type: msg.type });
         // Unexpected first message — reject.
-        session.send({
+        void this.send(session, {
           type: "reconnect_rejected",
           reason: "Expected guest_deck or reconnect as first message",
         });
@@ -861,16 +1609,24 @@ export class P2PHostAdapter implements EngineAdapter {
     reservationToken?: string,
   ): Promise<void> {
     await this.enqueuePregameOp(async () => {
+      if (!this.ownsAuthority()) {
+        this.rejectSuperseded(session);
+        return;
+      }
       await this.pregameReady;
+      if (!this.ownsAuthority()) {
+        this.rejectSuperseded(session);
+        return;
+      }
       if (this.closedPregameSessions.has(session)) return;
       if (this.gameStarted) {
-        session.send({ type: "kick", reason: "Game already in progress" });
+        void this.send(session, { type: "kick", reason: "Game already in progress" });
         session.close("Game in progress");
         return;
       }
       const pid = this.firstWaitingSeat();
       if (pid === null) {
-        session.send({ type: "kick", reason: "Lobby full" });
+        void this.send(session, { type: "kick", reason: "Lobby full" });
         session.close("Lobby full");
         return;
       }
@@ -890,6 +1646,27 @@ export class P2PHostAdapter implements EngineAdapter {
         ? guestDeckRaw
         : { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] };
 
+      if (this.nativeBridge) {
+        try {
+          await this.nativeBridge.attachGuest(pid, guestDeck, displayName ?? `Player ${pid + 1}`);
+        } catch (err) {
+          // Still pre-start, so a native per-seat attach failure may safely
+          // fall back to the existing WASM authority without exposing a mixed
+          // authority game to any PeerJS guest.
+          console.warn("[P2PHost] native guest attachment failed; using WASM host", err);
+          await this.nativeBridge.abandon().catch(() => {
+            /* best-effort cleanup before local fallback */
+          });
+          this.nativeBridge.dispose();
+          this.nativeBridge = null;
+          this.attachBrowserAiDecisionDiagnostics();
+        }
+      }
+      if (!this.ownsAuthority()) {
+        this.rejectSuperseded(session);
+        return;
+      }
+
       const token = crypto.randomUUID();
       this.playerTokens.set(pid, token);
       this.guestSessions.set(pid, session);
@@ -900,7 +1677,7 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.refreshPregameSeatView();
       this.saveSession();
 
-      session.onMessage((msg) => this.handleGuestMessage(pid, msg));
+      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
 
       this.broadcastSeatSnapshot();
       this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
@@ -920,6 +1697,7 @@ export class P2PHostAdapter implements EngineAdapter {
     deck: DeckListPayload["player"],
   ): Promise<void> {
     await this.enqueuePregameOp(async () => {
+      if (!this.ownsAuthority()) return;
       if (this.gameStarted) return;
       if (this.pregameSeatState.seats[pid]?.type !== "JoinedHuman") return;
 
@@ -933,18 +1711,22 @@ export class P2PHostAdapter implements EngineAdapter {
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
+          companion: deck.companion ?? [],
+          signature_spell: deck.signature_spell ?? [],
           selected_format: this.formatConfig!.format,
         }) as { selected_format_compatible?: boolean | null; selected_format_reasons: string[] };
 
+        if (!this.ownsAuthority()) return;
         if (this.gameStarted) return;
         if (result.selected_format_compatible === false) {
           const reason = result.selected_format_reasons[0]
             ?? `Deck is not legal in ${this.formatConfig!.format}.`;
           const session = this.guestSessions.get(pid);
           if (session) {
-            session.send({ type: "kick", reason: `Deck rejected: ${reason}`, format: this.formatConfig!.format });
+            void this.send(session, { type: "kick", reason: `Deck rejected: ${reason}`, format: this.formatConfig!.format });
             session.close("Deck validation failed");
           }
+          await this.releaseNativePregameSeat(pid, "deck rejection");
           this.guestSessions.delete(pid);
           this.playerTokens.delete(pid);
           this.guestDecks.delete(pid);
@@ -965,6 +1747,28 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
+  /** Keep the native pregame reducer aligned whenever a P2P human seat is
+   * released before start. A failed sync is still safe to fall back because
+   * no authoritative game state exists yet. */
+  private async releaseNativePregameSeat(pid: PlayerId, reason: string): Promise<void> {
+    if (!this.nativeBridge) return;
+    try {
+      await this.nativeBridge.applySeatMutation({
+        type: "SetKind",
+        data: { seatIndex: pid, kind: { type: "WaitingHuman" } },
+      });
+      this.nativeBridge.detachGuest(pid);
+    } catch (err) {
+      console.warn(`[P2PHost] native pregame ${reason} sync failed; using WASM host`, err);
+      await this.nativeBridge.abandon().catch(() => {
+        /* best-effort cleanup before local fallback */
+      });
+      this.nativeBridge.dispose();
+      this.nativeBridge = null;
+      this.attachBrowserAiDecisionDiagnostics();
+    }
+  }
+
   async initializeGame(): Promise<SubmitResult> {
     return this.startPregameGame();
   }
@@ -974,6 +1778,10 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private async startPregameGameInner(): Promise<SubmitResult> {
+      this.assertNotDisposed();
+      if (!this.ownsAuthority()) {
+        throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+      }
       if (this.gameStarted) {
         return { events: [] };
       }
@@ -1011,6 +1819,24 @@ export class P2PHostAdapter implements EngineAdapter {
         throw new AdapterError("P2P_ERROR", "Cannot start P2P game with zero opponents", false);
       }
 
+      if (this.nativeBridge) {
+        this.gameStarted = true;
+        this.nativeInitialSetupPending = true;
+        this.pregameSeatState.gameStarted = true;
+        await this.refreshPregameSeatView();
+
+        const allNames = this.playerNamesForSeats();
+        this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
+        if (this.broker && this.brokerGameCode) {
+          void this.broker.unregister(this.brokerGameCode).catch(() => {
+            /* best-effort */
+          });
+        }
+        const result = await this.nativeBridge.start();
+        this.saveSession();
+        return result;
+      }
+
       const deckPayload: DeckListPayload = {
         player: hostDeck.player,
         opponent: orderedOpponents[0],
@@ -1020,13 +1846,52 @@ export class P2PHostAdapter implements EngineAdapter {
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
         : this.pregameSeatState.seats.length;
-      const result = await this.wasm.initializeGame(
-        deckPayload,
-        this.formatConfig,
-        playerCount,
-        this.matchConfig,
-        undefined,
-      );
+      if (this.disposed) await this.bailDisposed(false, "start");
+      // The occupancy test, the install, and the multiplayer claim are one
+      // engine call. `initializeMultiplayerHostGame` refuses an engine that
+      // already holds a game and claims the flag on the line after it installs
+      // the state — on a memory-constrained device this is the same worker
+      // local play uses, so a client-side probe followed by a separate install
+      // would leave a window for a local `initializeGame` to land in between
+      // and destroy the hosted game (or be destroyed by it). A refusal arrives
+      // as `AdapterErrorCode.ENGINE_OCCUPIED`.
+      let result: SubmitResult;
+      try {
+        result = await this.wasm.initializeMultiplayerHostGame(
+          deckPayload,
+          this.formatConfig,
+          playerCount,
+          this.matchConfig,
+          undefined,
+        );
+      } catch (err) {
+        // Nothing to compensate. The engine claims itself only on a successful
+        // install, so a rejection — an occupied-engine refusal, a deck error,
+        // or "Card database not loaded" when `ensureCardDb` swallowed a fetch
+        // failure — leaves the engine byte-for-byte untouched. `claimed: false`
+        // is what says so, and it is load-bearing in both directions: `true`
+        // would run `resetGameState()` on the shared engine and destroy the
+        // live local game a refusal had just protected, while dropping the call
+        // entirely would lose the private-adapter worker disposal and the typed
+        // "disposed during start" error. gameStore catches the rethrow and
+        // shows a toast, so the original error is preserved.
+        if (this.disposed) await this.bailDisposed(false, "start");
+        await this.wasm.releaseHostSession(false);
+        throw err;
+      }
+      // The engine now holds this game. Record the claim only now: claiming
+      // before the engine accepted would let a refused call's teardown clear
+      // state this session never owned.
+      if (this.disposed) await this.bailDisposed(true, "start");
+      // Checked before the stamp: a host whose lease was superseded mid-start
+      // must not take the claim from the host that superseded it. It did
+      // install engine state, so it hands that state back rather than leaving
+      // it for someone else's teardown to find unclaimed.
+      if (!this.ownsAuthority()) {
+        await this.wasm.releaseHostSession(true);
+        throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+      }
+      sharedEngineHost = this.engineClaim;
       this.gameStarted = true;
       this.pregameSeatState.gameStarted = true;
       await this.refreshPregameSeatView();
@@ -1041,14 +1906,16 @@ export class P2PHostAdapter implements EngineAdapter {
         });
       }
 
+      const revision = ++this.authoritativeRevision;
       for (const [pid, session] of this.guestSessions) {
         const token = this.playerTokens.get(pid)!;
         const snapshot = await this.wasm.getViewerSnapshot(pid);
-        session.send({
+        void this.send(session, {
           type: "game_setup",
           wireProtocolVersion: WIRE_PROTOCOL_VERSION,
           assignedPlayerId: pid,
           playerToken: token,
+          revision,
           state: snapshot.state,
           events: result.events,
           playerNames: allNames,
@@ -1065,6 +1932,10 @@ export class P2PHostAdapter implements EngineAdapter {
     // caller — gameStore — derived it from `getPlayerId()`). The host is
     // the trust boundary for its own actions; the engine's guard still
     // verifies the actor against `authorized_submitter(state)`.
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+    }
     if (this.gameRunState !== "running") {
       throw new AdapterError(
         "P2P_PAUSED",
@@ -1072,10 +1943,230 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const result = await this.wasm.submitAction(action, actor);
+    const result = this.nativeBridge
+      ? await this.nativeBridge.submitAction(action, actor)
+      : await this.wasm.submitAction(action, actor);
+    if (isZeroCountDebugCreate(action)) return result;
     await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
+    this.persistAuthoritativeState();
     return result;
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+    }
+    if (this.gameRunState !== "running") {
+      throw new AdapterError(
+        "P2P_PAUSED",
+        `Cannot submit interaction while game state is ${this.gameRunState}`,
+        true,
+      );
+    }
+    const result = this.nativeBridge
+      ? await this.nativeBridge.submitInteraction(submission, actor)
+      : await this.wasm.submitInteraction(submission, actor);
+    await this.broadcastStateUpdate(result.events, result.log_entries);
+    await this.runAiLoop();
+    this.persistAuthoritativeState();
+    return result;
+  }
+
+  async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+    }
+    if (this.gameRunState !== "running") {
+      throw new AdapterError(
+        "P2P_PAUSED",
+        `Cannot preview mana payment while game state is ${this.gameRunState}`,
+        true,
+      );
+    }
+    if (this.nativeBridge) return this.nativeBridge.previewManaPayment(action, actor);
+    return this.wasm.previewManaPayment(action, actor);
+  }
+
+  async exportPersistenceState(): Promise<string> {
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+    }
+    if (this.nativeBridge) {
+      throw new AdapterError("P2P_ERROR", "Native P2P persistence is managed by phase-server", false);
+    }
+    return this.wasm.exportPersistenceState();
+  }
+
+  /** Releases a complete native-server revision only after every local seat
+   * socket has supplied its own filtered view. The native server is the
+   * authority for this revision; PeerJS carries it through to terminal
+   * correlation rather than inventing another clock. */
+  private async handleNativeRevision(
+    revision: number,
+    views: Map<PlayerId, NativeViewerUpdate>,
+  ): Promise<void> {
+    if (!this.ownsAuthority()) return;
+    const hostUpdate = views.get(0);
+    if (!hostUpdate) return;
+    if (revision < this.authoritativeRevision) return;
+    this.authoritativeRevision = revision;
+    const allNames = this.playerNamesForSeats();
+    const sends: Array<Promise<boolean>> = [];
+    for (const [pid, session] of this.guestSessions) {
+      const update = views.get(pid);
+      if (!update || this.disconnectedSeats.has(pid)) continue;
+      if (this.nativeInitialSetupPending) {
+        const token = this.playerTokens.get(pid);
+        if (!token) continue;
+        sends.push(this.send(session, {
+          type: "game_setup",
+          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+          assignedPlayerId: pid,
+          playerToken: token,
+          revision,
+          state: update.snapshot.state,
+          events: update.events,
+          playerNames: allNames,
+          ...legalActionsToWire(update.snapshot.legalResult),
+        }));
+      } else {
+        sends.push(this.send(session, {
+          type: "state_update",
+          revision,
+          state: update.snapshot.state,
+          events: update.events,
+          logEntries: update.logEntries,
+          ...legalActionsToWire(update.snapshot.legalResult),
+        }));
+      }
+    }
+    await Promise.all(sends);
+    this.nativeInitialSetupPending = false;
+    for (const [playerId, update] of views) {
+      this.nativeDeliveredViews.set(playerId, { revision, snapshot: update.snapshot });
+    }
+    this.emit({
+      type: "stateChanged",
+      snapshot: hostUpdate.snapshot,
+      events: hostUpdate.events,
+      logEntries: hostUpdate.logEntries,
+    });
+    await this.commitTerminalIfComplete(hostUpdate.snapshot, revision);
+  }
+
+  /** The native server publishes the fault after its final state snapshot.
+   * Keep the same ordering over PeerJS and make the host terminal only after
+   * every active guest received that final filtered state. */
+  private async handleNativeAiDriverFault(
+    fault: { id: number; revision: number; message: string },
+  ): Promise<void> {
+    if (!this.ownsAuthority()) return;
+
+    if (this.nativeAiDriverFault !== null) {
+      // A resumed adapter is already terminal because its durable fault was
+      // rehydrated before the native bridge reconnects. Accept only that exact
+      // replay; a duplicate or a different terminal record must not create a
+      // second host error or overwrite the persisted cause.
+      if (
+        this.nativeAiDriverFault.id !== fault.id
+        || this.nativeAiDriverFault.revision !== fault.revision
+        || this.nativeAiDriverFault.message !== fault.message
+        || this.deliveredNativeAiDriverFault !== null
+      ) {
+        return;
+      }
+      this.deliveredNativeAiDriverFault = fault;
+      this.emit({ type: "error", message: fault.message });
+      return;
+    }
+
+    if (this.gameRunState === "terminal") return;
+    this.nativeAiDriverFault = fault;
+    this.deliveredNativeAiDriverFault = fault;
+    this.gameRunState = "terminal";
+    this.saveSession();
+    await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
+      if (this.disconnectedSeats.has(playerId)) return;
+      await this.send(session, { type: "ai_driver_fault", ...fault });
+    }));
+    this.emit({ type: "error", message: fault.message });
+  }
+
+  /**
+   * Final state first, terminal statement second. The ordered transport plus
+   * the state commitment lets a guest reject a plausible-looking terminal
+   * result that belongs to another final position or host incarnation.
+   */
+  private async commitTerminalIfComplete(
+    snapshot: EngineSnapshot,
+    revision: number,
+    reason: string = "Game complete",
+  ): Promise<void> {
+    const { waiting_for: waitingFor } = snapshot.state;
+    if (waitingFor.type !== "GameOver" || this.terminalResult) return;
+    this.authoritativeRevision = Math.max(this.authoritativeRevision, revision);
+    const winner = waitingFor.data.winner;
+    const display = { winner, reason };
+    const createResult = async (
+      recipient: PlayerId,
+      terminalState: GameState,
+    ): Promise<P2PTerminalResult> => ({
+      key: this.sessionKey,
+      lease: this.authority,
+      recipient,
+      revision,
+      terminalId: crypto.randomUUID(),
+      finalStateCommitment: await p2pFinalStateCommitment(terminalState),
+      display,
+    });
+    const result = await createResult(0, snapshot.state);
+    if (!(await commitP2PTerminalResult(result))) {
+      this.emit({ type: "terminalUnavailable", message: "Failed to retain P2P terminal result" });
+      return;
+    }
+    this.terminalResult = result;
+    this.gameRunState = "terminal";
+    await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
+      const viewerSnapshot = this.nativeBridge
+        ? this.nativeBridge.viewerSnapshot(playerId)
+        : await this.wasm.getViewerSnapshot(playerId);
+      const recipientResult = await createResult(playerId, viewerSnapshot.state);
+      await this.send(session, { type: "terminal_result", result: recipientResult });
+    }));
+    this.emit({ type: "terminalResult", result });
+  }
+
+  /**
+   * A terminal statement is recipient-bound because its commitment covers the
+   * recipient's filtered final state. Reconnects therefore need a newly
+   * committed statement rather than replaying the host's retained result.
+   */
+  private async terminalResultForRecipient(
+    recipient: PlayerId,
+    terminalState: GameState,
+    revision: number,
+  ): Promise<P2PTerminalResult> {
+    const terminal = this.terminalResult;
+    if (terminal === null) throw new Error("No terminal result to deliver");
+    if (terminalState.waiting_for.type !== "GameOver" || terminal.revision !== revision) {
+      throw new Error("Reconnect acknowledgement is not the committed final state");
+    }
+    return {
+      key: this.sessionKey,
+      lease: this.authority,
+      recipient,
+      revision,
+      terminalId: crypto.randomUUID(),
+      finalStateCommitment: await p2pFinalStateCommitment(terminalState),
+      display: terminal.display,
+    };
   }
 
   /**
@@ -1086,13 +2177,29 @@ export class P2PHostAdapter implements EngineAdapter {
    * actions from the engine-side viewer gate (`legal_actions_for_viewer`).
    * Skips disconnected seats (their state is delivered via `reconnect_ack`).
    */
-  private async broadcastStateUpdate(events: GameEvent[], logEntries?: GameLogEntry[]): Promise<void> {
-    const sends: Array<Promise<void>> = [];
+  private async broadcastStateUpdate(
+    events: GameEvent[],
+    logEntries?: GameLogEntry[],
+    terminalReason?: string,
+  ): Promise<void> {
+    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(events, logEntries, terminalReason));
+  }
+
+  private async broadcastStateUpdateInner(
+    events: GameEvent[],
+    logEntries?: GameLogEntry[],
+    terminalReason?: string,
+  ): Promise<void> {
+    if (!this.ownsAuthority()) return;
+    if (this.nativeBridge) return;
+    const revision = ++this.authoritativeRevision;
+    const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
       const snapshot = await this.wasm.getViewerSnapshot(pid);
-      sends.push(session.send({
+      sends.push(this.send(session, {
         type: "state_update",
+        revision,
         state: snapshot.state,
         events,
         logEntries,
@@ -1100,21 +2207,72 @@ export class P2PHostAdapter implements EngineAdapter {
       }));
     }
     await Promise.all(sends);
+    await this.commitTerminalIfComplete(await this.wasm.getSnapshot(), revision, terminalReason);
   }
 
   async getState(): Promise<GameState> {
+    this.assertNotDisposed();
+    if (this.nativeBridge) return this.nativeBridge.getState();
     return this.wasm.getState();
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
+    this.assertNotDisposed();
+    if (this.nativeBridge) return this.nativeBridge.getLegalActions();
     return this.wasm.getLegalActions();
   }
 
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
+  /** The host owns the engine — delegate to the inner WASM adapter, which
+   *  stamps the seq when the worker response arrives. (The broadcast path
+   *  `getViewerSnapshot` deliberately does NOT consume the counter: guests
+   *  stamp arrival order on their own ordered channel, and `seq` is never
+   *  compared across clients.) */
+  async getSnapshot(): Promise<EngineSnapshot> {
+    this.assertNotDisposed();
+    if (this.nativeBridge) return this.nativeBridge.getSnapshot();
+    return this.wasm.getSnapshot();
   }
 
-  restoreState(_state: GameState): void {
+  getAiActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> | AiActionProposal | null {
+    // Rejected rather than thrown: callers wrap this in `Promise.resolve(...)`
+    // without a synchronous try, matching what a disposed private engine did.
+    if (this.disposed) return Promise.reject(hostDisposedError());
+    return this.nativeBridge
+      ? null
+      : this.wasm.getAiActionProposal(difficulty, playerId);
+  }
+
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      return { status: "stale", reason: "P2P host authority changed" };
+    }
+    if (this.gameRunState !== "running") {
+      throw new AdapterError(
+        "P2P_PAUSED",
+        `Cannot submit AI proposal while game state is ${this.gameRunState}`,
+        true,
+      );
+    }
+    if (this.nativeBridge) {
+      return { status: "stale", reason: "native P2P authority owns AI decisions" };
+    }
+    const outcome = await this.wasm.submitAiActionProposal(proposal);
+    if (outcome.status === "applied") {
+      await this.broadcastStateUpdate(outcome.result.events, outcome.result.log_entries);
+      await this.runAiLoop();
+      this.persistAuthoritativeState();
+    }
+    return outcome;
+  }
+
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
@@ -1127,10 +2285,32 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   async sendConcede(): Promise<void> {
+    if (!this.ownsAuthority()) return;
     await this.concedePlayer(0, "Host conceded", "conceded");
     for (const [, s] of this.guestSessions) {
-      s.send({ type: "player_conceded", playerId: 0, reason: "Host conceded" });
+      void this.send(s, { type: "player_conceded", playerId: 0, reason: "Host conceded" });
     }
+  }
+
+  /**
+   * A draft match installs this only with its pod-issued capability. The
+   * adapter deliberately does not synthesize a result from a room code.
+   */
+  sendMatchConcede(): void {
+    this.requestBoundMatchConcede(0);
+  }
+
+  /**
+   * The sole match-concession sink. Both the local host control and a guest's
+   * protected wire request pass through this authority-bound route.
+   */
+  private requestBoundMatchConcede(concedingPlayer: PlayerId): void {
+    if (!this.boundMatchConcede || this.matchConcedeSent || !this.ownsAuthority()) return;
+    if (!this.gameStarted || this.gameRunState !== "running") return;
+    this.matchConcedeSent = true;
+    void Promise.resolve(this.boundMatchConcede.onConcede(concedingPlayer)).catch(() => {
+      this.matchConcedeSent = false;
+    });
   }
 
   /**
@@ -1142,11 +2322,18 @@ export class P2PHostAdapter implements EngineAdapter {
    * clears the persistence before disposing.
    */
   dispose(): void {
-    if (this.hostConnectionUnsub) this.hostConnectionUnsub();
+    // Set first and synchronously: every in-flight init/start re-checks this
+    // after each await, and callers that kept a reference must fail loud.
+    this.disposed = true;
+    this.unsubscribeHostConnections();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
     }
     this.disconnectedSeats.clear();
+    for (const session of this.pendingReconnectSessions.values()) {
+      session.close();
+    }
+    this.pendingReconnectSessions.clear();
     for (const session of this.guestSessions.values()) {
       session.close();
     }
@@ -1155,12 +2342,31 @@ export class P2PHostAdapter implements EngineAdapter {
     this.playerTokens.clear();
     this.guestDecks.clear();
     this.aiDecks.clear();
+    this.nativeDeliveredViews.clear();
     try {
       this.hostPeer.destroy();
     } catch {
       /* best-effort */
     }
-    this.wasm.dispose();
+    // Native authority is persisted by phase-server. A component unmount is
+    // intentionally not an abandonment: a remount/reload reconnects with the
+    // stored local tokens. Explicit termination below sends AbandonGame.
+    this.nativeBridge?.dispose();
+    // Release only what this session owns. A private engine is disposed as
+    // before; a shared one keeps its worker and card DB and has its state
+    // cleared only when this adapter is the recorded claimant — so a stale or
+    // never-started host cannot wipe a live claimant's game (or a local game
+    // that was never a host's to begin with). Idempotent: `dispose()` really is
+    // called twice on the same instance (GameProvider disposes directly, then
+    // `gameStore.reset()` disposes it again), and the second pass takes the
+    // unclaimed branch. Fire-and-forget from a synchronous `dispose()`.
+    if (sharedEngineHost === this.engineClaim) {
+      sharedEngineHost = null;
+      void this.wasm.releaseHostSession(true);
+    } else {
+      void this.wasm.releaseHostSession(false);
+    }
+    releaseP2PHostLease(this.authority);
     // Close the broker only when the adapter owns it. When the multiplayer
     // store owns the broker (externally managed), it survives adapter disposal
     // so the lobby entry stays alive across page navigations.
@@ -1181,6 +2387,10 @@ export class P2PHostAdapter implements EngineAdapter {
    * persistence preserved and go through `dispose()`.
    */
   async terminateGame(): Promise<void> {
+    if (!this.ownsAuthority()) {
+      this.dispose();
+      return;
+    }
     // Notify every live guest session BEFORE dispose tears the sessions down.
     // Without this, guests interpret the ensuing DataConnection close as a
     // transient network drop and burn through the full reconnect backoff
@@ -1197,9 +2407,12 @@ export class P2PHostAdapter implements EngineAdapter {
     // received the farewell (or the channel was already gone).
     await Promise.all(
       [...this.guestSessions.values()].map((s) =>
-        s.send({ type: "host_left", reason: "Host left the game" }),
+        this.send(s, { type: "host_left", reason: "Host left the game" }),
       ),
     );
+    await this.nativeBridge?.abandon().catch(() => {
+      /* best-effort teardown: persisted tombstone is cleared below */
+    });
     if (this.gameId) {
       void clearP2PHostSession(this.gameId);
     }
@@ -1208,15 +2421,35 @@ export class P2PHostAdapter implements EngineAdapter {
 
   private async handleGuestMessage(
     pid: PlayerId,
+    sourceSession: PeerSession,
     msg: P2PMessage,
   ): Promise<void> {
+    const session = this.guestSessions.get(pid);
+    // A reconnecting channel is intentionally not installed in
+    // `guestSessions` until its ACK has been delivered. Keep every control
+    // frame bound to the exact installed channel, not merely its player id.
+    if (session !== sourceSession) return;
+    if (!this.ownsAuthority()) {
+      if (session) this.rejectSuperseded(session);
+      return;
+    }
+    if (
+      msg.authority
+      && (msg.authority.sessionKey !== this.authority.sessionKey
+        || msg.authority.hostIncarnation !== this.authority.hostIncarnation)
+    ) {
+      if (session) {
+        void this.send(session, { type: "action_rejected", reason: "Stale host incarnation" });
+      }
+      return;
+    }
     switch (msg.type) {
       case "action": {
         // Verify sender identity to prevent guest 2 spoofing as guest 3.
         if (msg.senderPlayerId !== pid) {
           const session = this.guestSessions.get(pid);
           if (session) {
-            session.send({
+            void this.send(session, {
               type: "action_rejected",
               reason: `senderPlayerId mismatch (declared ${msg.senderPlayerId}, session owns ${pid})`,
             });
@@ -1232,7 +2465,7 @@ export class P2PHostAdapter implements EngineAdapter {
         if (this.eliminatedSeats.has(pid)) {
           const session = this.guestSessions.get(pid);
           if (session) {
-            session.send({
+            void this.send(session, {
               type: "action_rejected",
               reason: "Player has conceded and can no longer act",
             });
@@ -1242,7 +2475,7 @@ export class P2PHostAdapter implements EngineAdapter {
         if (this.gameRunState !== "running") {
           const session = this.guestSessions.get(pid);
           if (session) {
-            session.send({
+            void this.send(session, {
               type: "action_rejected",
               reason: `Game ${this.gameRunState}`,
             });
@@ -1256,26 +2489,105 @@ export class P2PHostAdapter implements EngineAdapter {
           // tag with the authenticated session identity — the wire payload
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
-          const result = await this.wasm.submitAction(msg.action, pid);
+          const result = this.nativeBridge
+            ? await this.nativeBridge.submitAction(msg.action, pid)
+            : await this.wasm.submitAction(msg.action, pid);
+          if (isZeroCountDebugCreate(msg.action)) {
+            const session = this.guestSessions.get(pid);
+            if (session) await this.send(session, { type: "action_noop" });
+            break;
+          }
           await this.broadcastStateUpdate(result.events, result.log_entries);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
           await this.runAiLoop();
+          this.persistAuthoritativeState();
           // Emit local stateChanged so host UI updates for opponent actions.
-          const state = await this.wasm.getState();
-          const legalResult = await this.wasm.getLegalActions();
-          this.emit({
-            type: "stateChanged",
-            state,
-            events: result.events,
-            legalResult,
-            logEntries: result.log_entries,
-          });
+          if (!this.nativeBridge) {
+            this.emit({
+              type: "stateChanged",
+              snapshot: await this.wasm.getSnapshot(),
+              events: result.events,
+              logEntries: result.log_entries,
+            });
+          }
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           const session = this.guestSessions.get(pid);
-          if (session) session.send({ type: "action_rejected", reason });
+          if (session) void this.send(session, { type: "action_rejected", reason });
+        }
+        break;
+      }
+      case "interaction": {
+        const session = this.guestSessions.get(pid);
+        if (!session || msg.senderPlayerId !== pid) {
+          if (session) void this.send(session, { type: "action_rejected", reason: "senderPlayerId mismatch" });
+          return;
+        }
+        if (this.eliminatedSeats.has(pid) || this.gameRunState !== "running") {
+          void this.send(session, {
+            type: "action_rejected",
+            reason: this.eliminatedSeats.has(pid)
+              ? "Player has conceded and can no longer act"
+              : `Game ${this.gameRunState}`,
+          });
+          return;
+        }
+        try {
+          const result = this.nativeBridge
+            ? await this.nativeBridge.submitInteraction(msg.submission, pid)
+            : await this.wasm.submitInteraction(msg.submission, pid);
+          await this.broadcastStateUpdate(result.events, result.log_entries);
+          await this.runAiLoop();
+          this.persistAuthoritativeState();
+          if (!this.nativeBridge) {
+            this.emit({
+              type: "stateChanged",
+              snapshot: await this.wasm.getSnapshot(),
+              events: result.events,
+              logEntries: result.log_entries,
+            });
+          }
+        } catch (err) {
+          void this.send(session, {
+            type: "action_rejected",
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+        break;
+      }
+      case "preview_mana_payment": {
+        const session = this.guestSessions.get(pid);
+        if (!session) return;
+        if (this.eliminatedSeats.has(pid)) {
+          void this.send(session, {
+            type: "mana_payment_preview_rejected",
+            requestId: msg.requestId,
+            reason: "Player has conceded and can no longer act",
+          });
+          return;
+        }
+        if (this.gameRunState !== "running") {
+          void this.send(session, {
+            type: "mana_payment_preview_rejected",
+            requestId: msg.requestId,
+            reason: `Game ${this.gameRunState}`,
+          });
+          return;
+        }
+        try {
+          const sourceIds = this.nativeBridge
+            ? await this.nativeBridge.previewManaPayment(msg.action, pid)
+            : await this.wasm.previewManaPayment(msg.action, pid);
+          void this.send(session, { type: "mana_payment_preview", requestId: msg.requestId, sourceIds });
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          void this.send(session, {
+            type: "mana_payment_preview_rejected",
+            requestId: msg.requestId,
+            reason,
+          });
         }
         break;
       }
@@ -1287,12 +2599,25 @@ export class P2PHostAdapter implements EngineAdapter {
         // "kicked") so their log entries read correctly.
         for (const [otherPid, s] of this.guestSessions) {
           if (otherPid === pid) continue;
-          s.send({
+          void this.send(s, {
             type: "player_conceded",
             playerId: pid,
             reason: "Player conceded",
           });
         }
+        break;
+      }
+      case "match_concede": {
+        if (!this.boundMatchConcede) {
+          if (session) {
+            void this.send(session, {
+              type: "action_rejected",
+              reason: "Whole-match concession is unavailable for this game",
+            });
+          }
+          return;
+        }
+        this.requestBoundMatchConcede(pid);
         break;
       }
       default:
@@ -1301,6 +2626,7 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private handleGuestDisconnect(pid: PlayerId): void {
+    if (!this.ownsAuthority()) return;
     if (!this.guestSessions.has(pid)) return;
     if (this.disconnectedSeats.has(pid)) return;
 
@@ -1308,7 +2634,10 @@ export class P2PHostAdapter implements EngineAdapter {
 
     if (!this.gameStarted) {
       void this.enqueuePregameOp(async () => {
+        if (!this.ownsAuthority()) return;
         if (this.gameStarted) return;
+        await this.releaseNativePregameSeat(pid, "disconnect");
+        if (!this.ownsAuthority()) return;
         // Pre-game disconnect: free the seat back to the lobby. Drop the token
         // (no reconnect path before game start). The seat number is reused via
         // `nextSeat` rewind so the next joiner takes the same slot.
@@ -1329,6 +2658,14 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
+    if (this.gameRunState === "terminal") {
+      this.disconnectedSeats.set(pid, {
+        disconnectedAt: Date.now(),
+        timer: null,
+      });
+      return;
+    }
+
     // Mid-game disconnect: hold the seat open indefinitely. We do NOT
     // auto-concede a dropped player — no grace timer is armed. The game stays
     // `paused-disconnect`, which auto-resumes the moment the player reconnects
@@ -1345,8 +2682,8 @@ export class P2PHostAdapter implements EngineAdapter {
     // Notify remaining guests.
     for (const [otherPid, session] of this.guestSessions) {
       if (otherPid === pid) continue;
-      session.send({ type: "player_disconnected", playerId: pid });
-      session.send({ type: "game_paused", reason: "Player disconnected" });
+      void this.send(session, { type: "player_disconnected", playerId: pid });
+      void this.send(session, { type: "game_paused", reason: "Player disconnected" });
     }
 
     this.emit({
@@ -1357,9 +2694,22 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "gamePaused", reason: "Player disconnected" });
   }
 
-  private handleReconnect(session: PeerSession, playerToken: string): void {
+  private handleReconnect(
+    session: PeerSession,
+    playerToken: string,
+    sessionKey?: P2PSessionKey,
+  ): void {
+    if (!this.ownsAuthority()) {
+      this.rejectSuperseded(session);
+      return;
+    }
+    if (sessionKey !== undefined && sessionKey !== this.sessionKey) {
+      void this.send(session, { type: "reconnect_rejected", reason: "Wrong P2P session" });
+      session.close("Wrong P2P session");
+      return;
+    }
     if (this.kickedTokens.has(playerToken)) {
-      session.send({ type: "reconnect_rejected", reason: "Player kicked" });
+      void this.send(session, { type: "reconnect_rejected", reason: "Player kicked" });
       session.close("Kicked");
       return;
     }
@@ -1371,12 +2721,12 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     }
     if (pid === null) {
-      session.send({ type: "reconnect_rejected", reason: "Unknown token" });
+      void this.send(session, { type: "reconnect_rejected", reason: "Unknown token" });
       session.close("Unknown token");
       return;
     }
     if (!this.disconnectedSeats.has(pid)) {
-      session.send({
+      void this.send(session, {
         type: "reconnect_rejected",
         reason: "No grace window active for this seat",
       });
@@ -1384,42 +2734,146 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
-    const grace = this.disconnectedSeats.get(pid)!;
-    if (grace.timer !== null) clearTimeout(grace.timer);
-    this.disconnectedSeats.delete(pid);
-    this.guestSessions.set(pid, session);
+    if (this.pendingReconnectSessions.has(pid)) {
+      void this.send(session, { type: "reconnect_rejected", reason: "Reconnect already in progress" });
+      session.close("Reconnect already in progress");
+      return;
+    }
 
-    // Wire subsequent messages from this guest.
-    session.onMessage((msg) => this.handleGuestMessage(pid as PlayerId, msg));
+    // Consume every pre-ACK frame. If a channel sends action/concede/control
+    // frames while the snapshot is in flight, those frames must never be
+    // replayed into the promoted session later.
+    session.onMessage(() => undefined);
+    this.pendingReconnectSessions.set(pid, session);
+    void this.completeReconnect(pid, session);
+  }
 
-    // Send fresh state to the reconnecting guest.
-    void (async () => {
-      const snapshot = await this.wasm.getViewerSnapshot(pid as PlayerId);
-      session.send({
+  private async completeReconnect(pid: PlayerId, session: PeerSession): Promise<void> {
+    await this.enqueueDelivery(() => this.completeReconnectAfterHandoff(pid, session));
+  }
+
+  private async completeReconnectAfterHandoff(pid: PlayerId, session: PeerSession): Promise<void> {
+    try {
+      const handoff = await this.reconnectHandoff(pid);
+      if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+
+      const acknowledged = await this.send(session, {
         type: "reconnect_ack",
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-        assignedPlayerId: pid as PlayerId,
-        state: snapshot.state,
+        assignedPlayerId: pid,
+        revision: handoff.revision,
+        state: handoff.snapshot.state,
         playerNames: this.playerNamesForSeats(),
-        ...legalActionsToWire(snapshot),
+        ...legalActionsToWire(handoff.snapshot.legalResult),
       });
-    })();
-
-    // Notify other guests.
-    for (const [otherPid, otherSession] of this.guestSessions) {
-      if (otherPid === pid) continue;
-      otherSession.send({ type: "player_reconnected", playerId: pid });
-    }
-    this.emit({ type: "playerReconnected", playerId: pid });
-
-    // Resume if no other seats are paused.
-    if (this.disconnectedSeats.size === 0 && this.gameRunState === "paused-disconnect") {
-      this.gameRunState = "running";
-      for (const [, s] of this.guestSessions) {
-        s.send({ type: "game_resumed" });
+      // A queued send can be dropped after the reconnect handoff was captured.
+      // Only a channel that actually accepted its ACK can take the seat; a
+      // failed ACK remains disconnected and is eligible for a later retry.
+      if (!acknowledged) {
+        this.failPendingReconnect(pid, session, "Reconnect acknowledgement could not be delivered");
+        return;
       }
-      this.emit({ type: "gameResumed" });
+      if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+
+      if (this.deliveredNativeAiDriverFault !== null) {
+        const faultDelivered = await this.send(session, {
+          type: "ai_driver_fault",
+          ...this.deliveredNativeAiDriverFault,
+        });
+        if (!faultDelivered) {
+          this.failPendingReconnect(pid, session, "Reconnect fault could not be delivered");
+          return;
+        }
+      }
+      if (this.terminalResult !== null) {
+        const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
+        const terminalDelivered = await this.send(session, { type: "terminal_result", result });
+        if (!terminalDelivered) {
+          this.failPendingReconnect(pid, session, "Reconnect terminal result could not be delivered");
+          return;
+        }
+      }
+      if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+
+      const grace = this.disconnectedSeats.get(pid);
+      if (!grace) return;
+      if (grace.timer !== null) clearTimeout(grace.timer);
+      this.pendingReconnectSessions.delete(pid);
+      this.disconnectedSeats.delete(pid);
+      this.guestSessions.set(pid, session);
+      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+
+      for (const [otherPid, otherSession] of this.guestSessions) {
+        if (otherPid !== pid) void this.send(otherSession, { type: "player_reconnected", playerId: pid });
+      }
+      this.emit({ type: "playerReconnected", playerId: pid });
+      this.resumeIfUnblocked();
+    } catch (error) {
+      this.failPendingReconnect(pid, session, "Reconnect acknowledgement failed");
+      traceAdapter("Host", "reconnect-ack-failed", {
+        pid,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
+  }
+
+  /** Capture state, legal actions, and their authority revision as one handoff.
+   * WASM has no server revision, so retry if an action fan-out advances the
+   * local revision while its viewer snapshot is resolving. */
+  private async reconnectHandoff(pid: PlayerId): Promise<{ revision: number; snapshot: EngineSnapshot }> {
+    if (this.nativeBridge) {
+      const delivered = this.nativeDeliveredViews.get(pid);
+      if (!delivered) throw new AdapterError("P2P_ERROR", `No delivered native snapshot for seat ${pid}`, true);
+      return delivered;
+    }
+    while (this.ownsAuthority()) {
+      const revision = this.authoritativeRevision;
+      const viewer = await this.wasm.getViewerSnapshot(pid);
+      if (revision === this.authoritativeRevision) {
+        return { revision, snapshot: { state: viewer.state, legalResult: viewer, seq: nextSnapshotSeq() } };
+      }
+    }
+    throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+  }
+
+  private clearPendingReconnectReservation(session: PeerSession): void {
+    for (const [pid, pending] of this.pendingReconnectSessions) {
+      if (pending === session) {
+        this.pendingReconnectSessions.delete(pid);
+        return;
+      }
+    }
+  }
+
+  private failPendingReconnect(pid: PlayerId, session: PeerSession, reason: string): void {
+    if (this.pendingReconnectSessions.get(pid) !== session) return;
+    this.pendingReconnectSessions.delete(pid);
+    // An otherwise open guest needs an explicit terminal response; a bare
+    // close is treated as a transient transport loss and starts its retry loop.
+    // `PeerSession.close` preserves already-queued sends, so this rejection is
+    // written before the farewell close frame when the transport remains open.
+    void this.send(session, { type: "reconnect_rejected", reason });
+    session.close(reason);
+  }
+
+  private closePendingReconnect(pid: PlayerId, reason: string): void {
+    const session = this.pendingReconnectSessions.get(pid);
+    if (!session) return;
+    this.pendingReconnectSessions.delete(pid);
+    session.close(reason);
+  }
+
+  private resumeIfUnblocked(): void {
+    if (
+      this.disconnectedSeats.size !== 0
+      || this.pendingReconnectSessions.size !== 0
+      || (this.gameRunState !== "paused-disconnect" && this.gameRunState !== "paused-manual")
+    ) return;
+    this.gameRunState = "running";
+    for (const session of this.guestSessions.values()) {
+      void this.send(session, { type: "game_resumed" });
+    }
+    this.emit({ type: "gameResumed" });
   }
 
   /**
@@ -1434,6 +2888,7 @@ export class P2PHostAdapter implements EngineAdapter {
     reason: string,
     origin: "kick" | "conceded",
   ): Promise<void> {
+    if (!this.ownsAuthority()) return;
     // Cancel any active grace timer for this seat. `timer` may be null if the
     // host already called `holdForReconnect`.
     const grace = this.disconnectedSeats.get(pid);
@@ -1441,6 +2896,7 @@ export class P2PHostAdapter implements EngineAdapter {
       if (grace.timer !== null) clearTimeout(grace.timer);
       this.disconnectedSeats.delete(pid);
     }
+    this.closePendingReconnect(pid, "Player conceded");
     // Remove the session for self-concede / grace-expiry paths. (The kick
     // path removes its own session before calling concedePlayer so it can
     // send the `kick` wire message first; double-deletion is a no-op here.)
@@ -1459,18 +2915,20 @@ export class P2PHostAdapter implements EngineAdapter {
       // Concede's engine guard requires `actor === player_id`. `pid` is both
       // the seat being conceded and the authenticated identity we're acting
       // on behalf of (e.g. grace-expiry or kick).
-      const result = await this.wasm.submitAction(concedeAction, pid);
-      await this.broadcastStateUpdate(result.events, result.log_entries);
+      const result = this.nativeBridge
+        ? await this.nativeBridge.submitAction(concedeAction, pid)
+        : await this.wasm.submitAction(concedeAction, pid);
+      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
       await this.runAiLoop();
-      const state = await this.wasm.getState();
-      const legalResult = await this.wasm.getLegalActions();
-      this.emit({
-        type: "stateChanged",
-        state,
-        events: result.events,
-        legalResult,
-        logEntries: result.log_entries,
-      });
+      this.persistAuthoritativeState();
+      if (!this.nativeBridge) {
+        this.emit({
+          type: "stateChanged",
+          snapshot: await this.wasm.getSnapshot(),
+          events: result.events,
+          logEntries: result.log_entries,
+        });
+      }
       this.emit(
         origin === "kick"
           ? { type: "playerKicked", playerId: pid, reason }
@@ -1479,17 +2937,8 @@ export class P2PHostAdapter implements EngineAdapter {
     } catch (err) {
       console.error("[P2PHost] concedePlayer failed:", err);
     }
-    // Resume game state if this concede unblocked the pause.
-    if (
-      this.disconnectedSeats.size === 0 &&
-      this.gameRunState === "paused-disconnect"
-    ) {
-      this.gameRunState = "running";
-      for (const [, s] of this.guestSessions) {
-        s.send({ type: "game_resumed" });
-      }
-      this.emit({ type: "gameResumed" });
-    }
+    // A concession may clear the final outstanding reconnect reservation.
+    this.resumeIfUnblocked();
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -1501,8 +2950,10 @@ export class P2PHostAdapter implements EngineAdapter {
    * Adds the seat's token to the denylist so they cannot reconnect.
    */
   async kickPlayer(pid: PlayerId, reason: string = "Kicked by host"): Promise<void> {
+    if (!this.ownsAuthority()) return;
     const token = this.playerTokens.get(pid);
     if (token) this.kickedTokens.add(token);
+    this.closePendingReconnect(pid, "Kicked");
     // Persist the kick before the session close — the kickedTokens set
     // survives host reload so a kicked guest can't sneak back in on
     // resume.
@@ -1512,7 +2963,7 @@ export class P2PHostAdapter implements EngineAdapter {
     // for an already-removed seat.
     const session = this.guestSessions.get(pid);
     if (session) {
-      session.send({ type: "kick", reason });
+      void this.send(session, { type: "kick", reason });
       try { session.close("Kicked"); } catch { /* best-effort */ }
       this.guestSessions.delete(pid);
     }
@@ -1521,7 +2972,7 @@ export class P2PHostAdapter implements EngineAdapter {
     // locally; remaining peers need the wire message).
     for (const [otherPid, s] of this.guestSessions) {
       if (otherPid === pid) continue;
-      s.send({ type: "player_kicked", playerId: pid, reason });
+      void this.send(s, { type: "player_kicked", playerId: pid, reason });
     }
   }
 
@@ -1530,11 +2981,12 @@ export class P2PHostAdapter implements EngineAdapter {
    * Cancels their grace timer and routes to `concedePlayer`.
    */
   async concedeDisconnected(pid: PlayerId): Promise<void> {
+    if (!this.ownsAuthority()) return;
     const reason = "Host continued without reconnecting player";
     await this.concedePlayer(pid, reason, "conceded");
     for (const [otherPid, s] of this.guestSessions) {
       if (otherPid === pid) continue;
-      s.send({ type: "player_conceded", playerId: pid, reason });
+      void this.send(s, { type: "player_conceded", playerId: pid, reason });
     }
   }
 
@@ -1545,6 +2997,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * fires; only the auto-concede timer is cancelled.
    */
   holdForReconnect(pid: PlayerId): void {
+    if (!this.ownsAuthority()) return;
     const grace = this.disconnectedSeats.get(pid);
     if (grace) {
       if (grace.timer !== null) clearTimeout(grace.timer);
@@ -1560,24 +3013,27 @@ export class P2PHostAdapter implements EngineAdapter {
 
   /** Manually pause (host UI). */
   requestPause(): void {
+    if (!this.ownsAuthority()) return;
     if (this.gameRunState === "running") {
       this.gameRunState = "paused-manual";
       for (const [, s] of this.guestSessions) {
-        s.send({ type: "game_paused", reason: "Paused by host" });
+        void this.send(s, { type: "game_paused", reason: "Paused by host" });
       }
       this.emit({ type: "gamePaused", reason: "Paused by host" });
     }
   }
 
-  /** Manually resume (host UI). Only resumes if no seats are still disconnected. */
+  /** Manually resume only an explicit manual pause after every reconnect settles. */
   requestResume(): void {
+    if (!this.ownsAuthority()) return;
     if (
       this.gameRunState === "paused-manual" &&
-      this.disconnectedSeats.size === 0
+      this.disconnectedSeats.size === 0 &&
+      this.pendingReconnectSessions.size === 0
     ) {
       this.gameRunState = "running";
       for (const [, s] of this.guestSessions) {
-        s.send({ type: "game_resumed" });
+        void this.send(s, { type: "game_resumed" });
       }
       this.emit({ type: "gameResumed" });
     }
@@ -1590,17 +3046,36 @@ export class P2PHostAdapter implements EngineAdapter {
  * applies host-broadcasted state updates locally.
  */
 export class P2PGuestAdapter implements EngineAdapter {
-  private gameState: GameState | null = null;
-  private legalActions: LegalActionsResult = {
-    actions: [],
-    autoPassRecommended: false,
-  };
+  /**
+   * The single cached engine pair, rebuilt (and re-stamped) once per inbound
+   * state-bearing message — `game_setup`, `reconnect_ack`, `state_update`.
+   * `getState`/`getLegalActions` both read from THIS object, so they can no
+   * longer straddle two updates the way two independently-cached fields could.
+   * The host's ordered DataChannel delivers updates in engine order, so
+   * stamping on arrival reproduces that order exactly.
+   */
+  private snapshot: EngineSnapshot | null = null;
   private listeners: P2PAdapterEventListener[] = [];
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextManaPaymentPreviewRequestId = 1;
+  private pendingManaPaymentPreviews = new Map<
+    number,
+    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
   private session: PeerSession | null = null;
+  /** The current transport becomes authenticated only after its setup ACK. */
+  private authenticatedSession: PeerSession | null = null;
   private playerToken: string | null = null;
   private assignedPlayerId: PlayerId | null = null;
+  /** Current host lease accepted from game_setup/reconnect_ack. */
+  private authority: P2PAuthorityStamp | null = null;
+  readonly supportsMatchConcede: true | undefined;
+  private matchConcedeSent = false;
+  /** Revision of the cached state frame. A terminal result is bound to this
+   * exact final state, not merely to the room code. */
+  private cachedRevision: number | null = null;
+  private readonly acceptedAiDriverFaultIds = new Set<number>();
   /**
    * Once true, the adapter is in a terminal state (kicked, reconnect rejected,
    * or disposed). `handleHostDisconnect` bails out so the auto-reconnect loop
@@ -1631,10 +3106,14 @@ export class P2PGuestAdapter implements EngineAdapter {
     // persisted before a prefix bump still resolve. Falls back to
     // `hostPeerId` when omitted (callers that don't persist across bumps).
     private readonly sessionKey?: string,
+    existingAuthority?: P2PAuthorityStamp,
+    matchConcedeBound: boolean = false,
   ) {
     if (existingPlayerToken) {
       this.playerToken = existingPlayerToken;
     }
+    this.authority = existingAuthority ?? null;
+    this.supportsMatchConcede = matchConcedeBound ? true : undefined;
     this.gameSetupPromise = new Promise<SubmitResult>((resolve, reject) => {
       this.gameSetupResolve = resolve;
       this.gameSetupReject = reject;
@@ -1659,27 +3138,45 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.attachSession(this.initialConn);
     if (this.playerToken) {
       traceAdapter("Guest", "send-reconnect", { hostPeerId: this.hostPeerId });
-      this.session!.send({ type: "reconnect", playerToken: this.playerToken });
+      this.send({
+        type: "reconnect",
+        playerToken: this.playerToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+        ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
+      });
     } else {
       traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
-      this.session!.send({
+      this.send({
         type: "guest_deck",
         deckData: this.deckData,
         displayName: this.displayName,
         reservationToken: this.reservationToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       });
     }
   }
 
   private attachSession(conn: DataConnection): void {
+    if (this.terminated) {
+      conn.close();
+      return;
+    }
     traceAdapter("Guest", "attach-session", { connOpen: conn.open });
     const session = createPeerSession(conn, {
       onSessionEnd: () => {
-        this.handleHostDisconnect();
+        this.handleHostDisconnect(session);
       },
     });
+    this.rejectPendingSubmission(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),
+    );
     this.session = session;
-    session.onMessage((msg) => this.handleHostMessage(msg));
+    this.authenticatedSession = null;
+    this.matchConcedeSent = false;
+    session.onMessage((msg) => this.handleHostMessage(session, msg));
   }
 
   async initializeGame(): Promise<SubmitResult> {
@@ -1694,24 +3191,11 @@ export class P2PGuestAdapter implements EngineAdapter {
     // as the engine `actor`. If this client were malicious and claimed
     // another identity, the host would detect the mismatch and drop the
     // action before touching the engine.
-    if (!this.session) {
-      throw new AdapterError(
-        "P2P_ERROR",
-        "Not connected to host",
-        true,
-      );
-    }
-    if (this.assignedPlayerId === null) {
-      throw new AdapterError(
-        "P2P_ERROR",
-        "Not yet assigned a player ID",
-        true,
-      );
-    }
+    this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      this.session!.send({
+      this.send({
         type: "action",
         senderPlayerId: this.assignedPlayerId!,
         action,
@@ -1719,22 +3203,102 @@ export class P2PGuestAdapter implements EngineAdapter {
     });
   }
 
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.requireAuthenticatedSession();
+    return new Promise<SubmitResult>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      this.send({
+        type: "interaction",
+        senderPlayerId: this.assignedPlayerId!,
+        submission,
+      });
+    });
+  }
+
+  async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
+    this.requireAuthenticatedSession();
+
+    const requestId = this.nextManaPaymentPreviewRequestId++;
+    return new Promise<ObjectId[]>((resolve, reject) => {
+      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      this.send({ type: "preview_mana_payment", requestId, action });
+    });
+  }
+
   async getState(): Promise<GameState> {
-    if (!this.gameState) {
+    if (!this.snapshot) {
       throw new AdapterError("P2P_ERROR", "No game state available", false);
     }
-    return this.gameState;
+    return this.snapshot.state;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this.legalActions;
+    return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
   }
 
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
+  async getSnapshot(): Promise<EngineSnapshot> {
+    if (!this.snapshot) {
+      throw new AdapterError("P2P_ERROR", "No game state available", false);
+    }
+    return this.snapshot;
   }
 
-  restoreState(_state: GameState): void {
+  /** Rebuild the cached pair from an inbound state-bearing message, stamping
+   *  it with a fresh globally-monotonic seq at arrival. */
+  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+    this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    return this.snapshot;
+  }
+
+  private async acceptTerminalResult(
+    session: PeerSession,
+    message: Extract<P2PMessage, { type: "terminal_result" }>,
+  ): Promise<void> {
+    if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
+    const { result } = message;
+    if (
+      !isValidP2PTerminalResult(result)
+      || !message.authority
+      || message.authority.sessionKey !== result.lease.sessionKey
+      || message.authority.hostIncarnation !== result.lease.hostIncarnation
+      || this.authority === null
+      || result.key !== this.authority.sessionKey
+      || result.lease.hostIncarnation !== this.authority.hostIncarnation
+      || result.recipient !== this.assignedPlayerId
+      || this.cachedRevision !== result.revision
+      || this.snapshot?.state.waiting_for.type !== "GameOver"
+    ) {
+      this.emit({ type: "terminalUnavailable", message: "Rejected an unbound P2P terminal result" });
+      return;
+    }
+    try {
+      if ((await p2pFinalStateCommitment(this.snapshot.state)) !== result.finalStateCommitment) {
+        this.emit({ type: "terminalUnavailable", message: "P2P terminal result did not match the final state" });
+        return;
+      }
+      if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
+      if (!(await commitP2PTerminalResult(result))) {
+        this.emit({ type: "terminalUnavailable", message: "Conflicting P2P terminal result" });
+        return;
+      }
+    } catch (error) {
+      this.emit({
+        type: "terminalUnavailable",
+        message: error instanceof Error ? error.message : "Failed to retain P2P terminal result",
+      });
+      return;
+    }
+    if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
+    this.terminate();
+    void clearP2PSession(this.sessionKey ?? this.hostPeerId);
+    this.emit({ type: "terminalResult", result });
+  }
+
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
@@ -1747,32 +3311,48 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   sendConcede(): void {
-    if (!this.session) return;
-    this.session.send({ type: "concede" });
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "concede" });
+  }
+
+  /** Requests settlement from the authenticated host-side match authority. */
+  sendMatchConcede(): void {
+    if (!this.currentAuthenticatedSession()) return;
+    if (!this.supportsMatchConcede || this.matchConcedeSent) return;
+    this.matchConcedeSent = true;
+    this.send({ type: "match_concede" });
   }
 
   dispose(): void {
     // Mark terminal BEFORE closing the session so the session's
     // `onSessionEnd` → `handleHostDisconnect` short-circuit fires and skips
     // the auto-reconnect loop.
-    this.terminated = true;
-    if (this.session) {
-      this.session.close();
-      this.session = null;
-    }
+    this.terminate(new AdapterError("P2P_ERROR", "Adapter disposed", true));
     try {
       this.hostPeer.destroy();
     } catch {
       /* best-effort */
     }
-    this.gameState = null;
-    this.legalActions = { actions: [], autoPassRecommended: false };
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    this.snapshot = null;
     this.listeners = [];
   }
 
-  private handleHostMessage(msg: P2PMessage): void {
+  private handleHostMessage(session: PeerSession, msg: P2PMessage): void {
+    if (session !== this.session) return;
+    if (this.terminated) return;
+    if (
+      this.authenticatedSession !== session
+      && msg.type !== "game_setup"
+      && msg.type !== "reconnect_ack"
+      && msg.type !== "reconnect_rejected"
+      && msg.type !== "kick"
+      // The host broadcasts this to both joined and still-lobbying guests
+      // before it closes their sessions, so it must stop reconnecting even
+      // before this connection has delivered its setup handshake.
+      && msg.type !== "host_left"
+    ) {
+      return;
+    }
     traceAdapter("Guest", "host-message", { type: msg.type });
     // First-contact protocol-version check. `game_setup` and `reconnect_ack`
     // both carry `wireProtocolVersion`; if a future host bumps the version
@@ -1782,46 +3362,72 @@ export class P2PGuestAdapter implements EngineAdapter {
     // PEER_ID_PREFIX bump prevents *room discovery* across mismatched
     // bundles, but a same-version-prefix-different-message-shape change
     // would slip past it — that's what this guards.
+    //
+    // This is the SOLE guest-side enforcement point for the rule.
+    // `validateMessage` once checked it too, one layer lower: it threw from
+    // inside `decodeWireMessage`, and `peer.ts` warns-and-drops on a decode
+    // throw, so the frame died in the transport and this branch was dead code
+    // for the case it was written for. A lower layer cannot surface the
+    // mismatch — rejecting `gameSetupPromise` and emitting `reconnectFailed`
+    // both need adapter state the transport has no access to.
     if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
-      if (msg.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
-        const reason = `Wire protocol mismatch: host sent v${msg.wireProtocolVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+      // Read through a widened local: these two messages DECLARE the field at
+      // the literal `typeof WIRE_PROTOCOL_VERSION`, so comparing `msg.…`
+      // directly narrows `msg` to `never` in the mismatch branch and the
+      // interpolation below stops compiling. The runtime value is whatever the
+      // host actually sent, which is the entire point of the check.
+      const hostVersion: number = msg.wireProtocolVersion;
+      if (hostVersion !== WIRE_PROTOCOL_VERSION) {
+        // This reason reaches the user RAW: rejectGameSetup → AdapterError
+        // → GameProvider's error toast. `i18n/README.md` asks for `t()` on
+        // frontend-authored strings; this path predates that and is left as
+        // found — the violation is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: host sent v${hostVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PGuestAdapter]", reason);
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(reason);
         this.emit({ type: "reconnectFailed", reason });
         return;
       }
     }
+    if (!this.acceptsHostAuthority(msg)) return;
     switch (msg.type) {
       case "game_setup": {
+        this.authenticatedSession = session;
         this.assignedPlayerId = msg.assignedPlayerId;
         this.playerToken = msg.playerToken;
-        void saveP2PSession(this.sessionKey ?? this.hostPeerId, {
-          playerToken: msg.playerToken,
-          playerId: msg.assignedPlayerId,
-        });
-        this.gameState = msg.state;
-        this.legalActions = legalActionsFromWire(msg);
+        if (msg.authority) {
+          this.authority = msg.authority;
+          void saveP2PSession(this.sessionKey ?? this.hostPeerId, {
+            playerToken: msg.playerToken,
+            playerId: msg.assignedPlayerId,
+            authority: this.authority,
+          });
+        }
+        this.cachedRevision = msg.revision ?? null;
+        this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.settleGameSetup({ events: msg.events });
         break;
       }
       case "reconnect_ack": {
+        this.authenticatedSession = session;
         this.assignedPlayerId = msg.assignedPlayerId;
-        if (this.playerToken) {
+        if (this.playerToken && msg.authority) {
+          this.authority = msg.authority;
           void saveP2PSession(this.sessionKey ?? this.hostPeerId, {
             playerToken: this.playerToken,
             playerId: msg.assignedPlayerId,
+            authority: this.authority,
           });
         }
-        this.gameState = msg.state;
-        this.legalActions = legalActionsFromWire(msg);
+        this.cachedRevision = msg.revision ?? null;
+        const reconnectSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.emit({
           type: "stateChanged",
-          state: msg.state,
+          snapshot: reconnectSnapshot,
           events: [],
-          legalResult: this.legalActions,
         });
         // Resolve `initializeGame()` for the reconnect path too. Reconnecting
         // guests never receive `game_setup`; without this they would hang.
@@ -1832,14 +3438,14 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "reconnect_rejected": {
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(msg.reason);
         this.emit({ type: "reconnectFailed", reason: msg.reason });
         this.emit({ type: "gameOver", winner: null, reason: msg.reason });
         break;
       }
       case "kick": {
-        this.terminated = true;
+        this.terminate();
         const kickFormat = (msg as { format?: string }).format;
         const isDeckRejection = msg.reason.startsWith("Deck rejected:");
         this.rejectGameSetup(
@@ -1851,14 +3457,31 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "host_left": {
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(msg.reason);
         this.emit({ type: "gameOver", winner: null, reason: msg.reason });
         break;
       }
+      case "terminal_result": {
+        void this.acceptTerminalResult(session, msg);
+        break;
+      }
+      case "ai_driver_fault": {
+        if (this.acceptedAiDriverFaultIds.has(msg.id)) break;
+        if (this.cachedRevision === null || this.cachedRevision < msg.revision) {
+          this.emit({ type: "terminalUnavailable", message: "Rejected an out-of-order native AI driver fault" });
+          break;
+        }
+        this.acceptedAiDriverFaultIds.add(msg.id);
+        const error = new AdapterError("P2P_ERROR", msg.message, false);
+        this.terminate(error);
+        this.emit({ type: "error", message: msg.message });
+        break;
+      }
       case "state_update": {
-        this.gameState = msg.state;
-        this.legalActions = legalActionsFromWire(msg);
+        if (this.authenticatedSession !== session) return;
+        this.cachedRevision = msg.revision ?? null;
+        const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         if (this.pendingResolve) {
           this.pendingResolve({ events: msg.events, log_entries: msg.logEntries });
           this.pendingResolve = null;
@@ -1866,9 +3489,8 @@ export class P2PGuestAdapter implements EngineAdapter {
         } else {
           this.emit({
             type: "stateChanged",
-            state: msg.state,
+            snapshot: updateSnapshot,
             events: msg.events,
-            legalResult: this.legalActions,
             logEntries: msg.logEntries,
           });
         }
@@ -1877,10 +3499,34 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "action_rejected": {
         if (this.pendingReject) {
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", msg.reason, true),
+            actionRejectionError(msg.reason),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        }
+        break;
+      }
+      case "action_noop": {
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+      case "mana_payment_preview": {
+        const pending = this.pendingManaPaymentPreviews.get(msg.requestId);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(msg.requestId);
+          pending.resolve(msg.sourceIds);
+        }
+        break;
+      }
+      case "mana_payment_preview_rejected": {
+        const pending = this.pendingManaPaymentPreviews.get(msg.requestId);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(msg.requestId);
+          pending.reject(actionRejectionError(msg.reason));
         }
         break;
       }
@@ -1960,7 +3606,81 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.gameSetupReject(new AdapterError("P2P_REJECTED", reason, false));
   }
 
-  private handleHostDisconnect(): void {
+  private rejectPendingManaPaymentPreviews(error: Error): void {
+    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+      reject(error);
+    }
+    this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectPendingSubmission(error: Error): void {
+    this.pendingReject?.(error);
+    this.pendingResolve = null;
+    this.pendingReject = null;
+  }
+
+  private acceptsHostAuthority(msg: P2PMessage): boolean {
+    if (!msg.authority) {
+      // Old room peers cannot emit a lease stamp. Hosts from this build always
+      // do, so their stale incarnations are fenced; accepting this shape keeps
+      // the additive wire change from breaking an already-open legacy room.
+      return true;
+    }
+    if (this.authority === null) return true;
+    if (msg.type === "reconnect_ack") {
+      // A legitimate same-key resume intentionally has a new incarnation.
+      if (this.authority && msg.authority.sessionKey !== this.authority.sessionKey) {
+        this.terminate();
+        this.rejectGameSetup("Host changed the P2P session key");
+        return false;
+      }
+      return true;
+    }
+    if (msg.type === "game_setup") {
+      return msg.authority.sessionKey === this.authority.sessionKey
+        && msg.authority.hostIncarnation === this.authority.hostIncarnation;
+    }
+    return this.authority !== null
+      && msg.authority.sessionKey === this.authority.sessionKey
+      && msg.authority.hostIncarnation === this.authority.hostIncarnation;
+  }
+
+  private send(message: P2PMessage): void {
+    if (!this.session) return;
+    this.session.send({ ...message, ...(this.authority ? { authority: this.authority } : {}) });
+  }
+
+  private currentAuthenticatedSession(): PeerSession | null {
+    if (
+      this.terminated
+      || this.session === null
+      || this.authenticatedSession !== this.session
+      || this.assignedPlayerId === null
+    ) {
+      return null;
+    }
+    return this.session;
+  }
+
+  private requireAuthenticatedSession(): PeerSession {
+    const session = this.currentAuthenticatedSession();
+    if (session) return session;
+    if (this.session === null) {
+      throw new AdapterError("P2P_ERROR", "Not connected to host", true);
+    }
+    throw new AdapterError("P2P_ERROR", "Not yet assigned a player ID", true);
+  }
+
+  private handleHostDisconnect(session: PeerSession): void {
+    if (session !== this.session) return;
+    this.rejectPendingSubmission(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),
+    );
+    this.authenticatedSession = null;
+    this.matchConcedeSent = false;
     this.session = null;
     // Suppress auto-reconnect in terminal states (kicked, explicitly rejected,
     // or adapter disposed). Without this, a kicked guest would spin the
@@ -1968,6 +3688,16 @@ export class P2PGuestAdapter implements EngineAdapter {
     // token.
     if (this.terminated) return;
     void this.attemptReconnect(0);
+  }
+
+  private terminate(error = new AdapterError("P2P_ERROR", "Host session terminated", true)): void {
+    this.terminated = true;
+    this.authenticatedSession = null;
+    this.rejectPendingSubmission(error);
+    this.rejectPendingManaPaymentPreviews(error);
+    const session = this.session;
+    this.session = null;
+    session?.close();
   }
 
   private async attemptReconnect(attemptIndex: number): Promise<void> {
@@ -1983,6 +3713,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       : RECONNECT_STEADY_STATE_MS;
     this.emit({ type: "reconnecting", attempt: attemptIndex + 1 });
     await new Promise((r) => setTimeout(r, delay));
+    if (this.terminated) return;
 
     try {
       const conn = this.hostPeer.connect(this.hostPeerId);
@@ -1997,11 +3728,22 @@ export class P2PGuestAdapter implements EngineAdapter {
           reject(err);
         });
       });
+      if (this.terminated) {
+        conn.close();
+        return;
+      }
       this.attachSession(conn);
+      if (this.terminated) return;
       if (this.playerToken) {
-        this.session!.send({ type: "reconnect", playerToken: this.playerToken });
+        this.send({
+          type: "reconnect",
+          playerToken: this.playerToken,
+          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+          ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
+        });
       }
     } catch (err) {
+      if (this.terminated) return;
       console.warn(
         `[P2PGuest] reconnect attempt ${attemptIndex + 1} failed:`,
         err,

@@ -57,6 +57,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::BlightEffect,
             source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -88,6 +89,7 @@ pub fn resolve(
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
 
     Ok(())

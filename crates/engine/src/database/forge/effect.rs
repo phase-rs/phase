@@ -453,7 +453,7 @@ fn translate_discard(
     })
 }
 
-// CR 701.16a: Sacrifice permanents.
+// CR 701.21a: Sacrifice permanents.
 fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = params
         .get("SacValid")

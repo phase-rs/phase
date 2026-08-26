@@ -11,7 +11,7 @@
 //!
 //! Pre-fix, mill bailed with `return Ok(())` on that pause: cards 2..N were
 //! silently stranded in the library with an orphaned pause. The fix parks the
-//! undelivered tail in `state.pending_batch_deliveries` and the
+//! undelivered tail in the active `BatchDelivery` frame and the
 //! replacement-choice resume path (`handle_replacement_choice`) drains it after
 //! each choice, re-parking when the next card surfaces its own prompt.
 //!
@@ -28,6 +28,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::{ResolutionFrame, ResolutionStateWire};
 use engine::types::zones::{EtbTapState, Zone};
 
 /// CR 614.6: "If a card would be put into a graveyard from anywhere, exile it
@@ -97,6 +98,19 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
     let mut events = Vec::new();
     mill::resolve(runner.state_mut(), &ability, &mut events).unwrap();
 
+    assert!(matches!(
+        runner.state().resolution_stack.last(),
+        Some(ResolutionFrame::BatchDelivery(_))
+    ));
+    let saved = serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+        .expect("paused BatchDelivery prompt serializes as v2");
+    assert_eq!(saved["resolution_state_version"], 2);
+    assert!(saved.get("pending_batch_deliveries").is_none());
+    assert!(saved.get("resolution_frames").is_some());
+    let restored: ResolutionStateWire =
+        serde_json::from_value(saved).expect("v2 BatchDelivery prompt restores");
+    *runner.state_mut() = restored.into_game_state();
+
     // CR 616.1: each milled card surfaces an ordering prompt between the two
     // applicable redirects. Answer each (index 0); bounded so a regression that
     // loops or re-prompts indefinitely fails loudly instead of hanging.
@@ -112,6 +126,15 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
             .act(GameAction::ChooseReplacement { index: 0 })
             .expect("answer the CR 616.1 ordering prompt");
         prompts_answered += 1;
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            assert!(matches!(
+                runner.state().resolution_stack.last(),
+                Some(ResolutionFrame::BatchDelivery(_))
+            ));
+        }
     }
 
     let state = runner.state();
@@ -143,7 +166,7 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
         "no milled card may reach the graveyard under the redirects"
     );
     assert!(
-        state.pending_batch_deliveries.is_none(),
+        state.active_batch_delivery().is_none(),
         "the parked mill tail must be fully drained"
     );
 }

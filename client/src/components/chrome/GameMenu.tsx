@@ -3,13 +3,23 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
+import { EngineModeBadge } from "./EngineModeBadge.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
-import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+
+/**
+ * Who a rollback request is addressed to. A string union rather than a boolean
+ * because the axis is *who the audience is*, not a yes/no: at a table the
+ * request is a proposal every other human votes on; solo vs. AI there is nobody
+ * to ask and it is simply an undo. Only the label differs — the wire request is
+ * the same either way.
+ */
+export type TakebackAudience = "table" | "solo";
 
 interface GameMenuProps {
   gameId: string;
@@ -17,14 +27,21 @@ interface GameMenuProps {
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
-  multiplayerBoardLayout?: MultiplayerBoardLayout;
+  /** The currently displayed layout, already resolved from the raw preference. */
+  multiplayerBoardLayout?: ResolvedMultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
+  showMultiplayerSplitLayoutNudge?: boolean;
+  onTryMultiplayerSplitLayout?: () => void;
+  onDismissMultiplayerSplitLayoutNudge?: () => void;
   onSettingsClick: () => void;
   onHelpClick: () => void;
   onConcede?: () => void;
   /** GH #1507: ask every other human player to approve rolling the game
    * back to the state before this player's last action. Online-only. */
   onRequestTakeback?: () => void;
+  /** Label axis for the entry above. Defaults to `"table"`, which is the
+   *  pre-existing wording. */
+  takebackAudience?: TakebackAudience;
   /** Show the always-visible Sandbox Tools button. Gated by the caller to
    *  game modes where debug actions actually work (vs-AI, local, or a
    *  multiplayer sandbox). */
@@ -46,10 +63,14 @@ export function GameMenu({
   onToggleAiHand,
   multiplayerBoardLayout,
   onToggleMultiplayerBoardLayout,
+  showMultiplayerSplitLayoutNudge = false,
+  onTryMultiplayerSplitLayout,
+  onDismissMultiplayerSplitLayoutNudge,
   onSettingsClick,
   onHelpClick,
   onConcede,
   onRequestTakeback,
+  takebackAudience = "table",
   showSandboxTools,
   onSandboxToolsClick,
   debugClickModeButtonVisible = false,
@@ -94,7 +115,10 @@ export function GameMenu({
   return (
     <div
       ref={menuRef}
-      className="fixed z-40 flex flex-col items-start"
+      /* Row, not a column: the engine badge sits beside the menu button. The
+         dropdown below is absolutely positioned, so it stays anchored to this
+         container's left edge and is unaffected by the row's flow. */
+      className="fixed z-40 flex items-center gap-2"
       style={{
         left: "calc(env(safe-area-inset-left) + 0.5rem)",
         top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
@@ -129,10 +153,11 @@ export function GameMenu({
           </svg>
         </button>
       </div>
+      <EngineModeBadge />
       {open && (
         <div
           aria-label={t("gameMenu.menu")}
-          className="absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
+          className="game-menu-scroll thin-scrollbar absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-1rem)] touch-pan-y overflow-y-auto overscroll-contain rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
         >
           <div className="mb-1 flex items-center gap-1 border-b border-gray-700/80 px-2 pb-1">
             <VolumeControl variant="game" />
@@ -151,6 +176,37 @@ export function GameMenu({
               }}
             />
           )}
+          {showMultiplayerSplitLayoutNudge &&
+            onTryMultiplayerSplitLayout &&
+            onDismissMultiplayerSplitLayoutNudge && (
+              <div className="mx-2 mb-1 rounded-md border border-cyan-300/20 bg-cyan-300/8 px-3 py-2">
+                <p className="text-xs leading-4 text-slate-200">
+                  {t("gameMenu.multiplayerSplitLayoutNudge.message")}
+                </p>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onDismissMultiplayerSplitLayoutNudge();
+                      setOpen(false);
+                    }}
+                    className="rounded px-2 py-1 text-xs font-semibold text-slate-300 transition-colors hover:bg-white/10 hover:text-white"
+                  >
+                    {t("gameMenu.multiplayerSplitLayoutNudge.dismiss")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onTryMultiplayerSplitLayout();
+                      setOpen(false);
+                    }}
+                    className="rounded bg-cyan-300 px-2 py-1 text-xs font-semibold text-slate-950 transition-colors hover:bg-cyan-200"
+                  >
+                    {t("gameMenu.multiplayerSplitLayoutNudge.trySplit")}
+                  </button>
+                </div>
+              </div>
+            )}
           <div className="my-1 border-t border-gray-700/70" />
           <MenuSectionLabel label={t("gameMenu.sections.tools")} />
           {showReportCard && onReportCardClick && (
@@ -213,9 +269,16 @@ export function GameMenu({
               }}
             />
           )}
-          {isOnlineMode && onRequestTakeback && (
+          {/* The prop's presence is the authority, matching `showSandboxTools`
+              two blocks above. A menu should not re-derive when an action is
+              legal — GamePage decides, from the transport that implements it. */}
+          {onRequestTakeback && (
             <MenuButton
-              label={t("gameMenu.requestTakeback")}
+              label={t(
+                takebackAudience === "solo"
+                  ? "gameMenu.undoLastAction"
+                  : "gameMenu.requestTakeback",
+              )}
               onClick={() => {
                 setOpen(false);
                 onRequestTakeback();

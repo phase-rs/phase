@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 
+import { buildGameState } from "../../test/factories/gameStateFactory";
 import { createPeerSession } from "../peer";
 import { validateMessage } from "../protocol";
 import type { P2PMessage } from "../protocol";
@@ -66,13 +67,21 @@ describe("P2P Protocol - validateMessage", () => {
 });
 
 describe("PeerSession", () => {
-  it("send resolves immediately and bypasses encoding when connection is not open", async () => {
+  it("reports a dropped send and bypasses encoding when connection is not open", async () => {
     const { conn, session } = createTestSession();
     conn.open = false;
-    // The closed-channel sentinel is now a same-microtask resolve with no
-    // bytes recorded — equivalent to the old `false` return.
-    await session.send({ type: "concede" });
+    await expect(session.send({ type: "concede" })).resolves.toBe(false);
     expect(conn.sentRaw.length).toBe(0);
+    session.close();
+  });
+
+  it("reports a dropped queued send when the channel closes before its write", async () => {
+    const { conn, session } = createTestSession();
+    const send = session.send({ type: "concede" });
+    conn.open = false;
+
+    await expect(send).resolves.toBe(false);
+    expect(conn.sentRaw).toEqual([]);
     session.close();
   });
 
@@ -229,10 +238,41 @@ describe("PeerSession", () => {
       throw new Error("channel torn down");
     };
 
-    await session.send({ type: "concede" });
+    await expect(session.send({ type: "concede" })).resolves.toBe(false);
 
     expect(onDisconnect).toHaveBeenCalledTimes(1);
     expect(onDisconnect).toHaveBeenCalledWith("Channel send failed");
     errorSpy.mockRestore();
+  });
+
+  // A wire-version skew must TRAVERSE the transport, not die inside it. This
+  // file mocks nothing, so the REAL `encodeWireMessage`/`decodeWireMessage`
+  // and the real binary framing run end to end — the one place in the suite
+  // where that is true. A `game_setup` stamped with a stale version used to
+  // throw inside `decodeWireMessage` and be swallowed by the decode `catch`
+  // above: frame dropped, channel open, nothing downstream told, guest hung.
+  // The version rule now lives solely in the adapter, so the frame must
+  // arrive at an `onMessage` handler for that rule to be able to run at all.
+  it("delivers a stale-wire-version game_setup to the message handler", async () => {
+    const { conn, session } = createTestSession();
+    const handler = vi.fn();
+    session.onMessage(handler);
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: 25,
+      assignedPlayerId: 1,
+      playerToken: "token-123",
+      state: buildGameState(),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "game_setup", wireProtocolVersion: 25 }),
+    );
+    session.close();
   });
 });

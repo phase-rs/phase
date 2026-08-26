@@ -1,3 +1,9 @@
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -142,9 +148,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--difficulty" => {
                 // Case-insensitive; unknown labels fall back to Medium via
-                // `AiDifficulty::from_label`. The determinization gate runs
-                // `--difficulty hard` on both branch and baseline so the pair
-                // isolates the K=2-vs-K=0 delta (§11).
+                // `AiDifficulty::from_label`. Run the same difficulty on branch
+                // and baseline so the pair isolates the code delta.
                 difficulty = AiDifficulty::from_label(&next_value(&mut iter, "--difficulty")?);
             }
             "--suite-filter" => {

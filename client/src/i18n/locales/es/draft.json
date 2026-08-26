@@ -59,7 +59,8 @@
     "passingLeft": "→ Pasando a la izquierda →",
     "passingRight": "← Pasando a la derecha ←",
     "connected": "Conectado",
-    "disconnected": "Desconectado"
+    "disconnected": "Desconectado",
+    "faceUpDraftCards": "Boca arriba: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",
@@ -77,17 +78,60 @@
   },
   "pack": {
     "confirmPick": "Confirmar elección",
+    "draftEffects": "Efectos de draft:",
     "waitingNext": "Esperando el siguiente sobre...",
     "cardsInPack": "{{count}} cartas en el sobre",
     "picking": "Eligiendo…",
     "autoPick": "Elección automática"
+  },
+  "sealedOpening": {
+    "title": "Abre tu pool de sellado",
+    "subtitle": "Abre seis sobres, uno a la vez.",
+    "packProgress": "Sobre {{current}} de {{total}}",
+    "openPack": "Abrir sobre",
+    "openPackArt": "Abrir ilustración del sobre",
+    "pulls": "Tus cartas",
+    "nextPack": "Siguiente sobre",
+    "viewPool": "Ver tu pool",
+    "poolTitle": "Tu pool de sellado",
+    "poolSubtitle": "Las {{count}} cartas, agrupadas por tipo.",
+    "buildDeck": "Construir mazo"
   },
   "pool": {
     "cardsDrafted": "{{count}} cartas drafteadas",
     "empty": "Aún no se ha drafteado ninguna carta",
     "sortColor": "Color",
     "sortType": "Tipo",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Blanco",
+      "blue": "Azul",
+      "black": "Negro",
+      "red": "Rojo",
+      "green": "Verde",
+      "multicolor": "Multicolor",
+      "colorless": "Incoloro",
+      "creature": "Criatura",
+      "instant": "Instantáneo",
+      "sorcery": "Conjuro",
+      "enchantment": "Encantamiento",
+      "artifact": "Artefacto",
+      "planeswalker": "Planeswalker",
+      "land": "Tierra",
+      "other": "Otro",
+      "mythic": "Mítica",
+      "rare": "Rara",
+      "uncommon": "Infrecuente",
+      "common": "Común",
+      "rarityOther": "Otras rarezas",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Clasificación — Ronda {{round}}",
@@ -100,13 +144,19 @@
   },
   "limitedDeck": {
     "poolHeading": "Grupo ({{count}})",
+    "searchPool": "Buscar en tu pool...",
     "allAdded": "Todas las cartas añadidas al mazo.",
+    "noFilterMatches": "Ninguna carta coincide con los filtros",
+    "filterUnavailable": "Los filtros no están disponibles ahora — se muestran todas las cartas.",
     "mainDeck": "Mazo principal",
     "emptyDeckHint": "Haz clic en las cartas del grupo para añadirlas a tu mazo.",
     "addableCards": "Cartas añadibles",
+    "searchAddableCards": "Buscar cartas añadibles...",
     "autoLands": "Tierras automáticas",
     "suggestDeck": "Sugerir mazo",
     "submitDeck": "Enviar mazo",
+    "validationTitle": "El mazo necesita atención",
+    "submitFailed": "No se pudo enviar el mazo",
     "removeCard": "Quitar {{name}}",
     "addCard": "Añadir {{name}}",
     "cardCount": "/ {{min}} cartas",
@@ -126,6 +176,10 @@
       "title": "Draft Rápido",
       "description": "Draftea 3 sobres con 7 drafters de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Abre seis sobres, revisa el pool completo y luego construye un mazo de 40 cartas para una partida al mejor de uno."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Pega o carga una lista de cube, ajusta las reglas de sobres y mazo, y luego draftea rápido contra bots de IA."
@@ -135,11 +189,20 @@
       "description": "Hospeda o únete a un pod con hasta 8 jugadores, draftea en directo juntos y luego juega un torneo suizo o de eliminación."
     },
     "podInProgress": "Pod Draft en curso",
+    "guestPodInProgress": "Pod unido listo para reconectar",
     "podLabel": "Pod {{kind}}",
-    "seatCount": "{{count}} asientos",
+    "guestPodLabel": "Pod de draft",
+    "seatCount_one": "{{count}} asiento",
+    "seatCount_few": "{{count}} asientos",
+    "seatCount_many": "{{count}} asientos",
+    "seatCount_other": "{{count}} asientos",
     "roomLabel": "Sala {{code}}",
-    "cardsPicked": "{{count}} cartas elegidas",
+    "cardsPicked_one": "{{count}} carta elegida",
+    "cardsPicked_few": "{{count}} cartas elegidas",
+    "cardsPicked_many": "{{count}} cartas elegidas",
+    "cardsPicked_other": "{{count}} cartas elegidas",
     "resume": "Reanudar",
+    "reconnect": "Reconectar",
     "draftInProgress": "Draft en curso",
     "draftComplete": "Draft completado",
     "resumeMatch": "Reanudar partida",
@@ -156,6 +219,7 @@
   },
   "quickPhase": {
     "drafting": "Drafteando",
+    "opening": "Abriendo sobres",
     "deckbuilding": "Construcción de mazo",
     "matchRecord": "Partida {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",
@@ -236,6 +300,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Draft Rápido",
+    "sealedTitle": "Sellado",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -261,6 +326,8 @@
     "kindPremierDesc": "Partidas de torneo al mejor de uno tras la construcción de mazo. Rondas más rápidas, sin banquillo entre juegos.",
     "kindTraditional": "Tradicional",
     "kindTraditionalDesc": "Partidas de torneo al mejor de tres tras la construcción de mazo, con banquillo entre juegos.",
+    "kindSealed": "Sellado",
+    "kindSealedDesc": "Abre seis sobres directamente en el pool de cada jugador y luego construye un mazo de torneo al mejor de uno.",
     "tournamentFormat": "Formato de torneo",
     "tournamentSwiss": "Suizo",
     "tournamentSwissDesc": "Todos siguen jugando durante tres rondas, incluso tras una derrota.",
@@ -315,7 +382,11 @@
     "sideboardGame": "Banquillo — Partida {{number}}",
     "sideboardHint": "Haz cambios en el banquillo y luego envía los datos. Tu selección está disponible a continuación.",
     "submitSideboard": "Enviar banquillo",
-    "preparingNext": "Preparando la siguiente partida..."
+    "preparingNext": "Preparando la siguiente partida...",
+    "hideOverlay": "Ocultar esta pantalla",
+    "showOverlay": "Mostrar esta pantalla",
+    "hiddenNotice": "El banquillo sigue abierto para esta partida.",
+    "hiddenNoticePlayDraw": "Aún queda por elegir entre jugar o robar en esta partida."
   },
   "podComplete": {
     "title": "Draft completado",
@@ -324,7 +395,8 @@
   "podError": {
     "kicked": "Fuiste expulsado del pod",
     "hostLeft": "El anfitrión abandonó el draft",
-    "connection": "Error de conexión"
+    "connection": "Error de conexión",
+    "retry": "Intentar reconectar"
   },
   "lobby": {
     "title": "Sala de espera del pod de draft",

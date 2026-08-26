@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
-import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../adapter/types";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
@@ -119,15 +119,18 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     const submitAction = vi
       .fn<EngineAdapter["submitAction"]>()
       .mockResolvedValue({ events: [], log_entries: [] } as unknown as SubmitResult);
-    const getState = vi
-      .fn<EngineAdapter["getState"]>()
-      .mockResolvedValue(emptyState);
-    const getLegalActions = vi
-      .fn<EngineAdapter["getLegalActions"]>()
-      .mockResolvedValue(buildLegalActionsResult());
+    // `processAction` reads the engine pair through `getSnapshot` only — the
+    // old getState + post-animation getLegalActions pair is gone.
+    const getSnapshot = vi
+      .fn<EngineAdapter["getSnapshot"]>()
+      .mockImplementation(async () => ({
+        state: emptyState,
+        legalResult: buildLegalActionsResult(),
+        seq: nextSnapshotSeq(),
+      }));
 
     useGameStore.setState({
-      adapter: buildEngineAdapterMock(emptyState, { submitAction, getState, getLegalActions }),
+      adapter: buildEngineAdapterMock(emptyState, { submitAction, getSnapshot }),
       gameState: emptyState,
       gameMode: "ai",
     });
@@ -138,6 +141,9 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
 
     // The healthy path must never surface the engine-lost recovery prompt.
     expect(notifyEngineLost).not.toHaveBeenCalled();
+    // Exactly one engine pair read per dispatch — the split-epoch second fetch
+    // is gone, so a regression that reintroduces it shows up here.
+    expect(getSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it("drops a queued local action when the waiting prompt changes before it runs", async () => {
@@ -163,17 +169,18 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
           }),
       )
       .mockResolvedValue({ events: [], log_entries: [] } as unknown as SubmitResult);
-    const getState = vi
-      .fn<EngineAdapter["getState"]>()
-      .mockResolvedValue(nextState);
-    const getLegalActions = vi
-      .fn<EngineAdapter["getLegalActions"]>()
-      .mockResolvedValue(buildLegalActionsResult({
-        actions: [{ type: "SelectCards", data: { cards: [] } }],
+    const getSnapshot = vi
+      .fn<EngineAdapter["getSnapshot"]>()
+      .mockImplementation(async () => ({
+        state: nextState,
+        legalResult: buildLegalActionsResult({
+          actions: [{ type: "SelectCards", data: { cards: [] } }],
+        }),
+        seq: nextSnapshotSeq(),
       }));
 
     useGameStore.setState({
-      adapter: buildEngineAdapterMock(initialState, { submitAction, getState, getLegalActions }),
+      adapter: buildEngineAdapterMock(initialState, { submitAction, getSnapshot }),
       gameState: initialState,
       waitingFor: firstWaitingFor,
       gameMode: "ai",

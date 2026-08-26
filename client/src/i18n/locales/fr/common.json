@@ -5,15 +5,44 @@
     "close": "Fermer",
     "closeNamed": "Fermer {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "le nombre le plus élevé",
+    "lowestNumber": "le nombre le plus bas",
+    "chosenNumber": "le nombre choisi"
+  },
+  "scryOutcome": {
+    "title": "Regard terminé",
+    "you": "Vous",
+    "result": "{{player}} — {{top}} au-dessus · {{bottom}} au-dessous"
+  },
   "modal": {
     "defaultEyebrow": "Outil d'espace de travail"
   },
   "pausedBanner": {
-    "message": "Partie en pause — {{reason}}"
+    "message": "Partie en pause — {{reason}}",
+    "resume": "Reprendre"
   },
   "fullscreen": {
     "enter": "Passer en plein écran",
     "exit": "Quitter le plein écran"
+  },
+  "nativeEngineProgress": {
+    "title": "Mise à jour du moteur natif",
+    "resolving": "Recherche du serveur local approprié…",
+    "downloadingBinary": "Téléchargement du serveur mis à jour…",
+    "verifying": "Vérification du serveur…",
+    "downloadingData": "Téléchargement des données du jeu…",
+    "spawning": "Démarrage du serveur local…",
+    "ready": "Moteur natif prêt",
+    "failed": "Impossible de préparer le moteur natif"
+  },
+  "engineBadge": {
+    "native": "Moteur natif",
+    "nativeTooltip": "Cette partie utilise le moteur natif de l'application de bureau.",
+    "inBrowser": "Moteur du navigateur",
+    "inBrowserTooltip": "Moteur natif indisponible — cette partie s'exécute dans le navigateur.",
+    "versionMismatchTooltip": "Version du moteur natif incompatible — cette partie s'exécute dans le navigateur.",
+    "notAttemptedTooltip": "Cette partie s'exécute dans le navigateur — le moteur natif n'a pas été utilisé."
   },
   "buildBadge": {
     "downloading": "téléchargement… {{progress}} %",
@@ -22,6 +51,7 @@
     "updatePending": "mise à jour en attente après la partie",
     "cards": "cartes {{age}} ({{commit}})",
     "cardDataTitle": "Données de cartes générées le {{date}} à partir de {{commit}}",
+    "desktopAppVersion": "Application de bureau v{{version}}",
     "checkForUpdates": "Rechercher des mises à jour",
     "updaterDebugInfo": "Infos de débogage de la mise à jour",
     "updaterIssue": "Problème de mise à jour : {{error}}",
@@ -29,10 +59,11 @@
     "updated": "à jour"
   },
   "comboDetector": {
-    "label": "Détecteur de combos",
+    "label": "Détecteur de combos (expérimental)",
     "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
     "on": "Activé",
-    "off": "Désactivé"
+    "off": "Désactivé",
+    "interactive": "Interactif"
   },
   "gameMenu": {
     "sections": {
@@ -54,10 +85,16 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Passer à la vue table divisée",
     "switchToLegacyView": "Passer à la vue legacy focalisée",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Voyez tous les adversaires à la fois avec la vue table divisée.",
+      "trySplit": "Essayer la vue divisée",
+      "dismiss": "Pas maintenant"
+    },
     "helpShortcuts": "Aide et raccourcis",
     "showAiHand": "Afficher la main de l'IA",
     "hideAiHand": "Masquer la main de l'IA",
     "requestTakeback": "Demander une reprise",
+    "undoLastAction": "Annuler la dernière action",
     "concede": "Concéder",
     "backToDraft": "Retour au Draft",
     "mainMenu": "Menu principal",
@@ -65,6 +102,7 @@
     "cardDataTitle": "Données de cartes : {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio indisponible — le serveur audio du système ne répond pas. Redémarrez l'application pour réessayer.",
     "mute": "Couper le son",
     "unmute": "Rétablir le son",
     "volume": "Volume"
@@ -245,7 +283,13 @@
     "youPlayFirst": "Vous jouez en premier",
     "playerPlaysFirst": "{{name}} joue en premier",
     "heads": "Face",
-    "tails": "Pile"
+    "tails": "Pile",
+    "coinFlip": "Pile ou face",
+    "wonCoinFlip": "{{name}} a gagné le pile ou face",
+    "lostCoinFlip": "{{name}} a perdu le pile ou face",
+    "turnOrder": "Ordre des tours",
+    "turnOrderItem": "Tour {{turn}} : {{name}}",
+    "youTakeTurn": "Vous jouez au tour {{turn}}"
   },
   "chrome": {
     "back": "Retour",

@@ -5,6 +5,8 @@ import { formatPTDelta, type PTContribution } from "../../viewmodel/attribution"
 
 interface PTBoxProps {
   ptDisplay: PTDisplay;
+  /** Keeps a creature-planeswalker's P/T clear of its bottom-right loyalty badge. */
+  position?: "left" | "right";
   /**
    * Per-source +N/+M contributions from CR 613 layer 7c (ModifyPT).
    * When present and non-empty, attaches a hover tooltip listing each
@@ -48,6 +50,7 @@ function formatTooltip(
 
 export function PTBox({
   ptDisplay,
+  position = "right",
   ptSources,
   basePower,
   baseToughness,
@@ -58,7 +61,7 @@ export function PTBox({
       : undefined;
   return (
     <div
-      className="absolute bottom-0 right-0 z-20 flex items-center gap-px rounded-tl bg-black/80 font-bold leading-none"
+      className={`absolute bottom-0 z-20 flex items-center gap-px bg-black/80 font-bold leading-none ${position === "left" ? "left-0 rounded-tr" : "right-0 rounded-tl"}`}
       title={title}
       style={ptBoxStyle}
     >

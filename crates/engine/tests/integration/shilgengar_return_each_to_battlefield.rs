@@ -99,7 +99,7 @@ fn shilgengar_returns_each_creature_card_with_finality_counter() {
     for obj in &returned {
         let finality = obj
             .counters
-            .get(&CounterType::Generic("finality".to_string()))
+            .get(&CounterType::Finality)
             .copied()
             .unwrap_or(0);
         assert_eq!(

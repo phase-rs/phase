@@ -7,12 +7,11 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::GiftKind;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
-/// CR 702.174: Deliver a gift to the opponent of the ability's controller.
+/// CR 702.174: Deliver a gift to the opponent chosen when the gift cost was paid.
 /// Gift delivery is a no-op when the gift wasn't promised (`additional_cost_paid == false`).
-/// When promised, the opponent receives the gift before the spell's other effects resolve.
+/// When promised, the chosen opponent receives the gift before the spell's other effects resolve.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -34,8 +33,14 @@ pub fn resolve(
         return Ok(());
     }
 
-    // In 2-player, the opponent is the next player after the controller.
-    let opponent = players::next_player(state, ability.controller);
+    // CR 702.174a/e: Deliver to the opponent chosen when the gift cost was paid.
+    // Prefer the cast-time SpellContext latch, then the finalize stamp on the
+    // source object. Never fall back to turn-order `next_player`.
+    let Some(opponent) = resolve_gift_recipient(state, ability) else {
+        // CR 800.4b / CR 609.3: Latched recipient left the game, or the cast
+        // path failed to stamp a recipient — do as much as possible (nothing).
+        return Ok(());
+    };
 
     // CR 702.174b: On a permanent, the gift ability triggers when the permanent enters.
     // CR 702.174j: For instants/sorceries, the gift effect always happens first.
@@ -80,67 +85,57 @@ pub fn resolve(
                 obj.tapped = true;
             }
         }
+        // CR 702.174g: "Gift an extra turn" means "The chosen player takes an
+        // extra turn after this one." CR 500.7 owns the queue, so this routes
+        // through the same authority `Effect::ExtraTurn` uses rather than
+        // touching `extra_turns` directly.
+        //
+        // "After this one" is the ANCHOR: the extra turn follows the turn during
+        // which the gift resolved, which is `state.active_player`'s — not the
+        // recipient's next turn. `enqueue_extra_turn` takes that anchor as its
+        // third argument, exactly as the effect resolver passes it.
+        GiftKind::ExtraTurn => {
+            // CR 805.8: with shared team turns the extra turn is taken by the
+            // recipient's team; the same normalization the effect resolver does.
+            let recipient = crate::game::topology::normalize_shared_turn_recipient(state, opponent);
+            crate::game::turns::enqueue_extra_turn(state, recipient, state.active_player);
+        }
     }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GiftDelivery,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
 }
 
+/// CR 702.174a: Resolve the latched gift recipient.
+fn resolve_gift_recipient(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    let candidate = ability.context.gift_recipient.or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .and_then(|obj| obj.gift_recipient)
+    })?;
+    // CR 800.4: Only deliver if the chosen player is still in the game.
+    players::is_alive(state, candidate).then_some(candidate)
+}
+
 /// Deliver "gift a card" — opponent draws one card.
-/// Routes through the replacement system so draw-replacement effects apply (CR 121.1).
+/// Routes through the single-authority `start_draw_sequence` path so
+/// draw-replacement effects apply and CR 121.1's `allowed_draw_count` gate
+/// honors `CantDraw` and `PerTurnDrawLimit` statics. The old direct
+/// `select_cards_to_draw` call bypassed that gate for Gift draws.
 fn deliver_card_draw(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     opponent: PlayerId,
 ) -> Result<(), EffectError> {
-    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
-    // helper so post-replacement continuations drain in the same step.
-    let _ = super::draw::draw_through_replacement(
-        state,
-        opponent,
-        1,
-        events,
-        |state, event, events| {
-            let ProposedEvent::Draw {
-                player_id, count, ..
-            } = event
-            else {
-                return;
-            };
-            // CR 121.1 + CR 613.11: route card selection through the single
-            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
-            // honored on the gift draw too.
-            let cards_to_draw = super::draw::select_cards_to_draw(state, player_id, count as usize);
-
-            for obj_id in cards_to_draw {
-                zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                // CR 121.1 + CR 504.1: Increment counters first; embed the
-                // resulting per-step ordinal into the event so trigger
-                // conditions can identify the first draw of the draw step.
-                let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                    } else {
-                        (1, 1)
-                    };
-                events.push(GameEvent::CardDrawn {
-                    player_id,
-                    object_id: obj_id,
-                    nth_in_turn,
-                    nth_in_step,
-                });
-                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                // CR 702.94a + CR 603.11: Shared first-draw / miracle-offer hook.
-                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-            }
-        },
-    );
+    // CR 614.1a + CR 614.6 + CR 704.3: The sequence driver retains replacement
+    // pauses and drains post-replacement continuations in this resolution step.
+    let _ = super::draw::start_draw_sequence(state, opponent, 1, events);
 
     Ok(())
 }
@@ -174,29 +169,25 @@ fn create_gift_token(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::restrictions::record_battlefield_entry(state, obj_id);
     crate::game::restrictions::record_token_created(state, obj_id);
 
     // CR 111.1 + CR 603.6a: Token creation is a zone change from outside the
     // game — emit `ZoneChanged { from: None }` so ETB triggers (Soul Warden,
     // Panharmonicon, etc.) fire for gift tokens through the normal code path.
-    let zone_change_record = state
-        .objects
-        .get(&obj_id)
-        .expect("token just created")
-        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-    events.push(GameEvent::ZoneChanged {
-        object_id: obj_id,
-        from: None,
-        to: Zone::Battlefield,
-        record: Box::new(zone_change_record),
-    });
-
-    events.push(GameEvent::TokenCreated {
-        object_id: obj_id,
-        name: name.to_string(),
+    //
+    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
+    // `from: None → Battlefield` authority so the emitted `ZoneChanged` carries this turn's real
+    // zone-change index instead of the `0` placeholder. The authority performs the CR 608.2i
+    // battlefield-entry bookkeeping itself, so the co-located `record_battlefield_entry` call is
+    // deleted — keeping it would double-count `battlefield_entries_this_turn`.
+    super::token::push_committed_token_entry_events(
+        state,
+        obj_id,
+        name.to_string(),
         source_id,
-    });
+        events,
+    )
+    .expect("token just created");
 
     obj_id
 }
@@ -215,6 +206,10 @@ mod tests {
             PlayerId(0),
         );
         ability.context.additional_cost_paid = promised;
+        if promised {
+            // CR 702.174a: Latched recipient (2p sole opponent = P1).
+            ability.context.gift_recipient = Some(PlayerId(1));
+        }
         ability
     }
 
@@ -237,6 +232,102 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
         ));
+    }
+
+    /// CR 702.174g + CR 500.7: the promised extra turn is queued for the chosen
+    /// player, anchored after the turn during which the gift resolved.
+    #[test]
+    fn gift_extra_turn_queues_a_turn_for_the_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::ExtraTurn, true);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state
+                .extra_turns
+                .iter()
+                .map(|turn| (turn.player, turn.anchor))
+                .collect::<Vec<_>>(),
+            vec![(PlayerId(1), state.active_player)],
+            "CR 702.174g: the CHOSEN player takes the extra turn, after this one"
+        );
+    }
+
+    /// The negative that keeps the row above honest: an unpromised gift queues
+    /// nothing, so the assertion is about the promise and not about the queue
+    /// being writable.
+    #[test]
+    fn gift_extra_turn_queues_nothing_when_not_promised() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::ExtraTurn, false);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.extra_turns.is_empty());
+    }
+
+    #[test]
+    fn gift_card_uses_source_object_recipient_when_context_is_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gift Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().gift_recipient = Some(PlayerId(1));
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+
+        let mut ability = make_gift_ability(GiftKind::Card, true);
+        ability.source_id = source_id;
+        ability.context.gift_recipient = None;
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].hand.contains(&card_id));
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
+        ));
+    }
+
+    #[test]
+    fn gift_card_noops_for_eliminated_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        state.players[1].is_eliminated = true;
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::Card, true);
+        assert_eq!(resolve_gift_recipient(&state, &ability), None);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].library.contains(&card_id));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GiftDelivery,
+                ..
+            }
+        )));
     }
 
     #[test]

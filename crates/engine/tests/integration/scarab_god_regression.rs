@@ -53,9 +53,9 @@ fn scarab_god_upkeep_opponent_loses_life_per_zombie_count() {
         .unwrap()
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| t.phase == Some(Phase::Upkeep))
+        .find(|t| t.definition.phase == Some(Phase::Upkeep))
         .expect("upkeep phase trigger");
-    let execute = upkeep.execute.as_ref().expect("execute");
+    let execute = upkeep.definition.execute.as_ref().expect("execute");
     assert_eq!(
         execute.player_scope,
         Some(PlayerFilter::Opponent),

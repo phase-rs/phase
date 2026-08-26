@@ -1,33 +1,33 @@
-// External link routing for Tauri.
-//
-// In a regular browser, `<a target="_blank">` opens a new tab. Inside the
-// Tauri webview that target is silently swallowed — the webview has no
-// concept of "open in user's default browser" without explicit shell
-// integration. This installs a single document-level click capture that
-// intercepts external (http/https) link clicks in Tauri and hands them off
-// to `@tauri-apps/plugin-shell`'s `open()`, which invokes the OS handler
-// (xdg-open / `open` / ShellExecute).
-//
-// Capture phase + closest("a") rather than per-callsite onClick handlers so
-// every existing and future external link in the app works without changes.
+// Tauri webviews silently swallow target=_blank links, so one capture-phase
+// handler covers nested content in every current and future anchor without
+// per-callsite handlers. Modifier clicks intentionally follow the same path:
+// "open in new tab" has no useful meaning inside a webview. Relative app links
+// remain with the router; explicit non-HTTP(S) schemes and protocol-relative
+// URLs are denied before they can reach the shell.
 
-import { isTauri } from "./sidecar";
+import { isOpenableExternalUrl } from "./openExternal";
+import { isBundledTauriOrigin, isTauri } from "./platform";
 
-const EXTERNAL_URL_RE = /^https?:\/\//i;
+export const FIRST_PARTY_ORIGINS = new Set([
+  "https://phase-rs.dev",
+  "https://app.phase-rs.dev",
+  "https://preview.phase-rs.dev",
+]);
 
-async function openWithShell(url: string): Promise<void> {
-  const { open } = await import("@tauri-apps/plugin-shell");
-  await open(url);
+let handlerInstalled = false;
+
+async function openWithOpener(url: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
 }
 
 export function installTauriExternalLinkHandler(): void {
-  if (!isTauri()) return;
+  if (!isTauri() || handlerInstalled) return;
+  handlerInstalled = true;
 
   document.addEventListener(
     "click",
     (event) => {
-      // Modifier-clicks (cmd/ctrl/shift/middle) are still meaningless in
-      // Tauri — there's nowhere to "open in new tab" — so route them too.
       if (event.defaultPrevented) return;
 
       const target = event.target;
@@ -36,11 +36,41 @@ export function installTauriExternalLinkHandler(): void {
       if (!anchor) return;
 
       const href = anchor.getAttribute("href");
-      if (!href || !EXTERNAL_URL_RE.test(href)) return;
+      if (!href) return;
+
+      // Resolve exactly as the browser does before classifying the destination:
+      // it trims leading whitespace and treats backslashes as URL separators.
+      // Protocol-relative slash/backslash forms remain denied instead of
+      // inheriting the webview's scheme.
+      const normalizedHref = href.trim();
+      if (/^[\\/]{2}/.test(normalizedHref)) {
+        event.preventDefault();
+        return;
+      }
+      let destination: URL;
+      try {
+        destination = new URL(normalizedHref, window.location.href);
+      } catch {
+        event.preventDefault();
+        return;
+      }
+
+      // React Router owns same-origin paths, queries, and fragments.
+      if (
+        destination.protocol === window.location.protocol &&
+        destination.host === window.location.host
+      ) {
+        return;
+      }
+      if (!isOpenableExternalUrl(destination.href)) {
+        event.preventDefault();
+        return;
+      }
+      if (!isBundledTauriOrigin() && FIRST_PARTY_ORIGINS.has(destination.origin)) return;
 
       event.preventDefault();
-      void openWithShell(href).catch((err: unknown) => {
-        console.warn("[phase.rs] Failed to open external link via Tauri shell.", err);
+      void openWithOpener(destination.href).catch((err: unknown) => {
+        console.warn("[phase.rs] Failed to open external link via Tauri opener.", err);
       });
     },
     { capture: true },

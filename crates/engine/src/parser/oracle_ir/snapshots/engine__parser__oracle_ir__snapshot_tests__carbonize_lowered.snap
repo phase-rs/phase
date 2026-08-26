@@ -1,0 +1,152 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": null,
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GenericEffect",
+          "static_abilities": [
+            {
+              "mode": "CantBeRegenerated",
+              "affected": {
+                "type": "ParentTarget"
+              },
+              "modifications": [
+                {
+                  "type": "AddStaticMode",
+                  "mode": "CantBeRegenerated"
+                }
+              ],
+              "condition": null,
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": null
+            }
+          ],
+          "duration": "UntilEndOfTurn",
+          "target": {
+            "type": "TrackedSet",
+            "id": 0
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "AddTargetReplacement",
+            "replacement": {
+              "event": "Moved",
+              "execute": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "ChangeZone",
+                  "origin": "Battlefield",
+                  "destination": "Exile",
+                  "target": {
+                    "type": "SelfRef"
+                  },
+                  "owner_library": false,
+                  "enter_transformed": false,
+                  "enter_tapped": false,
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "mode": {
+                "type": "Mandatory"
+              },
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "description": null,
+              "condition": null,
+              "destination_zone": "Graveyard",
+              "consume_on_apply": true,
+              "expiry": {
+                "type": "EndOfTurn"
+              }
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": {
+            "type": "TargetMatchesFilter",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            "use_lki": true
+          },
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": {
+          "type": "TargetMatchesFilter",
+          "filter": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": []
+          },
+          "use_lki": true
+        },
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "~ deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

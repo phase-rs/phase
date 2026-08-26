@@ -38,6 +38,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Endure,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -100,6 +101,7 @@ pub fn resolve(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![enduring_controller],
         },
     );
@@ -107,6 +109,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Endure,
         source_id: enduring_id,
+        subject: None,
     });
 
     Ok(())

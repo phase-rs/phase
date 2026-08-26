@@ -4,9 +4,7 @@ wasm = "build --package engine-wasm --target wasm32-unknown-unknown --profile wa
 wasm-release = "build --package engine-wasm --target wasm32-unknown-unknown --release"
 test-all = "nextest run --workspace --features engine/proptest"
 clippy-strict = "clippy --all-targets -- -D warnings"
-export-cards = "run --profile tool --bin card-data-export --"
-export-json = "run --profile tool --bin json-export --"
-migrate-abilities = "run --profile tool --bin migrate-abilities --"
+export-cards = "run --profile tool --features cli --bin oracle-gen --"
 serve = "run --release --bin phase-server"
 coverage = "run --profile tool --bin coverage-report -- data/"
 parser-gaps = "run --profile tool --bin parser-gap-analyzer -- data/"
@@ -15,11 +13,43 @@ semantic-audit = "run --profile tool --features cli --bin oracle-gen -- semantic
 combo-verify = "run --profile tool --features combo-verify --bin combo-verify -- data/"
 scrape-feeds = "run --release -p feed-scraper --"
 tune-ai = "run --release --features tune --bin ai-tune --"
-ai-gate = "run --bin ai-gate --"
-ai-perf-gate = "run --bin ai-perf-gate --"
+# AI gates run `server-release`, NOT the default dev profile and NOT `--release`.
+#   * dev (opt-level 0) made the PR gates exceed their 60-minute timeout on every
+#     run; the suite is ~14x faster optimized.
+#   * `--release` in this workspace is the WASM-SIZE profile (opt-level 'z',
+#     lto = true, codegen-units = 1, panic = 'abort') — size-optimized, slow to
+#     build, and the wrong shape for a native wall-clock gate.
+# `server-release` is the native speed profile (opt-level 2, thin LTO,
+# codegen-units 16, panic = 'unwind').
+#
+# These two aliases, scripts/ai-gate.sh, scripts/ai-perf-gate.sh and
+# scripts/validate-ai-perf-reproducibility.sh must ALL name the same profile.
+# ai-perf-gate re-spawns itself via current_exe() for each cold-process trial, so
+# a parent built under one profile would spawn children under it while a script
+# reads a different target/<profile>/ path — profile skew there yields confidently
+# wrong numbers rather than an error.
+ai-gate = "run --profile server-release --bin ai-gate --"
+ai-perf-gate = "run --profile server-release --bin ai-perf-gate --"
 engine-inventory = "run --quiet -p engine-inventory-gen"
+probe-pin = "run --quiet -p probe-pin --"
 
 [env]
 # 16 MB stack for test threads — prevents stack overflow when Debug formatting
 # deeply nested recursive types (Effect ↔ AbilityDefinition mutual recursion).
 RUST_MIN_STACK = "16777216"
+
+# Shipped WASM gets a 16 MiB shadow stack; wasm-ld's default is 1 MiB.
+# The engine assumes native's 16 MiB (RUST_MIN_STACK above): deep paths include
+# Debug-formatting the Effect <-> AbilityDefinition recursion and the CR 732.2a
+# accept-time loop replay (drive_persistent_axis_collapse -> drive_loop_sequence_
+# iteration -> apply -- a large GameAction match + by-value GameState/ActionResult
+# frames). One period's release-optimized replay needs 1-2 MiB (measured: SIGABRTs
+# a 1 MiB thread, survives 2 MiB); the 1 MiB default overflowed on replay cycle 1
+# -> instant "engine connection lost". Matching 16 MiB means a path that fits
+# natively cannot overflow only in WASM. Cost is a one-time ~15 MiB linear-memory
+# reservation per flagged module (engine-wasm, draft-wasm, broker-wasm), NOT
+# download size (payload/.wasm size effectively unchanged). scripts/build-wasm.sh
+# guards this by asserting the shipped engine module's initial memory min.
+# `-z stack-size=N` is two wasm-ld argv tokens, hence two `-C link-arg`s.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-z", "-C", "link-arg=stack-size=16777216"]

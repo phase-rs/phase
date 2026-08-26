@@ -5,10 +5,12 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TapStateChange,
     TargetChoiceTiming, TargetFilter, TargetRef,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedObjectStatus;
 use crate::types::zones::Zone;
 
 /// CR 603.7e + CR 608.2c: Resolve the objects a `Tap`/`Untap` effect acts on.
@@ -39,6 +41,11 @@ fn tap_untap_target_ids(
 ) -> Vec<ObjectId> {
     match effect_target {
         TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state
@@ -52,8 +59,23 @@ fn tap_untap_target_ids(
             .get(id)
             .cloned()
             .unwrap_or_default(),
+        // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
+        // a new object taps nothing. This arm is a RAW read that never reaches
+        // `resolved_targets`, so the targeting chokepoint cannot see this pin.
+        //
+        // SUBSTITUTION-ONLY, and that is verified rather than assumed against
+        // the decision rule: there is no source fallback below this arm, an
+        // empty vector simply skips `resolve_set_tap_state`'s resolution loop,
+        // and control falls to that function's UNCONDITIONAL
+        // `EffectResolved` push (`:135-139`). An emptied list is already a
+        // clean no-op that emits the event, so no early return is needed.
+        //
+        // No slot carve-out applies: this arm enumerates every object ref via
+        // `filter_map` and never hands the list to `effect_object_targets`'s
+        // positional indexer, so a filtered list cannot renumber a
+        // `ParentTargetSlot`.
         _ => ability
-            .targets
+            .live_object_targets(state)
             .iter()
             .filter_map(|t| match t {
                 TargetRef::Object(id) => Some(*id),
@@ -133,6 +155,7 @@ fn resolve_single(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -165,15 +188,19 @@ pub(crate) fn process_one_tap(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             if let ProposedEvent::Tap { object_id, .. } = event {
-                let obj = state
-                    .objects
-                    .get_mut(&object_id)
-                    .ok_or(EffectError::ObjectNotFound(object_id))?;
-                obj.tapped = true;
-                events.push(GameEvent::PermanentTapped {
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
                     object_id,
-                    caused_by: Some(source_id),
-                });
+                    ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .map_err(|_| EffectError::ObjectNotFound(object_id))?
+                {
+                    events.push(GameEvent::PermanentTapped {
+                        object_id,
+                        caused_by: Some(source_id),
+                    });
+                }
             }
             Ok(TapUntapOutcome::Complete)
         }
@@ -195,12 +222,49 @@ pub(crate) fn process_one_untap(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             if let ProposedEvent::Untap { object_id, .. } = event {
-                let obj = state
+                let has_stun = state
                     .objects
-                    .get_mut(&object_id)
-                    .ok_or(EffectError::ObjectNotFound(object_id))?;
-                obj.tapped = false;
-                events.push(GameEvent::PermanentUntapped { object_id });
+                    .get(&object_id)
+                    .ok_or(EffectError::ObjectNotFound(object_id))?
+                    .counters
+                    .contains_key(&CounterType::Stun);
+                // CR 122.1d: any attempted untap, including an effect-driven
+                // untap, removes one stun counter instead. CR 101.2 keeps the
+                // permanent tapped when counter removal is prohibited.
+                if has_stun {
+                    if !super::counters::counter_removal_blocked(
+                        state,
+                        object_id,
+                        &CounterType::Stun,
+                    ) {
+                        let obj = state
+                            .objects
+                            .get_mut(&object_id)
+                            .ok_or(EffectError::ObjectNotFound(object_id))?;
+                        if let Some(count) = obj.counters.get_mut(&CounterType::Stun) {
+                            *count -= 1;
+                            if *count == 0 {
+                                obj.counters.remove(&CounterType::Stun);
+                            }
+                        }
+                        events.push(GameEvent::CounterRemoved {
+                            object_id,
+                            counter_type: CounterType::Stun,
+                            count: 1,
+                        });
+                    }
+                } else {
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .map_err(|_| EffectError::ObjectNotFound(object_id))?
+                    {
+                        events.push(GameEvent::PermanentUntapped { object_id });
+                    }
+                }
             }
             Ok(TapUntapOutcome::Complete)
         }
@@ -263,6 +327,7 @@ fn prompt_resolution_tap_untap_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id: ability.source_id,
+                    subject: None,
                 });
                 return true;
             }
@@ -274,6 +339,7 @@ fn prompt_resolution_tap_untap_choice(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return true;
     }
@@ -302,6 +368,9 @@ fn prompt_resolution_tap_untap_choice(
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        // Tap/untap selection performs no zone move, so no bounded-move
+        // duration rides the round-trip.
+        duration: None,
     };
     true
 }
@@ -344,6 +413,7 @@ fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -654,6 +724,34 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+    }
+
+    #[test]
+    fn effect_untap_removes_one_stun_counter_and_leaves_permanent_tapped() {
+        let mut state = GameState::new_two_player(42);
+        let faerie = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sleep-Cursed Faerie".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&faerie).unwrap();
+        object.tapped = true;
+        object.counters.insert(CounterType::Stun, 2);
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+
+        assert!(state.objects[&faerie].tapped);
+        assert_eq!(
+            state.objects[&faerie].counters.get(&CounterType::Stun),
+            Some(&1)
+        );
+        assert!(events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == faerie)));
     }
 
     #[test]

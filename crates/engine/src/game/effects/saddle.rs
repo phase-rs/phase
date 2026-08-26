@@ -127,6 +127,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomeSaddled,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

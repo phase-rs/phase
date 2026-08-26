@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// CR 400.1: The seven game zones — library, hand, battlefield, graveyard, stack, exile, and command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Zone {
     /// CR 401: The library — a player's draw pile, face-down, order matters.
     Library,
@@ -14,6 +14,23 @@ pub enum Zone {
     Exile,
     /// CR 408: The command zone — reserved for emblems, commanders, dungeons, and other specialized objects.
     Command,
+}
+
+impl Zone {
+    /// CR 400.2: the battlefield, graveyard, stack, exile, and command zones are
+    /// public; the library and hand are hidden even when their cards are
+    /// momentarily revealed.
+    ///
+    /// The distinction is load-bearing for CR 608.2h: an effect that needs
+    /// information from a specific object reads that object's CURRENT
+    /// characteristics while it is in the public zone it was expected to be in,
+    /// and falls back to last known information once it is not.
+    pub fn is_public(self) -> bool {
+        match self {
+            Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
+            Zone::Library | Zone::Hand => false,
+        }
+    }
 }
 
 /// CR 118.9a + CR 601.2b + CR 601.2h: Source zone for an `AbilityCost::Exile`
@@ -42,6 +59,48 @@ impl ExileCostSourceZone {
             Zone::Graveyard => Some(Self::Graveyard),
             _ => None,
         }
+    }
+}
+
+/// CR 608.2c: whether a battlefield entry is the referent a following
+/// demonstrative anaphor binds to ("manifest dread, then attach this Equipment
+/// to **that creature**").
+///
+/// Carried on the entry request rather than derived at the delivery, because
+/// the question is about the EFFECT that asked for the entry, not about the
+/// permanent that arrives. Two effects can produce an identical face-down
+/// permanent and only one of them be the producer the sentence refers back to,
+/// so no property of the entrant — its zone, its face-down cause, its
+/// characteristics — can answer it.
+///
+/// [`Silent`] is the default on purpose: an entry that has not been marked is
+/// not a producer, so a delivery path added later cannot silently start
+/// overwriting the game-lifetime `last_created_token_ids` ledger.
+///
+/// The engine's marked call sites and the parser's admission authority
+/// (`oracle_effect::lower::publishes_chain_created_referent`) are the two halves
+/// of one contract and have to be changed together.
+///
+/// [`Silent`]: ChainReferentIntent::Silent
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ChainReferentIntent {
+    /// This entry names nothing. Every path that has not opted in.
+    #[default]
+    Silent,
+    /// CR 608.2c: on successful delivery, this entrant becomes the chain's
+    /// most-recent created referent.
+    Publishes,
+}
+
+impl ChainReferentIntent {
+    /// Whether a delivery carrying this intent publishes the referent.
+    pub fn publishes(self) -> bool {
+        matches!(self, Self::Publishes)
+    }
+
+    /// Whether the intent is the default, for wire-shape preservation.
+    pub fn is_silent(&self) -> bool {
+        matches!(self, Self::Silent)
     }
 }
 

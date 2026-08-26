@@ -57,13 +57,23 @@ pub(crate) fn players_for_filter(
         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
         // opponent who was dealt damage of the given kind this turn, optionally
         // restricted to a matching source.
-        PlayerFilter::OpponentDealtDamage { kind, source } => state
+        PlayerFilter::OpponentDealtDamage {
+            kind,
+            source,
+            min_sources,
+        } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 crate::game::quantity::opponent_dealt_damage_matches(
-                    state, player.id, controller, *kind, source, source_id,
+                    state,
+                    player.id,
+                    controller,
+                    *kind,
+                    source,
+                    *min_sources,
+                    source_id,
                 )
             })
             .map(|player| player.id)
@@ -327,6 +337,33 @@ pub(crate) fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 608.2c + CR 608.2h + CR 109.4: "each [player class] who
+        // controlled/owned a [filter] this way" — candidates satisfying both
+        // `relation` and possession of a member of the most recent tracked
+        // object set. Delegates to the shared possession authority.
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            caused_by,
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
+                    && crate::game::quantity::possessed_tracked_set_member(
+                        state,
+                        player.id,
+                        *possession,
+                        filter,
+                        *caused_by,
+                        controller,
+                        source_id,
+                    )
+            })
+            .map(|player| player.id)
+            .collect(),
     }
 }
 

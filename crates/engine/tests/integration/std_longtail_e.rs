@@ -23,23 +23,42 @@
 //! (`TriggeringSource`) as a `Duration::UntilHostLeavesPlay` continuous effect.
 //! Parser round-trip and runtime binding tests below.
 //!
+//! Now supported (S25 P2e — Moonlit Meditation): "The first time you would create
+//! one or more tokens each turn, you may instead create that many tokens that are
+//! copies of enchanted permanent." lowers to an Optional `CreateToken` replacement
+//! gated by `ReplacementCondition::FirstTokenCreationEachTurn`, whose
+//! `CopyTokenOf { target: AttachedTo, count: EventContextAmount }` execute makes
+//! host-copies. Per-PLAYER once-per-turn window (the Oracle's "you"), tracked via
+//! the shared `GameState::players_who_created_token_this_turn` primitive (consumed
+//! by the first token the controller creates this turn — so a source entering
+//! mid-turn after an earlier creation does NOT fire, per the official ruling),
+//! "that many" count, decline-consumes, turn-reset, per-player (not per-source)
+//! window, and Doubling-Season non-recursion tests below.
+//!
 //! Deferred (honest `Effect::unimplemented` / SwallowedClause retained, NOT
-//! asserted 0-unimpl): Moonlit Meditation (first-time-each-turn optional
-//! CreateToken replacement that overrides the spec to copies of the enchanted
-//! permanent — needs a per-turn token-creation gate, an Optional CreateToken
-//! pipeline, and a dynamic host-copy spec; out of scope for the multiplier
-//! parameterization), Zimone (prime-number intervening-if
+//! asserted 0-unimpl): Zimone (prime-number intervening-if
 //! condition — heavy primality predicate; the token+counter parse is fixed, the
 //! card stays honestly condition-unsupported via a SwallowedClause warning).
 
+use std::sync::Arc;
+
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::game_object::{AttachTarget, GameObject};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::turns::execute_cleanup;
+use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::TargetFilter;
 use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 
 fn parse(
     oracle: &str,
@@ -319,9 +338,11 @@ fn ojer_taq_token_triplication_full_card_parses() {
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::layers::evaluate_layers;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect,
+    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ManaProduction,
+    PlayerScope, QuantityExpr, StaticCondition,
 };
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
+use engine::types::keywords::Keyword;
 use engine::types::zones::Zone;
 
 const VRASKA_ORACLE: &str = "Deathtouch\nWhenever a nontoken creature an opponent controls dies, you may pay {1}. If you do, return that card to the battlefield tapped under your control. It's a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other card types.";
@@ -373,6 +394,7 @@ fn generic_effect_static_mods(
             static_abilities,
             duration,
             target,
+            end_cost: _,
         } => {
             let mods = &static_abilities.first()?.modifications;
             Some((mods, duration, target))
@@ -679,5 +701,1452 @@ fn brilliance_otherwise_animates_returned_artifact_as_robot() {
     assert!(
         obj.card_types.subtypes.iter().any(|s| s == "Robot"),
         "returned object is a Robot"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Moonlit Meditation — first-time-each-turn copy-of-host token replacement
+// ---------------------------------------------------------------------------
+
+const MOONLIT_ORACLE: &str = "Enchant artifact or creature you control\n\
+The first time you would create one or more tokens each turn, you may instead \
+create that many tokens that are copies of enchanted permanent.";
+
+/// The parsed CreateToken replacement carried by Moonlit Meditation.
+fn moonlit_replacement() -> engine::types::ability::ReplacementDefinition {
+    let parsed = parse(
+        MOONLIT_ORACLE,
+        "Moonlit Meditation",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    parsed
+        .replacements
+        .into_iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Moonlit must parse to a CreateToken replacement")
+}
+
+/// Put a Moonlit Meditation Aura on the battlefield under `controller`, attached
+/// to `host`, carrying its parsed first-time copy-of-host replacement.
+fn install_moonlit(state: &mut GameState, host: ObjectId, controller: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(950),
+        controller,
+        "Moonlit Meditation".to_string(),
+        Zone::Battlefield,
+    );
+    let reps = vec![moonlit_replacement()];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Enchantment];
+    obj.card_types.subtypes = vec!["Aura".to_string()];
+    obj.attached_to = Some(AttachTarget::Object(host));
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+    id
+}
+
+/// Put a Doubling Season (token-doubling half only) on the battlefield under
+/// `controller` — a mandatory `CreateToken` doubler used to exercise the
+/// #1511 interaction (a *different* source's replacement still doubles the
+/// substitute copies).
+fn install_doubling_season(state: &mut GameState, controller: PlayerId) -> ObjectId {
+    let parsed = parse_oracle_text(
+        "If one or more tokens would be created under your control, twice that \
+         many tokens are created instead.",
+        "Doubling Season",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed.replacements.is_empty(),
+        "Doubling Season token doubler must parse"
+    );
+    let id = create_object(
+        state,
+        CardId(960),
+        controller,
+        "Doubling Season".to_string(),
+        Zone::Battlefield,
+    );
+    let reps = parsed.replacements.clone();
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Enchantment];
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+    id
+}
+
+/// Resolve a token-creating sorcery controlled by `controller`, driving the real
+/// token pipeline (propose → `replace_event`). If an optional replacement
+/// (Moonlit) applies, the pipeline parks on `WaitingFor::ReplacementChoice`.
+fn resolve_token_source(runner: &mut GameRunner, controller: PlayerId, oracle: &str) {
+    let parsed = parse_oracle_text(oracle, "Token Source", &[], &["Sorcery".to_string()], &[]);
+    let def = parsed
+        .abilities
+        .first()
+        .expect("token source should parse to an ability");
+    let src = create_object(
+        runner.state_mut(),
+        CardId(951),
+        controller,
+        "Token Source".to_string(),
+        Zone::Stack,
+    );
+    let ability = build_resolved_from_def(def, src, controller);
+    let mut events = Vec::<GameEvent>::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("token effect should resolve");
+}
+
+fn host_copy_tokens<'a>(
+    runner: &'a GameRunner,
+    host_name: &str,
+    controller: PlayerId,
+) -> Vec<&'a GameObject> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && o.controller == controller && o.name == host_name)
+        .collect()
+}
+
+fn at_replacement_choice(runner: &GameRunner) -> bool {
+    matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    )
+}
+
+/// Give a host a distinctive subtype on BOTH the live and base card types —
+/// `CopyTokenOf` reads copiable values from `base_card_types`
+/// (`intrinsic_copiable_values`), so a copy inherits the subtype only if the
+/// base carries it.
+fn set_copiable_subtype(state: &mut GameState, id: ObjectId, subtype: &str) {
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.subtypes = vec![subtype.to_string()];
+    obj.base_card_types.subtypes = vec![subtype.to_string()];
+}
+
+/// A1 — accept: a your-owned token creation is replaced by copies of the
+/// enchanted host (name/P/T/subtypes match the host, not the original token
+/// spec). Revert the parser to `.valid_card(SelfRef)` and the replacement never
+/// matches (CreateToken has no affected object) → no prompt, plain Soldier:
+/// both `at_replacement_choice` and `copies.len() == 1` flip.
+#[test]
+fn moonlit_accept_creates_copies_of_enchanted_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+
+    assert!(
+        at_replacement_choice(&runner),
+        "your token creation must surface Moonlit's optional replacement, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Moonlit");
+    runner.advance_until_stack_empty();
+
+    let copies = host_copy_tokens(&runner, "Host Ox", P0);
+    assert_eq!(copies.len(), 1, "accept → exactly one host-copy token");
+    let copy = copies[0];
+    assert_eq!(
+        (copy.power, copy.toughness),
+        (Some(5), Some(4)),
+        "the copy has the host's P/T (5/4), not the 1/1 Soldier spec"
+    );
+    assert!(
+        copy.card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Ox")),
+        "the copy is the enchanted host (Ox), got {:?}",
+        copy.card_types.subtypes
+    );
+    assert!(
+        !copy
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Soldier")),
+        "the original Soldier spec was replaced by a host-copy"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "accept records the copy token → the per-player window is consumed"
+    );
+}
+
+/// A2 — owner scope: a P1-owned creation on P0's turn is NOT replaced by P0's
+/// Moonlit (`token_owner_scope(You)`). Paired positive reach-guard in the same
+/// test: a P0-owned creation with the same Moonlit installed DOES prompt — so
+/// the non-prompt is owner-scope rejection, not a dead Moonlit.
+#[test]
+fn moonlit_ignores_opponent_owned_token_creation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P1,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "P0's Moonlit must not replace a P1-owned token creation, got {:?}",
+        runner.state().waiting_for
+    );
+    let p1_tokens: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && o.controller == P1)
+        .collect();
+    assert_eq!(p1_tokens.len(), 1, "the opponent's plain token is created");
+    assert!(
+        p1_tokens[0]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Soldier")),
+        "the opponent's token stays a Soldier, not a host-copy"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "reach-guard: a your-owned creation with the same Moonlit must prompt"
+    );
+}
+
+/// B1 (official ruling) — per-player window, pre-consumed by an earlier token: a
+/// P0-owned token is created BEFORE Moonlit exists (recording P0 in
+/// `players_who_created_token_this_turn`), then Moonlit enters, then a second
+/// creation the SAME turn does NOT prompt — P0's per-player window is already
+/// spent. This is the exact official ruling: "If you create one or more tokens,
+/// and then Moonlit Meditation comes under your control that same turn, the
+/// replacement effect won't apply to any tokens you create for the rest of the
+/// turn." SWITCH DISCRIMINATOR: revert the eval to the per-source latch (empty for
+/// a source that just entered and never applied) → Moonlit would wrongly prompt
+/// and the `!at_replacement_choice` assertion below fails.
+#[test]
+fn moonlit_source_entering_after_earlier_token_does_not_fire() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+
+    // First creation, BEFORE Moonlit exists → records P0 in the per-player set.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "no replacement before Moonlit exists"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "the pre-Moonlit creation consumed P0's per-player window"
+    );
+
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // Second creation, same turn, AFTER Moonlit enters → window already spent.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "Moonlit entering after an earlier same-turn creation does NOT fire \
+         (per-player window pre-consumed; official ruling), got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Ox", P0).is_empty(),
+        "no host-copy — Moonlit did not fire"
+    );
+}
+
+/// B2 — "that many" count: an N=3 token creation, accepted, yields exactly 3
+/// host-copies. Revert the `quantity.rs` `EventContextAmount` scoped arm → the
+/// count reads `None` → 0 copies. Hostile cascade shadow: a *different*
+/// `current_trigger_match_count` (7) must not win — the Moonlit-scoped count is
+/// read first, un-shadowable.
+#[test]
+fn moonlit_copies_that_many_for_multi_token_events() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create three 1/1 white Soldier creature tokens.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "an N-token creation must prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    // Hostile shadow: the highest-priority cascade entry after the Moonlit field.
+    runner.state_mut().current_trigger_match_count = Some(7);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        3,
+        "'that many' == the replaced event count (3), not 0 (revert quantity arm) nor 7 (cascade shadow)"
+    );
+}
+
+/// B3 — decline consumes the window: declining still creates the original token,
+/// which `record_token_created` records in the per-player
+/// `players_who_created_token_this_turn` set, so a second creation the same turn
+/// does not prompt. Decline falls through to the original event → a plain Soldier,
+/// no host-copy. If the original creation did not record the player, the window
+/// would stay open and the second creation would prompt.
+#[test]
+fn moonlit_decline_consumes_the_turn_allowance() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "reach-guard: the first creation prompts"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline");
+    runner.advance_until_stack_empty();
+
+    let soldiers: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| {
+            o.is_token
+                && o.controller == P0
+                && o.card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case("Soldier"))
+        })
+        .collect();
+    assert_eq!(
+        soldiers.len(),
+        1,
+        "decline creates the original plain Soldier"
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Ox", P0).is_empty(),
+        "no host-copy is created on decline"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "decline creates the original token → the per-player window is consumed"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "allowance consumed by the decline → the second creation is not replaced"
+    );
+}
+
+/// B4 — turn reset: consuming the window on turn N (here by DECLINING — which
+/// still creates the original token and records the player, proven in B3, and —
+/// unlike accept — leaves no mid-resolution copy-continuation seed to interfere
+/// with this off-stack harness) and then crossing a turn boundary
+/// (`start_next_turn`) clears `players_who_created_token_this_turn`, so Moonlit
+/// fires again. Without the turn-start clear (`turns.rs`), the second turn's
+/// creation would not prompt.
+#[test]
+fn moonlit_resets_at_turn_start() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // Turn N: fire, then DECLINE to consume the window without seeding a copy
+    // continuation.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "turn N: first creation prompts"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "turn N: the window is consumed"
+    );
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "turn N: window consumed → second creation not replaced"
+    );
+
+    // Cross a turn boundary through the real reset path.
+    let mut events = Vec::<GameEvent>::new();
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut events);
+    assert!(
+        !runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "turn start clears the per-player token-creation record"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "next turn: the per-player record reset → Moonlit fires again, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// B6 — turn-start clears the transient copy-count seed (fix #1,
+/// `turns.rs::start_next_turn`). Directly discriminating: the on-stack accept
+/// flow can never observe a *stale* seed at a turn boundary — the intervening
+/// return-to-priority full-drain (`effects/mod.rs`) already nulls
+/// `post_replacement_token_substitution_count` one action after the owning
+/// resolution, so in a natural cast it is already `None` before
+/// `start_next_turn` runs and removing the turn-start clear would not change
+/// that flow. To make the turn-start clear *itself* revert-detectable we seed
+/// both transients to their live "mid-substitution" values (as the accept path
+/// would leave them if a priority pass had NOT intervened) and prove the turn
+/// boundary alone scrubs them. Revert either `= None` line in `start_next_turn`
+/// → the matching post-boundary assertion below stays `Some`/non-empty and
+/// fails. The decline-based B4 keeps covering the
+/// `players_who_created_token_this_turn` turn-reset; this closes the
+/// copy-count/applied-seed clean-state gap.
+#[test]
+fn moonlit_turn_start_scrubs_transient_substitution_seeds() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    let moonlit = install_moonlit(runner.state_mut(), host, P0);
+
+    // Mid-substitution snapshot: the accept path seeds the "that many" copy
+    // count and the self-suppression applied set keyed by the Moonlit source.
+    runner.state_mut().post_replacement_token_substitution_count = Some(4);
+    runner.state_mut().post_replacement_token_choice_applied =
+        Some(std::collections::HashSet::from([
+            engine::types::proposed_event::AppliedReplacementKey::object(moonlit, 0),
+        ]));
+
+    // Reach-guard (non-vacuity): the seeds are actually set when the boundary
+    // is crossed — `start_next_turn` is not operating on an already-clean state.
+    assert_eq!(
+        runner.state().post_replacement_token_substitution_count,
+        Some(4),
+        "reach-guard: copy-count seed is Some before the turn boundary"
+    );
+    assert!(
+        runner
+            .state()
+            .post_replacement_token_choice_applied
+            .as_ref()
+            .is_some_and(|s| s.len() == 1),
+        "reach-guard: applied seed is populated before the turn boundary"
+    );
+
+    let mut events = Vec::<GameEvent>::new();
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut events);
+
+    // Fix #1: revert `state.post_replacement_token_substitution_count = None;`
+    // in start_next_turn → this stays Some(4) and fails.
+    assert_eq!(
+        runner.state().post_replacement_token_substitution_count,
+        None,
+        "turn start scrubs the transient copy-count seed"
+    );
+    // Fix #1 (applied-seed line): revert
+    // `state.post_replacement_token_choice_applied = None;` → this stays
+    // Some(..) and fails.
+    assert!(
+        runner
+            .state()
+            .post_replacement_token_choice_applied
+            .is_none(),
+        "turn start scrubs the transient self-suppression applied seed"
+    );
+}
+
+/// B5 — per-PLAYER window (not per-source): Moonlit A firing (and creating a copy,
+/// which records P0 in `players_who_created_token_this_turn`) consumes P0's window
+/// for the whole turn. A distinct Moonlit B installed afterward the SAME turn does
+/// NOT fire — "the first time you would create … each turn" is per-player, not
+/// keyed by source `ObjectId`. SWITCH DISCRIMINATOR: revert the eval to the
+/// per-source latch → B (a different, unlatched `ObjectId`) would wrongly prompt
+/// and produce an Elk copy, failing both assertions below.
+#[test]
+fn moonlit_window_is_per_player_not_per_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host_a = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let host_b = scenario.add_creature(P0, "Host Elk", 3, 3).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host_b, "Elk");
+    install_moonlit(runner.state_mut(), host_a, P0);
+
+    // Moonlit A fires on the first creation and makes a copy → records P0.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(at_replacement_choice(&runner), "Moonlit A prompts");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept A");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "A's copy consumed P0's per-player window"
+    );
+
+    // Moonlit B enters the same turn AFTER the window was spent → does NOT fire.
+    install_moonlit(runner.state_mut(), host_b, P0);
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "Moonlit B does NOT fire — P0's per-player window is already spent, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Elk", P0).is_empty(),
+        "no Elk copy — B did not fire (per-player window, not per-source)"
+    );
+}
+
+/// Accept-path window recording (guards the removal of the per-source note fn): a
+/// single Moonlit present from the start, the first creation is accepted → a copy
+/// is created, which `record_token_created` records in the per-player set. A second
+/// creation the SAME turn then does NOT prompt. This is NOT a per-source→per-player
+/// switch discriminator (with one ever-present source both models agree); its job
+/// is to prove the ACCEPT path still closes the window through
+/// `record_token_created` now that `note_first_token_replacement_applied` is gone —
+/// were the copy path to stop recording the player, the second creation would
+/// wrongly prompt.
+#[test]
+fn moonlit_second_creation_same_turn_after_accept_does_not_fire() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // First creation: accept → a host-copy is created and records P0.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(at_replacement_choice(&runner), "first creation prompts");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        1,
+        "accept produced one host-copy"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "the copy recorded P0 in the per-player set"
+    );
+
+    // Second creation, same turn: window already spent → no prompt, no new copy.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "second same-turn creation does NOT prompt — accept consumed the window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        1,
+        "still exactly one host-copy — the second creation was not replaced"
+    );
+}
+
+/// B3-doubler (#1511 interaction): Moonlit + Doubling Season, create 1 token,
+/// accept → exactly 2 host-copies with no re-prompt/recursion. Doubling Season
+/// (a different source's rid, absent from the inherited applied set) still
+/// doubles the substitute copies; Moonlit does NOT re-fire on its own copies
+/// (inherited applied set, CR 614.5). Revert Step 5 (`HashSet::new()`)
+/// → the copies inherit no applied set → Doubling Season re-applies to the
+/// count-2 copy batch → >2 copies (and/or a re-prompt).
+#[test]
+fn moonlit_with_doubling_season_yields_two_host_copies_no_recursion() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+    install_doubling_season(runner.state_mut(), P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    // Drive every replacement prompt (apply candidate 0) to completion.
+    for _ in 0..8 {
+        if at_replacement_choice(&runner) {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("apply replacement");
+            runner.advance_until_stack_empty();
+        } else {
+            break;
+        }
+    }
+    assert!(
+        !at_replacement_choice(&runner),
+        "must not re-prompt/recurse on the substitute copies, got {:?}",
+        runner.state().waiting_for
+    );
+    let copies = host_copy_tokens(&runner, "Host Ox", P0);
+    assert_eq!(
+        copies.len(),
+        2,
+        "Moonlit (copies of host) doubled by Doubling Season → exactly 2 host-copies, \
+         not >2 (recursion) nor plain Soldiers"
+    );
+    for c in &copies {
+        assert_eq!(
+            (c.power, c.toughness),
+            (Some(5), Some(4)),
+            "each is a host-copy (5/4 Ox), not a copy-of-copy or a 1/1 Soldier"
+        );
+    }
+}
+
+/// P1 — parse round-trip: Moonlit lowers to the expected Optional CreateToken
+/// replacement with zero `Effect::Unimplemented`. Sibling reach-guard: Jinnie
+/// Fay's "if you would create one or more tokens…" still parses to a
+/// `ChooseOneOf` substitution, unaffected by Moonlit's specific antecedent arm.
+#[test]
+fn moonlit_parses_to_copy_of_host_replacement() {
+    use engine::types::ability::{
+        ControllerRef, Effect, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
+    };
+
+    let parsed = parse(
+        MOONLIT_ORACLE,
+        "Moonlit Meditation",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_zero_unimplemented(&parsed, "Moonlit Meditation");
+
+    let rep = parsed
+        .replacements
+        .iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Moonlit CreateToken replacement");
+    assert_eq!(
+        rep.token_owner_scope,
+        Some(ControllerRef::You),
+        "'you would create' → You owner scope"
+    );
+    assert_eq!(
+        rep.condition,
+        Some(ReplacementCondition::FirstTokenCreationEachTurn {
+            player: ControllerRef::You,
+        }),
+        "first-time-each-turn gate"
+    );
+    assert!(
+        matches!(rep.mode, ReplacementMode::Optional { decline: None }),
+        "'you may instead' → Optional, got {:?}",
+        rep.mode
+    );
+    assert_eq!(
+        rep.valid_card, None,
+        "no valid_card gate — CreateToken has no affected object id"
+    );
+    let exec = rep.execute.as_deref().expect("execute payload");
+    match &*exec.effect {
+        Effect::CopyTokenOf { target, count, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::AttachedTo,
+                "copies of the enchanted host"
+            );
+            assert_eq!(
+                *count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "'that many' → EventContextAmount"
+            );
+        }
+        other => panic!("expected CopyTokenOf, got {other:?}"),
+    }
+
+    let jinnie = parse(
+        "If you would create one or more tokens, you may instead create that many \
+         1/1 green and white Rabbit creature tokens or that many 3/3 green and white \
+         Elk creature tokens.",
+        "Jinnie Fay, Jetmir's Second",
+        &[],
+        &["Legendary", "Creature"],
+        &["Cat", "Elf", "Druid"],
+    );
+    let jinnie_rep = jinnie
+        .replacements
+        .iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Jinnie CreateToken replacement still parses");
+    assert!(
+        matches!(
+            &*jinnie_rep.execute.as_deref().unwrap().effect,
+            Effect::ChooseOneOf { .. }
+        ),
+        "Jinnie remains a ChooseOneOf substitution, not stolen by Moonlit's arm"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Princess Yue / Fang / Gideon / quote-scoped assigned names
+// ---------------------------------------------------------------------------
+
+const PRINCESS_YUE_ORACLE: &str = "When Princess Yue dies, if she was a nonland creature, return this card to the battlefield tapped under your control. She's a land named Moon. She gains \"{T}: Add {C}.\" (She's still legendary.)\n{T}: Scry 2.";
+const FANG_ORACLE: &str = "Flying\nWhenever Fang attacks, another target legendary creature you control gets +X/+0 until end of turn, where X is Fang's power.\nWhen Fang dies, if he wasn't a Spirit, return this card to the battlefield under your control. He's a Spirit in addition to his other types.";
+const GIDEON_CHAMPION_ORACLE: &str = "[+1]: Put a loyalty counter on Gideon for each creature target opponent controls.\n[0]: Until end of turn, Gideon becomes a Human Soldier creature with power and toughness each equal to the number of loyalty counters on him and gains indestructible. He's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[−15]: Exile all other permanents.";
+const ARGOTHIAN_ORACLE: &str = "Put two +1/+1 counters on each of X target lands you control. They each become 0/0 Elemental creatures with reach, haste, and \"When this creature leaves the battlefield, conjure a card named Forest onto the battlefield tapped.\" They're still lands.";
+const AWAKENING_ORACLE: &str = "Put nine +1/+1 counters on target land you control. It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi. It's still a land.";
+const TENTH_DISTRICT_HERO_ORACLE: &str = "{1}{W}, Collect evidence 2: This creature becomes a Human Detective with base power and toughness 4/4 and gains vigilance.\n{2}{W}, Collect evidence 4: If this creature is a Detective, it becomes a legendary creature named Mileva, the Stalwart, it has base power and toughness 5/5, and it gains \"Other creatures you control have indestructible.\"";
+const CURSE_OF_FENRIC_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — For each player, destroy up to one target creature that player controls. For each creature destroyed this way, its controller creates a 3/3 green Mutant creature token with deathtouch.\nII — Target nontoken creature becomes a 6/6 legendary Horror creature named Fenric and loses all abilities.\nIII — Target Mutant fights another target creature named Fenric.";
+const IRENCRAG_ORACLE: &str = "{T}: Add {C}.\nWhenever a legendary creature you control enters, you may have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.";
+const DISTURBED_SLUMBER_ORACLE: &str = "Until end of turn, target land you control becomes a 4/4 Dinosaur creature with reach and haste. It's still a land. It must be blocked this turn if able.";
+const NISSA_VITAL_FORCE_ORACLE: &str = "[+1]: Untap target land you control. Until your next turn, it becomes a 5/5 Elemental creature with haste. It's still a land.\n[−3]: Return target permanent card from your graveyard to your hand.\n[−6]: You get an emblem with \"Whenever a land you control enters, you may draw a card.\"";
+const SYLVAN_AWAKENING_ORACLE: &str = "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.";
+const WRENN_REALMBREAKER_ORACLE: &str = "Lands you control have \"{T}: Add one mana of any color.\"\n[+1]: Up to one target land you control becomes a 3/3 Elemental creature with vigilance, hexproof, and haste until your next turn. It's still a land.\n[−2]: Mill three cards. You may put a permanent card from among the milled cards into your hand.\n[−7]: You get an emblem with \"You may play lands and cast permanent spells from your graveyard.\"";
+const AWAKENER_DRUID_ORACLE: &str = "When this creature enters, target Forest becomes a 4/5 green Treefolk creature for as long as this creature remains on the battlefield. It's still a land.";
+const HEDGE_WHISPERER_ORACLE: &str = "You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)";
+const CACOPHONY_UNLEASHED_ORACLE: &str = "When this enchantment enters, if you cast it, destroy all nonenchantment creatures.\nWhenever this enchantment or another enchantment you control enters, until end of turn, this enchantment becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.";
+const CAVERNOUS_MAW_ORACLE: &str = "{T}: Add {C}.\n{2}: This land becomes a 3/3 Elemental creature until end of turn. It's still a Cave land. Activate only if the number of other Caves you control plus the number of Cave cards in your graveyard is three or greater.";
+
+fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
+    let mut result = Vec::new();
+    let mut pending = vec![def];
+    while let Some(node) = pending.pop() {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = node.effect.as_ref()
+        {
+            result.extend(
+                static_abilities
+                    .iter()
+                    .flat_map(|static_def| static_def.modifications.iter()),
+            );
+        }
+        pending.extend(node.sub_ability.as_deref());
+        pending.extend(node.else_ability.as_deref());
+    }
+    result
+}
+
+fn retained_type_definition<'a>(
+    definition: &'a AbilityDefinition,
+    core_type: &CoreType,
+    subtype: Option<&str>,
+) -> Option<&'a AbilityDefinition> {
+    let carries_retained_type = match definition.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|static_definition| {
+            let has_core_type = static_definition.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddType {
+                        core_type: actual
+                    } if actual == core_type
+                )
+            });
+            let has_subtype = subtype.is_none_or(|expected| {
+                static_definition.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == expected
+                    )
+                })
+            });
+            has_core_type && has_subtype
+        }),
+        _ => false,
+    };
+    if carries_retained_type {
+        return Some(definition);
+    }
+    definition
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| retained_type_definition(sub, core_type, subtype))
+        .or_else(|| {
+            definition
+                .else_ability
+                .as_deref()
+                .and_then(|otherwise| retained_type_definition(otherwise, core_type, subtype))
+        })
+}
+
+fn parsed_retained_type_definition<'a>(
+    parsed: &'a engine::parser::oracle::ParsedAbilities,
+    core_type: CoreType,
+    subtype: Option<&str>,
+) -> &'a AbilityDefinition {
+    parsed
+        .abilities
+        .iter()
+        .find_map(|definition| retained_type_definition(definition, &core_type, subtype))
+        .or_else(|| {
+            parsed.triggers.iter().find_map(|trigger| {
+                trigger.execute.as_deref().and_then(|definition| {
+                    retained_type_definition(definition, &core_type, subtype)
+                })
+            })
+        })
+        .expect("retained-type production definition")
+}
+
+fn assert_retained_type_duration(
+    parsed: &engine::parser::oracle::ParsedAbilities,
+    name: &str,
+    core_type: CoreType,
+    subtype: Option<&str>,
+    expected_duration: Duration,
+) {
+    assert_zero_unimplemented(parsed, name);
+    let retained = parsed_retained_type_definition(parsed, core_type, subtype);
+    assert_eq!(retained.duration, Some(expected_duration.clone()), "{name}");
+    assert!(
+        matches!(
+            retained.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(actual),
+                ..
+            } if actual == &expected_duration
+        ),
+        "{name}: retained-type effect duration must match the governing animation: {retained:#?}"
+    );
+}
+
+fn assert_exact_text_name(
+    definitions: impl IntoIterator<Item = AbilityDefinition>,
+    expected_name: &str,
+) {
+    let definitions: Vec<_> = definitions.into_iter().collect();
+    let modifications: Vec<_> = definitions.iter().flat_map(all_modifications).collect();
+    assert!(
+        modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::SetTextName { name } if name == expected_name
+        )),
+        "missing SetTextName({expected_name:?}) in {modifications:#?}"
+    );
+    assert!(
+        !modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::SetName { .. })),
+        "non-copy assigned name must not use SetName: {modifications:#?}"
+    );
+}
+
+#[test]
+fn resolving_outer_assigned_names_are_layer_three_in_all_full_cards() {
+    let awakening = parse(
+        AWAKENING_ORACLE,
+        "Awakening of Vitu-Ghazi",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_zero_unimplemented(&awakening, "Awakening of Vitu-Ghazi");
+    assert_exact_text_name(awakening.abilities, "Vitu-Ghazi");
+
+    let tenth = parse(
+        TENTH_DISTRICT_HERO_ORACLE,
+        "Tenth District Hero",
+        &[],
+        &["Creature"],
+        &["Human"],
+    );
+    assert_zero_unimplemented(&tenth, "Tenth District Hero");
+    assert_exact_text_name(tenth.abilities, "Mileva, the Stalwart");
+
+    let fenric = parse(
+        CURSE_OF_FENRIC_ORACLE,
+        "The Curse of Fenric",
+        &[],
+        &["Enchantment"],
+        &["Saga"],
+    );
+    assert_zero_unimplemented(&fenric, "The Curse of Fenric");
+    let fenric_chapters = fenric
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref().cloned());
+    assert_exact_text_name(fenric_chapters, "Fenric");
+
+    let irencrag = parse(IRENCRAG_ORACLE, "The Irencrag", &[], &["Artifact"], &[]);
+    assert_zero_unimplemented(&irencrag, "The Irencrag");
+    let execute = irencrag
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref().cloned());
+    assert_exact_text_name(execute, "Everflame, Heroes' Legacy");
+}
+
+#[test]
+fn princess_fang_gideon_and_argothian_full_cards_parse_semantically() {
+    let princess = parse(
+        PRINCESS_YUE_ORACLE,
+        "Princess Yue",
+        &[],
+        &["Legendary", "Creature"],
+        &["Human", "Noble"],
+    );
+    assert_zero_unimplemented(&princess, "Princess Yue");
+    let princess_trigger = princess.triggers.first().expect("Princess dies trigger");
+    assert!(matches!(
+        princess_trigger.condition,
+        Some(engine::types::ability::TriggerCondition::ZoneChangeObjectMatchesFilter { .. })
+    ));
+    let princess_mods = all_modifications(
+        princess_trigger
+            .execute
+            .as_deref()
+            .expect("Princess trigger execute"),
+    );
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetTextName { name } if name == "Moon"
+    )));
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetCardTypes { core_types }
+            if core_types == &vec![CoreType::Land]
+    )));
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantAbility { definition }
+            if matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(definition.effect.as_ref(), Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                })
+    )));
+    assert!(
+        princess.abilities.iter().any(|definition| {
+            matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::Scry {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                )
+        }),
+        "Princess's printed tap/Scry ability must remain distinct from the granted mana ability"
+    );
+
+    let fang = parse(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        &["Flying"],
+        &["Legendary", "Creature"],
+        &["Wolf", "Dog"],
+    );
+    assert_zero_unimplemented(&fang, "Fang, Roku's Companion");
+    let fang_trigger = fang
+        .triggers
+        .iter()
+        .find(|trigger| {
+            matches!(
+                trigger.condition,
+                Some(engine::types::ability::TriggerCondition::Not { .. })
+            )
+        })
+        .expect("Fang dies trigger");
+    assert!(all_modifications(fang_trigger.execute.as_deref().unwrap())
+        .iter()
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Spirit"
+        )));
+
+    let gideon = parse(
+        GIDEON_CHAMPION_ORACLE,
+        "Gideon, Champion of Justice",
+        &[],
+        &["Legendary", "Planeswalker"],
+        &["Gideon"],
+    );
+    assert_zero_unimplemented(&gideon, "Gideon, Champion of Justice");
+    assert!(gideon
+        .abilities
+        .iter()
+        .flat_map(all_modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::AddType {
+                core_type: CoreType::Planeswalker
+            }
+        )));
+
+    let argothian = parse(
+        ARGOTHIAN_ORACLE,
+        "Argothian Uprooting",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_zero_unimplemented(&argothian, "Argothian Uprooting");
+    let argothian_mods: Vec<_> = argothian
+        .abilities
+        .iter()
+        .flat_map(all_modifications)
+        .collect();
+    assert!(!argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetName { .. } | ContinuousModification::SetTextName { .. }
+    )));
+    assert!(argothian_mods
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::SetPower { value: 0 })));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetToughness { value: 0 }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddSubtype { subtype } if subtype == "Elemental"
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Reach
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantTrigger { trigger }
+            if matches!(trigger.execute.as_deref().map(|ability| ability.effect.as_ref()),
+                Some(Effect::Conjure {
+                    cards,
+                    destination: Zone::Battlefield,
+                    tapped: true,
+                    ..
+                }) if cards.len() == 1 && cards[0].named_name() == Some("Forest"))
+    )));
+}
+
+fn run_dies_return_case(
+    oracle: &str,
+    name: &str,
+    subtypes: Vec<&str>,
+    starts_as_land: bool,
+) -> (ObjectId, ObjectId, engine::game::scenario::CastOutcome) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut subject = scenario.add_creature_from_oracle(P0, name, 2, 2, oracle);
+    subject
+        .as_legendary()
+        .with_subtypes(subtypes)
+        .controlled_by(P1);
+    if starts_as_land {
+        subject.as_land().as_creature();
+    }
+    let subject = subject.id();
+    let sentinel = scenario.add_creature(P1, "Sentinel", 3, 3).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(murder).target_object(subject).resolve();
+    (subject, sentinel, outcome)
+}
+
+#[test]
+fn princess_yue_dies_filter_and_returned_object_transformation_execute() {
+    let (yue, sentinel, outcome) =
+        run_dies_return_case(PRINCESS_YUE_ORACLE, "Princess Yue", vec!["Human"], false);
+    outcome.assert_zone(&[yue], Zone::Battlefield);
+    outcome.assert_zone(&[sentinel], Zone::Battlefield);
+    let object = &outcome.state().objects[&yue];
+    assert!(object.tapped);
+    assert_eq!(object.controller, P1);
+    assert_eq!(object.name, "Moon");
+    assert!(object.card_types.supertypes.contains(&Supertype::Legendary));
+    assert!(object.card_types.core_types.contains(&CoreType::Land));
+    assert!(!object.card_types.core_types.contains(&CoreType::Creature));
+    assert!(object.abilities.iter().any(|definition| {
+        matches!(definition.cost, Some(AbilityCost::Tap))
+            && matches!(
+                definition.effect.as_ref(),
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                }
+            )
+    }));
+    assert!(outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == yue)
+        }));
+    assert!(!outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == sentinel)
+        }));
+    assert!(!outcome.state().objects[&sentinel]
+        .abilities
+        .iter()
+        .any(|definition| matches!(
+            definition.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless { .. },
+                ..
+            }
+        )));
+
+    let (land_yue, _, negative) =
+        run_dies_return_case(PRINCESS_YUE_ORACLE, "Princess Yue", vec!["Human"], true);
+    negative.assert_zone(&[land_yue], Zone::Graveyard);
+    assert!(!negative
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land_yue)
+        }));
+    assert!(matches!(
+        negative.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn fang_dies_filter_adds_spirit_only_when_it_was_absent() {
+    let (fang, _, outcome) = run_dies_return_case(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        vec!["Wolf", "Dog"],
+        false,
+    );
+    outcome.assert_zone(&[fang], Zone::Battlefield);
+    let object = &outcome.state().objects[&fang];
+    assert!(object.card_types.core_types.contains(&CoreType::Creature));
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Wolf"));
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Spirit"));
+    assert!(outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == fang)
+        }));
+
+    let (spirit_fang, _, negative) = run_dies_return_case(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        vec!["Wolf", "Spirit"],
+        false,
+    );
+    negative.assert_zone(&[spirit_fang], Zone::Graveyard);
+    assert!(!negative
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == spirit_fang)
+        }));
+    assert!(matches!(
+        negative.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Candidate-bound production coverage for every retained-type duration class in
+/// the 79-card projected comparator slice. The 72-card add-Land EOT class keeps
+/// its runtime discriminator below (Disturbed Slumber); these shipped cards pin
+/// all three non-EOT authorities plus the two distinct one-card EOT payloads.
+/// Reverting the preceding-animation binding changes every retained definition
+/// asserted here back to `Permanent`.
+#[test]
+fn shipped_retained_type_duration_classes_follow_the_governing_animation() {
+    let until_next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (name, oracle, types, subtypes) in [
+        (
+            "Nissa, Vital Force",
+            NISSA_VITAL_FORCE_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Nissa"][..],
+        ),
+        (
+            "Sylvan Awakening",
+            SYLVAN_AWAKENING_ORACLE,
+            &["Sorcery"][..],
+            &[][..],
+        ),
+        (
+            "Wrenn and Realmbreaker",
+            WRENN_REALMBREAKER_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Wrenn"][..],
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], types, subtypes);
+        assert_retained_type_duration(&parsed, name, CoreType::Land, None, until_next_turn.clone());
+    }
+
+    let awakener = parse(
+        AWAKENER_DRUID_ORACLE,
+        "Awakener Druid",
+        &[],
+        &["Creature"],
+        &["Human", "Druid"],
+    );
+    assert_retained_type_duration(
+        &awakener,
+        "Awakener Druid",
+        CoreType::Land,
+        None,
+        Duration::UntilHostLeavesPlay,
+    );
+
+    let hedge = parse(
+        HEDGE_WHISPERER_ORACLE,
+        "Hedge Whisperer",
+        &[],
+        &["Creature"],
+        &["Elf", "Druid"],
+    );
+    assert_retained_type_duration(
+        &hedge,
+        "Hedge Whisperer",
+        CoreType::Land,
+        None,
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        },
+    );
+
+    let cacophony = parse(
+        CACOPHONY_UNLEASHED_ORACLE,
+        "Cacophony Unleashed",
+        &[],
+        &["Legendary", "Enchantment"],
+        &[],
+    );
+    assert_retained_type_duration(
+        &cacophony,
+        "Cacophony Unleashed",
+        CoreType::Enchantment,
+        None,
+        Duration::UntilEndOfTurn,
+    );
+
+    let cavernous_maw = parse(
+        CAVERNOUS_MAW_ORACLE,
+        "Cavernous Maw",
+        &[],
+        &["Land"],
+        &["Cave"],
+    );
+    assert_retained_type_duration(
+        &cavernous_maw,
+        "Cavernous Maw",
+        CoreType::Land,
+        Some("Cave"),
+        Duration::UntilEndOfTurn,
+    );
+}
+
+/// CR 205.1b + CR 514.2 + CR 611.2a: the separate "It's still a land"
+/// sentence modifies the preceding animation; it does not create an independent
+/// permanent continuous effect. This exact shipped-card cast drives the parsed
+/// chain through resolution and cleanup. Reverting the duration binding leaves
+/// the retained-Land transient at `Permanent`, so the final assertion fails.
+#[test]
+fn retained_type_clause_expires_with_its_governing_animation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disturbed Slumber", true, DISTURBED_SLUMBER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_object(land).resolve();
+    assert!(
+        outcome
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                effect.duration == Duration::UntilEndOfTurn
+                    && matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land)
+                    && effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Land
+                            }
+                        )
+                    })
+            }),
+        "reach guard: the retained-Land clause must install an UntilEndOfTurn transient"
+    );
+
+    let mut events = Vec::new();
+    execute_cleanup(runner.state_mut(), &mut events);
+    evaluate_layers(runner.state_mut());
+
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land)
+                    && effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Land
+                            }
+                        )
+                    })
+            }),
+        "CR 514.2: the retained-type transient must expire with the governing animation"
     );
 }

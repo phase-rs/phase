@@ -261,11 +261,19 @@ fn rollercrusher_combat_damage_not_doubled() {
     );
 }
 
-/// (d) ETB X-damage shape: the pre-existing "When ~ enters, it deals X damage to
-/// each of up to X target creatures" ETB parses to a `DealDamage{CostXPaid}` over
-/// a `0..=X` multi-target set. This is a SHAPE assertion — the ETB is not part of
-/// this increment's behavioral change (it already parsed correctly); it is
-/// documented here so the card's coverage flip is not hollow on that clause.
+/// (d) ETB X-damage shape: "When ~ enters, it deals X damage to each of up to X target
+/// creatures" parses to a `DealDamage{CostXPaid}` over a `0..=X` multi-target set.
+///
+/// CR 107.3i — BOTH X sites must bind to the same value. This assertion previously pinned
+/// `multi_target.max` as a bare `QuantityRef::Variable{"X"}` while `amount` was already
+/// `CostXPaid`: the same X, lowered two different ways. That asymmetry was the bug, not the
+/// spec. `multi_target` is consumed at TARGET SELECTION, before the trigger resolves and
+/// before `current_trigger_event` is set, so an unbound `Variable("X")` there resolves to
+/// **0** — "up to 0 target creatures". The Ride dealt its damage to nobody while rendering as
+/// fully supported, and this test pinned that as correct.
+///
+/// Both slots now bind to `CostXPaid` (t96). If `max` ever reverts to `Variable("X")`, the
+/// card silently stops targeting anything again.
 #[test]
 fn rollercrusher_etb_parses_x_damage_multitarget() {
     let parsed = parse_card(
@@ -297,9 +305,10 @@ fn rollercrusher_etb_parses_x_damage_multitarget() {
     assert_eq!(
         multi.max,
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::Variable {
-                name: "X".to_string()
-            }
-        })
+            qty: QuantityRef::CostXPaid
+        }),
+        "CR 107.3i: the target-count X must bind to the same paid X as the damage amount. A \
+         bare Variable(\"X\") here resolves to 0 at target selection — 'up to 0 target \
+         creatures' — so the ETB damages nobody."
     );
 }

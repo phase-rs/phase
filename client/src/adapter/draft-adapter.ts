@@ -1,4 +1,5 @@
 import type * as DraftWasm from "@wasm/draft";
+import type { MatchConfig } from "./types";
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -11,7 +12,105 @@ export interface DraftCardInstance {
   colors: string[];
   cmc: number;
   type_line: string;
+  draft_effect?: "additional_pick";
 }
+
+export type DraftPoolGroupKind =
+  | "white"
+  | "blue"
+  | "black"
+  | "red"
+  | "green"
+  | "multicolor"
+  | "colorless"
+  | "creature"
+  | "instant"
+  | "sorcery"
+  | "enchantment"
+  | "artifact"
+  | "planeswalker"
+  | "land"
+  | "other"
+  | "mythic"
+  | "rare"
+  | "uncommon"
+  | "common"
+  | "rarity_other"
+  | "mana_value0"
+  | "mana_value1"
+  | "mana_value2"
+  | "mana_value3"
+  | "mana_value4"
+  | "mana_value5"
+  | "mana_value6_plus";
+
+export interface DraftPoolEntry {
+  card: DraftCardInstance;
+  count: number;
+  /** Every collapsed copy's instance id — the collapse keys on the name, so
+   * same-name instances (a reprint at a different rarity) are only
+   * addressable through these. */
+  instance_ids: string[];
+}
+
+export interface DraftPoolGroup {
+  kind: DraftPoolGroupKind;
+  total: number;
+  cards: DraftPoolEntry[];
+}
+
+export interface DraftPoolColorCounts {
+  white: number;
+  blue: number;
+  black: number;
+  red: number;
+  green: number;
+}
+
+/** Typed filter contract mirroring `draft_core::view::PoolFilter` (#7546):
+ * the display sends WHAT it asks for; the engine decides WHICH instances
+ * match. Empty axis = unconstrained. */
+export interface PoolFilter {
+  query: string;
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
+/** Engine-computed filter option lists (`draft_core::view::PoolFilterOptions`):
+ * the stateless path for views that predate the option fields. */
+export interface PoolFilterOptions {
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
+export interface DraftPoolGroups {
+  color_groups: DraftPoolGroup[];
+  type_groups: DraftPoolGroup[];
+  cmc_groups: DraftPoolGroup[];
+  rarity_groups: DraftPoolGroup[];
+  /** Engine-owned option list for a type-filter control: every type bucket
+   * any pool member belongs to (multi-valued), in engine order. The exclusive
+   * `type_groups` axis stays a presentation/sorting shape. */
+  type_filter_options: DraftPoolGroupKind[];
+  /** Engine-owned option list for a color-filter control (CR 105.2: a card
+   * can be one or more colors). The exclusive `color_groups` axis stays a
+   * presentation shape. */
+  color_filter_options: DraftPoolGroupKind[];
+  color_counts: DraftPoolColorCounts;
+}
+
+/** Empty engine-shaped pool data for a lobby before a draft session exists. */
+export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
+  color_groups: [],
+  type_groups: [],
+  cmc_groups: [],
+  rarity_groups: [],
+  type_filter_options: [],
+  color_filter_options: [],
+  color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+};
 
 // @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
@@ -21,6 +120,7 @@ export interface SeatPublicView {
   connected: boolean;
   has_submitted_deck: boolean;
   pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
+  face_up_draft_cards: DraftCardInstance[];
 }
 
 export type DraftStatus =
@@ -33,6 +133,8 @@ export type DraftStatus =
   | "RoundComplete"
   | "Complete"
   | "Abandoned";
+
+export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed";
 
 export type TournamentFormat = "Swiss" | "SingleElimination";
 
@@ -79,7 +181,7 @@ export interface PairingView {
 // @sync-with: crates/draft-core/src/view.rs
 export interface SpectatorDraftView {
   status: DraftStatus;
-  kind: "Quick" | "Premier" | "Traditional";
+  kind: DraftKind;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
@@ -93,6 +195,7 @@ export interface SpectatorDraftView {
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
   /** Present only when the host enabled omniscient spectator visibility. */
   pools?: DraftCardInstance[][];
   current_packs?: (DraftCardInstance[] | null)[];
@@ -101,12 +204,17 @@ export interface SpectatorDraftView {
 // @sync-with: crates/draft-core/src/view.rs
 export interface DraftPlayerView {
   status: DraftStatus;
-  kind: "Quick" | "Premier" | "Traditional";
+  kind: DraftKind;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  draft_effects: DraftCardInstance[];
+  /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
+  pool_groups: DraftPoolGroups;
+  /** Engine-provided sealed packs in opening order. Absent for draft events. */
+  sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];
   cards_per_pack: number;
   pack_count: number;
@@ -115,9 +223,16 @@ export interface DraftPlayerView {
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;
+  /**
+   * Engine-derived round that pairings may next be generated for. Always >= 1.
+   * Published unconditionally, so on a `Complete` pod it names a round that can
+   * never be generated — read `current_round` there instead.
+   */
+  next_pairing_round: number;
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
 }
 
 export type MultiplayerSeatDescriptor =
@@ -193,6 +308,43 @@ export class DraftAdapter {
     return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
 
+  /**
+   * Narrow a limited-pool listing through the ENGINE's filtering authority
+   * (#7546 review). Each instance is classified inside draft-core — the
+   * wire-delivered groups are not an input, so a legacy (pre-v11) view
+   * filters every collapsed copy correctly. Stateless — works for P2P
+   * guests; no draft session is required.
+   */
+  async filterPoolListing(
+    listing: DraftCardInstance[],
+    filter: PoolFilter,
+  ): Promise<string[]> {
+    const wasm = await ensureDraftWasm();
+    return wasm.filter_pool_listing(
+      JSON.stringify(listing),
+      JSON.stringify(filter),
+    ) as string[];
+  }
+
+  /**
+   * The engine-owned filter option lists, computed from the pool instances
+   * alone — for views whose delivered groups predate the option fields
+   * (review round 5). Never reconstructed in the display layer.
+   */
+  async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
+    const wasm = await ensureDraftWasm();
+    return wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
+  }
+
+  async initializeSealed(
+    setPoolJson: string,
+    difficulty: number,
+    seed: number,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
   async initializeCube(
     cubeListText: string,
     cubeName: string,
@@ -213,6 +365,17 @@ export class DraftAdapter {
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect(
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
   }
 
   /** Let the bot AI pick the best card from the current pack for the player. */
@@ -253,36 +416,25 @@ export class DraftAdapter {
 
   // ── Multi-seat API (P2P Tournament Host) ─────────────────────────────
 
-  async startMultiplayerDraft(
-    setPoolJson: string,
-    kind: "Premier" | "Traditional",
-    seatNames: string[],
-    seed: number,
-  ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.start_multiplayer_draft(
-      setPoolJson,
-      kind,
-      JSON.stringify(seatNames),
-      seed,
-    ) as DraftPlayerView;
-  }
-
   async createMultiplayerDraft(
     poolInput: PoolInput,
     seats: MultiplayerSeatDescriptor[],
-    kind: "Premier" | "Traditional",
+    kind: Exclude<DraftKind, "Quick">,
     seed: number,
     draftCode: string,
     tournamentFormat: TournamentFormat,
     podPolicy: PodPolicy,
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    const kindId = kind === "Premier" ? 1 : 2;
+    const kindId: Record<Exclude<DraftKind, "Quick">, number> = {
+      Premier: 1,
+      Traditional: 2,
+      Sealed: 3,
+    };
     return wasm.create_multiplayer_draft(
       JSON.stringify(poolInput),
       JSON.stringify(seats),
-      kindId,
+      kindId[kind],
       seed,
       draftCode,
       tournamentFormat,
@@ -293,6 +445,19 @@ export class DraftAdapter {
   async submitPickForSeat(seat: number, cardInstanceId: string): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.submit_pick_for_seat(seat, cardInstanceId) as DraftPlayerView;
+  }
+
+  async submitPickWithDraftEffectForSeat(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect_for_seat(
+      seat,
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
   }
 
   async submitDeckForSeat(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {
@@ -337,9 +502,9 @@ export class DraftAdapter {
     return wasm.get_view_for_seat(0) as DraftPlayerView;
   }
 
-  async generatePairings(round: number): Promise<DraftPlayerView> {
+  async generatePairings(): Promise<DraftPlayerView> {
     return this.applyActionAndGetHostView(
-      JSON.stringify({ type: "GeneratePairings", data: { round } }),
+      JSON.stringify({ type: "GeneratePairings" }),
     );
   }
 

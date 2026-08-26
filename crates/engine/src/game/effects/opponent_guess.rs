@@ -3,8 +3,10 @@ use crate::types::ability::{
     ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, TriggerSourceContext,
+    WaitingFor,
+};
 use crate::types::player::PlayerId;
 
 /// CR 608.2d + CR 608.2e: An opponent / the defending player guesses a value the
@@ -34,17 +36,28 @@ pub fn resolve(
         // rider fires (guess_outcome stays None).
         return Ok(());
     };
+    let Some(source_context) = opponent_guess_source_context(state, ability) else {
+        return Ok(());
+    };
 
-    let (options, choice_type, proposition_truth) = match &subject {
+    let (options, choice_type, proposition_truth, committed_choice) = match &subject {
         GuessSubject::CommittedChoice { choice_type } => {
             // CR 608.2d: the guesser may name ANY printed value; a used number is
             // a wrong guess, not an illegal choice. So enumerate the full printed
             // domain directly from `choice_type` (ignoring `distinctness`), NOT
             // via the history-subtracting `compute_options`.
             let options = match choice_type {
-                ChoiceType::NumberRange { min, max, .. } => {
-                    (*min..=*max).map(|n| n.to_string()).collect::<Vec<_>>()
-                }
+                // CR 107.1a/b: only a BOUNDED committed domain can be enumerated
+                // for the guesser. An unbounded one has no printed list to guess
+                // from, so it falls through to the empty set and the CR 609.3
+                // no-op guard below — the same outcome as any other committed
+                // domain the guess machinery cannot enumerate. No printed card
+                // pairs an unbounded choice with a guess.
+                ChoiceType::NumberRange {
+                    min,
+                    max: Some(max),
+                    ..
+                } => (*min..=*max).map(|n| n.to_string()).collect::<Vec<_>>(),
                 // Other committed-choice domains route through the shared option
                 // enumerator's printed-domain semantics. No printed card uses a
                 // non-number committed guess yet; fall back to an empty set so the
@@ -53,15 +66,19 @@ pub fn resolve(
             };
             // CR 609.3: with nothing committed on the source there is nothing to
             // guess against — do nothing, leaving guess_outcome None.
-            let has_commit = state.objects.get(&ability.source_id).is_some_and(|o| {
-                o.chosen_attributes
-                    .iter()
-                    .any(|a| matches!(a, crate::types::ability::ChosenAttribute::Number(_)))
-            });
-            if options.is_empty() || !has_commit {
+            let committed_choice = source_context
+                .lki
+                .chosen_attributes
+                .iter()
+                .rev()
+                .find(|attribute| {
+                    matches!(attribute, crate::types::ability::ChosenAttribute::Number(_))
+                })
+                .cloned();
+            if options.is_empty() || committed_choice.is_none() {
                 return Ok(());
             }
-            (options, choice_type.clone(), None)
+            (options, choice_type.clone(), None, committed_choice)
         }
         GuessSubject::Proposition {
             lhs,
@@ -91,7 +108,7 @@ pub fn resolve(
             let choice_type = ChoiceType::Labeled {
                 options: options.clone(),
             };
-            (options, choice_type, Some(truth))
+            (options, choice_type, Some(truth), None)
         }
     };
 
@@ -103,16 +120,35 @@ pub fn resolve(
         player: guesser,
         options,
         choice_type,
-        source_id: ability.source_id,
+        source: OpponentGuessSource {
+            prompt: PromptSourceBinding::from_trigger_source(&source_context),
+        },
+        owner: Some(OpponentGuessOwner {
+            context: source_context,
+            committed_choice,
+        }),
         proposition_truth,
     };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::OpponentGuess,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
+}
+
+fn opponent_guess_source_context(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<TriggerSourceContext> {
+    ability.trigger_source.clone().or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .map(|source| crate::game::triggers::trigger_source_context_for_latch(state, source))
+    })
 }
 
 /// CR 608.2e: Resolve the guessing player from a `ControllerRef`.
@@ -203,11 +239,10 @@ fn proposition_labels(comparator: Comparator) -> Vec<String> {
 /// (CR 608.2c "the last chosen value" — read within this same resolution, where
 /// the choose instruction precedes the guess instruction in the one ability).
 pub(crate) fn guess_is_correct(
-    state: &GameState,
-    source_id: ObjectId,
     options: &[String],
     choice: &str,
     proposition_truth: Option<bool>,
+    committed_choice: Option<&crate::types::ability::ChosenAttribute>,
 ) -> bool {
     match proposition_truth {
         Some(truth) => {
@@ -220,12 +255,12 @@ pub(crate) fn guess_is_correct(
             // The choose instruction precedes the guess within this single
             // ability, so this is an in-resolution back-reference, not a
             // CR 607.2d link between two distinct printed abilities.
-            let committed = state.objects.get(&source_id).and_then(|o| {
-                o.chosen_attributes.iter().rev().find_map(|a| match a {
-                    crate::types::ability::ChosenAttribute::Number(n) => Some(*n as i32),
-                    _ => None,
-                })
-            });
+            let committed = match committed_choice {
+                Some(crate::types::ability::ChosenAttribute::Number(number)) => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*number))
+                }
+                _ => None,
+            };
             choice
                 .parse::<i32>()
                 .ok()

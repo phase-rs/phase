@@ -1,6 +1,12 @@
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::database::legality::LegalityFormat;
+use crate::types::custom_format::{
+    custom_format_registry, CustomFormatId, CustomFormatRules, FormatConfigError,
+};
 use crate::types::player::PlayerId;
 
 /// Broad grouping used by the UI to visually cluster related formats
@@ -32,7 +38,7 @@ pub struct FormatMetadata {
 }
 
 /// Supported game formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameFormat {
     Standard,
     Limited,
@@ -64,6 +70,121 @@ pub enum GameFormat {
     /// Create a token that's a copy of a creature card with mana value X chosen
     /// at random."
     Momir,
+    /// An engine-validated custom format. Resolves via
+    /// `FormatConfig.custom_rules` (see `types::custom_format`) — a bare
+    /// `GameFormat::Custom(id)` alone cannot fully answer several of this
+    /// enum's methods; see each method's doc comment for how it handles
+    /// `Custom`.
+    Custom(CustomFormatId),
+}
+
+/// Parse error for `GameFormat::from_str` — `GameFormat` has no catch-all
+/// variant (unlike `Keyword`), so this is genuinely fallible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameFormatParseError(pub String);
+
+impl std::fmt::Display for GameFormatParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for GameFormatParseError {}
+
+impl std::str::FromStr for GameFormat {
+    type Err = GameFormatParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("Custom:") {
+            return rest
+                .parse::<u16>()
+                .map(|n| GameFormat::Custom(CustomFormatId(n)))
+                .map_err(|_| GameFormatParseError(format!("invalid Custom format id: {rest:?}")));
+        }
+        match s {
+            "Standard" => Ok(GameFormat::Standard),
+            "Limited" => Ok(GameFormat::Limited),
+            "Commander" => Ok(GameFormat::Commander),
+            "Pioneer" => Ok(GameFormat::Pioneer),
+            "Modern" => Ok(GameFormat::Modern),
+            "Premodern" => Ok(GameFormat::Premodern),
+            "Legacy" => Ok(GameFormat::Legacy),
+            "Vintage" => Ok(GameFormat::Vintage),
+            "Historic" => Ok(GameFormat::Historic),
+            "Timeless" => Ok(GameFormat::Timeless),
+            "Pauper" => Ok(GameFormat::Pauper),
+            "PauperCommander" => Ok(GameFormat::PauperCommander),
+            "DuelCommander" => Ok(GameFormat::DuelCommander),
+            "TinyLeaders" => Ok(GameFormat::TinyLeaders),
+            "Oathbreaker" => Ok(GameFormat::Oathbreaker),
+            "Brawl" => Ok(GameFormat::Brawl),
+            "HistoricBrawl" => Ok(GameFormat::HistoricBrawl),
+            "FreeForAll" => Ok(GameFormat::FreeForAll),
+            "TwoHeadedGiant" => Ok(GameFormat::TwoHeadedGiant),
+            "Archenemy" => Ok(GameFormat::Archenemy),
+            "Planechase" => Ok(GameFormat::Planechase),
+            "Momir" => Ok(GameFormat::Momir),
+            other => Err(GameFormatParseError(format!(
+                "unknown GameFormat: {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for GameFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GameFormat::Custom(id) => write!(f, "Custom:{}", id.0),
+            GameFormat::Standard => write!(f, "Standard"),
+            GameFormat::Limited => write!(f, "Limited"),
+            GameFormat::Commander => write!(f, "Commander"),
+            GameFormat::Pioneer => write!(f, "Pioneer"),
+            GameFormat::Modern => write!(f, "Modern"),
+            GameFormat::Premodern => write!(f, "Premodern"),
+            GameFormat::Legacy => write!(f, "Legacy"),
+            GameFormat::Vintage => write!(f, "Vintage"),
+            GameFormat::Historic => write!(f, "Historic"),
+            GameFormat::Timeless => write!(f, "Timeless"),
+            GameFormat::Pauper => write!(f, "Pauper"),
+            GameFormat::PauperCommander => write!(f, "PauperCommander"),
+            GameFormat::DuelCommander => write!(f, "DuelCommander"),
+            GameFormat::TinyLeaders => write!(f, "TinyLeaders"),
+            GameFormat::Oathbreaker => write!(f, "Oathbreaker"),
+            GameFormat::Brawl => write!(f, "Brawl"),
+            GameFormat::HistoricBrawl => write!(f, "HistoricBrawl"),
+            GameFormat::FreeForAll => write!(f, "FreeForAll"),
+            GameFormat::TwoHeadedGiant => write!(f, "TwoHeadedGiant"),
+            GameFormat::Archenemy => write!(f, "Archenemy"),
+            GameFormat::Planechase => write!(f, "Planechase"),
+            GameFormat::Momir => write!(f, "Momir"),
+        }
+    }
+}
+
+impl Serialize for GameFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for GameFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => {
+                s.parse::<GameFormat>().map_err(serde::de::Error::custom)
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "expected a string for GameFormat, got {other:?}"
+            ))),
+        }
+    }
 }
 
 /// CR 100.4 / CR 100.4a: Per-format sideboard rules.
@@ -83,7 +204,9 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
-/// Per-card override to the default constructed copy limit.
+/// A deck-construction copy ceiling for one card name: either unbounded or
+/// capped at `n`. Used at both levels of the rule — the format's default
+/// (see [`GameFormat::default_deck_copy_limit`]) and a card's printed override.
 ///
 /// CR 100.2a sets the default constructed limit to four of any card with a
 /// particular English name (basic lands excepted). A handful of cards print an
@@ -124,25 +247,82 @@ pub enum FormatTopology {
     },
 }
 
+/// Configuration for the limited range of influence option.
+///
+/// The engine does not implement limited-range rules yet. This type preserves
+/// the full per-seat configuration shape so external boundaries can reject it
+/// explicitly until the corresponding game-rule support exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeOfInfluenceConfig {
+    /// The number of seats away that each player can influence by default.
+    /// Zero is valid and means a player can influence only themself.
+    pub default_range: u8,
+    /// Per-seat exceptions to [`Self::default_range`].
+    #[serde(default)]
+    pub player_overrides: BTreeMap<PlayerId, u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RangeOfInfluenceConfigWire {
+    Current(RangeOfInfluenceConfig),
+    Legacy(u8),
+}
+
+fn deserialize_range_of_influence<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<RangeOfInfluenceConfig>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<RangeOfInfluenceConfigWire>::deserialize(deserializer).map(|range| {
+        range.map(|range| {
+            Box::new(match range {
+                RangeOfInfluenceConfigWire::Current(config) => config,
+                RangeOfInfluenceConfigWire::Legacy(default_range) => RangeOfInfluenceConfig {
+                    default_range,
+                    player_overrides: BTreeMap::new(),
+                },
+            })
+        })
+    })
+}
+
+/// Fail-closed default for `FormatConfig.sideboard_policy` on a payload
+/// serialized before that field existed: understating a sideboard
+/// allowance is safer than overstating one.
+fn default_sideboard_policy_fallback() -> SideboardPolicy {
+    SideboardPolicy::Forbidden
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct FormatConfig {
     pub format: GameFormat,
     pub starting_life: i32,
     pub min_players: u8,
     pub max_players: u8,
+    /// CR 100.5: the format's **minimum** deck size. There is no maximum deck
+    /// size for non-Commander decks, so a 61-card Standard deck is legal and
+    /// this must be compared with `<`, never `==`.
+    ///
+    /// The command-zone formats are the exception: CR 903.5a makes 100 both the
+    /// minimum and the maximum, so an exact comparison is correct there — but
+    /// only there, and only when gated on `command_zone`.
     pub deck_size: u16,
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
-    pub range_of_influence: Option<u8>,
+    #[serde(default, deserialize_with = "deserialize_range_of_influence")]
+    pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
     /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
     /// designated as the archenemy and takes the first turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy_player: Option<PlayerId>,
     /// Engine-derived predicate: true when the format uses a commander card
-    /// and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+    /// and the commander-damage state-based action (CR 903.10a).
     /// Covers Commander, Duel Commander, Pauper Commander, Brawl, and
     /// Historic Brawl. The frontend consumes this directly — it must never
     /// re-list commander-style formats client-side.
@@ -154,6 +334,18 @@ pub struct FormatConfig {
     /// gates — it must never re-list fixed-deck formats client-side.
     #[serde(default)]
     pub supplies_fixed_deck: bool,
+    /// Engine-derived, stored per-format sideboard policy (CR 100.4/100.4a).
+    /// Mirrors `uses_commander`/`supplies_fixed_deck`'s stored-field
+    /// pattern — real consumers (`deck_loading.rs`, `match_flow.rs`,
+    /// `companion.rs`) read this field, never `GameFormat::sideboard_policy()`
+    /// directly: for a built-in format the two always agree, but for
+    /// `GameFormat::Custom` the bare method has no way to see the real
+    /// declared policy sitting in `custom_rules.structural.sideboard_policy`
+    /// and would silently discard it, which is exactly the bug this field
+    /// exists to prevent. `#[serde(default)]` fails closed (`Forbidden`) for
+    /// any payload serialized before this field existed.
+    #[serde(default = "default_sideboard_policy_fallback")]
+    pub sideboard_policy: SideboardPolicy,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -161,6 +353,83 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Present only when `format == GameFormat::Custom(id)` (and then `id`
+    /// must equal `custom_rules.id` — see
+    /// `custom_format::validate_custom_rules_consistency`). `None` for every
+    /// built-in format. Boxed because `FormatConfig` is embedded directly in
+    /// `lobby_broker::protocol::LobbyClientMessage::CreateGameWithSettings`
+    /// (and the canonical `server_core` equivalent) — an unboxed
+    /// `CustomFormatRules` pushes that enum's largest variant over clippy's
+    /// `large_enum_variant` threshold, exactly like `range_of_influence`
+    /// above is boxed for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_rules: Option<Box<CustomFormatRules>>,
+}
+
+/// Deserializing via the derive above, unchecked, would let an external
+/// payload construct `format: Custom(id)` with `custom_rules: None` or a
+/// mismatched id — `custom_format::validate_custom_rules_consistency` exists
+/// precisely to reject that, but a validator nobody calls doesn't protect
+/// anything. `#[serde(remote = "Self")]` on `FormatConfig` above generates
+/// this type's normal derived field-by-field (de)serialization as plain
+/// inherent `FormatConfig::serialize`/`FormatConfig::deserialize` functions
+/// (not the `Serialize`/`Deserialize` trait impls, which are instead
+/// hand-written here) — the standard serde idiom for "derive, then validate
+/// before accepting," with zero duplicated field declarations. `Serialize`
+/// needs no validation (an in-memory `FormatConfig` is already guaranteed
+/// consistent) and is a pure passthrough; `Deserialize` is the single
+/// authoritative `FormatConfig` ingress — every deserialization path (WASM
+/// boundary, lobby-broker/server-core protocol payloads, replay/save/restore
+/// files) goes through it, since every such path ultimately deserializes a
+/// `GameState`/`PersistedGameState` whose own `format_config: FormatConfig`
+/// field is a plain derived field with no bypass.
+impl Serialize for FormatConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FormatConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let config = Self::deserialize(deserializer)?;
+        // `command_zone`/`commander_damage_threshold`/`uses_commander`/
+        // `singleton`/`sideboard_policy` etc. are this struct's own independently-serialized
+        // runtime fields — for a built-in format they're always consistent
+        // because a `FormatConfig::x()` builder derived them together. For
+        // `Custom` there is no such builder yet: `custom_rules.structural`
+        // (a `CommandZoneMode`-discriminated declaration) and these bare
+        // runtime fields are two independently-writable representations of
+        // the same thing, and nothing here cross-checks them — a
+        // matching-`custom_rules.id` payload could still declare
+        // `CommandZoneMode::Disabled` while separately setting
+        // `command_zone: true`. Rather than accept that inconsistency (or
+        // partially validate it in a way a later phase would have to widen
+        // anyway), reject `Custom` outright at this single boundary until a
+        // real resolver — landing with Axis A/Axis B registration — can
+        // derive every runtime field FROM `custom_rules.structural` instead
+        // of accepting them independently. `GameFormat::Custom` remains
+        // fully constructible in-memory (for schema tests, and for that
+        // future resolver to build) — only external deserialization of an
+        // ACTIVE `FormatConfig` is refused.
+        if matches!(config.format, GameFormat::Custom(_)) {
+            return Err(serde::de::Error::custom(
+                "GameFormat::Custom cannot be activated via external FormatConfig \
+                 deserialization yet — no resolver exists to derive/validate this struct's \
+                 runtime fields (command_zone, uses_commander, commander_damage_threshold, \
+                 singleton, sideboard_policy, ...) from custom_rules.structural, so two independently-writable \
+                 representations of the same state could disagree; this lands in a later phase",
+            ));
+        }
+        crate::types::custom_format::validate_custom_rules_consistency(&config)
+            .map_err(serde::de::Error::custom)?;
+        Ok(config)
+    }
 }
 
 impl FormatTopology {
@@ -206,6 +475,10 @@ impl GameFormat {
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
             | GameFormat::Limited => None,
+            // A custom format's legality is entirely governed by its own
+            // `LegalityRules` (legal_sets/banned/restricted), never by the
+            // built-in `LegalityFormat` table.
+            GameFormat::Custom(_) => None,
         }
     }
 
@@ -239,6 +512,70 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Limited => SideboardPolicy::Unlimited,
+            // Phase 1a: disclosed, temporary, bare-GameFormat-context
+            // fallback — not this custom format's real declared policy
+            // (that lives on the resolved FormatConfig/CustomFormatRules,
+            // which this method has no access to). Forbidden is the
+            // fail-closed answer: understating a sideboard allowance is
+            // safer than overstating one. Phase 1b migrates real callers to
+            // read FormatConfig's resolved field instead of this method.
+            GameFormat::Custom(_) => SideboardPolicy::Forbidden,
+        }
+    }
+
+    /// CR 100.2a / CR 100.2b / CR 903.5b: Per-format default copy limit for a
+    /// single card name, before per-card overrides and the basic-land
+    /// exemption are applied.
+    ///
+    /// - `UpTo(4)` — CR 100.2a: constructed decks may contain no more than four
+    ///   of any card with a particular English name. Planechase and Archenemy
+    ///   build a constructed deck plus a supplementary deck (CR 100.2d), so
+    ///   they inherit the same limit.
+    /// - `UpTo(1)` — CR 903.5b: the Commander singleton rule, shared by every
+    ///   command-zone singleton variant.
+    /// - `Unlimited` — CR 100.2b: a limited deck may contain as many duplicates
+    ///   of a card as the product provides. Free-for-All and Two-Headed Giant
+    ///   are casual variants that restrict no card pool, and Momir supplies a
+    ///   fixed deck (CR 100.2a's limit never applies to a deck players do not
+    ///   construct).
+    ///
+    /// This is the format half of the copy rule only. `max_deck_copies` in
+    /// `game::deck_validation` is the single authority that combines it with
+    /// the basic-land exemption and a card's printed [`DeckCopyLimit`]
+    /// override; callers wanting "how many copies of this card are legal"
+    /// must use that, never this method alone.
+    pub fn default_deck_copy_limit(self) -> DeckCopyLimit {
+        match self {
+            GameFormat::Standard
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::Planechase
+            | GameFormat::Archenemy => DeckCopyLimit::UpTo(4),
+            GameFormat::Commander
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => DeckCopyLimit::UpTo(1),
+            GameFormat::Limited
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Momir => DeckCopyLimit::Unlimited,
+            // Phase 1a: disclosed, temporary, bare-GameFormat-context
+            // fallback — not this custom format's real declared limit.
+            // UpTo(1) (the same value already used for command-zone
+            // singleton formats) is the fail-closed answer: it under-permits
+            // rather than silently over-permitting a format whose real
+            // rules were never consulted. Phase 1b migrates real callers to
+            // read FormatConfig's resolved field instead of this method.
+            GameFormat::Custom(_) => DeckCopyLimit::UpTo(1),
         }
     }
 
@@ -262,21 +599,54 @@ impl GameFormat {
     }
 
     /// Whether this format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.5u). True for Commander, Duel
+    /// state-based action (CR 903.10a). True for Commander, Duel
     /// Commander, Pauper Commander, Brawl, and Historic Brawl — every format
     /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
     /// `commander_damage_threshold`. The frontend consumes the derived
     /// `FormatConfig::uses_commander` field rather than re-listing the
     /// commander-style variants client-side.
-    pub fn uses_commander(self) -> bool {
-        matches!(
-            self,
+    ///
+    /// Returns `Err` for `GameFormat::Custom` rather than panicking or
+    /// guessing `false`: this is a public query, callable with any
+    /// `GameFormat` a caller holds — including one parsed straight from
+    /// untrusted input, since `GameFormat::from_str` accepts any
+    /// `"Custom:<u16>"` string. A bare `GameFormat` carries no
+    /// `CustomFormatRules` to answer this from, and a Custom format can
+    /// legitimately resolve to a commander-using configuration, so `false`
+    /// would be a silently wrong answer, not a safe default. Callers that
+    /// might see a Custom format from an external source must handle the
+    /// rejection; callers with a resolved `FormatConfig` should read its
+    /// `uses_commander` field instead of calling this at all.
+    pub fn uses_commander(self) -> Result<bool, FormatConfigError> {
+        match self {
             GameFormat::Commander
-                | GameFormat::DuelCommander
-                | GameFormat::PauperCommander
-                | GameFormat::Brawl
-                | GameFormat::HistoricBrawl,
-        )
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => Ok(true),
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir => Ok(false),
+            GameFormat::Custom(id) => Err(FormatConfigError(format!(
+                "uses_commander cannot resolve ad-hoc Custom format {} — read \
+                 FormatConfig.uses_commander from the resolved config instead",
+                id.0
+            ))),
+        }
     }
 
     /// Whether this format's deck is fixed by the format rules and supplied
@@ -287,34 +657,73 @@ impl GameFormat {
     /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
     /// and must never re-list fixed-deck formats client-side.
     pub fn supplies_fixed_deck(self) -> bool {
-        matches!(self, GameFormat::Momir)
+        match self {
+            GameFormat::Momir => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Commander
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase => false,
+            // No custom-format use case for an engine-supplied fixed deck
+            // exists today — a real one would need its own design, analogous
+            // to Momir's Madness.
+            GameFormat::Custom(_) => false,
+        }
     }
 
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
-    pub fn label(self) -> &'static str {
+    ///
+    /// Built-in variants return a static string. `Custom(id)` looks the id up
+    /// in `custom_format_registry()`: a hit returns that preset's real label;
+    /// a miss returns the fixed fallback `"Custom Format"`. A miss is the
+    /// normal case for an ad-hoc lobby-saved format — its player-chosen name
+    /// is client-local only and never travels to the engine, so the engine
+    /// has no name of its own to report.
+    pub fn label(self) -> Cow<'static, str> {
         match self {
-            GameFormat::Standard => "Standard",
-            GameFormat::Limited => "Limited",
-            GameFormat::Commander => "Commander",
-            GameFormat::Pioneer => "Pioneer",
-            GameFormat::Modern => "Modern",
-            GameFormat::Premodern => "Premodern",
-            GameFormat::Legacy => "Legacy",
-            GameFormat::Vintage => "Vintage",
-            GameFormat::Historic => "Historic",
-            GameFormat::Timeless => "Timeless",
-            GameFormat::Pauper => "Pauper",
-            GameFormat::PauperCommander => "Pauper Commander",
-            GameFormat::DuelCommander => "Duel Commander",
-            GameFormat::TinyLeaders => "Tiny Leaders: Reborn",
-            GameFormat::Oathbreaker => "Oathbreaker",
-            GameFormat::Brawl => "Brawl",
-            GameFormat::HistoricBrawl => "Historic Brawl",
-            GameFormat::FreeForAll => "Free-for-All",
-            GameFormat::TwoHeadedGiant => "Two-Headed Giant",
-            GameFormat::Archenemy => "Archenemy",
-            GameFormat::Planechase => "Planechase",
-            GameFormat::Momir => "Momir's Madness",
+            GameFormat::Standard => Cow::Borrowed("Standard"),
+            GameFormat::Limited => Cow::Borrowed("Limited"),
+            GameFormat::Commander => Cow::Borrowed("Commander"),
+            GameFormat::Pioneer => Cow::Borrowed("Pioneer"),
+            GameFormat::Modern => Cow::Borrowed("Modern"),
+            GameFormat::Premodern => Cow::Borrowed("Premodern"),
+            GameFormat::Legacy => Cow::Borrowed("Legacy"),
+            GameFormat::Vintage => Cow::Borrowed("Vintage"),
+            GameFormat::Historic => Cow::Borrowed("Historic"),
+            GameFormat::Timeless => Cow::Borrowed("Timeless"),
+            GameFormat::Pauper => Cow::Borrowed("Pauper"),
+            GameFormat::PauperCommander => Cow::Borrowed("Pauper Commander"),
+            GameFormat::DuelCommander => Cow::Borrowed("Duel Commander"),
+            GameFormat::TinyLeaders => Cow::Borrowed("Tiny Leaders: Reborn"),
+            GameFormat::Oathbreaker => Cow::Borrowed("Oathbreaker"),
+            GameFormat::Brawl => Cow::Borrowed("Brawl"),
+            GameFormat::HistoricBrawl => Cow::Borrowed("Historic Brawl"),
+            GameFormat::FreeForAll => Cow::Borrowed("Free-for-All"),
+            GameFormat::TwoHeadedGiant => Cow::Borrowed("Two-Headed Giant"),
+            GameFormat::Archenemy => Cow::Borrowed("Archenemy"),
+            GameFormat::Planechase => Cow::Borrowed("Planechase"),
+            GameFormat::Momir => Cow::Borrowed("Momir's Madness"),
+            GameFormat::Custom(id) => custom_format_registry()
+                .into_iter()
+                .find(|def| def.rules.id == id)
+                .map(|def| Cow::Owned(def.label))
+                .unwrap_or(Cow::Borrowed("Custom Format")),
         }
     }
 
@@ -449,7 +858,7 @@ impl GameFormat {
                 format: GameFormat::HistoricBrawl,
                 label: "Historic Brawl",
                 short_label: "HBR",
-                description: "60-card eternal singleton",
+                description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::historic_brawl(),
             },
@@ -570,6 +979,39 @@ impl FormatConfig {
                 ));
             }
         }
+        if let Some(range) = &self.range_of_influence {
+            let max_radius = player_count / 2;
+            if range.default_range > max_radius {
+                return Err(format!(
+                    "range_of_influence.default_range must be at most {max_radius} for {player_count} players"
+                ));
+            }
+            for (&player, &radius) in &range.player_overrides {
+                if player.0 >= player_count {
+                    return Err(format!(
+                        "range_of_influence.player_overrides contains seat {} outside player_count ({player_count})",
+                        player.0
+                    ));
+                }
+                if radius > max_radius {
+                    return Err(format!(
+                        "range_of_influence.player_overrides[{}] must be at most {max_radius} for {player_count} players",
+                        player.0
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects limited-range configuration until the engine implements its rules.
+    pub fn reject_unimplemented_range_of_influence(&self) -> Result<(), String> {
+        if self.range_of_influence.is_some() {
+            return Err(
+                "range_of_influence is not supported until limited-range rules are implemented"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -593,8 +1035,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Standard.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -612,8 +1056,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: true,
+            sideboard_policy: GameFormat::Commander.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -703,8 +1149,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::TinyLeaders.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -726,8 +1174,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Oathbreaker.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -762,15 +1212,20 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: true,
+            sideboard_policy: GameFormat::Brawl.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
-    /// Historic Brawl: same rules as Brawl but with the broader Historic card pool.
+    /// Historic Brawl: Brawl's structural rules with the broader Historic card
+    /// pool and a 100-card deck (Arena's 100-card Brawl, formerly "Historic
+    /// Brawl" — distinct from 60-card Standard Brawl).
     pub fn historic_brawl() -> Self {
         FormatConfig {
             format: GameFormat::HistoricBrawl,
+            deck_size: 100,
             ..Self::brawl()
         }
     }
@@ -789,8 +1244,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::FreeForAll.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -810,8 +1267,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Limited.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -834,8 +1293,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Momir.sideboard_policy(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -853,8 +1314,10 @@ impl FormatConfig {
             team_based: true,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::TwoHeadedGiant.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -875,8 +1338,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Planechase.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -896,8 +1361,10 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
             uses_commander: false,
+            sideboard_policy: GameFormat::Archenemy.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -916,8 +1383,17 @@ impl FormatConfig {
     /// counts for Commander) are intentionally not recovered — guests use
     /// this purely to filter their local deck picker, and the host's own
     /// FormatConfig remains authoritative once the P2P session is established.
-    pub fn for_format(format: GameFormat) -> Self {
-        match format {
+    ///
+    /// Returns `Err` for `GameFormat::Custom` rather than panicking: this is
+    /// a public factory, callable with any `GameFormat` a caller happens to
+    /// hold — including one parsed straight from untrusted external input,
+    /// since `GameFormat::from_str` accepts any `"Custom:<u16>"` string. A
+    /// bare `GameFormat` carries no `CustomFormatRules` to build structural
+    /// rules from, so there is no default to fall back to here; callers that
+    /// might see a Custom format from an external source must handle the
+    /// rejection rather than the function terminating the process.
+    pub fn for_format(format: GameFormat) -> Result<Self, FormatConfigError> {
+        Ok(match format {
             GameFormat::Standard => Self::standard(),
             GameFormat::Limited => Self::limited(),
             GameFormat::Commander => Self::commander(),
@@ -940,7 +1416,13 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
-        }
+            GameFormat::Custom(id) => {
+                return Err(FormatConfigError(format!(
+                    "for_format cannot resolve ad-hoc Custom format {} structural rules — read custom_rules from the resolved FormatConfig/CustomFormatRules instead",
+                    id.0
+                )))
+            }
+        })
     }
 }
 
@@ -1002,6 +1484,20 @@ mod tests {
         assert_eq!(config.commander_damage_threshold, None);
         assert!(!config.uses_commander);
         assert!(!config.team_based);
+    }
+
+    #[test]
+    fn format_config_brawl_deck_sizes() {
+        // Standard Brawl is 60 cards; Historic Brawl (Arena's 100-card Brawl)
+        // is 100. Both share the remaining structural rules.
+        let brawl = FormatConfig::brawl();
+        assert_eq!(brawl.deck_size, 60);
+        let historic = FormatConfig::historic_brawl();
+        assert_eq!(historic.deck_size, 100);
+        assert_eq!(historic.starting_life, brawl.starting_life);
+        assert!(historic.singleton);
+        assert!(historic.command_zone);
+        assert_eq!(historic.commander_damage_threshold, Some(21));
     }
 
     #[test]
@@ -1150,7 +1646,7 @@ mod tests {
             SideboardPolicy::Forbidden
         );
         assert!(GameFormat::Oathbreaker.grants_free_first_mulligan());
-        assert!(!GameFormat::Oathbreaker.uses_commander());
+        assert!(!GameFormat::Oathbreaker.uses_commander().unwrap());
         assert_eq!(GameFormat::Oathbreaker.legality_format(), None);
     }
 
@@ -1177,6 +1673,86 @@ mod tests {
             let deserialized: FormatConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(config, deserialized);
         }
+    }
+
+    #[test]
+    fn range_of_influence_config_round_trips_with_player_overrides() {
+        let config = RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        };
+
+        let json = serde_json::to_value(&config).expect("range config serializes");
+        assert_eq!(json["default_range"], 0);
+        assert_eq!(json["player_overrides"]["1"], 1);
+        assert_eq!(json["player_overrides"]["3"], 2);
+        assert_eq!(
+            serde_json::from_value::<RangeOfInfluenceConfig>(json)
+                .expect("range config deserializes"),
+            config
+        );
+    }
+
+    #[test]
+    fn range_of_influence_config_defaults_missing_overrides_to_empty() {
+        let config: RangeOfInfluenceConfig =
+            serde_json::from_str(r#"{"default_range":0}"#).expect("range config deserializes");
+
+        assert_eq!(config.default_range, 0);
+        assert!(config.player_overrides.is_empty());
+    }
+
+    #[test]
+    fn legacy_scalar_range_of_influence_deserializes_and_remains_rejected() {
+        let mut serialized = serde_json::to_value(FormatConfig::standard())
+            .expect("format config serializes before legacy rewrite");
+        serialized["range_of_influence"] = serde_json::json!(1);
+
+        let config: FormatConfig =
+            serde_json::from_value(serialized).expect("legacy scalar range config deserializes");
+
+        assert_eq!(
+            config.range_of_influence,
+            Some(Box::new(RangeOfInfluenceConfig {
+                default_range: 1,
+                player_overrides: BTreeMap::new(),
+            }))
+        );
+        assert!(config
+            .reject_unimplemented_range_of_influence()
+            .expect_err("legacy enabled range must reach the normal feature gate")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn range_of_influence_validation_uses_actual_seating() {
+        let mut config = FormatConfig::commander();
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        }));
+        assert!(config.validate_for_player_count(4).is_ok());
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(4), 0)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override must name an occupied seat")
+            .contains("outside player_count"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(1), 3)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override cannot exceed the table radius")
+            .contains("player_overrides[1]"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides = BTreeMap::new();
+        config.range_of_influence.as_mut().unwrap().default_range = 3;
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("a range cannot exceed the table radius")
+            .contains("at most 2"));
     }
 
     #[test]
@@ -1234,7 +1810,7 @@ mod tests {
     #[test]
     fn limited_for_format_roundtrip() {
         assert_eq!(
-            FormatConfig::for_format(GameFormat::Limited),
+            FormatConfig::for_format(GameFormat::Limited).unwrap(),
             FormatConfig::limited()
         );
     }
@@ -1242,7 +1818,7 @@ mod tests {
     #[test]
     fn premodern_for_format_roundtrip() {
         assert_eq!(
-            FormatConfig::for_format(GameFormat::Premodern),
+            FormatConfig::for_format(GameFormat::Premodern).unwrap(),
             FormatConfig::premodern()
         );
     }
@@ -1253,7 +1829,7 @@ mod tests {
         // `FormatConfig::uses_commander` field, and the existence of a
         // commander-damage threshold must all agree for every variant.
         for meta in GameFormat::registry() {
-            let expected = meta.format.uses_commander();
+            let expected = meta.format.uses_commander().unwrap();
             assert_eq!(
                 meta.default_config.uses_commander, expected,
                 "{:?}: registry default disagrees with predicate",
@@ -1274,12 +1850,23 @@ mod tests {
                 "{:?}: registry default disagrees with supplies_fixed_deck predicate",
                 meta.format
             );
+            // The stored `sideboard_policy` field must agree with the bare
+            // method for every built-in — real consumers read the stored
+            // field precisely so it can diverge safely for Custom, which
+            // means it must never silently diverge for a built-in.
+            assert_eq!(
+                meta.default_config.sideboard_policy,
+                meta.format.sideboard_policy(),
+                "{:?}: registry default disagrees with sideboard_policy predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
-            let config = FormatConfig::for_format(format);
-            assert_eq!(config.uses_commander, format.uses_commander());
+            let config = FormatConfig::for_format(format).unwrap();
+            assert_eq!(config.uses_commander, format.uses_commander().unwrap());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
+            assert_eq!(config.sideboard_policy, format.sideboard_policy());
         }
     }
 

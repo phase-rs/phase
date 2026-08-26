@@ -59,7 +59,8 @@
     "passingLeft": "→ Nach links geben →",
     "passingRight": "← Nach rechts geben ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Aufgedeckt: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",
@@ -77,17 +78,60 @@
   },
   "pack": {
     "confirmPick": "Pick bestätigen",
+    "draftEffects": "Draft-Effekte:",
     "waitingNext": "Warten auf nächsten Booster...",
     "cardsInPack": "{{count}} Karten im Booster",
     "picking": "Wird ausgewählt…",
     "autoPick": "Auto-Pick"
+  },
+  "sealedOpening": {
+    "title": "Öffne deinen Sealed-Pool",
+    "subtitle": "Öffne sechs Booster, einen nach dem anderen.",
+    "packProgress": "Booster {{current}} von {{total}}",
+    "openPack": "Booster öffnen",
+    "openPackArt": "Booster-Artwork öffnen",
+    "pulls": "Deine Karten",
+    "nextPack": "Nächster Booster",
+    "viewPool": "Pool ansehen",
+    "poolTitle": "Dein Sealed-Pool",
+    "poolSubtitle": "Alle {{count}} Karten, nach Typ gruppiert.",
+    "buildDeck": "Deck bauen"
   },
   "pool": {
     "cardsDrafted": "{{count}} Karten gedraftet",
     "empty": "Noch keine Karten gedraftet",
     "sortColor": "Farbe",
     "sortType": "Typ",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Weiß",
+      "blue": "Blau",
+      "black": "Schwarz",
+      "red": "Rot",
+      "green": "Grün",
+      "multicolor": "Mehrfarbig",
+      "colorless": "Farblos",
+      "creature": "Kreatur",
+      "instant": "Spontanzauber",
+      "sorcery": "Hexerei",
+      "enchantment": "Verzauberung",
+      "artifact": "Artefakt",
+      "planeswalker": "Planeswalker",
+      "land": "Land",
+      "other": "Andere",
+      "mythic": "Mythisch",
+      "rare": "Selten",
+      "uncommon": "Ungewöhnlich",
+      "common": "Häufig",
+      "rarityOther": "Andere Seltenheiten",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Tabelle — Runde {{round}}",
@@ -100,13 +144,19 @@
   },
   "limitedDeck": {
     "poolHeading": "Pool ({{count}})",
+    "searchPool": "Pool durchsuchen...",
     "allAdded": "Alle Karten zum Deck hinzugefügt.",
+    "noFilterMatches": "Keine Karten passen zu den Filtern",
+    "filterUnavailable": "Filter gerade nicht verfügbar — alle Karten werden gezeigt.",
     "mainDeck": "Hauptdeck",
     "emptyDeckHint": "Klicke Karten aus dem Pool an, um sie deinem Deck hinzuzufügen.",
     "addableCards": "Hinzufügbare Karten",
+    "searchAddableCards": "Hinzufügbare Karten durchsuchen...",
     "autoLands": "Auto-Länder",
     "suggestDeck": "Deck vorschlagen",
     "submitDeck": "Deck einreichen",
+    "validationTitle": "Das Deck benötigt Aufmerksamkeit",
+    "submitFailed": "Deck konnte nicht eingereicht werden",
     "removeCard": "{{name}} entfernen",
     "addCard": "{{name}} hinzufügen",
     "cardCount": "/ {{min}} Karten",
@@ -126,6 +176,10 @@
       "title": "Quick Draft",
       "description": "Drafte 3 Booster mit 7 KI-Draftern, baue ein 40-Karten-Deck und spiele dann eine Bo1-Partie gegen einen von ihnen."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Öffne sechs Booster, sieh dir den vollständigen Pool an und baue dann ein 40-Karten-Deck für eine Bo1-Partie."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Füge eine Cube-Liste ein oder lade sie, passe Booster- und Deckregeln an und drafte dann schnell gegen KI-Bots."
@@ -135,11 +189,20 @@
       "description": "Hoste einen Pod mit bis zu 8 Spielern oder tritt einem bei, draftet live gemeinsam und spielt dann ein Schweizer System- oder K.-o.-Turnier."
     },
     "podInProgress": "Pod Draft läuft",
+    "guestPodInProgress": "Beigetretener Pod bereit zum Wiederverbinden",
     "podLabel": "{{kind}}-Pod",
-    "seatCount": "{{count}} Plätze",
+    "guestPodLabel": "Draft-Pod",
+    "seatCount_one": "{{count}} Platz",
+    "seatCount_few": "{{count}} Plätze",
+    "seatCount_many": "{{count}} Plätze",
+    "seatCount_other": "{{count}} Plätze",
     "roomLabel": "Raum {{code}}",
-    "cardsPicked": "{{count}} Karten ausgewählt",
+    "cardsPicked_one": "{{count}} Karte ausgewählt",
+    "cardsPicked_few": "{{count}} Karten ausgewählt",
+    "cardsPicked_many": "{{count}} Karten ausgewählt",
+    "cardsPicked_other": "{{count}} Karten ausgewählt",
     "resume": "Fortsetzen",
+    "reconnect": "Wiederverbinden",
     "draftInProgress": "Draft läuft",
     "draftComplete": "Draft abgeschlossen",
     "resumeMatch": "Partie fortsetzen",
@@ -156,6 +219,7 @@
   },
   "quickPhase": {
     "drafting": "Draften",
+    "opening": "Booster öffnen",
     "deckbuilding": "Deckbau",
     "matchRecord": "Partie {{number}} — {{wins}}S-{{losses}}N",
     "record": "{{wins}}S-{{losses}}N",
@@ -236,6 +300,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -261,6 +326,8 @@
     "kindPremierDesc": "Best-of-One-Turnierpartien nach dem Deckbau. Schnellere Runden, kein Sideboarding zwischen den Spielen.",
     "kindTraditional": "Traditional",
     "kindTraditionalDesc": "Best-of-Three-Turnierpartien nach dem Deckbau, mit Sideboarding zwischen den Spielen.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Öffne sechs Booster direkt für den Pool jedes Spielers und baue dann ein Best-of-One-Turnierdeck.",
     "tournamentFormat": "Turnierformat",
     "tournamentSwiss": "Schweizer System",
     "tournamentSwissDesc": "Alle spielen drei Runden lang weiter, auch nach einer Niederlage.",
@@ -315,7 +382,11 @@
     "sideboardGame": "Sideboard — Spiel {{number}}",
     "sideboardHint": "Nimm Sideboard-Änderungen vor und reiche dann ein. Dein Pool ist unten verfügbar.",
     "submitSideboard": "Sideboard einreichen",
-    "preparingNext": "Nächstes Spiel wird vorbereitet..."
+    "preparingNext": "Nächstes Spiel wird vorbereitet...",
+    "hideOverlay": "Diesen Bildschirm ausblenden",
+    "showOverlay": "Diesen Bildschirm anzeigen",
+    "hiddenNotice": "Das Sideboarding ist für dieses Spiel weiterhin offen.",
+    "hiddenNoticePlayDraw": "Für dieses Spiel steht die Wahl zwischen Spielen und Ziehen noch aus."
   },
   "podComplete": {
     "title": "Draft abgeschlossen",
@@ -324,7 +395,8 @@
   "podError": {
     "kicked": "Du wurdest aus dem Pod geworfen",
     "hostLeft": "Der Host hat den Draft verlassen",
-    "connection": "Verbindungsfehler"
+    "connection": "Verbindungsfehler",
+    "retry": "Erneut verbinden"
   },
   "lobby": {
     "title": "Draft-Pod-Lobby",

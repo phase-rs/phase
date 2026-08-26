@@ -69,6 +69,14 @@ pub fn resolve(
             chosen_pile_effect,
             unchosen_pile_effect,
         ),
+        PileSource::ExiledThisWay => resolve_exiled_this_way(
+            state,
+            ability,
+            events,
+            chooser_id,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+        ),
     }
 }
 
@@ -144,6 +152,7 @@ fn resolve_battlefield(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SeparateIntoPiles,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -161,6 +170,7 @@ fn resolve_battlefield(
         chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
         unchosen_pile_effect: unchosen_pile_effect.clone(),
         source_id: ability.source_id,
+        pile_source: PileSource::Battlefield,
     };
 
     Ok(())
@@ -193,6 +203,7 @@ fn resolve_revealed_from_library_top(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SeparateIntoPiles,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -215,16 +226,21 @@ fn resolve_revealed_from_library_top(
     });
 
     // CR 608.2d + CR 700.3: "An opponent" — the controller chooses which opponent
-    // performs the partition. With a single opponent the choice is trivial.
+    // performs the partition. With a single opponent the choice is trivial. A CHOICE,
+    // not a target (CR 115.10a): existence authority only, no targeting exclusions.
+    // `p.id != controller` stays — opponent SCOPE, not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != controller && !p.is_eliminated)
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
         .map(|p| p.id)
         .collect();
 
     let eligible: crate::im::Vector<ObjectId> = revealed_ids.into_iter().collect();
 
+    let ps = PileSource::RevealedFromLibraryTop { count };
     if candidates.len() >= 2 {
         // Multiplayer: surface a choice prompt for the controller.
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
@@ -235,6 +251,7 @@ fn resolve_revealed_from_library_top(
             chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
             unchosen_pile_effect: unchosen_pile_effect.clone(),
             source_id: ability.source_id,
+            pile_source: ps,
         };
     } else {
         // Two-player game: single opponent, no decision needed.
@@ -248,6 +265,81 @@ fn resolve_revealed_from_library_top(
             chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
             unchosen_pile_effect: unchosen_pile_effect.clone(),
             source_id: ability.source_id,
+            pile_source: ps,
+        };
+    }
+
+    Ok(())
+}
+
+/// CR 700.3 + CR 607.2a: ExiledThisWay pile source — the Boneyard Parley
+/// path. The eligible set is derived from `exile_links` keyed on the
+/// ability's source, which were populated by the preceding exile instruction
+/// in the same resolution chain.
+fn resolve_exiled_this_way(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    chooser_id: PlayerId,
+    chosen_pile_effect: &crate::types::ability::AbilityDefinition,
+    unchosen_pile_effect: &Option<Box<crate::types::ability::AbilityDefinition>>,
+) -> Result<(), EffectError> {
+    let controller = ability.controller;
+
+    // CR 607.2a: Collect cards exiled by this source during the current
+    // resolution chain. The preceding exile instruction populates
+    // `exile_links` before the pile step runs.
+    let eligible: crate::im::Vector<ObjectId> =
+        crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+            .iter()
+            .map(|entry| entry.exiled_id)
+            .collect();
+
+    if eligible.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::SeparateIntoPiles,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
+    // CR 608.2d + CR 700.3: "An opponent" — the controller chooses which
+    // opponent performs the partition (trivial in two-player). A CHOICE, not a target
+    // (CR 115.10a): existence authority only. The SECOND pile-source mint of this
+    // variant; it must narrow identically to the `RevealedFromLibraryTop` mint above.
+    let candidates: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
+        .map(|p| p.id)
+        .collect();
+
+    if candidates.len() >= 2 {
+        state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
+            player: controller,
+            candidates,
+            eligible,
+            chooser: chooser_id,
+            chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
+            unchosen_pile_effect: unchosen_pile_effect.clone(),
+            source_id: ability.source_id,
+            pile_source: PileSource::ExiledThisWay,
+        };
+    } else {
+        let partitioner = candidates.into_iter().next().unwrap_or(controller);
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: partitioner,
+            eligible,
+            remaining_subjects: crate::im::Vector::new(),
+            completed: crate::im::Vector::new(),
+            chooser: chooser_id,
+            chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
+            unchosen_pile_effect: unchosen_pile_effect.clone(),
+            source_id: ability.source_id,
+            pile_source: PileSource::ExiledThisWay,
         };
     }
 
@@ -263,6 +355,26 @@ pub fn apply_pile_effect(
     results: &[(PileResult, crate::types::game_state::PileSide)],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c + CR 110.2a: The sub-effect controller must be the source's
+    // controller (the spell caster), NOT `result.subject` (the partitioner).
+    // `ControllerRef::You` on an `enters_under` field resolves against
+    // `ability.controller`; using the partitioner would put cards onto the
+    // battlefield under the opponent's control instead of the caster's.
+    // If the source left the battlefield/stack, fall back to the chooser
+    // stored in `WaitingFor::SeparatePilesChoice` (guaranteed to be the
+    // spell controller during this resolution window).
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| {
+            if let WaitingFor::SeparatePilesChoice { player, .. } = state.waiting_for {
+                Some(player)
+            } else {
+                results.first().map(|(r, _)| r.subject)
+            }
+        })
+        .ok_or(EffectError::PlayerNotFound)?;
     for (result, side) in results {
         let chosen: &crate::im::Vector<ObjectId> = match side {
             crate::types::game_state::PileSide::A => &result.pile_a,
@@ -272,7 +384,8 @@ pub fn apply_pile_effect(
             continue;
         }
         for &object_id in chosen.iter() {
-            let mut chain = sub_effect_as_resolved(chosen_pile_effect, source_id, result.subject);
+            let mut chain =
+                sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
             chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
@@ -280,6 +393,7 @@ pub fn apply_pile_effect(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SeparateIntoPiles,
         source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -293,6 +407,19 @@ pub fn apply_unchosen_pile_effect(
     results: &[(PileResult, crate::types::game_state::PileSide)],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c: Same source-controller reasoning as `apply_pile_effect`.
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| {
+            if let WaitingFor::SeparatePilesChoice { player, .. } = state.waiting_for {
+                Some(player)
+            } else {
+                results.first().map(|(r, _)| r.subject)
+            }
+        })
+        .ok_or(EffectError::PlayerNotFound)?;
     for (result, chosen_side) in results {
         let unchosen: &crate::im::Vector<ObjectId> = match chosen_side {
             crate::types::game_state::PileSide::A => &result.pile_b,
@@ -302,7 +429,8 @@ pub fn apply_unchosen_pile_effect(
             continue;
         }
         for &object_id in unchosen.iter() {
-            let mut chain = sub_effect_as_resolved(unchosen_pile_effect, source_id, result.subject);
+            let mut chain =
+                sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
             chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
@@ -332,7 +460,13 @@ fn sub_effect_as_resolved(
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.forward_result = def.forward_result;
-    resolved.player_scope = def.player_scope.clone();
+    // CR 700.3: The per-object loop in `apply_pile_effect` already iterates
+    // over each pile member — the parsed `player_scope` (e.g. "Each opponent")
+    // is the pile-separation iteration, NOT a per-effect fan-out. Carrying it
+    // through would cause `resolve_chain_body` to re-enter the player_scope
+    // sacrifice-collection path, ignoring the explicit `TargetRef::Object` we
+    // set. Clear it so the sub-effect resolves as a direct targeted sacrifice.
+    resolved.player_scope = None;
     resolved.starting_with = def.starting_with.clone();
     resolved.target_selection_mode = def.target_selection_mode;
     resolved.sub_link = def.sub_link;
@@ -432,6 +566,156 @@ mod tests {
                 assert_eq!(eligible.len(), 3);
             }
             other => panic!("expected SeparatePilesPartition, got {other:?}"),
+        }
+    }
+
+    /// R4k — CR 608.2d + CR 700.3: *"an opponent"* separates the piles, and WHICH opponent
+    /// is the controller's CHOICE (CR 115.10a), not a target. Both pile-source mints of
+    /// `SeparatePilesChooseOpponent` must narrow identically: a phased-out seat (the
+    /// CR 702.26b MIRROR) and a departed seat (CR 800.4 + CR 102.1) are not choosable.
+    ///
+    /// TWO ARMS, ONE PER MINT, because the two are separate code paths that were changed
+    /// separately — restoring either inline filter alone must flip its own arm. Neither is
+    /// reachable from the file's existing row: `make_an_example_ability` uses
+    /// `PileSource::Battlefield`, which dispatches to `resolve_battlefield` and reaches
+    /// neither site.
+    ///
+    /// FIVE SEATS: both mints publish only when `candidates.len() >= 2`, so with fewer
+    /// surviving opponents the resolver takes the single-opponent auto-partition branch and
+    /// publishes `SeparatePilesPartition` instead — an exclusion-only assertion would then
+    /// pass without the routed code ever running. Asserting the published variant IS the
+    /// reach-guard. Pre-fix value measured, not assumed: `[P1, P3, P4]`.
+    ///
+    /// REVERT-PROBE: restore either `.filter(|p| p.id != controller && !p.is_eliminated)`
+    /// ⇒ P1 reappears in that arm ⇒ that arm's total equality FAILS.
+    #[test]
+    fn separate_piles_offer_excludes_a_phased_out_opponent_at_both_pile_sources() {
+        use crate::types::format::FormatConfig;
+
+        fn board() -> GameState {
+            let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+            let mut setup_events = Vec::new();
+            // Setup anti-vacuity, asserted before anything is measured.
+            let transitioned =
+                crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut setup_events);
+            assert_eq!(
+                transitioned,
+                vec![PlayerId(1)],
+                "phase_out_player must actually transition P1"
+            );
+            assert!(
+                state.players[1].is_phased_out(),
+                "P1 must read as phased out"
+            );
+            crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+            assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+            state
+        }
+
+        fn pile_ability(
+            source_id: ObjectId,
+            controller: PlayerId,
+            ps: PileSource,
+        ) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature(),
+                    ),
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: sacrifice_sub(),
+                    pile_source: ps,
+                    unchosen_pile_effect: None,
+                },
+                Vec::new(),
+                source_id,
+                controller,
+            )
+        }
+
+        // ARM 1 — site 12, `RevealedFromLibraryTop`. At least one library card is staged, or
+        // `reveal_count == 0` short-circuits before the candidate derivation runs.
+        {
+            let mut state = board();
+            let caster = state.players[0].id;
+            let card = crate::game::zones::create_object(
+                &mut state,
+                CardId(11),
+                caster,
+                "Top Card".to_string(),
+                Zone::Library,
+            );
+            assert!(
+                state.players[0].library.contains(&card),
+                "reach-guard: the reveal needs a library card, or the resolver returns \
+                 before it ever derives candidates"
+            );
+
+            let ability = pile_ability(
+                ObjectId(100),
+                caster,
+                PileSource::RevealedFromLibraryTop { count: 1 },
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolves");
+            match &state.waiting_for {
+                WaitingFor::SeparatePilesChooseOpponent {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, caster);
+                    assert_eq!(
+                        *candidates,
+                        vec![PlayerId(3), PlayerId(4)],
+                        "RevealedFromLibraryTop mint: phased-out P1 and eliminated P2 out, \
+                         both valid opponents in"
+                    );
+                }
+                other => panic!("expected SeparatePilesChooseOpponent, got {other:?}"),
+            }
+        }
+
+        // ARM 2 — site 13, `ExiledThisWay`. The eligible set comes from the source's exile
+        // links, so one linked exiled card is staged or the resolver returns early.
+        {
+            let mut state = board();
+            let caster = state.players[0].id;
+            let source_id = ObjectId(101);
+            let exiled = crate::game::zones::create_object(
+                &mut state,
+                CardId(12),
+                caster,
+                "Exiled Card".to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                exiled_id: exiled,
+                source_id,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            });
+            assert!(
+                !crate::game::players::linked_exile_cards_for_source(&state, source_id).is_empty(),
+                "reach-guard: the ExiledThisWay eligible set must be non-empty, or the \
+                 resolver returns before it ever derives candidates"
+            );
+
+            let ability = pile_ability(source_id, caster, PileSource::ExiledThisWay);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolves");
+            match &state.waiting_for {
+                WaitingFor::SeparatePilesChooseOpponent {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, caster);
+                    assert_eq!(
+                        *candidates,
+                        vec![PlayerId(3), PlayerId(4)],
+                        "ExiledThisWay mint: phased-out P1 and eliminated P2 out, both \
+                         valid opponents in"
+                    );
+                }
+                other => panic!("expected SeparatePilesChooseOpponent, got {other:?}"),
+            }
         }
     }
 

@@ -24,7 +24,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{CopyRetargetPermission, Effect};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -283,6 +283,185 @@ fn chain_of_smog_copy_controlled_by_targeted_player_and_retargeted() {
         p1_hand_before - 2,
         "the copy was retargeted away from P1; P1 discards only the original two"
     );
+}
+
+#[test]
+fn chain_of_smog_discard_choice_resumes_selected_tail_after_library_of_leng() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let smog = scenario.add_real_card(P0, "Chain of Smog", Zone::Hand, db);
+    scenario.add_real_card(P1, "Library of Leng", Zone::Battlefield, db);
+    for _ in 0..3 {
+        scenario.add_card_to_hand(P1, "Mountain");
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_mana(&mut runner, P0, &[ManaType::Black, ManaType::Colorless]);
+    let card_id = runner.state().objects[&smog].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: smog,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Chain of Smog");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![engine::types::ability::TargetRef::Player(P1)],
+        })
+        .expect("target P1");
+
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DiscardChoice { count, cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: cards.into_iter().take(count).collect(),
+                    })
+                    .expect("select two cards to discard");
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("advance Chain of Smog");
+            }
+            waiting_for => panic!("expected discard choice, got {waiting_for:?}"),
+        }
+    }
+
+    assert!(matches!(
+        runner.state().pending_discard_batch.as_deref(),
+        Some(engine::types::game_state::PendingDiscardBatch {
+            completion: engine::types::game_state::PendingDiscardBatchCompletion::DiscardChoice { chosen },
+            ..
+        }) if chosen.len() == 2
+    ));
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone())).expect(
+        "paused selected discard serializes through the authoritative persistence envelope",
+    );
+    let restored: PersistedGameState = serde_json::from_str(&saved)
+        .expect("paused selected discard restores through the authoritative persistence envelope");
+    let restored = restored.into_game_state();
+    assert!(matches!(
+        restored.pending_discard_batch.as_deref(),
+        Some(engine::types::game_state::PendingDiscardBatch {
+            completion: engine::types::game_state::PendingDiscardBatchCompletion::DiscardChoice { chosen },
+            ..
+        }) if chosen.len() == 2
+    ));
+    let mut runner = engine::game::scenario::GameRunner::from_state(restored);
+
+    let mut replacement_events = Vec::new();
+    for _ in 0..2 {
+        let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!("each selected card must reach Library of Leng's replacement choice");
+        };
+        let decline = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Decline")
+            .expect("Library of Leng supplies a decline choice");
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: decline })
+            .expect("decline Library of Leng");
+        replacement_events.extend(result.events);
+    }
+
+    assert!(runner.state().pending_discard_batch.is_none());
+    assert_eq!(runner.state().last_effect_count, Some(2));
+    assert_eq!(
+        replacement_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                engine::types::events::GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Discard,
+                    source_id,
+                    ..
+                } if *source_id == smog
+            ))
+            .count(),
+        1,
+        "the resumed selected discard emits its terminal marker exactly once"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P1, .. }
+    ));
+    assert_eq!(
+        hand_size(&runner, P1),
+        1,
+        "both selected cards must discard before Chain of Smog's copy continuation"
+    );
+}
+
+#[test]
+fn chain_of_smog_discard_choice_rejects_a_duplicate_card_submission() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let smog = scenario.add_real_card(P0, "Chain of Smog", Zone::Hand, db);
+    for _ in 0..3 {
+        scenario.add_card_to_hand(P1, "Mountain");
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_mana(&mut runner, P0, &[ManaType::Black, ManaType::Colorless]);
+    let card_id = runner.state().objects[&smog].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: smog,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Chain of Smog");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![engine::types::ability::TargetRef::Player(P1)],
+        })
+        .expect("target P1");
+
+    let (count, duplicate) = loop {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DiscardChoice { count, cards, .. } => break (count, cards[0]),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("advance Chain of Smog");
+            }
+            waiting_for => panic!("expected discard choice, got {waiting_for:?}"),
+        }
+    };
+    assert_eq!(count, 2, "Chain of Smog requires two distinct discards");
+
+    let error = runner
+        .act(GameAction::SelectCards {
+            cards: vec![duplicate, duplicate],
+        })
+        .expect_err("one card cannot satisfy Chain of Smog's two-card discard");
+    assert!(matches!(
+        error,
+        engine::game::EngineError::InvalidAction(message)
+            if message == "Selected cards must be distinct"
+    ));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardChoice { count: 2, .. }
+    ));
+    assert_eq!(runner.state().objects[&duplicate].zone, Zone::Hand);
+    assert_eq!(hand_size(&runner, P1), 3);
 }
 
 // ---------------------------------------------------------------------------

@@ -259,6 +259,48 @@ describe("DeckBuilder", () => {
     });
   });
 
+  it("persists a signature spell only when saving as Oathbreaker", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Oath Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 1 }],
+        sideboard: [],
+        commander: ["The Oathbreaker"],
+        signature_spell: ["Lightning Bolt"],
+        format: "Oathbreaker",
+      }),
+    );
+    const props = {
+      onFormatChange: vi.fn(),
+      initialDeckName: "Oath Deck",
+      searchFilters: { text: "", colors: [], type: "", sets: [], browseFormat: "all" as const },
+      onSearchFiltersChange: vi.fn(),
+      onResetSearch: vi.fn(),
+    };
+
+    const { rerender } = render(<DeckBuilder format="Oathbreaker" {...props} />);
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("Oath Deck"));
+    await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        localStorage.getItem(STORAGE_KEY_PREFIX + "Oath Deck") ?? "{}",
+      );
+      expect(persisted.signature_spell).toEqual(["Lightning Bolt"]);
+    });
+
+    rerender(<DeckBuilder format="Modern" {...props} />);
+    await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        localStorage.getItem(STORAGE_KEY_PREFIX + "Oath Deck") ?? "{}",
+      );
+      expect("signature_spell" in persisted).toBe(false);
+    });
+  });
+
   it("does not restore Two-Headed Giant as a persisted deck-builder format", async () => {
     const onFormatChange = vi.fn();
     localStorage.setItem(

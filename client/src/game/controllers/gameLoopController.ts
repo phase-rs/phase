@@ -2,10 +2,10 @@ import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
-import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
-import { dispatchAction, dispatchResolveAll } from "../dispatch";
+import { dispatchAction } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
 import type { OpponentController } from "./types";
 
@@ -66,13 +66,6 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (!("data" in waitingFor)) return;
     if (!gameState) return;
 
-    const stackLen = gameState.stack?.length ?? 0;
-
-    if (config.mode === "ai" && stackLen >= STACK_PRESSURE_ELEVATED) {
-      scheduleBatchResolve();
-      return;
-    }
-
     if (gameState.priority_player !== getPlayerId()) return;
 
     const { fullControl } = useUiStore.getState();
@@ -80,22 +73,6 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (shouldAutoPass(gameState, waitingFor, fullControl, autoPassRecommended)) {
       scheduleAutoPass();
     }
-  }
-
-  function scheduleBatchResolve(): void {
-    clearAutoPassTimeout();
-    autoPassTimeout = setTimeout(() => {
-      autoPassTimeout = null;
-      if (!active) return;
-      const playerId = getPlayerId();
-      const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
-      const aiSeats = usePreferencesStore.getState().aiSeats;
-      const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-        playerId: i + 1,
-        difficulty: aiSeats[i]?.difficulty ?? config.difficulty ?? "Medium",
-      }));
-      dispatchResolveAll(playerId, seats);
-    }, 0);
   }
 
   function scheduleAutoPass(): void {

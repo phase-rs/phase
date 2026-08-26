@@ -63,7 +63,9 @@ fn torrential_gearhulk_etb_casts_graveyard_instant_without_mana_cost() {
     let mut runner = scenario.build();
 
     assert!(
-        !runner.state().objects[&gearhulk].trigger_definitions[0].optional,
+        !runner.state().objects[&gearhulk].trigger_definitions[0]
+            .definition
+            .optional,
         "Gearhulk ETB must be mandatory on stack when targets exist"
     );
 

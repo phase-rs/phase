@@ -86,12 +86,12 @@ fn body_of_knowledge_draws_only_when_itself_is_dealt_damage() {
 
     let trigger = &runner.state().objects[&body].trigger_definitions[0];
     assert_eq!(
-        trigger.mode,
+        trigger.definition.mode,
         TriggerMode::DamageReceived,
         "precondition: Body of Knowledge installs a DamageReceived trigger"
     );
     assert_eq!(
-        trigger.valid_card,
+        trigger.definition.valid_card,
         Some(TargetFilter::SelfRef),
         "precondition: the trigger must be self-scoped"
     );

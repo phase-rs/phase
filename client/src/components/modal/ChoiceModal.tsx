@@ -8,6 +8,8 @@ import { DialogShell } from "./DialogShell.tsx";
 export interface ChoiceOption {
   id: string;
   label: string;
+  /** Use the compact explanatory treatment when the label is the option's full content. */
+  labelTone?: "primary" | "secondary";
   description?: string;
   /** Optional glyph rendered before the label (e.g. a loyalty badge). */
   icon?: ReactNode;
@@ -64,9 +66,11 @@ export function ChoiceModal({
               onClick={() => onChoose(opt.id)}
               className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
             >
-              <span className="font-semibold text-white">
-                {opt.icon && <span className="mr-1.5 align-middle">{opt.icon}</span>}
-                <RichLabel text={opt.label} size="sm" />
+              <span
+                className={`flex items-center gap-2 ${opt.labelTone === "secondary" ? "text-xs font-normal text-slate-400" : "font-semibold text-white"}`}
+              >
+                {opt.icon && <span className="shrink-0">{opt.icon}</span>}
+                <RichLabel text={opt.label} size={opt.labelTone === "secondary" ? "xs" : "sm"} />
               </span>
               {opt.description && (
                 <p className="mt-1 text-xs text-slate-400">

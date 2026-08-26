@@ -26,7 +26,7 @@ fn assert_has_cumulative_upkeep_trigger(state: &GameState, remora: ObjectId) {
             .trigger_definitions
             .as_slice()
             .iter()
-            .any(|t| matches!(t.mode, TriggerMode::PayCumulativeUpkeep)),
+            .any(|t| matches!(t.definition.mode, TriggerMode::PayCumulativeUpkeep)),
         "Mystic Remora must carry a synthesized cumulative-upkeep trigger"
     );
 }

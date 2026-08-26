@@ -422,7 +422,7 @@ export function MultiplayerPage() {
           });
           useGameStore.setState({ gameId });
           navigate(
-            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}`,
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer`,
           );
           return true;
         }
@@ -525,7 +525,7 @@ export function MultiplayerPage() {
     async (code: string, _context?: LobbyGame) => {
       const playerName = useMultiplayerStore.getState().displayName ?? "Player";
       try {
-        await joinDraft({ roomCode: code, displayName: playerName });
+        await joinDraft({ kind: "new", roomCode: code, displayName: playerName });
         setView("draft-lobby");
       } catch {
         showToast(t("page.failedToJoinDraft"));

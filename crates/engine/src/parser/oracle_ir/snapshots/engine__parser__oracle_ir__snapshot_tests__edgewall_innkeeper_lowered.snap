@@ -30,12 +30,27 @@ expression: "&lowered"
         "forward_result": false
       },
       "valid_card": {
-        "type": "Typed",
-        "type_filters": [
-          "Creature"
-        ],
-        "controller": null,
-        "properties": []
+        "type": "And",
+        "filters": [
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": []
+          },
+          {
+            "type": "Typed",
+            "type_filters": [],
+            "controller": null,
+            "properties": [
+              {
+                "type": "HasAdventure"
+              }
+            ]
+          }
+        ]
       },
       "origin": null,
       "destination": null,

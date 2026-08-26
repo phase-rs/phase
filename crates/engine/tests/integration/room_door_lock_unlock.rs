@@ -38,6 +38,7 @@ fn room_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType::default(),
         mana_cost: ManaCost::default(),
@@ -54,6 +55,7 @@ fn room_back_face() -> BackFaceData {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Split),
+        parse_warnings: vec![],
     }
 }
 

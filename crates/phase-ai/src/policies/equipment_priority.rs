@@ -222,10 +222,7 @@ mod tests {
     fn policy_verdict(state: &GameState, action: GameAction) -> PolicyVerdict {
         let candidate = CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -11,6 +12,12 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getOpponentIds, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import {
+  OPPONENT_CARD_SCALE,
+  OPPONENT_HAND_VERTICAL_SCALE,
+  handFanGeometry,
+  handFanVerticalMetrics,
+} from "./handFanPresentation.ts";
 
 interface OpponentHandProps {
   playerId?: PlayerId;
@@ -33,20 +40,23 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
     ?? (myId === 0 ? 1 : 0);
   const opponent = players?.[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
-  const revealedCards = useGameStore((s) => s.gameState?.revealed_cards);
-  const publicRevealedCards = useGameStore((s) => s.gameState?.public_revealed_cards);
 
   if (!opponent) return null;
 
   const cardCount = opponent.hand.length;
-  const center = cardCount > 0 ? (cardCount - 1) / 2 : 0;
   const isSplitLayout = layout === "split";
+  const verticalMetrics = handFanVerticalMetrics(
+    isCompactHeight,
+    OPPONENT_HAND_VERTICAL_SCALE,
+  );
+  const fan = handFanGeometry(
+    cardCount,
+    "--opponent-hand-card-w",
+    verticalMetrics.arcScale,
+  );
 
-  // Cards extend above the container so they peek from the top edge.
-  const baseY = isSplitLayout ? 0 : -15;
-  const curveY = isSplitLayout ? 1.4 : 6;
-  const rotationStep = isSplitLayout ? 3.5 : 6;
-  const overlap = isSplitLayout ? "calc(var(--card-w) * -0.2)" : "-16px";
+  // Mirror the player's shallow bottom ribbon across the top edge: same arc
+  // depth and tilt magnitude, with signs reversed so the hand opens downward.
   const minHeightClass = isSplitLayout
     ? "min-h-[calc(var(--card-h)*0.55)]"
     : isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*0.7)]";
@@ -54,16 +64,20 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
   return (
     <div
       className={`flex items-start justify-center overflow-visible ${isSplitLayout ? "px-1 pb-0" : "px-4 pb-1"} ${minHeightClass}`}
-      style={{ perspective: "800px" }}
+      style={
+        {
+          perspective: "800px",
+          "--opponent-hand-card-w": `calc(var(--card-w) * ${OPPONENT_CARD_SCALE})`,
+          "--opponent-hand-card-h": `calc(var(--card-h) * ${OPPONENT_CARD_SCALE})`,
+        } as React.CSSProperties
+      }
     >
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
-          const isRevealed = (revealedCards?.includes(id) ?? false)
-            || (publicRevealedCards?.includes(id) ?? false);
-          const showFace = showCards || isRevealed;
-          // Negate rotation so fan opens toward opponent (top of screen)
-          const rotation = -((i - center) * rotationStep);
+          const showFace = showCards || (obj?.display_visible_to_viewer ?? false);
+          const rotation = -fan.rotation(i);
+          const arcOffset = fan.arc(i);
 
           return (
             <motion.div
@@ -71,12 +85,15 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
               initial={{ opacity: 0, y: -60 }}
               animate={{
                 opacity: 1,
-                y: baseY - Math.abs(i - center) ** 2 * curveY,
+                y: -(verticalMetrics.restingY + arcOffset),
                 rotate: rotation,
               }}
               exit={{ opacity: 0, y: -60 }}
               transition={{ delay: i * 0.03, duration: 0.25 }}
-              style={{ marginLeft: i > 0 ? overlap : undefined, zIndex: i }}
+              style={{ marginLeft: i > 0 ? fan.overlap : undefined, zIndex: i }}
+              data-opponent-hand-card
+              data-hand-rotation={rotation}
+              data-hand-arc={arcOffset}
             >
               <OpponentCardThumbnail
                 cardId={id}
@@ -96,8 +113,8 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
 }
 
 const cardStyle = {
-  width: "calc(var(--card-w) * 0.78)",
-  height: "calc(var(--card-h) * 0.78)",
+  width: "var(--opponent-hand-card-w)",
+  height: "var(--opponent-hand-card-h)",
   transform: "rotate(180deg)",
 } as const;
 
@@ -111,6 +128,7 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
     return (
       <img
         src={src}
+        {...getCardImageSrcSetProps(src)}
         alt={cardName}
         // `pointer-events-auto` so the card is the hit-test target even when an
         // ancestor opts out of pointer events (the split-seat fan wrapper does,

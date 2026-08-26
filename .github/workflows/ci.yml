@@ -32,7 +32,9 @@ jobs:
   rust-lint:
     name: Rust lint (fmt, clippy, parser gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
+    # retain a bounded job while leaving room for the remaining lint gates.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,11 +46,28 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--locked` costs nothing here (this step already resolves the whole
+      # workspace) and asserts the committed root Cargo.lock is in sync with the
+      # manifests. Without it, dropping a crate leaves dead entries in the lock,
+      # every later cargo invocation silently rewrites the file, and Nightly
+      # Release dies on `cargo release`'s dirty-tree check -- which is exactly
+      # what #7556 did. `--locked` is already used for the Tauri manifest below.
       - name: Clippy
-        run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+
+      - name: Interaction bindings are current
+        run: ./scripts/check-interaction-bindings.sh --check
 
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
@@ -60,6 +79,14 @@ jobs:
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
 
+      - name: PreLowered ratchet (Plan 05b burn-down)
+        # Ceiling check on `OracleNodeIr::PreLowered*` occurrences per parser
+        # file. Counts may only decrease, and a parser file carrying PreLowered
+        # with no ledger entry fails, so a new producer cannot be added in a
+        # third file and escape the burn-down. Ledger:
+        # scripts/prelowered-ratchet.txt
+        run: ./scripts/check-prelowered-ratchet.sh
+
       - name: Skill doc gate (oracle-parser SKILL.md)
         # Asserts .claude/skills/oracle-parser/SKILL.md still matches the
         # parser source tree: documented paths/symbols exist and the §3
@@ -67,14 +94,23 @@ jobs:
         run: ./scripts/check-skill-doc.sh
 
       - name: Engine authority gate
-        # Diff-based gate: new engine code must use single-authority helpers
-        # (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (A) Diff-based: new engine code must use single-authority helpers
+        #     (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (B) Full-tree: gameplay zone changes must go through zone_pipeline,
+        #     not the raw movers / zone containers / `GameObject::zone =`.
+        #     Every classified site requires a nonempty `allow-raw-zone:`
+        #     annotation explaining why it is not a replaceable zone event.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             BASE="origin/main"
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
+
+      - name: Resolution-frame boundary guard
+        # Full-tree guard: legacy resolution keys are reader/fixture-only, and
+        # ResolutionStack mutation remains top-only or adjacent-pair scoped.
+        run: ./scripts/check-resolution-frame-boundaries.sh
 
       - name: Test card-data load gate
         # Diff-based gate: new test code must not reparse the full ~90 MB
@@ -88,13 +124,13 @@ jobs:
           ./scripts/check-test-card-data-load.sh "$BASE"
 
   rust-test:
-    name: Rust tests (shard ${{ matrix.shard }}/2)
+    name: Rust tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -126,6 +162,14 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -136,7 +180,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/2 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/4 --workspace --exclude phase-tauri --features engine/proptest --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -144,11 +188,22 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
+          fetch-depth: 2
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Set cache keys
         id: cache-keys
@@ -249,6 +304,35 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
+      - name: Verify Gemstone Caverns production-export drift guard
+        run: |
+          test -s data/card-data.json
+          test_name='gemstone_caverns_begin_game::gemstone_caverns_full_export_retains_luck_counter_mana_contract'
+          cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
+          grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
+
+      - name: Card export must not mutate the tracked parser vocabulary
+        # Regression guard: the export is a PURE READ of the tracked tree.
+        #
+        # It used to rewrite crates/engine/data/oracle-subtypes.json on every run,
+        # from CardTypes.json ∪ the AtomicCards harvest — but this job downloads
+        # only AtomicCards.json (see the mtgjson cache above), so CardTypes.json
+        # was always absent and the regeneration silently fell back to the harvest
+        # alone. That deletes the 26 token-only creature subtypes (Army, Servo,
+        # Pentavite, Sculpture, Tentacle, …) which are printed on no card face and
+        # so live in CardTypes.json alone. Because the engine `include_str!`s that
+        # file, the rewrite bumped its mtime and rebuilt the engine right here —
+        # leaving validate, coverage, and semantic-audit below to run against a
+        # parser whose subtype vocabulary was missing all 26.
+        #
+        # The refresh now lives behind `--write-subtypes`, passed only by
+        # scripts/gen-card-data.sh (the one caller that fetches the sidecar, and
+        # which hard-fails without it). This asserts the export stays a pure read.
+        # Scoped to the same condition as the generate step so it is never
+        # vacuous: it runs exactly when an export ran.
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: git diff --exit-code -- crates/engine/data/oracle-subtypes.json
+
       - name: Validate card-data against engine schema
         # PR-time gate — the same parse the WASM does at runtime, run against
         # the freshly produced card-data. If a parser/schema change makes the
@@ -258,13 +342,47 @@ jobs:
         # passed. card-data.json is byte-identical either way, restored from
         # cardgen or regenerated above.
         # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
-        # hit is only real because `oracle-gen` rewrites
-        # crates/engine/data/oracle-subtypes.json solely when its bytes change:
-        # the engine lib pulls that file in via `include_str!`, so an
-        # unconditional write would bump its mtime, dirty the crate's dep-info
-        # fingerprint, and force a full engine recompile right here.
+        # hit is real because the export never writes to crates/engine/data: the
+        # engine lib pulls oracle-subtypes.json in via `include_str!`, so any
+        # write would bump its mtime, dirty the crate's dep-info fingerprint, and
+        # force a full engine recompile right here — against a vocabulary this job
+        # has no CardTypes.json to regenerate correctly. The step above pins that.
         if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
+
+      - name: Draw replacement corpus freeze (Plan 03 / CR 121.2)
+        # Every `ReplacementEvent::Draw` definition must declare whether it
+        # modifies the draw *instruction* count (CR 121.2a) or replaces one
+        # *individual* draw (CR 121.2). Scope is assigned at construction and is
+        # not recoverable afterwards, so the corpus that carries one — and the
+        # scope each row must get — is frozen against a committed baseline.
+        #
+        # This lives in the card-data job, not the Rust lint job, because it
+        # reads the generated (gitignored) export. It runs UNCONDITIONALLY, with
+        # no gates-cache guard: that cache is keyed on MTGJSON + engine sources
+        # and does NOT hash scripts/**, so a PR that edited only the baseline
+        # would hit the cache, skip the check, and report a false green. The
+        # export is present either way (generated above or restored by cardgen).
+        run: python3 scripts/draw_replacement_census.py --corpus --check
+
+      - name: Cost-walk carrier drift guard (CR 605.1a)
+        # `visit_ability_def_costs_scoped` does not descend the eight inline
+        # branch carriers that `visit_effect_scoped` does (documented KNOWN GAP).
+        # A cost on a carrier-nested `AbilityDefinition` therefore escapes
+        # CR 605.1a's cost criterion, and a `Mill` / `Exile { Library }` cost
+        # there would keep mana-ability status it should have lost. Zero such
+        # costs exist today; this fails the moment a parser production emits one.
+        #
+        # Lives here, not in the Rust test job, for the same reason as the draw
+        # census above: it reads the generated (gitignored) export. The
+        # equivalent `#[test]` would self-skip in `Rust tests` (see the header of
+        # scripts/check-test-card-data-load.sh), and the change that triggers
+        # this gap comes from a parser author whose PR is checked by CI — so a
+        # CI-invisible guard is green for exactly the person it exists to stop.
+        #
+        # Unconditional, like the draw census: gates-cache does not hash
+        # scripts/**, so a cache hit must not skip it.
+        run: python3 scripts/cost_walk_carrier_census.py --check
 
       - name: Card support coverage report
         # Skipped on a gates-cache hit — coverage-data.json and
@@ -321,10 +439,10 @@ jobs:
         continue-on-error: true
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PAYLOAD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          echo "$PR_NUMBER" > pr-number.txt
           # Derive the baseline from the ACTUAL main commit this CI merge commit
           # was built on — its non-head parent — NOT the webhook payload's
           # base.sha. The payload value freezes at event-creation time, but the
@@ -336,16 +454,13 @@ jobs:
           # #4303: a one-card autotap fix whose comment listed 25 unrelated
           # cards). Reading the base off the merge commit's parent keeps both
           # sides in lockstep no matter how stale (or main-merged) the PR is.
-          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
-            P1="$(git rev-parse HEAD^1)"
-            P2="$(git rev-parse HEAD^2)"
-            # Parent order is not contractual across GitHub's merge-ref build, so
-            # pick whichever parent is NOT the PR head as the base (main) side.
-            if [ "$P1" = "$HEAD_SHA" ]; then BASE_SHA="$P2"; else BASE_SHA="$P1"; fi
-          else
-            # Unmergeable PR (no synthetic merge commit) — nothing to pin to;
-            # fall back to the payload base.sha.
-            BASE_SHA="$PAYLOAD_BASE_SHA"
+          if ! BASE_SHA="$(./scripts/parse-diff-base.sh "$HEAD_SHA")"; then
+            # An unmergeable PR has no synthetic merge parent. A shallow or
+            # missing parent is never licensed to use the frozen webhook base:
+            # that would bill intervening main changes to this PR.
+            printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending — no synthetic merge parent is available for PR head `%s`._\n' "$HEAD_SHA" > parse-diff.md
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
@@ -355,7 +470,6 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "$PR_NUMBER" > pr-number.txt
           URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
           if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
             cargo run --profile tool --features cli --bin coverage-parse-diff -- \
@@ -531,7 +645,10 @@ jobs:
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
   tauri-check:
-    name: Tauri compile check
+    # Disabled pending a faster Linux dependency setup: apt-get update regularly
+    # consumes this job's entire 15-minute timeout.
+    if: ${{ false }}
+    name: Tauri compile check + tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -551,34 +668,126 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
 
-      - name: Stub frontend dist for tauri::generate_context!
+      - name: Stub bootstrap dist for tauri::generate_context!
         # phase-tauri's build.rs runs `tauri::generate_context!()` which
-        # requires `frontendDist` (../dist per tauri.conf.json) to exist.
-        # An empty stub is enough for type-checking — we don't bundle assets.
+        # requires `frontendDist` (../bootstrap/dist per tauri.conf.json) to
+        # exist. An empty stub is enough for type-checking — we don't bundle
+        # bootstrap assets here.
         run: |
-          mkdir -p client/dist
-          echo '<!doctype html><html></html>' > client/dist/index.html
-
-      - name: Stub phase-server sidecar + bundled resources for tauri-build
-        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and bundled data resources, so tauri-build requires those paths to
-        # exist at check time. The real sidecar / data files are built in the
-        # release matrix; for PR-time compile checks we only need the paths to
-        # exist.
-        run: |
-          mkdir -p client/src-tauri/binaries client/public
-          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          touch client/public/card-data.json
-          touch client/public/draft-pools.json
+          mkdir -p client/bootstrap/dist
+          echo '<!doctype html><html></html>' > client/bootstrap/dist/index.html
 
       - name: Tauri compile check
         # phase-tauri is excluded from the workspace clippy and nextest runs
-        # above (no proptest support, no tests). Without this step, compile
-        # errors in the desktop crate only surface at release time during the
-        # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
+        # above. Without this step, compile errors in the desktop crate only
+        # surface at shell release time. Catches them on every PR in ~3 min.
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
+
+      - name: Tauri tests
+        # phase-tauri's `#[cfg(test)]` unit tests (migration, native_bridge,
+        # native_engine, audio_probe, ...) are excluded from the workspace
+        # nextest run above for the same reason as the compile check, so they
+        # need their own step or they'd never run in CI at all.
+        run: cargo test --locked --manifest-path client/src-tauri/Cargo.toml
+
+  android-debug-apk:
+    name: Android debug APK (ARM64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          target: aarch64-linux-android
+          cache-shared-key: rust-tauri-android-arm64
+          cache-workspaces: client/src-tauri -> target
+
+      - name: Install pinned Android SDK and NDK
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Install frozen client dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build ARM64 debug APK through the project CLI
+        run: |
+          set -euo pipefail
+          NODE_BIN=$(realpath "$(command -v node)")
+          TAURI_JS="$GITHUB_WORKSPACE/client/node_modules/@tauri-apps/cli/tauri.js"
+          test -f "$NODE_BIN"
+          test -x "$NODE_BIN"
+          test -f "$TAURI_JS"
+          export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+          "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+
+      - name: Inspect ARM64 debug APK
+        run: |
+          set -euo pipefail
+          APK=$(find client/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit)
+          test -n "$APK"
+          test -f "$APK"
+
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          TAURI_PROPERTIES="client/src-tauri/gen/android/app/tauri.properties"
+          test -f "$TAURI_PROPERTIES"
+          APP_VERSION=$(sed -n 's/^tauri.android.versionName=//p' "$TAURI_PROPERTIES")
+          VERSION_CODE=$(sed -n 's/^tauri.android.versionCode=//p' "$TAURI_PROPERTIES")
+          test -n "$APP_VERSION"
+          [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]
+          BADGING=$($AAPT2 dump badging "$APK")
+          grep -F "package: name='rs.phase.app.debug' versionCode='$VERSION_CODE' versionName='$APP_VERSION'" <<<"$BADGING"
+          grep -F "minSdkVersion:'24'" <<<"$BADGING"
+          grep -F "targetSdkVersion:'36'" <<<"$BADGING"
+
+          SIGNING=$($APKSIGNER verify --verbose --print-certs "$APK")
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' <<<"$SIGNING"
+          grep -F 'CN=Android Debug' <<<"$SIGNING"
+
+          mapfile -t ABIS < <(unzip -Z1 "$APK" | sed -nE 's#^lib/([^/]+)/.*\.so$#\1#p' | sort -u)
+          test "${#ABIS[@]}" -eq 1
+          test "${ABIS[0]}" = 'arm64-v8a'
+          if unzip -Z1 "$APK" | grep -Eq '(^|/)(update\.json|.*\.sig)$'; then
+            echo 'Android debug APK unexpectedly contains updater material'
+            exit 1
+          fi
+          cp "$APK" Phase-Android-ARM64-debug.apk
+
+      - name: Upload inspected Android debug APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase-android-arm64-debug
+          path: Phase-Android-ARM64-debug.apk
+          retention-days: 14
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)
@@ -591,6 +800,7 @@ jobs:
       - draft-pools
       - wasm-check
       - tauri-check
+      - android-debug-apk
     if: always()
     steps:
       - name: Check split Rust jobs
@@ -601,8 +811,9 @@ jobs:
           DRAFT_POOLS_RESULT: ${{ needs.draft-pools.result }}
           WASM_RESULT: ${{ needs.wasm-check.result }}
           TAURI_RESULT: ${{ needs.tauri-check.result }}
+          ANDROID_RESULT: ${{ needs.android-debug-apk.result }}
         run: |
-          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $DRAFT_POOLS_RESULT $WASM_RESULT $TAURI_RESULT"
+          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $DRAFT_POOLS_RESULT $WASM_RESULT $TAURI_RESULT $ANDROID_RESULT"
           # `skipped` is a pass: draft-pools is main-only and is skipped on PRs.
           for result in $results; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then

@@ -1,0 +1,82 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "LoseLife",
+          "amount": {
+            "type": "Difference",
+            "left": {
+              "type": "Ref",
+              "qty": {
+                "type": "Power",
+                "scope": {
+                  "type": "Demonstrative"
+                }
+              }
+            },
+            "right": {
+              "type": "Ref",
+              "qty": {
+                "type": "Toughness",
+                "scope": {
+                  "type": "Demonstrative"
+                }
+              }
+            }
+          },
+          "target": {
+            "type": "Typed",
+            "type_filters": [],
+            "controller": "Opponent",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": {
+        "type": "Player"
+      },
+      "valid_source": null,
+      "description": "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

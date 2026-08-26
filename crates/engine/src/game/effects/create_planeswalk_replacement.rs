@@ -52,17 +52,31 @@ pub fn resolve(
     shield.runtime_execute = Some(Box::new(substitute)); // CR 614.6: substitute
     shield.consume_on_apply = false; // CR 614.5: continuous within the window
     shield.valid_player = Some(ReplacementPlayerScope::AnyPlayer); // "a player"
-                                                                   // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
-    shield.expiry = crate::game::effects::add_target_replacement::expiry_from_duration(
+    shield.planeswalk_scope =
+        Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly);
+    // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
+    match crate::game::effects::add_target_replacement::expiry_from_duration(
         ability.duration.as_ref(),
         ability.controller,
-    );
+    ) {
+        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Explicit(
+            expiry,
+        ) => shield.expiry = Some(expiry),
+        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unstated => {}
+        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::GateControlled
+        | crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unsupported => {
+            // CR 611.2a: do not install a planeswalk replacement with a stated
+            // duration this lifecycle cannot enforce.
+            return Ok(());
+        }
+    }
     shield.source_controller = Some(ability.controller);
 
     state.pending_damage_replacements.push(shield);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreatePlaneswalkReplacement,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -119,6 +133,11 @@ mod tests {
             shield.valid_player,
             Some(ReplacementPlayerScope::AnyPlayer),
             "\"a player would planeswalk\" is any-player scoped"
+        );
+        assert_eq!(
+            shield.planeswalk_scope,
+            Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly),
+            "CR 901.9c: Fixed Point matches only planar-die planeswalks"
         );
         // CR 514.2: expiry is armed from the ability's UntilNextTurnOf
         // { Controller } duration so the shared untap-step prune drops it at the

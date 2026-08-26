@@ -13,10 +13,13 @@ vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: dispatchActionMock
 
 function record(sourceId: number, accept: boolean): MayTriggerAutoChoiceRecord {
   return {
-    key: {
-      player: 0,
-      source_id: sourceId,
-      origin: { type: "Printed", trigger_index: 0 },
+    selector: {
+      type: "ExactInstance",
+      data: {
+        player: 0,
+        source_id: sourceId,
+        origin: { type: "Printed", trigger_index: 0 },
+      },
     },
     choice: { type: accept ? "Accept" : "Decline" },
   };
@@ -71,7 +74,7 @@ describe("MayTriggerAutoChoiceList", () => {
     expect(screen.getByText("Remove")).toBeInTheDocument();
   });
 
-  it("dispatches a Remove that echoes the stored key verbatim", () => {
+  it("dispatches a Remove that echoes the stored selector verbatim", () => {
     seed([record(50, true)]);
     render(<MayTriggerAutoChoiceList />);
 
@@ -84,10 +87,13 @@ describe("MayTriggerAutoChoiceList", () => {
         op: {
           type: "Remove",
           data: {
-            key: {
-              player: 0,
-              source_id: 50,
-              origin: { type: "Printed", trigger_index: 0 },
+            selector: {
+              type: "ExactInstance",
+              data: {
+                player: 0,
+                source_id: 50,
+                origin: { type: "Printed", trigger_index: 0 },
+              },
             },
           },
         },

@@ -62,7 +62,7 @@ describe("PhaseStopBar", () => {
   });
 
   it("cycles a stop in place, preserving array order", () => {
-    // Order matters: `usePhaseStopsSync` dedupes by positional comparison, so
+    // Order matters: `useGameplayPreferencesSync` dedupes by positional comparison, so
     // cycling must not move the touched stop to the end of the array. Seed two
     // stops and cycle the first — it must stay at index 0.
     usePreferencesStore.setState({

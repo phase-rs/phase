@@ -8,7 +8,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -22,6 +22,33 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 400.7 + CR 603.7c: a delayed copy whose pinned referent became a new
+    // object copies nothing. The trigger DID fire and DID resolve (CR 603.7b) —
+    // it simply affected nothing — so the game log, event observers and the
+    // chain machinery must see an EffectResolved, exactly as the sibling
+    // `stack_entry_cant_be_copied` guard below does.
+    //
+    // PLACEMENT IS LOAD-BEARING: this MUST sit ABOVE the `ok_or_else(..)?`
+    // below. Returning `None` from `copy_source_entry` instead converts a
+    // deliberate no-op into `EffectError::MissingParam` and emits NO
+    // EffectResolved, because the `?` short-circuits before any events.push.
+    // The guard belongs at a function that can say "resolved, did nothing", not
+    // one that can only say "absent".
+    //
+    // Inert for every non-pinned caller: `pinned_object_targets_all_stale`
+    // requires a non-empty `target_incarnations`, which only a pinned delayed
+    // ParentTarget trigger has. Measured: all 14 in-class CopySpell pairs carry
+    // `target: ParentTarget`, so Saruman (ExiledBySource) and Isochron Scepter
+    // (TrackedSet) can never satisfy it and their branches run untouched.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 707.10 / CR 702.153a (Casualty): resolve which stack entry to copy.
     // The helper handles explicit object targets (Twincast / Gogo), SelfRef
     // (Casualty triggers whose intermediate stack pushes would make stack.last()
@@ -34,6 +61,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -69,6 +97,7 @@ pub fn resolve(
         let mut copy_obj = source_obj.clone();
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;
+        // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
         copy_obj.zone = Zone::Stack;
         copy_obj.is_token = true;
         copy_obj.additional_cost_payment_count = 0;
@@ -78,6 +107,10 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.10: no mana was spent to cast a spell copy — reset the
+        // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
+        // cast it", issue #5943) do not re-fire off the original's payment.
+        copy_obj.clear_cast_payment_stamps();
         apply_spell_copy_modifications(
             &mut copy_obj,
             &additional_modifications,
@@ -110,6 +143,9 @@ pub fn resolve(
                 clear_cast_from_zone_recursive(a);
                 a.context.additional_cost_paid = false;
                 a.context.alternative_mana_cost_paid = false;
+                // CR 707.10: a copy of a spell isn't cast, so it must never
+                // consume a once-per-turn CastWithAlternativeCost grant's slot.
+                a.context.alt_cost_grant_source = None;
                 a.context.additional_cost_payment_count = 0;
                 a.context.kickers_paid.clear();
             }
@@ -147,8 +183,39 @@ pub fn resolve(
         | StackEntryKind::KeywordAction { .. } => None,
     };
 
-    state.stack.push_back(copy_entry);
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+    // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
+    // copy-creation generation and emits `StackPushed`.
+    let copied_trigger_firing = state.stack_trigger_firings.get(&top_entry.id).copied();
+    crate::game::stack::push_copy_to_stack(state, copy_entry, copied_trigger_firing, events);
+
+    // CR 707.10d: Zada — each copy is put on the stack targeting the current
+    // iteration member; no controller choice to change targets.
+    if matches!(
+        ability.effect,
+        Effect::CopySpell {
+            retarget: CopyRetargetPermission::RetargetEachCopyToIterationMember,
+            ..
+        }
+    ) {
+        // CR 400.7 + CR 603.7c: sits below the all-stale guard above, so this
+        // substitution handles the PARTIAL-stale case the guard does not.
+        if let Some(member) = ability
+            .live_object_targets(state)
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+        {
+            let member_pin = state
+                .objects
+                .get(&member)
+                .map(ObjectIncarnationRef::from_object);
+            if let Some(copy_ability) = state.stack.back_mut().and_then(|e| e.ability_mut()) {
+                rewrite_copy_spell_object_targets(copy_ability, member, member_pin);
+            }
+        }
+    }
 
     // CR 707.10: A copy of a spell is itself a spell on the stack, but it
     // isn't cast. Emit a distinct `SpellCopied` event so copy-sensitive
@@ -196,6 +263,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
             return Ok(());
@@ -216,6 +284,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
@@ -260,9 +329,7 @@ fn apply_spell_copy_modifications(
             // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
             // trigger persists once the copy becomes a token permanent.
             ContinuousModification::GrantTrigger { trigger } => {
-                std::sync::Arc::make_mut(&mut copy_obj.base_trigger_definitions)
-                    .push((**trigger).clone());
-                copy_obj.trigger_definitions.push((**trigger).clone());
+                copy_obj.push_printed_trigger((**trigger).clone());
             }
             _ => {}
         }
@@ -430,7 +497,10 @@ fn resolve_copier_player(
         | ControllerRef::EnchantedPlayer
         // CR 102.1: no card scopes "the active player copies this spell";
         // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
-        | ControllerRef::ActivePlayer => None,
+        | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: no card scopes a copier to a snapshotted player;
+        // the lowering exists only for combat-requirement continuous effects.
+        | ControllerRef::SpecificPlayer { .. } => None,
     }
 }
 
@@ -498,10 +568,49 @@ pub(crate) fn copy_count_with_replacements(
 }
 
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
-    let target_id = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Object(id) => Some(*id),
-        TargetRef::Player(_) => None,
-    });
+    if let Effect::CopySpell {
+        target, retarget, ..
+    } = &ability.effect
+    {
+        if matches!(target, TargetFilter::TriggeringSource)
+            || matches!(
+                retarget,
+                CopyRetargetPermission::RetargetEachCopyToIterationMember
+            )
+        {
+            if let Some(entry) = triggering_spell_stack_entry(state) {
+                return Some(entry);
+            }
+        }
+    }
+    // CR 707.10 + CR 607.2a (#5576 Saruman of Many Colors): an exile-linked copy
+    // ("Copy the exiled card" → `ExiledBySource`; Isochron Scepter imprint →
+    // `TrackedSet`) binds its source from the durable exile link / tracked set,
+    // NOT from `ability.targets`. This MUST precede the generic
+    // Object-target-on-stack lookup below: `resolve_ability_chain` propagates a
+    // parent exile clause's chosen target ("exile target … card") onto this
+    // CopySpell sub-ability, but that object is now in exile — not on the stack —
+    // so the stack lookup would find nothing and (before this reordering) the
+    // exile-linked branch was never reached, so the copy silently no-op'd.
+    if let Effect::CopySpell { target, .. } = &ability.effect {
+        if target.references_exiled_by_source() {
+            return copy_source_from_exiled_by_source(state, ability, target);
+        }
+        if references_tracked_set(target) {
+            return copy_source_from_tracked_set(state, ability, target);
+        }
+    }
+    // CR 400.7 + CR 603.7c: covers the partial-stale case, and is defence in
+    // depth for any future caller of `copy_source_entry` that does not pass
+    // through the guarded `resolve`.
+    let target_id =
+        ability
+            .live_object_targets(state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            });
     if let Some(target_id) = target_id {
         return state
             .stack
@@ -519,11 +628,6 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
                     )
             })
             .cloned();
-    }
-    if let Effect::CopySpell { target, .. } = &ability.effect {
-        if references_tracked_set(target) {
-            return copy_source_from_tracked_set(state, ability, target);
-        }
     }
     if matches!(
         &ability.effect,
@@ -582,6 +686,39 @@ fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
     }
 }
 
+/// CR 707.10 + CR 406.6 + CR 607.2a (Isochron Scepter class / Hideaway
+/// family): `CopySpell { ExiledBySource }` copies a card that was exiled by
+/// an EARLIER, separately-resolved ability on this same source (an ETB
+/// Imprint or a synthesized Hideaway ETB) — not by an earlier clause in this
+/// same resolution chain (that case stays on the `TrackedSet` path via
+/// `copy_source_from_tracked_set`). Resolved via the source's durable
+/// `exile_links`, the same linked-ability lookup `cast_from_zone.rs` uses for
+/// `CastFromZone { ExiledBySource }`. At most one card is ever linked to a
+/// given source under this binding (a single Imprint / Hideaway exile per
+/// source), so `.find` on the first match is sufficient — no ordering
+/// ambiguity to resolve.
+fn copy_source_from_exiled_by_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<StackEntry> {
+    let ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: the lookup is scoped by `ability.source_id` but kind-agnostic
+    // (it matches ANY `ExileLinkKind` linked to this source), mirroring the
+    // pre-existing `cast_from_zone.rs` linked-exile pattern. Accepted
+    // limitation: no card links two different exile kinds to one source, so a
+    // first-match `.find` cannot pick the wrong pile.
+    let source_id = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+        .iter()
+        .map(|link| link.exiled_id)
+        .find(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.zone == Zone::Exile && matches_target_filter(state, *id, target, &ctx)
+            })
+        })?;
+    stack_entry_from_exiled_spell_object(state, source_id, ability.controller)
+}
+
 /// CR 707.10 + CR 702.153a (Isochron Scepter): `CopySpell { TrackedSet }` copies
 /// an imprinted card from exile, not the top of the stack.
 fn copy_source_from_tracked_set(
@@ -630,7 +767,7 @@ fn stack_entry_from_exiled_spell_object(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -737,9 +874,49 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+/// CR 707.10 + CR 707.10b: Normalize a copied activated/triggered ability.
+/// The copy keeps the original ability's source (unlike a spell copy, which
+/// sources itself), so this only re-stamps `source_id` uniformly through the
+/// chain — but it must ALSO clear `noted_mana_payment` (issue #6504):
+/// CR 707.10 says a copy of an activated ability is not itself activated, so
+/// it never paid a mana cost. A naive struct clone otherwise carries the
+/// ORIGINAL activation's payment snapshot along for the ride, and
+/// `Effect::NoteManaSpent` resolving on the copy (Jeweled Amulet's first
+/// ability copied via Rings of Brighthearth or similar) would falsely note
+/// mana colors the copy never paid.
 fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
     let source_id = ability.source_id;
     set_resolved_source_recursive(ability, source_id);
+    ability.clear_noted_mana_payment_recursive();
+}
+
+/// CR 707.10d: Replace every object target on a copied spell with `new_target`
+/// and capture the target's current incarnation for ordinary resolution pins.
+fn rewrite_copy_spell_object_targets(
+    ability: &mut ResolvedAbility,
+    new_target: ObjectId,
+    new_target_pin: Option<ObjectIncarnationRef>,
+) {
+    let replaced_object_target = ability
+        .targets
+        .iter_mut()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .map(|target| {
+            *target = TargetRef::Object(new_target);
+        })
+        .count()
+        > 0;
+    if replaced_object_target {
+        if let Some(pin) = new_target_pin {
+            ability.update_selected_target_incarnation(pin);
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
+    }
+    if let Some(else_ab) = ability.else_ability.as_mut() {
+        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
+    }
 }
 
 fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
@@ -770,8 +947,11 @@ mod tests {
         ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
         TapStateChange, TargetFilter, TargetRef,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
 
     /// Helper: push a spell onto the stack with a matching GameObject.
@@ -792,7 +972,7 @@ mod tests {
             controller: owner,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: variant,
                 actual_mana_spent: 0,
             },
@@ -874,6 +1054,126 @@ mod tests {
             }
             _ => panic!("Expected both entries to be Spells with abilities"),
         }
+    }
+
+    /// CR 707.10 (issue #5943): a spell copy is not cast — the copy born by
+    /// `resolve(Effect::CopySpell)` must carry NO cast-payment record even
+    /// though it clones the original object. All five stamps reset to their
+    /// no-payment defaults; the original keeps its own record (reach-guard).
+    #[test]
+    fn spell_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Compleated Test Walker",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&ObjectId(10)].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: ObjectId(10),
+                    lki,
+                },
+            );
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.base_card_types = obj.card_types.clone();
+            obj.loyalty = Some(5);
+            obj.base_loyalty = Some(5);
+            obj.keywords.push(Keyword::Compleated);
+            obj.base_keywords.push(Keyword::Compleated);
+        }
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, ObjectId(10), "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the ORIGINAL keeps its payment record — the reset hit
+        // only the copy.
+        assert_eq!(
+            state.objects[&ObjectId(10)].mana_spent_to_cast_amount,
+            2,
+            "original keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(10)].phyrexian_life_paid,
+            1,
+            "original keeps its own Phyrexian life-payment record"
+        );
+
+        // Runtime regression: resolve the copied permanent spell through the
+        // production stack/entry-replacement pipeline. If the copy inherited
+        // the source's life payment, Compleated would reduce its 5 loyalty to 3.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let copy = state
+            .objects
+            .get(&copy_id)
+            .expect("copy persists after resolution");
+        assert_eq!(
+            copy.zone,
+            Zone::Battlefield,
+            "copy must resolve as a permanent"
+        );
+        assert_eq!(
+            copy.counters.get(&CounterType::Loyalty),
+            Some(&5),
+            "CR 702.150a: a spell copy has no source Phyrexian life payment to reduce loyalty"
+        );
     }
 
     /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's
@@ -967,7 +1267,7 @@ mod tests {
             copy_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| *t == sac_trigger),
+                .any(|t| t.definition == sac_trigger),
             "the copy must gain the granted end-step-sacrifice trigger (live store)"
         );
         assert!(
@@ -1118,7 +1418,7 @@ mod tests {
             "declining Demonstrate must not put either copy onto the stack"
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "declining Demonstrate must not leave the opponent copy queued"
         );
         assert!(
@@ -1586,6 +1886,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
     }
@@ -1745,6 +2046,7 @@ mod tests {
             card_id: CardId(1),
             object_id: cast_spell_id,
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
 
         let copy_ability = ResolvedAbility::new(
@@ -1846,6 +2148,7 @@ mod tests {
                 card_id: CardId(1),
                 object_id: cast_spell_id,
                 controller: PlayerId(0),
+                cast_mana_value: None,
             }),
         );
 
@@ -2015,7 +2318,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2061,6 +2364,81 @@ mod tests {
     }
 
     #[test]
+    fn copied_self_transform_captures_the_copy_creation_time() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::stack::push_to_stack;
+        use crate::game::transform::transform_permanent;
+
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        crate::game::effects::incubate::resolve(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::Incubate {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                vec![],
+                ObjectId(90),
+                PlayerId(0),
+            ),
+            &mut events,
+        )
+        .expect("Incubator is created");
+        let source_id = *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("Incubator on battlefield");
+        let definition = state.objects[&source_id]
+            .abilities
+            .first()
+            .expect("Incubator has a transform ability")
+            .clone();
+        push_to_stack(
+            &mut state,
+            StackEntry {
+                id: ObjectId(100),
+                source_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: Box::new(build_resolved_from_def(&definition, source_id, PlayerId(0))),
+                },
+            },
+            &mut events,
+        );
+        transform_permanent(&mut state, source_id, &mut events)
+            .expect("source transforms while the original ability is on the stack");
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        resolve(&mut state, &copy_effect, &mut events).expect("transform ability is copied");
+        let copy = state.stack.pop_back().expect("copied ability on stack");
+        crate::game::effects::transform_effect::resolve(
+            &mut state,
+            copy.ability().expect("copied transform ability"),
+            &mut events,
+        )
+        .expect("copied transform resolves");
+
+        assert!(
+            !state.objects[&source_id].transformed,
+            "CR 707.10: the copy is put onto the stack after the intervening transform, so its self-transform instruction must resolve"
+        );
+        assert_eq!(state.objects[&source_id].transformation_count, 2);
+    }
+
+    #[test]
     fn copied_activated_ability_keeps_original_source_for_self_ref_resolution() {
         let mut state = GameState::new_two_player(42);
         let basalt = ObjectId(10);
@@ -2093,7 +2471,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: basalt,
-                ability: untap_basalt,
+                ability: Box::new(untap_basalt),
             },
         });
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
@@ -2165,7 +2543,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2230,7 +2608,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_ability,
+                ability: Box::new(gogo_ability),
             },
         });
 
@@ -2256,7 +2634,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: other_id,
-                ability: copy_gogo,
+                ability: Box::new(copy_gogo),
             },
         });
 
@@ -2512,6 +2890,7 @@ mod tests {
                 source_name: "Hope Estheim".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -2535,6 +2914,7 @@ mod tests {
                 source_name: "Opponent Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -2573,7 +2953,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_copy,
+                ability: Box::new(gogo_copy),
             },
         });
 
@@ -2877,6 +3257,171 @@ mod tests {
         );
     }
 
+    #[test]
+    fn automatic_copy_retarget_captures_iteration_member_incarnation() {
+        fn resolve_zone_change(
+            state: &mut GameState,
+            object_id: ObjectId,
+            origin: Zone,
+            destination: Zone,
+            events: &mut Vec<GameEvent>,
+        ) {
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(origin),
+                    destination,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![TargetRef::Object(object_id)],
+                ObjectId(20),
+                PlayerId(0),
+            );
+            crate::game::effects::resolve_ability_chain(state, &ability, events, 0)
+                .expect("production ChangeZone must resolve");
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let original_target = ObjectId(60);
+        let iteration_member = ObjectId(61);
+        let mut original_target_object = GameObject::new(
+            original_target,
+            CardId(5),
+            PlayerId(1),
+            "Original Target".to_string(),
+            Zone::Battlefield,
+        );
+        original_target_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .insert(original_target, original_target_object);
+        let mut iteration_member_object = GameObject::new(
+            iteration_member,
+            CardId(6),
+            PlayerId(1),
+            "Iteration Member".to_string(),
+            Zone::Battlefield,
+        );
+        iteration_member_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .insert(iteration_member, iteration_member_object);
+
+        let mut original_spell = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(original_target)],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        original_spell.capture_target_incarnations_recursive(&state);
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Destroy Spell",
+            original_spell,
+            CastingVariant::Normal,
+        );
+
+        let mut copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::RetargetEachCopyToIterationMember,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![TargetRef::Object(iteration_member)],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        copy.target_incarnations = vec![ObjectIncarnationRef::from_object(
+            state.objects.get(&iteration_member).unwrap(),
+        )];
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(1),
+            object_id: ObjectId(10),
+            controller: PlayerId(0),
+            cast_mana_value: None,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");
+
+        let copied_ability = state
+            .stack
+            .back()
+            .and_then(|entry| entry.ability())
+            .expect("automatic copy must be on the stack");
+        assert_eq!(
+            copied_ability.targets,
+            vec![TargetRef::Object(iteration_member)]
+        );
+        assert!(
+            copied_ability.selected_target_pin_is_current(iteration_member, &state),
+            "automatic retarget must capture the iteration member incarnation"
+        );
+
+        resolve_zone_change(
+            &mut state,
+            iteration_member,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            &mut events,
+        );
+        resolve_zone_change(
+            &mut state,
+            iteration_member,
+            Zone::Graveyard,
+            Zone::Battlefield,
+            &mut events,
+        );
+        assert_eq!(
+            state.objects.get(&iteration_member).unwrap().zone,
+            Zone::Battlefield,
+            "iteration member must return to the battlefield before copy resolution"
+        );
+        let copied_ability = state
+            .stack
+            .back()
+            .and_then(|entry| entry.ability())
+            .cloned()
+            .expect("automatic copy ability must remain on the stack");
+        assert!(
+            !copied_ability.selected_target_pin_is_current(iteration_member, &state),
+            "returned iteration member must no longer match the captured copy target pin"
+        );
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&iteration_member).unwrap().zone,
+            Zone::Battlefield,
+            "automatic copy must not affect a returned iteration-member incarnation"
+        );
+    }
+
     /// Twinning Staff's ruling grants new-target permission for the replacement-
     /// added copy even if the original copy effect keeps targets unchanged.
     #[test]
@@ -3115,6 +3660,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
             vec![],
             ObjectId(10),
@@ -3141,6 +3687,7 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
 
@@ -3165,7 +3712,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(original),
+                ability: Some(Box::new(original)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -3202,6 +3749,90 @@ mod tests {
             copy.counters.get(&CounterType::Loyalty).copied(),
             Some(4),
             "ETB must seed loyalty counters from the stamped entering face"
+        );
+    }
+
+    /// CR 707.10 + CR 607.2a (#5576 Saruman of Many Colors): a same-chain
+    /// plain-targeted `ChangeZone{Exile}` feeding "Copy the exiled card" now
+    /// binds the copy to `ExiledBySource`. End-to-end, the exile step publishes
+    /// an `ExileLink` (`should_track_exiled_by_source` sees the `ExiledBySource`
+    /// consumer) and the copy replicates the just-exiled card. Before the parser
+    /// fix the copy bound `TrackedSet(0)`, which a plain-targeted exile never
+    /// publishes — `copy_source_from_tracked_set` fell back to a global scan and,
+    /// with none present, copied nothing. Driven through the real parser so a
+    /// revert of the routing flips the copy target back and this fails.
+    #[test]
+    fn copy_the_exiled_card_after_targeted_graveyard_exile_copies_that_card() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(5);
+        state.objects.insert(
+            source_id,
+            GameObject::new(
+                source_id,
+                CardId(99),
+                PlayerId(0),
+                "Saruman of Many Colors".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        // An instant card in the OPPONENT's graveyard — the exile+copy target.
+        let target_card = ObjectId(10);
+        let mut gy = GameObject::new(
+            target_card,
+            CardId(1),
+            PlayerId(1),
+            "Shock".to_string(),
+            Zone::Graveyard,
+        );
+        gy.card_types.core_types.push(CoreType::Instant);
+        gy.abilities = std::sync::Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        )]);
+        state.objects.insert(target_card, gy);
+
+        // Real parser output for the same-chain "exile target … Copy the exiled
+        // card" class: ChangeZone{Graveyard→Exile} → CopySpell{ExiledBySource}.
+        let def = parse_effect_chain(
+            "Exile target instant card from an opponent's graveyard. Copy the exiled card.",
+            AbilityKind::Activated,
+        );
+        let resolved = build_resolved_from_def_with_targets(
+            &def,
+            source_id,
+            PlayerId(0),
+            vec![TargetRef::Object(target_card)],
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.objects[&target_card].zone,
+            Zone::Exile,
+            "the targeted graveyard card must be exiled"
+        );
+        // A copy of THAT card (its DealDamage spell) is on the stack — a distinct
+        // object from the exiled original.
+        let copy = state.stack.iter().find_map(|e| {
+            let a = e.ability()?;
+            (e.id != target_card && matches!(a.effect, Effect::DealDamage { .. })).then_some(e.id)
+        });
+        assert!(
+            copy.is_some(),
+            "a copy of the exiled instant must be on the stack (ExiledBySource read), \
+             got stack of {} entries",
+            state.stack.len()
         );
     }
 }

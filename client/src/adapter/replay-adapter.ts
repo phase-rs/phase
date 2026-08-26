@@ -1,6 +1,7 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameState,
   LegalActionsResult,
@@ -82,11 +83,21 @@ export class ReplayAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return { actions: [], autoPassRecommended: false, spellCosts: {}, legalActionsByObject: {} };
+    return {
+      actions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+      spellCosts: {},
+      legalActionsByObject: {},
+    };
   }
 
-  getAiAction(): Promise<GameAction | null> {
-    return Promise.resolve(null);
+  /** Same "no single current state" contract as `getState` — the Replay Viewer
+   *  drives the store via `seek()`, never through the snapshot commit path. */
+  getSnapshot(): Promise<EngineSnapshot> {
+    return Promise.reject(
+      new Error("ReplayAdapter has no single current state — call seek(index) instead"),
+    );
   }
 
   restoreState(): void {

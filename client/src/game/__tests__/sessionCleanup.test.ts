@@ -12,6 +12,8 @@ describe("clearPromptOverlayState", () => {
       pendingAbilityChoice: null,
       enchantmentsDialogPlayer: null,
       manualManaOverride: false,
+      mobileHandGesture: null,
+      scryOutcome: null,
     });
   });
 
@@ -69,5 +71,52 @@ describe("clearPromptOverlayState", () => {
     clearPromptOverlayState();
 
     expect(useUiStore.getState().handFilter).toBe("none");
+  });
+
+  it("clears an in-flight mobile hand gesture at a game boundary", () => {
+    useUiStore.setState({
+      mobileHandGesture: {
+        objectId: 1,
+        phase: "drag",
+        sourceOrigin: {
+          bottom: 180,
+          centerX: 50,
+          height: 140,
+          rotation: 0,
+          top: 40,
+          width: 100,
+        },
+        offsetX: 12,
+        offsetY: -80,
+        playable: true,
+        castReady: true,
+      },
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().mobileHandGesture).toBeNull();
+  });
+
+  it("clears active and queued roll overlays at a game boundary", () => {
+    useUiStore.setState({
+      diceRoll: { kind: "coin", playerId: 1, won: true, context: "ability" },
+      diceRollQueue: [{ kind: "coin", playerId: 1, won: false, context: "ability" }],
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().diceRoll).toBeNull();
+    expect(useUiStore.getState().diceRollQueue).toEqual([]);
+  });
+
+  it("clears a completed scry overlay at a game boundary", () => {
+    useUiStore.setState({
+      scryOutcome: { playerId: 1, topCount: 2, bottomCount: 1 },
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().scryOutcome).toBeNull();
   });
 });

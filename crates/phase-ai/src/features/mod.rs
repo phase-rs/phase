@@ -12,18 +12,25 @@ pub mod artifacts;
 pub mod blink;
 pub mod commitment;
 pub mod control;
+pub mod cost_reduction;
+pub mod devotion;
+pub mod discard_matters;
+pub mod draw_matters;
 pub mod enchantments;
 pub mod energy;
 pub mod equipment;
+pub mod graveyard_types;
 pub mod landfall;
 pub mod lifegain;
 pub mod mana_ramp;
 pub mod mill;
 pub mod plus_one_counters;
+pub mod poison;
 pub mod reanimator;
 pub mod spellslinger_prowess;
 pub mod tokens_wide;
 pub mod tribal;
+pub mod vehicles;
 
 #[cfg(test)]
 pub mod tests;
@@ -33,18 +40,25 @@ pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
 pub use blink::BlinkFeature;
 pub use control::ControlFeature;
+pub use cost_reduction::CostReductionFeature;
+pub use devotion::DevotionFeature;
+pub use discard_matters::DiscardMattersFeature;
+pub use draw_matters::DrawMattersFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
 pub use equipment::EquipmentFeature;
+pub use graveyard_types::GraveyardTypesFeature;
 pub use landfall::LandfallFeature;
 pub use lifegain::LifegainFeature;
 pub use mana_ramp::ManaRampFeature;
 pub use mill::MillFeature;
 pub use plus_one_counters::PlusOneCountersFeature;
+pub use poison::PoisonFeature;
 pub use reanimator::ReanimatorFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
 pub use tokens_wide::TokensWideFeature;
 pub use tribal::TribalFeature;
+pub use vehicles::VehiclesFeature;
 
 use engine::game::bracket_estimate::CommanderBracketTier;
 
@@ -66,6 +80,9 @@ pub struct DeckFeatures {
     pub mana_ramp: ManaRampFeature,
     pub tribal: TribalFeature,
     pub control: ControlFeature,
+    /// CR 601.2f: cost-reduction density ("spells you cast cost less") — the
+    /// acceleration axis `mana_ramp` explicitly defers.
+    pub cost_reduction: CostReductionFeature,
     pub enchantments: EnchantmentsFeature,
     pub equipment: EquipmentFeature,
     pub blink: BlinkFeature,
@@ -77,7 +94,20 @@ pub struct DeckFeatures {
     pub spellslinger_prowess: SpellslingerProwessFeature,
     pub reanimator: ReanimatorFeature,
     pub mill: MillFeature,
+    pub devotion: DevotionFeature,
     pub energy: EnergyFeature,
+    /// CR 104.3d: the alternate poison win clock (toxic / infect / proliferate).
+    pub poison: PoisonFeature,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    pub graveyard_types: GraveyardTypesFeature,
+    /// CR 121.1: "whenever you draw" payoff density (draw sources + engines).
+    pub draw_matters: DrawMattersFeature,
+    /// CR 701.9: "whenever you discard" payoff density (self-discard outlets +
+    /// engines). Disjoint from `hand_disruption`, which scores OPPONENT discard.
+    pub discard_matters: DiscardMattersFeature,
+    /// CR 702.122: crewed-Vehicle density paired with the creature bench needed
+    /// to tap for it. Gives `CrewTimingPolicy` the deck signal it lacked.
+    pub vehicles: VehiclesFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -110,6 +140,7 @@ impl DeckFeatures {
             mana_ramp: mana_ramp::detect(deck),
             tribal: tribal::detect(deck),
             control: control::detect(deck),
+            cost_reduction: cost_reduction::detect(deck),
             enchantments: enchantments::detect(deck),
             equipment: equipment::detect(deck),
             blink: blink::detect(deck),
@@ -121,7 +152,13 @@ impl DeckFeatures {
             spellslinger_prowess: spellslinger_prowess::detect(deck),
             reanimator: reanimator::detect(deck),
             mill: mill::detect(deck),
+            devotion: devotion::detect(deck),
             energy: energy::detect(deck),
+            poison: poison::detect(deck),
+            graveyard_types: graveyard_types::detect(deck),
+            draw_matters: draw_matters::detect(deck),
+            discard_matters: discard_matters::detect(deck),
+            vehicles: vehicles::detect(deck),
             bracket_tier: tier,
         }
     }

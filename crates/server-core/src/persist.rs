@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use engine::types::game_state::GameState;
+use engine::types::game_state::PersistedGameState;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,7 @@ use draft_core::types::{DraftConfig, DraftSession as DraftCoreSession};
 
 use crate::lobby::RegisterGameRequest;
 use crate::protocol::DraftLobbyMetadata;
+use crate::session::AiDriverFault;
 
 /// Serializable snapshot of a game session for disk persistence.
 ///
@@ -18,7 +19,15 @@ use crate::protocol::DraftLobbyMetadata;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub game_code: String,
-    pub state: GameState,
+    #[serde(default)]
+    pub state_revision: u64,
+    /// A persisted native-driver failure remains terminal across process
+    /// restart; omitting it decodes historical snapshots as healthy.
+    #[serde(default)]
+    pub ai_driver_fault: Option<AiDriverFault>,
+    #[serde(default = "default_next_ai_driver_fault_id")]
+    pub next_ai_driver_fault_id: u64,
+    pub state: PersistedGameState,
     pub player_tokens: Vec<String>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,
@@ -53,6 +62,10 @@ pub struct PersistedLobbyMeta {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_next_ai_driver_fault_id() -> u64 {
+    1
 }
 
 /// Serializable snapshot of a draft session for disk persistence.

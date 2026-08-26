@@ -14,11 +14,12 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
+use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
@@ -64,6 +65,48 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     }
 
     parse_oracle_cost_no_or(text)
+}
+
+/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
+/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
+/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
+/// the single cost authority.
+///
+/// The gerund construction appears in "cast … by <doing X> in addition to
+/// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
+/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
+/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
+/// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
+/// tag(gerund))` arm. Extend by a single arm per cost verb, only once
+/// `parse_oracle_cost` models its imperative.
+///
+/// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
+/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
+/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let original = phrase.trim();
+    let lower = original.to_lowercase();
+    // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
+    // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
+    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+        alt((
+            value("pay", tag::<_, _, E<'_>>("paying ")),
+            value("discard", tag("discarding ")),
+            value("sacrifice", tag("sacrificing ")),
+            value("tap", tag("tapping ")),
+            value("remove", tag("removing ")),
+            value("exile", tag("exiling ")),
+        ))
+        .parse(input)
+    }) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    parse_oracle_cost(&format!("{stem} {rest}"))
 }
 
 /// True when a top-level ` or ` branch parsed to a concrete activation cost
@@ -798,7 +841,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -986,19 +1032,32 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         value((), alt((tag("tap "), tag("tapped ")))).parse(i)
     }) {
         let tap_lower = tap_rest.to_lowercase();
-        let (count, filter_text) = if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            value(
-                (),
-                alt((tag("another untapped "), tag("an untapped "), tag("an "))),
-            )
+        // The leading quantifier reports a typed `CountWord` alongside the
+        // count. "Another"/"other" is not merely a quantity of one: it is the
+        // source-exclusion qualifier, and this branch CONSUMES it, so the
+        // remainder handed to `parse_target` no longer carries it. Without the
+        // signal the exclusion is lost and the source pays its own cost
+        // (Spire Mechcycle, #7522). Same failure and same typed remedy as the
+        // sacrifice imperative's `parse_count_expr_with_exclusion` (#4513).
+        let (count, filter_text, count_word) = if let Some((word, r)) =
+            nom_on_lower(tap_rest, &tap_lower, |i| {
+                alt((
+                    value(CountWord::SourceExclusion, tag("another untapped ")),
+                    value(CountWord::Plain, tag("an untapped ")),
+                    value(CountWord::Plain, tag("an ")),
+                ))
+                .parse(i)
+            }) {
+            (1u32, r.to_lowercase(), word)
+        } else if let Some((word, r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
+            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
+            alt((
+                value(CountWord::Plain, tag("x untapped ")),
+                value(CountWord::SourceExclusion, tag("x other untapped ")),
+            ))
             .parse(i)
         }) {
-            (1u32, r.to_lowercase())
-        } else if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
-            value((), alt((tag("x untapped "), tag("x other untapped ")))).parse(i)
-        }) {
-            (u32::MAX, r.to_lowercase())
+            (u32::MAX, r.to_lowercase(), word)
         } else if let Some((n, r)) = super::oracle_util::parse_number(&tap_lower) {
             let r = nom_on_lower(
                 &tap_rest[tap_lower.len() - r.len()..],
@@ -1007,15 +1066,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             )
             .map(|((), rest)| rest.to_lowercase())
             .unwrap_or_else(|| r.trim_start().to_string());
-            (n, r)
+            // The numeric branch does NOT consume "other" ("tap two other
+            // untapped artifacts you control"): the `untapped ` tag fails on
+            // the "other " lead, so the phrase reaches `parse_target` intact
+            // and `parse_type_phrase` supplies `FilterProp::Another` itself.
+            // Nothing to re-apply here.
+            (n, r, CountWord::Plain)
         } else {
-            (0, String::new())
+            (0, String::new(), CountWord::Plain)
         };
 
         if count > 0 {
             let target_text = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
+                let filter = match count_word {
+                    CountWord::SourceExclusion => {
+                        distribute_shared_properties(filter, &[FilterProp::Another])
+                    }
+                    CountWord::Plain => filter,
+                };
                 return AbilityCost::TapCreatures {
                     requirement: TapCreaturesRequirement::count(count),
                     filter,
@@ -1053,13 +1123,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
-    if let Some(energy) = try_parse_energy_cost(&lower) {
-        return AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed {
-                value: energy as i32,
-            },
-        };
+    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" / "Pay X {E}" — energy costs (CR 107.14)
+    if let Some(amount) = try_parse_energy_cost(&lower) {
+        return AbilityCost::PayEnergy { amount };
     }
 
     // "Return a land you control to its owner's hand" — bounce cost
@@ -1078,6 +1144,28 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Unattach;
+    }
+
+    // CR 701.3d + CR 608.2k: "Unattach a[n] <type> from ~" — unattach a matching
+    // attachment from the source host as a cost (Captain America's Throw). The
+    // detached object stays on the battlefield and becomes this ability's
+    // cost-referent. Kept AFTER the more-specific self-unattach branch above.
+    // The "from ~" recipient is normalized from the card name upstream
+    // (`normalize_card_name_refs`).
+    if let Some(((), after_article)) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("unattach ").parse(i)?;
+        value((), alt((tag("an "), tag("a ")))).parse(i)
+    }) {
+        let (filter, remainder) = parse_type_phrase(after_article);
+        let rem_lower = remainder.to_lowercase();
+        if let Some(((), tail)) = nom_on_lower(remainder, &rem_lower, |i| {
+            value((), preceded(tag(" from "), parse_cost_self_reference)).parse(i)
+        }) {
+            if tail.is_empty() {
+                // Only count == 1 has Oracle support today ("a[n] <type>").
+                return AbilityCost::UnattachFrom { filter, count: 1 };
+            }
+        }
     }
 
     // "reveal your hand" — reveal the controller's entire hand.
@@ -1253,9 +1341,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 /// Combinator-based (parser-combinator gate): runs on an already-lowercase slice
 /// and mirrors `try_parse_cost_reduction`'s `parse_mana_symbols` path.
 pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
-    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less to
-    // activate"). The spell form ("this spell costs {N} less to cast") is parsed
-    // through a different (spell) path that does NOT route through
+    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less/more
+    // to activate"). The spell form ("this spell costs {N} less/more to cast") is
+    // parsed through a different (spell) path that does NOT route through
     // `strip_cost_reduction_node`, so suppressing the suffix split there would
     // only strand its condition as a swallowed clause (e.g. Lashwhip Predator).
     let Ok((rest, _)) = tag::<_, _, nom::error::Error<&str>>("this ability costs ").parse(lower)
@@ -1269,12 +1357,18 @@ pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     };
 
     let after_mana = after_mana.trim_start();
-    tag::<_, _, nom::error::Error<&str>>("less to activate")
-        .parse(after_mana)
-        .is_ok()
+    // CR 601.2f: both cost reductions ("less") and cost increases ("more") are
+    // self-referential total-cost modifiers — keep the whole sentence intact for
+    // `try_parse_cost_reduction` (Loreseeker's Stone class).
+    alt((
+        tag::<_, _, nom::error::Error<&str>>("less to activate"),
+        tag::<_, _, nom::error::Error<&str>>("more to activate"),
+    ))
+    .parse(after_mana)
+    .is_ok()
 }
 
-/// CR 601.2f: Parse "this ability/spell costs {N} less to activate/cast for each [condition]".
+/// CR 601.2f: Parse "this ability/spell costs {N} less/more to activate/cast for each [condition]".
 /// Returns `None` for unrecognized patterns.
 pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let lower = text.to_lowercase();
@@ -1291,90 +1385,78 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let (mana_cost, after_mana) = parse_mana_symbols(&rest_lower)?;
     let amount_per = match mana_cost {
         crate::types::mana::ManaCost::Cost { generic, shards } if shards.is_empty() => generic,
-        // CR 107.3c: When the cost reduction is "{X}" and X is *defined by the
-        // text* ("..., where X is <count>"), the reduction is a dynamic amount,
-        // not a player-chosen one. Route to the where-X branch; any other shard
-        // shape (colored/colorless reductions) stays an honest gap — CR 118.7a
-        // limits cost reduction to the generic component.
+        // CR 107.3c: When the cost modification is "{X}" and X is *defined by the
+        // text* ("..., where X is <count>"), the amount is dynamic, not a
+        // player-chosen one. Route to the where-X branch; any other shard
+        // shape (colored/colorless adjustments) stays an honest gap — CR 118.7a
+        // limits generic-component adjustments for the Reduce path; Raise grows
+        // only generic as well (CR 601.2f).
         crate::types::mana::ManaCost::Cost { generic: 0, shards }
             if shards.as_slice() == [crate::types::mana::ManaCostShard::X] =>
         {
             return try_parse_dynamic_x_cost_reduction(after_mana.trim_start());
         }
-        _ => return None, // Only generic mana reduction supported
+        _ => return None, // Only generic mana modification supported
     };
 
     let after_mana = after_mana.trim_start();
 
+    // CR 601.2f: Directional axis — "less" reduces, "more" raises. Shared with
+    // external `ReduceAbilityCost` statics via `CostModifyMode`.
+    let (mode, after_mode) = parse_self_cost_modify_direction(after_mana)?;
+
     // CR 602.2b: An activated ability's analog to a spell's mana cost is its activation cost.
-    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0}.
+    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0};
+    //           cost increases are added into the total cost.
     // CR 102.1: The active player is the player whose turn it is, so "during your
     //           turn" is the controller-is-active-player test.
-    // Timing-gated flat form ("... less to activate during your turn[s]" / "... less
+    // Timing-gated flat form ("... less/more to activate during your turn[s]" / "... less/more
     // to cast during your turn[s]") is therefore exactly the `IsYourTurn` flat
     // conditional (count = Fixed(1)). Checked before the generic "if [condition]"
     // form because "during your turn" is not introduced by "if". Hylda's Crown of
     // Winter: "This ability costs {1} less to activate during your turn."
-    if nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            (
-                alt((
-                    tag("less to activate during your "),
-                    tag("less to cast during your "),
-                )),
-                alt((tag("turns"), tag("turn"))),
-            ),
-        )
-        .parse(i)
+    if nom_on_lower(after_mode, after_mode, |i| {
+        value((), (tag(" during your "), alt((tag("turns"), tag("turn"))))).parse(i)
     })
     .is_some_and(|((), rest)| rest.trim().trim_end_matches('.').trim().is_empty())
     {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(crate::types::ability::ParsedCondition::IsYourTurn),
         });
     }
 
-    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
-    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // CR 602.2b + CR 601.2f conditional flat form: "... less/more to activate if [condition]" /
+    // "... less/more to cast if [condition]". The adjustment is a flat {amount_per}
     // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
     // form; if the "if " marker is present but the condition does not parse,
     // return None so the clause stays a loud gap (coverage honesty) rather than
     // silently mis-parsing.
-    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((tag("less to activate if "), tag("less to cast if "))),
-        )
-        .parse(i)
-    }) {
+    if let Some(((), cond_text)) =
+        nom_on_lower(after_mode, after_mode, |i| value((), tag(" if ")).parse(i))
+    {
         let cond_text = cond_text.trim().trim_end_matches('.').trim();
         let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition),
         });
     }
 
-    // Strip " less to activate for each " or " less to cast for each "
-    let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((
-                tag("less to activate for each "),
-                tag("less to cast for each "),
-            )),
-        )
-        .parse(i)
+    // Strip " for each " after the already-consumed less/more verb.
+    let ((), after_less) = nom_on_lower(after_mode, after_mode, |i| {
+        value((), tag(" for each ")).parse(i)
     })?;
 
-    // Try parse_for_each_clause first (handles counters, player counts, etc.),
+    // Try parse_for_each_clause first (handles counters, player counts, hand size, etc.),
     // then fall back to parse_type_phrase for standard object count patterns.
     if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Ref { qty },
             condition: None,
@@ -1388,6 +1470,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     }
 
     Some(CostReduction {
+        mode,
         amount_per,
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -1396,32 +1479,49 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     })
 }
 
+/// CR 601.2f: After the `{N}` amount, consume "less|more to activate|cast" and
+/// return the direction plus the remainder (timing / if / for each / where-X).
+fn parse_self_cost_modify_direction(
+    after_mana: &str,
+) -> Option<(crate::types::statics::CostModifyMode, &str)> {
+    use crate::types::statics::CostModifyMode;
+    nom_on_lower(after_mana, after_mana, |i| {
+        alt((
+            map(alt((tag("less to activate"), tag("less to cast"))), |_| {
+                CostModifyMode::Reduce
+            }),
+            map(alt((tag("more to activate"), tag("more to cast"))), |_| {
+                CostModifyMode::Raise
+            }),
+        ))
+        .parse(i)
+    })
+}
+
 /// CR 601.2f + CR 602.2b + CR 107.3c: Parse the dynamic-{X} activated-ability
-/// cost-reduction tail "less to activate, where X is <count>" (verb axis also
-/// accepts "less to cast"). `input` is the already-lowercase slice immediately
+/// cost-modification tail "less|more to activate, where X is <count>" (verb axis also
+/// accepts "… to cast"). `input` is the already-lowercase slice immediately
 /// after the leading "{X}" amount.
 ///
 /// CR 107.3c: because X is defined by the ability's own text ("where X is ..."),
-/// the controller does not choose it — the reduction is a dynamic amount. This
+/// the controller does not choose it — the amount is dynamic. This
 /// maps to `CostReduction { amount_per: 1, count: Ref(<qty>), .. }` so the
-/// runtime `apply_cost_reduction` computes `reduce_by = 1 * count` and resolves
-/// `count` from game state. CR 118.7a/CR 601.2f then reduce only the generic
-/// component, flooring at {0}.
+/// runtime `apply_cost_reduction` computes `delta = 1 * count` and resolves
+/// `count` from game state. CR 118.7a/CR 601.2f then adjust only the generic
+/// component (`Reduce` floors at {0}; `Raise` adds).
 ///
-/// Covers the entire "{X} less to activate, where X is <any QuantityRef>" class
+/// Covers the entire "{X} less/more to activate, where X is <any QuantityRef>" class
 /// (Survey Mechan, The Dominion Bracelet, and any future card of this shape) by
 /// delegating the count phrase to `parse_dynamic_x_clause`. Returns `None` when
 /// the where-X clause does not parse so the clause stays an honest gap rather
 /// than a misparse.
 fn try_parse_dynamic_x_cost_reduction(input: &str) -> Option<CostReduction> {
-    // Strip the verb. No trailing space: the where-X clause begins with ", ".
-    let ((), after_verb) = nom_on_lower(input, input, |i| {
-        value((), alt((tag("less to activate"), tag("less to cast")))).parse(i)
-    })?;
+    let (mode, after_verb) = parse_self_cost_modify_direction(input)?;
 
     // Delegate ", where x is <phrase>" to the shared dynamic-X combinator.
     let (_, qty) = parse_dynamic_x_clause(after_verb).ok()?;
     Some(CostReduction {
+        mode,
         amount_per: 1,
         count: QuantityExpr::Ref { qty },
         condition: None,
@@ -1460,21 +1560,7 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
     if !has_another_prefix {
         return filter;
     }
-    match filter {
-        TargetFilter::Typed(mut typed) => {
-            if !typed.properties.contains(&FilterProp::Another) {
-                typed.properties.push(FilterProp::Another);
-            }
-            TargetFilter::Typed(typed)
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(|f| ensure_another_sacrifice_filter(f, phrase))
-                .collect(),
-        },
-        other => other,
-    }
+    distribute_shared_properties(filter, &[FilterProp::Another])
 }
 
 /// CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: Parse Baron Helmut Zemo's
@@ -1607,8 +1693,12 @@ fn try_parse_exile_top_library(rest: &str) -> Option<u32> {
     None
 }
 
-/// CR 107.9: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}".
-fn try_parse_energy_cost(lower: &str) -> Option<u32> {
+/// CR 107.3a + CR 107.14: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
+/// "pay x {e}" (Chthonian Nightmare / issue #1092). Returns a `QuantityExpr` rather
+/// than a bare count so a variable-X amount ("pay x {e}") can be represented as
+/// `QuantityExpr::Ref { qty: Variable("X") }`, mirroring the "pay x life" /
+/// "pay x speed" branches above instead of silently collapsing X to 0.
+fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     let text = nom_on_lower(lower, lower, |i| value((), tag("pay ")).parse(i))
         .map(|((), rest)| rest)
         .unwrap_or(lower)
@@ -1619,14 +1709,23 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
         // Verify the text is ONLY {E} symbols (no other text)
         let cleaned = text.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
-            return Some(count);
+            return Some(QuantityExpr::Fixed {
+                value: count as i32,
+            });
         }
     }
-    // "pay N {e}" / "pay eight {e}" / "pay six {e}"
+    // "pay N {e}" / "pay eight {e}" / "pay six {e}" / "pay x {e}"
     if text.ends_with("{e}") {
         let prefix = text.trim_end_matches("{e}").trim();
+        if prefix == "x" {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+        }
         if let Some((n, _)) = parse_number(prefix) {
-            return Some(n);
+            return Some(QuantityExpr::Fixed { value: n as i32 });
         }
     }
     None
@@ -1752,6 +1851,19 @@ fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {
                 None
             }
         }),
+        // Recurse into composite filters so a multi-type source-zone cost carries
+        // the same top-level `zone` a single-type one would. "Exile four instant
+        // and/or sorcery cards from your graveyard" (Demilich) lowers to an
+        // `Or([Typed{Instant, InZone(Graveyard)}, Typed{Sorcery, InZone(Graveyard)}])`
+        // filter; without this, `zone` stayed `None` and the payment layer's
+        // no-zone default (`exile_cost_effective_zone`) looked in the hand instead
+        // of the graveyard, making the cost unpayable and the card uncastable.
+        // Every leg of these disjunctions names the same zone, so the first leg
+        // that yields a zone is authoritative.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(extract_filter_zone)
+        }
+        TargetFilter::Not { filter } => extract_filter_zone(filter),
         _ => None,
     }
 }
@@ -1847,6 +1959,86 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
+    /// to the single cost authority, so a gerund cost phrase lowers identically to
+    /// its imperative form across the whole verb class — and an unmodeled verb
+    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    #[test]
+    fn gerund_cost_matches_imperative_authority() {
+        for (gerund, imperative) in [
+            ("discarding a card", "discard a card"),
+            ("paying 1 life", "pay 1 life"),
+            ("sacrificing a creature", "sacrifice a creature"),
+            ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
+            // riders exile cards as an additional cost.
+            (
+                "exiling four instant and/or sorcery cards from your graveyard",
+                "exile four instant and/or sorcery cards from your graveyard",
+            ),
+            (
+                "exiling another creature card from your graveyard",
+                "exile another creature card from your graveyard",
+            ),
+        ] {
+            assert_eq!(
+                parse_gerund_cost(gerund),
+                parse_oracle_cost(imperative),
+                "gerund {gerund:?} must lower like imperative {imperative:?}"
+            );
+        }
+        assert!(matches!(
+            parse_gerund_cost("sacrificing a Vehicle"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                ..
+            }) if type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+        ));
+        // The required-for-this-fix arm is concretely a discard-a-card cost.
+        assert!(
+            matches!(
+                parse_gerund_cost("discarding a card"),
+                AbilityCost::Discard { .. }
+            ),
+            "discarding a card must lower to a Discard cost"
+        );
+        // CR 701.13a: the exile arm lowers to a real graveyard Exile cost — the
+        // regression that turned Demilich/Helbrute from castable-with-dropped-cost
+        // into declined-and-uncastable is fixed at its root (the missing gerund).
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard"),
+                AbilityCost::Exile {
+                    count: 4,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Demilich's exile-four rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling another creature card from your graveyard"),
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Helbrute's exile-another-creature rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling another creature card from your graveyard")
+        );
+        // A verb the cost authority does not model stays honest.
+        assert!(
+            matches!(
+                parse_gerund_cost("frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled gerund verb must lower to Unimplemented"
+        );
     }
 
     #[test]
@@ -2165,6 +2357,102 @@ mod tests {
         );
     }
 
+    /// CR 602.2b + CR 601.2h + CR 118.3: the source-exclusion "another" in a
+    /// `TapCreatures` activation cost must survive into the cost filter, so the
+    /// ability's source cannot pay an activation cost that requires another
+    /// untapped creature (Spire Mechcycle, #7522).
+    ///
+    /// Table-driven over the printed shapes the tap-cost grammar distinguishes,
+    /// with both counter-directions: an ordinary article and a plain numeric
+    /// count must NOT gain the exclusion (a standalone tap cost with no
+    /// "another" does include the source).
+    ///
+    /// The "two other untapped" row was already green before this fix: the
+    /// numeric branch never consumes "other", so the phrase reaches
+    /// `parse_type_phrase` intact and it supplies the property. That row pins
+    /// the path; it is not evidence for the fix.
+    #[test]
+    fn tap_cost_another_carries_the_source_exclusion() {
+        let cases: &[(&str, bool)] = &[
+            ("Tap another untapped Merfolk you control", true),
+            (
+                "Tap another untapped creature you control with flying",
+                true,
+            ),
+            ("Tap two other untapped artifacts you control", true),
+            ("Tap an untapped Merfolk you control", false),
+            ("Tap three untapped Merfolk you control", false),
+        ];
+        for (text, excluded) in cases {
+            let AbilityCost::TapCreatures { filter, .. } = parse_oracle_cost(text) else {
+                panic!("{text:?} must parse to a TapCreatures cost");
+            };
+            let TargetFilter::Typed(typed) = &filter else {
+                panic!("{text:?} must parse to a typed filter, got {filter:?}");
+            };
+            assert_eq!(
+                typed.properties.contains(&FilterProp::Another),
+                *excluded,
+                "{text:?} exclusion mismatch, got {:?}",
+                typed.properties
+            );
+        }
+    }
+
+    /// Spire Mechcycle (#7522): "Tap another untapped Mount or Vehicle you
+    /// control" — the exclusion must land on EVERY leg of the disjunction. The
+    /// Mechcycle is itself a Vehicle, so it matches the SECOND leg; marking
+    /// only the first would still let it pay its own cost.
+    #[test]
+    fn tap_cost_another_marks_every_leg_of_a_disjunction() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped Mount or Vehicle you control")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter for 'Mount or Vehicle', got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs, got {filters:?}");
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected typed legs, got {leg:?}");
+            };
+            assert!(
+                typed.properties.contains(&FilterProp::Another),
+                "every leg must carry the exclusion, got {typed:?}"
+            );
+        }
+    }
+
+    /// CR 602.2b + CR 118.3: shared source exclusion must flow through the
+    /// `And` shape for "creature you control but don't own" without changing
+    /// the negated ownership leg.
+    #[test]
+    fn tap_cost_another_preserves_exclusion_in_conjunctive_filter() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped creature you control but don't own")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected an And filter, got {filter:?}");
+        };
+        assert!(matches!(
+            filters.first(),
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::Another)
+        ));
+        assert!(matches!(
+            filters.get(1),
+            Some(TargetFilter::Not { filter }) if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if !properties.contains(&FilterProp::Another)
+            )
+        ));
+    }
+
     #[test]
     fn cost_unattach_this_equipment() {
         assert_eq!(
@@ -2172,6 +2460,36 @@ mod tests {
             AbilityCost::Unattach
         );
         assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
+    }
+
+    #[test]
+    fn cost_unattach_a_type_from_self() {
+        // CR 701.3d + CR 608.2k: Captain America's Throw cost. The recipient
+        // "from Captain America, First Avenger" is normalized to "from ~"
+        // upstream by `normalize_card_name_refs`.
+        let (expected_filter, remainder) = super::parse_type_phrase("Equipment from ~");
+        assert_eq!(remainder, " from ~");
+        assert_eq!(
+            parse_oracle_cost("Unattach an Equipment from ~"),
+            AbilityCost::UnattachFrom {
+                filter: expected_filter,
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_unattach_self_still_unit_variant() {
+        // Negative: the more-specific self-unattach branch must win; it must NOT
+        // be captured by the new "unattach a[n] <type> from ~" branch.
+        assert_eq!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::Unattach
+        );
+        assert!(!matches!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::UnattachFrom { .. }
+        ));
     }
 
     #[test]
@@ -2655,6 +2973,29 @@ mod tests {
         }
     }
 
+    /// CR 107.3a + CR 701.9a: the shared X in an activated discard cost is
+    /// retained as a typed mana-value filter rather than swallowed as "a card".
+    #[test]
+    fn cost_discard_card_with_mana_value_x() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Discard a card with mana value X") {
+            AbilityCost::Discard {
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    }
+                } if name == "X"
+            ))),
+            other => panic!("expected discard with CmcEQ(X), got {other:?}"),
+        }
+    }
+
     #[test]
     fn cost_exile_colored_card_from_hand() {
         match parse_oracle_cost("Exile a blue card from your hand") {
@@ -2791,12 +3132,13 @@ mod tests {
     }
 
     /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
-    /// with a <filter>" extracts a filtered `YouAttackedWithAtLeast { count: 1 }`.
-    /// The trailing "this turn" is stripped upstream as a duration before the
-    /// reparse, so the bare form is what reaches the reducer (Thaumaton Torpedo).
+    /// with a <filter>" extracts a filtered `AttackedThisTurn` quantity gate
+    /// (GE 1). The trailing "this turn" is stripped upstream as a duration
+    /// before the reparse, so the bare form is what reaches the reducer
+    /// (Thaumaton Torpedo).
     #[test]
     fn cost_reduction_if_attacked_with_filter_gate() {
-        use crate::types::ability::ParsedCondition;
+        use crate::types::ability::{Comparator, CountScope, ParsedCondition, QuantityRef};
         let r = try_parse_cost_reduction(
             "this ability costs {3} less to activate if you attacked with a spacecraft",
         )
@@ -2804,9 +3146,17 @@ mod tests {
         assert_eq!(r.amount_per, 3);
         assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
         match r.condition {
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(tf)),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => assert!(
                 tf.type_filters
                     .iter()
@@ -3423,6 +3773,71 @@ mod tests {
             "creatures you control get +1/+1"
         ));
         assert!(!is_self_cost_reduction_prefix("draw a card"));
+
+        // CR 601.2f Raise: "more to activate" is the same self-referential class
+        // (Loreseeker's Stone) — keep the sentence intact for the directional parser.
+        assert!(is_self_cost_reduction_prefix(
+            "this ability costs {1} more to activate for each card in your hand"
+        ));
+    }
+
+    /// CR 601.2f + CR 602.2b: Loreseeker's Stone class — "costs {1} more to
+    /// activate for each card in your hand" parses as Raise × HandSize/zone
+    /// card count, not an Unimplemented gap.
+    #[test]
+    fn cost_increase_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} more to activate for each card in your hand",
+        )
+        .expect("hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2f Raise: the spell-form verb follows the same directional
+    /// cost-modification grammar as the activated-ability form.
+    #[test]
+    fn cost_increase_spell_variant_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this spell costs {1} more to cast for each card in your hand",
+        )
+        .expect("spell-form hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
     }
 
     /// CR 107.3c: The dynamic-{X} head still routes through the self

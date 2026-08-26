@@ -14,6 +14,7 @@ function group(count: number): GroupedPermanent {
     ids: Array.from({ length: count }, (_, index) => index + 1),
     count,
     representative: {} as GroupedPermanent["representative"],
+    isUnboundedPile: false,
   };
 }
 

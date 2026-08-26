@@ -149,8 +149,9 @@ pub(crate) fn finalize_amass(
     // CR 701.47c + CR 608.2c: Chained reflexive continuations may have been
     // stashed before a replacement choice finished. Stamp them with the final
     // post-replacement Army snapshot before they resume.
-    if let Some(continuation) = state.pending_continuation.as_mut() {
-        continuation
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame
+            .pending
             .chain
             .set_amassed_army_object_recursive(snapshot.clone());
     }
@@ -163,6 +164,7 @@ pub(crate) fn finalize_amass(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Amass,
         source_id: ability.source_id,
+        subject: None,
     });
 }
 
@@ -202,7 +204,7 @@ fn create_army_token(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
-        attach_to: None,
+        attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id: ability.source_id,
         controller: ability.controller,
@@ -381,7 +383,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: P0,

@@ -132,6 +132,10 @@ fn last_night_together_restricts_additional_combat_to_chosen_creatures() {
         .expect("declaring the chosen attackers must be accepted");
     let _ = runner.combat_damage();
 
+    // `combat_damage()` intentionally stops when EndCombat opens its priority
+    // window. Pass that window before checking the transition out of combat.
+    runner.pass_both_players();
+
     // CR 511.3: once that combat phase is over, its restriction ends.
     assert!(
         runner.state().current_combat_attacker_restriction.is_none(),

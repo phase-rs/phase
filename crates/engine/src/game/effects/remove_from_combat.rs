@@ -1,6 +1,13 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::game::combat::CombatParticipation;
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::resolved_commands::{
+    ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
+};
 
 /// CR 506.4: Remove a creature from combat — it stops being an attacking,
 /// blocking, blocked, and/or unblocked creature.
@@ -15,11 +22,64 @@ pub fn resolve(
         } => {
             vec![ability.source_id]
         }
+        // CR 400.7 + CR 603.7c: a delayed combat-removal whose pinned referent
+        // became a new object removes nothing. This read is RAW — the file
+        // makes no `resolved_targets` call, so the targeting chokepoint never
+        // sees this pin.
+        //
+        // Slot carve-out applies: the list is passed straight into
+        // `effect_object_targets`, which indexes `ParentTargetSlot`
+        // positionally. Population is 0 today (`melee`'s filter is a bare
+        // `ParentTarget`), but this is the standing 22-call-site constraint,
+        // not a card-specific judgement.
         Effect::RemoveFromCombat { target } => {
-            super::effect_object_targets(target, &ability.targets)
+            let live_targets = ability.live_object_targets(state);
+            let pool: &[TargetRef] = if matches!(target, TargetFilter::ParentTargetSlot { .. }) {
+                &ability.targets
+            } else {
+                &live_targets
+            };
+            super::effect_object_targets(target, pool)
         }
         _ => return Ok(()),
     };
+
+    // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it
+    // affected nothing. PLACEMENT IS LOAD-BEARING — this MUST sit ABOVE the
+    // source rebind below. Letting the substitution empty the list instead
+    // falls into `vec![ability.source_id]`, which re-binds the effect to the
+    // ability's OWN source instead of doing nothing.
+    //
+    // NOTE this file has no existing pushing early return to mirror — its only
+    // other early return (`_ => return Ok(())` above) deliberately pushes
+    // nothing. The shape mirrored here is `change_zone.rs` / `sacrifice.rs`.
+    // `EffectKind::RemoveFromCombat` (not `EffectKind::from(&ability.effect)`)
+    // matches this file's own convention at the unconditional push below.
+    //
+    // SCOPED TO THE NON-`SelfRef` ARM. A `SelfRef` removal's subject is the
+    // source itself, never the snapshot referent, so a stale pin on some other
+    // object in `ability.targets` must not cancel it. Without this guard the
+    // predicate and the subject it suppresses are decoupled — the same
+    // collapse of "no target declared" into "declared referent went stale"
+    // that `flip_permanent.rs` and `transform_effect.rs` preserve their raw
+    // `as_slice()` match to avoid. Unreachable today (the in-class population
+    // is `melee`, whose filter is a bare `ParentTarget`, so no `SelfRef` node
+    // co-occurs with a pin), but the coupling is what makes it correct rather
+    // than the population.
+    let subject_is_self_ref = matches!(
+        &ability.effect,
+        Effect::RemoveFromCombat {
+            target: TargetFilter::SelfRef
+        }
+    );
+    if !subject_is_self_ref && ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RemoveFromCombat,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // If no explicit targets, apply to source (e.g., "remove it from combat"
     // where "it" refers to the ability source).
@@ -36,6 +96,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RemoveFromCombat,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -45,29 +106,20 @@ pub fn resolve(
 /// Reusable building block for any code that needs to remove a permanent from combat
 /// (regeneration, effect resolution, controller change, etc.).
 pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::identifiers::ObjectId) {
-    let mut attacker_removed = false;
-    if let Some(ref mut combat) = state.combat {
-        // Remove as attacker
-        let attackers_before = combat.attackers.len();
-        combat.attackers.retain(|a| a.object_id != oid);
-        attacker_removed = combat.attackers.len() != attackers_before;
-        // Drop attacker-keyed forward assignments (oid was blocking nobody as a key,
-        // but was an attacker with blockers assigned to it).
-        combat.blocker_assignments.remove(&oid);
-        // Remove as blocker from all remaining attacker assignments
-        for blockers in combat.blocker_assignments.values_mut() {
-            blockers.retain(|b| *b != oid);
-        }
-        // Remove reverse lookup when oid was a blocker
-        combat.blocker_to_attacker.remove(&oid);
-        // Prune oid from every blocker's attacker list (oid was an attacker)
-        combat.blocker_to_attacker.retain(|_, attackers| {
-            attackers.retain(|id| *id != oid);
-            !attackers.is_empty()
-        });
-        // Remove any pending damage assignments for this object
-        combat.damage_assignments.remove(&oid);
+    // CR 733: read the exact roles being pruned BEFORE the prune, so the journal
+    // records what this removal actually did. An object holding no combat role
+    // prunes nothing and is not recorded.
+    let participation = CombatParticipation::capture(state, oid);
+    if participation.is_empty() {
+        return;
     }
+    let reference = state
+        .objects
+        .get(&oid)
+        .map(ObjectIncarnationRef::from_object);
+
+    let attacker_removed = crate::game::combat::prune_object_from_combat(state, oid);
+
     // CR 506.4 + CR 613.1f: a creature removed from combat stops being attacking,
     // so a granted "while attacking" keyword (deathtouch/lifelink via
     // FilterProp::Attacking { defender: None }, Layer 6) must be revoked immediately. Mark dirty only
@@ -76,6 +128,29 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
     if attacker_removed {
         state.layers_dirty.mark_full();
     }
+
+    if let Some(reference) = reference {
+        record_combat_membership_removal(state, reference, participation);
+    }
+}
+
+/// CR 733: Journals one settled CR 506.4 removal through its owning family.
+fn record_combat_membership_removal(
+    state: &mut GameState,
+    object: ObjectIncarnationRef,
+    expected_participation: CombatParticipation,
+) {
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_combat_membership(ResolvedCombatMembershipCommand {
+            object,
+            edit: ResolvedCombatMembershipEdit::Remove {
+                expected_participation,
+            },
+            cause,
+        })
+        .expect("resolved combat removal must have a live journal cause");
 }
 
 #[cfg(test)]

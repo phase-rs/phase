@@ -58,6 +58,8 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
     missing.append(&mut sideboard_missing);
     let (commander, mut commander_missing) = resolve_entries(db, &deck.commander, "commander");
     missing.append(&mut commander_missing);
+    let (companion, mut companion_missing) = resolve_entries(db, &deck.companion, "companion");
+    missing.append(&mut companion_missing);
     let (attraction_deck, mut attraction_missing) =
         resolve_entries(db, &deck.attraction_deck, "attraction_deck");
     missing.append(&mut attraction_missing);
@@ -85,6 +87,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         main_deck,
         sideboard,
         commander,
+        companion,
         attraction_deck,
         planar_deck,
         scheme_deck,

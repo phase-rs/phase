@@ -12,7 +12,7 @@
  * projects their events into reactive Zustand state for the React UI.
  */
 
-import { create } from "zustand";
+import { create, type StateCreator } from "zustand";
 
 import type {
   DraftCardInstance,
@@ -21,12 +21,12 @@ import type {
   SeatPublicView,
   StandingEntry,
 } from "../adapter/draft-adapter";
-import type { EngineAdapter, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
-import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
+import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
-import { legalResultState, useGameStore } from "./gameStore";
+import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
   type DraftPodHostConfig,
@@ -39,19 +39,50 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
+import type { DraftGuestRecoveryFailure } from "../adapter/p2p-draft-guest";
 import {
   clearActiveDraftPod,
+  clearActiveDraftGuest,
+  clearDraftSettlementOutbox,
+  loadDraftIntergameCommands,
   loadActiveDraftPod,
+  loadActiveDraftGuest,
+  loadDraftGuestSession,
+  loadDraftSettlementOutbox,
   saveActiveDraftPod,
+  saveDraftIntergameCommands,
+  saveDraftSettlementOutbox,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
 } from "../services/draftPersistence";
+import {
+  commandAcknowledgement,
+  consumeIntergamePermit,
+  draftIntergameDigest,
+  IntergameCommandController,
+  type DraftIntergameCommand,
+  type DraftIntergameCommandAck,
+  type DraftIntergameCommandPayload,
+} from "../services/intergameCommandLedger";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type DraftRole = "host" | "guest";
 
+export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "superseded";
+
+/**
+ * The pod SESSION's phase.
+ *
+ * Every member is the projection of an engine or adapter session status — the
+ * union of the ranges of `phaseForDraftViewStatus`, `hostStatusToPhase` and
+ * `guestStatusToPhase`. Nothing else belongs here.
+ *
+ * The Bo3 intergame window is deliberately NOT a member: the pod session is
+ * `MatchInProgress` for the whole match, individual games included. See
+ * {@link DraftPodScreen} and {@link draftPodScreen}.
+ */
 export type MultiplayerDraftPhase =
   | "idle"
   | "connecting"
@@ -60,12 +91,92 @@ export type MultiplayerDraftPhase =
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
-  | "betweenGames"
   | "roundComplete"
   | "complete"
   | "error"
   | "kicked"
   | "hostLeft";
+
+/**
+ * The screen the pod UI shows.
+ *
+ * Every member but `betweenGames` is a `MultiplayerDraftPhase` — the projection
+ * of the pod session's engine/adapter status. `betweenGames` is not a sibling of
+ * `matchInProgress`: the pod session is `MatchInProgress` for the whole match,
+ * individual games included, so the Bo3 intergame window is a refinement *within*
+ * that phase, not an alternative to it. Keeping it out of `MultiplayerDraftPhase`
+ * is what stops the five status writers (`statusChanged`, `viewUpdated`,
+ * `draftStarted` on the host; `statusChanged`, `viewUpdated` on the guest) from
+ * overwriting it — the clobber is no longer a rule to remember, it is a value
+ * `tsc` refuses to accept.
+ */
+export type DraftPodScreen = MultiplayerDraftPhase | "betweenGames";
+
+/**
+ * Single authority for which pod screen the store's state calls for.
+ *
+ * The overlay is called for exactly while BOTH hold:
+ *   1. the pod session is still in a match (`phase === "matchInProgress"`), and
+ *   2. an intergame prompt is live (`sideboardPrompt !== null`).
+ *
+ * Conjunct 1 is released by every writer that moves the pod session on — round
+ * boundary, tournament end, `Abandoned`, adapter error, `kicked`, `hostLeft`,
+ * `leave`, `reset`. Conjunct 2 is released by the four writers that end the
+ * window: `bo3GameStarted`, host `bo3GameStart`, guest `bo3GameStart`, and
+ * `disposeMatchAdapter`.
+ *
+ * Conjunct 2 is an inference from a proxy, and the proxy's lifecycle has a hole:
+ * nothing closes the window when the pod host's intergame orchestration
+ * deadlocks. Do NOT "fix" that by latching a flag — a latch is what the phase
+ * member was and what stranded the user. The deadlock's release is the viewer's,
+ * via `DraftPodPage`'s local overlay dismissal, which suppresses the *rendering*
+ * without touching this state.
+ *
+ * Keyed on `sideboardPrompt` alone, not `sideboardPrompt || playDrawPrompt`,
+ * because `playDrawPrompt` is strictly nested inside it: the writers that set it
+ * (`bo3ChoosePlayDraw`, host and guest) leave `sideboardPrompt` untouched, all
+ * three writers that set `sideboardPrompt` null `playDrawPrompt`, and every
+ * writer that clears one clears both. A `playDrawPrompt !== null` disjunct would
+ * be unreachable, so no test could discriminate it. The nesting is pinned
+ * directly instead — see the store tests.
+ */
+export function draftPodScreen(
+  state: Pick<MultiplayerDraftState, "phase" | "sideboardPrompt">,
+): DraftPodScreen {
+  return state.phase === "matchInProgress" && state.sideboardPrompt !== null
+    ? "betweenGames"
+    : state.phase;
+}
+
+/**
+ * Stable identity of the live intergame prompt, or `null` when none is live.
+ *
+ * Exists so a viewer's decision to hide the overlay can be scoped to the prompt
+ * it was made about. Returning a primitive keeps it usable as a zustand selector
+ * without `useShallow`.
+ *
+ * The third component is not redundant. One intergame window delivers TWO
+ * prompts, and they carry the same `matchId` and the same `gameNumber`:
+ * `transitionToPlayDraw` (`p2p-draft-host.ts`) sends the play/draw prompt with
+ * `gameNumber: state.gameNumber`, and `bo3ChoosePlayDraw` sets `playDrawPrompt`
+ * while leaving `sideboardPrompt` set. Without the discriminator a dismissal
+ * made about sideboarding would carry straight over and suppress the play/draw
+ * decision — a different decision, on a 10-second timer that auto-chooses
+ * (`startPlayDrawTimer` -> `autoChoosePlayDraw`).
+ *
+ * Note that `playDrawPrompt`'s nesting inside `sideboardPrompt` has OPPOSITE
+ * consequences at the two layers, and both are deliberate: `draftPodScreen`
+ * keys on `sideboardPrompt` alone because the nesting means there is only one
+ * screen answer, while this key must discriminate the prompt type precisely
+ * because the nesting means the two prompts otherwise share an identity.
+ */
+export function intergamePromptKey(
+  state: Pick<MultiplayerDraftState, "sideboardPrompt" | "playDrawPrompt">,
+): string | null {
+  return state.sideboardPrompt
+    ? `${state.sideboardPrompt.matchId}#${state.sideboardPrompt.gameNumber}#${state.playDrawPrompt ? "pd" : "sb"}`
+    : null;
+}
 
 export interface PairingInfo {
   round: number;
@@ -89,12 +200,15 @@ interface MultiplayerDraftState {
   pauseReason: DraftPauseReason | null;
   pairing: PairingInfo | null;
   error: string | null;
+  /** Recovery-only failure semantics, retained for an explicit retry CTA. */
+  guestRecoveryFailure: DraftGuestRecoveryFailure | null;
   selectedCard: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
   timerRemainingMs: number | null;
   standings: StandingEntry[];
   currentRound: number;
+  nextPairingRound: number;
   pairings: PairingView[];
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
@@ -121,15 +235,22 @@ interface MultiplayerDraftState {
 
 interface MultiplayerDraftActions {
   /** Host: create a new draft pod and start accepting guests. */
-  hostDraft: (config: DraftPodHostConfig) => Promise<void>;
+  /** `true` only after the current adapter initialized and remains owned. */
+  hostDraft: (config: DraftPodHostConfig) => Promise<boolean>;
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
+  /** Reconnect exclusively through the persisted capability, never `draft_join`. */
+  resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
   submitPick: (cardInstanceId: string) => Promise<void>;
+  /** Both: submit a pick using a drafted card's draft-time effect. */
+  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
+  /** Both: dismiss the current error banner. */
+  clearError: () => void;
   /** Both: confirm the currently selected card as pick. */
   confirmPick: () => Promise<void>;
   /** Both: pick a card from the current pack using a deterministic draft heuristic. */
@@ -158,8 +279,8 @@ interface MultiplayerDraftActions {
   reportMatchResult: (matchId: string, winnerSeat: number | null) => Promise<void>;
   /** Both: report the active game result using the current draft match pairing. */
   reportActiveMatchGameResult: (gameWinner: number | null) => Promise<void>;
-  /** Both: concede the active draft match and report the opponent as winner. */
-  reportActiveMatchConcession: () => Promise<void>;
+  /** Settles a bound match concession for the authenticated game seat. */
+  reportActiveMatchConcession: (concedingGamePlayer?: number) => Promise<void>;
   /** Host: advance to the next round (Casual mode). */
   advanceRound: () => void;
   /** Host: override a match result (Casual mode). */
@@ -172,15 +293,131 @@ interface MultiplayerDraftActions {
   choosePlayDraw: (matchId: string, playFirst: boolean) => void;
   /** Both: handle between-games prompt from match adapter. */
   handleBetweenGamesPrompt: (prompt: { matchId: string; gameNumber: number; score: MatchScore; loserSeat: number | null; timerMs: number }) => void;
+  /** Durable ingress; raw sideboard/play-draw transport is intentionally not exposed. */
+  submitIntergameCommand: (payload: DraftIntergameCommandPayload) => Promise<void>;
+  /** Executes only a pod-issued authorization after re-checking its immutable ack. */
+  submitAuthorized: (command: DraftIntergameCommand, acknowledgement: DraftIntergameCommandAck) => Promise<void>;
 }
 
 // ── Module-level adapter refs ──────────────────────────────────────────
 
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
+let activeHostEventUnsub: (() => void) | null = null;
+let activeGuestEventUnsub: (() => void) | null = null;
+let activeHostAbort: AbortController | null = null;
+let activeGuestAbort: AbortController | null = null;
+let activeHostRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
+let activeGuestRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
+let activeHostPersistenceId: string | null = null;
+let draftAdapterEpoch = 0;
+let resumeGuestDraftAttempt: {
+  routeToken: number;
+  signal: AbortSignal | undefined;
+  promise: Promise<GuestDraftResumeOutcome>;
+} | null = null;
+const disposedHostAdapters = new WeakSet<DraftPodHostAdapter>();
+const disposedGuestAdapters = new WeakSet<DraftPodGuestAdapter>();
+const retainedDraftSessionTeardowns = new Map<string, Promise<void>>();
 let activeMatchController: GameLoopController | null = null;
-const reportedMatchResultIds = new Set<string>();
+const intergameControllers = new Map<string, IntergameCommandController>();
 const DRAFT_MATCH_FORMAT_CONFIG = FORMAT_DEFAULTS.Limited;
+
+interface DetachedDraftAdapters {
+  host: DraftPodHostAdapter | null;
+  guest: DraftPodGuestAdapter | null;
+  hostPersistenceId: string | null;
+}
+
+function detachDraftAdapters(): DetachedDraftAdapters {
+  const detached = {
+    host: activeHostAdapter,
+    guest: activeGuestAdapter,
+    hostPersistenceId: activeHostPersistenceId,
+  };
+  activeHostAdapter = null;
+  activeGuestAdapter = null;
+  activeHostPersistenceId = null;
+  activeHostAbort?.abort();
+  activeGuestAbort?.abort();
+  activeHostRouteAbortListener?.signal.removeEventListener("abort", activeHostRouteAbortListener.listener);
+  activeGuestRouteAbortListener?.signal.removeEventListener("abort", activeGuestRouteAbortListener.listener);
+  activeHostAbort = null;
+  activeGuestAbort = null;
+  activeHostRouteAbortListener = null;
+  activeGuestRouteAbortListener = null;
+  activeHostEventUnsub?.();
+  activeGuestEventUnsub?.();
+  activeHostEventUnsub = null;
+  activeGuestEventUnsub = null;
+  return detached;
+}
+
+async function disposeHostAdapter(adapter: DraftPodHostAdapter, preserveSession: boolean): Promise<void> {
+  if (disposedHostAdapters.has(adapter)) return;
+  disposedHostAdapters.add(adapter);
+  await adapter.dispose({ preserveSession });
+}
+
+async function disposeGuestAdapter(adapter: DraftPodGuestAdapter, preserveRecovery = true): Promise<void> {
+  if (disposedGuestAdapters.has(adapter)) return;
+  disposedGuestAdapters.add(adapter);
+  await adapter.dispose({ preserveRecovery });
+}
+
+async function disposeDetachedDraftAdapters(
+  detached: DetachedDraftAdapters,
+  preserveSession: boolean,
+): Promise<void> {
+  await Promise.allSettled([
+    ...(detached.host ? [disposeHostAdapter(detached.host, preserveSession)] : []),
+    ...(detached.guest ? [disposeGuestAdapter(detached.guest, preserveSession)] : []),
+  ]);
+}
+
+/** Retains teardown after the active adapter ref has been detached on route abort. */
+function retainDraftSessionTeardown(
+  persistenceId: string | null,
+  teardown: Promise<void>,
+): void {
+  if (!persistenceId) return;
+  const previous = retainedDraftSessionTeardowns.get(persistenceId);
+  const retained = previous
+    ? previous.then(() => teardown, () => teardown)
+    : teardown;
+  retainedDraftSessionTeardowns.set(persistenceId, retained);
+  void retained.then(
+    () => {
+      if (retainedDraftSessionTeardowns.get(persistenceId) === retained) {
+        retainedDraftSessionTeardowns.delete(persistenceId);
+      }
+    },
+    () => {
+      if (retainedDraftSessionTeardowns.get(persistenceId) === retained) {
+        retainedDraftSessionTeardowns.delete(persistenceId);
+      }
+    },
+  );
+}
+
+/** Waits for the previous local owner of this persisted draft session to finish. */
+async function claimDraftSessionOwner(persistenceId: string | undefined): Promise<void> {
+  if (!persistenceId) return;
+  await retainedDraftSessionTeardowns.get(persistenceId);
+}
+
+function lifecycleSignal(controller: AbortController): AbortSignal {
+  return controller.signal;
+}
+
+function intergameAction(payload: DraftIntergameCommandPayload): GameAction {
+  switch (payload.type) {
+    case "SubmitSideboard":
+      return { type: "SubmitSideboard", data: { main: payload.main, sideboard: payload.sideboard } };
+    case "ChoosePlayDraw":
+      return { type: "ChoosePlayDraw", data: { play_first: payload.playFirst } };
+  }
+}
 
 const RARITY_SCORE: Record<string, number> = {
   mythic: 4,
@@ -248,29 +485,40 @@ function chooseAutoPickCard(view: DraftPlayerView | null): string | null {
   return bestCard.instance_id;
 }
 
-function opponentSeatForLaunch(launch: DraftMatchLaunch): number {
-  return launch.type === "Bot" ? launch.botSeat : launch.opponentSeat;
+function seatForLaunchGamePlayer(launch: DraftMatchLaunch, gamePlayer: number): number {
+  switch (launch.type) {
+    case "HumanHost":
+      return gamePlayer === 0 ? launch.localSeat : launch.opponentSeat;
+    case "HumanGuest":
+      return gamePlayer === 1 ? launch.localSeat : launch.opponentSeat;
+    case "Bot":
+      return gamePlayer === 0 ? launch.localSeat : launch.botSeat;
+  }
 }
 
 function winnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  return gameWinner === 0 ? launch.localSeat : opponentSeatForLaunch(launch);
-}
-
-function guestWinnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  return gameWinner === 0 ? opponentSeatForLaunch(launch) : launch.localSeat;
+  return gameWinner === null ? null : seatForLaunchGamePlayer(launch, gameWinner);
 }
 
 function winnerSeatForGameResult(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  const localGamePlayerId = launch.type === "HumanGuest" ? 1 : 0;
-  return gameWinner === localGamePlayerId ? launch.localSeat : opponentSeatForLaunch(launch);
+  return gameWinner === null ? null : seatForLaunchGamePlayer(launch, gameWinner);
 }
 
 function disposeMatchController(): void {
   activeMatchController?.dispose();
   activeMatchController = null;
+}
+
+async function retryDraftSettlement(launch: DraftMatchLaunch, role: DraftRole): Promise<void> {
+  if (launch.binding.matchAuthoritySeat !== launch.localSeat) return;
+  const settlement = await loadDraftSettlementOutbox(launch.binding);
+  if (!settlement) return;
+  if (role === "host" && activeHostAdapter) {
+    await activeHostAdapter.submitMatchSettlement(settlement);
+    await clearDraftSettlementOutbox(launch.binding);
+  } else if (role === "guest" && activeGuestAdapter) {
+    activeGuestAdapter.sendMatchSettlement(settlement);
+  }
 }
 
 /** The engine-side AI seat for a Bot draft match (the local player is game
@@ -285,27 +533,29 @@ async function installMatchRuntime(
   initResult: SubmitResult,
   controllerMode: "ai" | "online",
 ): Promise<void> {
-  const state = await adapter.getState();
-  const legalResult = await adapter.getLegalActions();
+  // Fetched after this match's engine is up, so the snapshot is
+  // newest-by-construction under the global seq counter: it always passes the
+  // commit gate, and it inherently drops any commit still in flight from the
+  // previous game of a Bo3 (whose stamps are strictly lower).
+  const snapshot = await adapter.getSnapshot();
   const initLogEntries: GameLogEntry[] = (initResult.log_entries ?? []).map((entry, i) => ({
     ...entry,
     seq: i,
   }));
 
-  useGameStore.setState({
-    gameId,
-    gameMode: "draft-match",
-    adapter,
-    gameState: state,
-    waitingFor: state.waiting_for,
-    ...legalResultState(legalResult),
-    events: [] as GameEvent[],
-    eventHistory: [] as GameEvent[],
-    logHistory: initLogEntries,
-    nextLogSeq: initLogEntries.length,
-    stateHistory: [],
-    turnCheckpoints: [],
-    lobbyProgress: null,
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    extraState: {
+      gameId,
+      gameMode: "draft-match",
+      adapter,
+      events: [] as GameEvent[],
+      eventHistory: [] as GameEvent[],
+      logHistory: initLogEntries,
+      nextLogSeq: initLogEntries.length,
+      stateHistory: [],
+      turnCheckpoints: [],
+      lobbyProgress: null,
+    },
   });
 
   disposeMatchController();
@@ -396,7 +646,14 @@ function activePhaseForDraftViewStatus(status: DraftPlayerView["status"]): Activ
   }
 }
 
-/** Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter). */
+/**
+ * Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter).
+ *
+ * Documented exemption from the `commitEngineSnapshot` single-writer invariant:
+ * this is a teardown clear, not a live-game commit. It has no snapshot to gate
+ * on, and any subsequent live commit arrives newest-by-construction (a fresh
+ * post-init fetch), so it cannot be resurrected by a stale pair.
+ */
 function disposeMatchAdapter(set: SetFn): void {
   const state = useMultiplayerDraftStore.getState();
   disposeMatchController();
@@ -415,6 +672,7 @@ function disposeMatchAdapter(set: SetFn): void {
         waitingFor: null,
         legalActions: [],
         autoPassRecommended: false,
+        endContinuousEffectOffers: [],
         spellCosts: {},
         legalActionsByObject: {},
         stateHistory: [],
@@ -441,12 +699,14 @@ const initialState: MultiplayerDraftState = {
   pauseReason: null,
   pairing: null,
   error: null,
+  guestRecoveryFailure: null,
   selectedCard: null,
   mainDeck: [],
   landCounts: {},
   timerRemainingMs: null,
   standings: [],
   currentRound: 0,
+  nextPairingRound: 1,
   pairings: [],
   submittedDeck: [],
   matchPairing: null,
@@ -456,18 +716,116 @@ const initialState: MultiplayerDraftState = {
   sideboardSubmitted: false,
 };
 
+/**
+ * Single authority for how long a pod error lives.
+ *
+ * An error belongs to the phase it was raised in; a *change* of phase retires
+ * it. Wrapping the store's setter — rather than writing `error: null` into each
+ * success arm — gives one rule for both roles: guests write `phase` from many
+ * arms of `handleGuestEvent` and cleared it at none, while the host had a
+ * single ad-hoc supersession on `pairingsGenerated`.
+ *
+ * Two properties are load-bearing and neither is incidental:
+ *
+ * - It fires only when `phase` actually *changes*. `viewUpdated` writes `phase`
+ *   on every broadcast — a pick, a seat connecting, a seat dropping — so clearing
+ *   on the mere presence of the key would erase an error the user has not read.
+ *   That form was considered and rejected when this banner was introduced.
+ * - The incoming payload wins. `kicked` and `hostLeft` write `phase` and `error`
+ *   in one `set()`; spreading the payload last preserves the reason they carry.
+ *
+ * Not covered, deliberately: a retry that does not change phase — `startMatch`
+ * fails and succeeds while `phase` is already `matchInProgress`. Dismissal
+ * (`clearError`) remains the clearing path for that case.
+ *
+ * The Bo3 intergame window is no longer a phase at all — it is derived by
+ * `draftPodScreen` from (`phase`, `sideboardPrompt`), and the three enter sites
+ * (`handleBetweenGamesPrompt` and the two `bo3SideboardPrompt` arms) write no
+ * `phase`. Three consequences for this rule, all intended:
+ *
+ * - Entering the window is not a transition, so an unread error survives it.
+ * - Neither is any `viewUpdated`/`statusChanged`/`draftStarted` broadcast
+ *   *during* the window: the phase is already `matchInProgress`, so a seat
+ *   dropping mid-window no longer retires the banner. That narrowing was this
+ *   block's own complaint and is now gone.
+ * - Nor is the Bo3 game *boundary*: `bo3GameStarted` and the two `bo3GameStart`
+ *   arms write `phase: "matchInProgress"` into a state whose phase is already
+ *   `matchInProgress`, so the equal-phase short-circuit below returns `next`
+ *   unchanged. An error raised earlier in the match therefore rides into game 2
+ *   until the pod phase actually moves. This is a deliberate delta, not a bug;
+ *   `clearError` remains the user's dismissal path.
+ *
+ * Scope: this wraps the *initializer's* setter, so it covers every write made
+ * inside this module. It is not zustand middleware and does not rebind
+ * `api.setState`, so `useMultiplayerDraftStore.setState(…)` bypasses the rule.
+ * That is fine today — production has no such call site (only tests do) — but a
+ * future production write through `setState` would not be phase-scoped.
+ */
+function clearErrorOnPhaseChange(set: SetFn): SetFn {
+  return (partial) =>
+    set((state) => {
+      const next = typeof partial === "function" ? partial(state) : partial;
+      return next.phase === undefined || next.phase === state.phase
+        ? next
+        : { error: null, ...next };
+    });
+}
+
+/** Applies {@link clearErrorOnPhaseChange} to the store's setter.
+ *
+ * Borrows the `create<T>()(middleware(initializer))` *shape* from `gameStore`,
+ * but it is not zustand middleware: it wraps only the initializer's `set`, so
+ * external `useMultiplayerDraftStore.setState(…)` calls are not phase-scoped.
+ * No production code does that (tests do); see `clearErrorOnPhaseChange`. */
+function phaseScopedError(
+  initializer: (
+    set: SetFn,
+    get: () => MultiplayerDraftState & MultiplayerDraftActions,
+  ) => MultiplayerDraftState & MultiplayerDraftActions,
+): StateCreator<MultiplayerDraftState & MultiplayerDraftActions> {
+  return (set, get) => initializer(clearErrorOnPhaseChange(set), get);
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useMultiplayerDraftStore = create<
   MultiplayerDraftState & MultiplayerDraftActions
->()((set, get) => ({
+>()(phaseScopedError((set, get) => ({
   ...initialState,
 
   hostDraft: async (config) => {
-    const adapter = new DraftPodHostAdapter();
-    activeHostAdapter = adapter;
+    const epoch = ++draftAdapterEpoch;
+    const previous = detachDraftAdapters();
+    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
+    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
+    if (previous.host || previous.guest) await previousTeardown;
+    if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
+    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return false;
 
-    adapter.onEvent((event) => handleHostEvent(event, set));
+    const adapter = new DraftPodHostAdapter();
+    const controller = new AbortController();
+    activeHostAdapter = adapter;
+    activeHostAbort = controller;
+    activeHostPersistenceId = config.persistenceId ?? null;
+
+    activeHostEventUnsub = adapter.onEvent((event) => {
+      if (activeHostAdapter === adapter && epoch === draftAdapterEpoch) {
+        handleHostEvent(event, set);
+      }
+    });
+
+    const abortOwner = () => {
+      controller.abort();
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return;
+      ++draftAdapterEpoch;
+      const detached = detachDraftAdapters();
+      const teardown = disposeDetachedDraftAdapters(detached, true);
+      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+      void teardown;
+      set(initialState);
+    };
+    config.signal?.addEventListener("abort", abortOwner, { once: true });
+    if (config.signal) activeHostRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
     set({
       ...initialState,
@@ -476,8 +834,11 @@ export const useMultiplayerDraftStore = create<
       seatIndex: 0,
     });
 
+    let initialized = false;
     try {
-      await adapter.initialize(config);
+      await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
+      initialized = true;
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return false;
       if (config.persistenceId) {
         const view = get().view;
         const phase = view ? activePhaseForDraftViewStatus(view.status) ?? "lobby" : "lobby";
@@ -494,16 +855,59 @@ export const useMultiplayerDraftStore = create<
           updatedAt: Date.now(),
         });
       }
+      return true;
     } catch {
-      // Error already emitted via adapter event
+      // The adapter reports the error while it is current. A late failure is
+      // deliberately silent: its event gate was detached by the new owner.
+    } finally {
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) {
+        config.signal?.removeEventListener("abort", abortOwner);
+        await disposeHostAdapter(adapter, true);
+      } else if (!initialized || adapter.status === "error") {
+        activeHostAdapter = null;
+        activeHostAbort = null;
+        activeHostPersistenceId = null;
+        activeHostEventUnsub?.();
+        activeHostEventUnsub = null;
+        config.signal?.removeEventListener("abort", abortOwner);
+        activeHostRouteAbortListener = null;
+        await disposeHostAdapter(adapter, true);
+      }
     }
+    return false;
   },
 
   joinDraft: async (config) => {
-    const adapter = new DraftPodGuestAdapter();
-    activeGuestAdapter = adapter;
+    const epoch = ++draftAdapterEpoch;
+    const previous = detachDraftAdapters();
+    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
+    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
+    if (previous.host || previous.guest) await previousTeardown;
+    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return;
 
-    adapter.onEvent((event) => handleGuestEvent(event, set));
+    const adapter = new DraftPodGuestAdapter();
+    const controller = new AbortController();
+    activeGuestAdapter = adapter;
+    activeGuestAbort = controller;
+
+    activeGuestEventUnsub = adapter.onEvent((event) => {
+      if (activeGuestAdapter === adapter && epoch === draftAdapterEpoch) {
+        handleGuestEvent(event, set);
+      }
+    });
+
+    const abortOwner = () => {
+      controller.abort();
+      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) return;
+      ++draftAdapterEpoch;
+      const detached = detachDraftAdapters();
+      const teardown = disposeDetachedDraftAdapters(detached, true);
+      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+      void teardown;
+      set(initialState);
+    };
+    config.signal?.addEventListener("abort", abortOwner, { once: true });
+    if (config.signal) activeGuestRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
     set({
       ...initialState,
@@ -511,10 +915,76 @@ export const useMultiplayerDraftStore = create<
       phase: "connecting",
     });
 
+    let initialized = false;
     try {
-      await adapter.initialize(config);
+      await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
+      initialized = true;
     } catch {
-      // Error already emitted via adapter event
+      // See hostDraft: only the current owner is allowed to project errors.
+    } finally {
+      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) {
+        config.signal?.removeEventListener("abort", abortOwner);
+        await disposeGuestAdapter(adapter);
+      } else if (!initialized || adapter.status === "error") {
+        activeGuestAdapter = null;
+        activeGuestAbort = null;
+        activeGuestEventUnsub?.();
+        activeGuestEventUnsub = null;
+        config.signal?.removeEventListener("abort", abortOwner);
+        activeGuestRouteAbortListener = null;
+        await disposeGuestAdapter(adapter);
+      }
+    }
+  },
+
+  resumeDraft: async (options = {}) => {
+    const routeToken = options.routeToken ?? 0;
+    if (
+      resumeGuestDraftAttempt
+      && resumeGuestDraftAttempt.routeToken === routeToken
+      && resumeGuestDraftAttempt.signal === options.signal
+    ) {
+      return resumeGuestDraftAttempt.promise;
+    }
+
+    const attempt: NonNullable<typeof resumeGuestDraftAttempt> = {
+      routeToken,
+      signal: options.signal,
+      promise: Promise.resolve("superseded"),
+    };
+    const isCurrent = () => resumeGuestDraftAttempt === attempt && !options.signal?.aborted;
+    attempt.promise = (async (): Promise<GuestDraftResumeOutcome> => {
+      if (options.signal?.aborted) return "superseded";
+      const locator = loadActiveDraftGuest();
+      if (!locator) return "absent";
+      const session = await loadDraftGuestSession(locator.hostPeerId, locator);
+      if (!isCurrent()) return "superseded";
+      if (!session) {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+
+      await get().joinDraft({
+        kind: "reconnect",
+        roomCode: locator.roomCode,
+        displayName: locator.displayName,
+        hostPeerId: locator.hostPeerId,
+        draftToken: session.draftToken,
+        signal: options.signal,
+      });
+      if (!isCurrent()) return "superseded";
+      if (activeGuestAdapter) return "resumed";
+      if (get().guestRecoveryFailure?.kind === "invalid") {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+      return "failed";
+    })();
+    resumeGuestDraftAttempt = attempt;
+    try {
+      return await attempt.promise;
+    } finally {
+      if (resumeGuestDraftAttempt === attempt) resumeGuestDraftAttempt = null;
     }
   },
 
@@ -534,9 +1004,25 @@ export const useMultiplayerDraftStore = create<
     }
   },
 
+  submitPickWithDraftEffect: async (effectCardInstanceId, cardInstanceIds) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      const view = await activeHostAdapter.submitPickWithDraftEffect(
+        effectCardInstanceId,
+        cardInstanceIds,
+      );
+      set({ view, selectedCard: null });
+    } else if (role === "guest" && activeGuestAdapter) {
+      await activeGuestAdapter.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+      set({ selectedCard: null });
+    }
+  },
+
   selectCard: (cardInstanceId) => {
     set({ selectedCard: cardInstanceId });
   },
+
+  clearError: () => set({ error: null }),
 
   confirmPick: async () => {
     const { selectedCard, submitPick } = get();
@@ -581,13 +1067,15 @@ export const useMultiplayerDraftStore = create<
     }
     const fullDeck = [...mainDeck, ...landCards];
 
-    set({ submittedDeck: fullDeck });
-
     if (role === "host" && activeHostAdapter) {
       const view = await activeHostAdapter.submitDeck(fullDeck);
-      set({ view });
+      set({ view, submittedDeck: fullDeck });
     } else if (role === "guest" && activeGuestAdapter) {
       await activeGuestAdapter.submitDeck(fullDeck);
+      // The guest adapter resolves only on `draft_deck_submit_ack`, not after
+      // a DataChannel write.  This keeps the deck builder honest across a
+      // reload between submit and host durability.
+      set({ submittedDeck: fullDeck });
     }
   },
 
@@ -631,6 +1119,15 @@ export const useMultiplayerDraftStore = create<
           2, // 1v1 match
           DRAFT_MATCH_FORMAT_CONFIG,
           matchPairing.matchConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            onConcede: (concedingGamePlayer) => get().reportActiveMatchConcession(concedingGamePlayer),
+          },
         );
 
         let resolveRoomFull!: () => void;
@@ -642,10 +1139,10 @@ export const useMultiplayerDraftStore = create<
             resolveRoomFull();
           }
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "stateChanged") {
-            const wf = event.state?.waiting_for;
+            const wf = event.snapshot.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
@@ -670,6 +1167,13 @@ export const useMultiplayerDraftStore = create<
                   loserSeat,
                   matchPairing.localSeat,
                   matchPairing.opponentSeat,
+                );
+              } else {
+                activeGuestAdapter?.handleMatchBetweenGames(
+                  matchPairing.matchId,
+                  gameNumber,
+                  score,
+                  loserSeat,
                 );
               }
               // Also transition the host's own UI to betweenGames
@@ -711,19 +1215,25 @@ export const useMultiplayerDraftStore = create<
           peer,
           conn.peer,
           conn,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
         );
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "stateChanged") {
-            const wf = event.state?.waiting_for;
+            const wf = event.snapshot.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
               // Guest reports as backup (host's report is authoritative)
-              const winnerSeat = guestWinnerSeatForLaunch(matchPairing, wf.data.winner);
+              const winnerSeat = winnerSeatForLaunch(matchPairing, wf.data.winner);
               void get().reportMatchResult(matchPairing.matchId, winnerSeat);
             }
             // BetweenGamesSideboard: guest receives sideboard prompt via draft pod channel
@@ -731,7 +1241,7 @@ export const useMultiplayerDraftStore = create<
           }
           if (event.type === "gameOver") {
             // Connection failure — report as match loss
-            const winnerSeat = guestWinnerSeatForLaunch(matchPairing, event.winner);
+            const winnerSeat = winnerSeatForLaunch(matchPairing, event.winner);
             void get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
@@ -763,19 +1273,24 @@ export const useMultiplayerDraftStore = create<
   },
 
   reportMatchResult: (matchId, winnerSeat) => {
-    const { role } = get();
-    if (reportedMatchResultIds.has(matchId)) return Promise.resolve();
-    if (role === "host" && activeHostAdapter) {
-      reportedMatchResultIds.add(matchId);
-      return activeHostAdapter.overrideMatchResult(matchId, winnerSeat).catch((err) => {
-        reportedMatchResultIds.delete(matchId);
-        throw err;
-      });
-    } else if (role === "guest" && activeGuestAdapter) {
-      reportedMatchResultIds.add(matchId);
-      activeGuestAdapter.sendMatchResult(matchId, winnerSeat);
-    }
-    return Promise.resolve();
+    const { role, matchPairing } = get();
+    if (!matchPairing || matchPairing.matchId !== matchId) return Promise.resolve();
+    if (matchPairing.binding.matchAuthoritySeat !== matchPairing.localSeat) return Promise.resolve();
+    return (async () => {
+      const existing = await loadDraftSettlementOutbox(matchPairing.binding);
+      const settlement: DraftMatchSettlement = existing ?? {
+        binding: matchPairing.binding,
+        receiptId: crypto.randomUUID(),
+        winnerSeat,
+      };
+      await saveDraftSettlementOutbox(settlement);
+      if (role === "host" && activeHostAdapter) {
+        await activeHostAdapter.submitMatchSettlement(settlement);
+        await clearDraftSettlementOutbox(matchPairing.binding);
+      } else if (role === "guest" && activeGuestAdapter) {
+        activeGuestAdapter.sendMatchSettlement(settlement);
+      }
+    })();
   },
 
   reportActiveMatchGameResult: async (gameWinner) => {
@@ -787,10 +1302,13 @@ export const useMultiplayerDraftStore = create<
     );
   },
 
-  reportActiveMatchConcession: async () => {
+  reportActiveMatchConcession: async (concedingGamePlayer = 0) => {
     const { matchPairing, reportMatchResult } = get();
     if (!matchPairing) return;
-    await reportMatchResult(matchPairing.matchId, opponentSeatForLaunch(matchPairing));
+    await reportMatchResult(
+      matchPairing.matchId,
+      seatForLaunchGamePlayer(matchPairing, concedingGamePlayer === 0 ? 1 : 0),
+    );
   },
 
   advanceRound: () => {
@@ -809,29 +1327,81 @@ export const useMultiplayerDraftStore = create<
   },
 
   submitSideboard: (matchId, mainDeck, sideboard) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      // Host submits to own P2PDraftHost via DraftPodHostAdapter forwarder (seat 0).
-      activeHostAdapter.handleSideboardSubmit(0, matchId, mainDeck, sideboard);
-    } else if (role === "guest" && activeGuestAdapter) {
-      activeGuestAdapter.sendSideboardSubmit(matchId, mainDeck, sideboard);
-    }
-    set({ sideboardSubmitted: true });
+    void matchId;
+    const counts = new Map<string, number>();
+    for (const name of mainDeck) counts.set(name, (counts.get(name) ?? 0) + 1);
+    void get().submitIntergameCommand({
+      type: "SubmitSideboard",
+      main: [...counts].map(([name, count]) => ({ name, count })),
+      sideboard,
+    });
   },
 
   choosePlayDraw: (matchId, playFirst) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      // Host as loser chooses play/draw via DraftPodHostAdapter forwarder (seat 0).
-      activeHostAdapter.handlePlayDrawChosen(0, matchId, playFirst);
-    } else if (role === "guest" && activeGuestAdapter) {
-      activeGuestAdapter.sendPlayDrawChoice(matchId, playFirst);
+    void matchId;
+    void get().submitIntergameCommand({ type: "ChoosePlayDraw", playFirst });
+  },
+
+  submitIntergameCommand: async (payload) => {
+    const state = get();
+    const launch = state.matchPairing;
+    const gameNumber = state.sideboardPrompt?.gameNumber ?? state.playDrawPrompt?.gameNumber;
+    if (!launch || gameNumber === undefined || state.seatIndex === null) return;
+    let controller = intergameControllers.get(launch.matchId);
+    if (!controller) {
+      controller = new IntergameCommandController(await loadDraftIntergameCommands(launch.matchId));
+      controller.recover();
+      intergameControllers.set(launch.matchId, controller);
+    }
+    const command = controller.hold({
+      commandId: crypto.randomUUID(), matchId: launch.matchId, gameNumber,
+      seat: state.seatIndex, payload, launchPayload: launch, launchDigest: draftIntergameDigest(launch),
+    });
+    await saveDraftIntergameCommands(launch.matchId, controller.snapshot());
+    if (state.role === "host") activeHostAdapter?.submitAuthorized(state.seatIndex, command);
+    else activeGuestAdapter?.submitAuthorized(command);
+    if (payload.type === "SubmitSideboard") set({ sideboardSubmitted: true });
+  },
+
+  submitAuthorized: async (command, acknowledgement) => {
+    const state = get();
+    const launch = state.matchPairing;
+    if (!launch || command.matchId !== launch.matchId || command.launchDigest !== draftIntergameDigest(launch)) return;
+    let controller = intergameControllers.get(command.matchId);
+    if (!controller) {
+      controller = new IntergameCommandController(await loadDraftIntergameCommands(command.matchId));
+      controller.recover();
+      intergameControllers.set(command.matchId, controller);
+    }
+    const known = controller.snapshot().find((candidate) => candidate.commandId === command.commandId);
+    if (known?.status === "Pending") controller.authorize(command.commandId, acknowledgement);
+    else if (!known && command.status === "Authorized") {
+      controller = new IntergameCommandController([...controller.snapshot(), command]);
+      intergameControllers.set(command.matchId, controller);
+    }
+    const permit = controller.begin(command.commandId, acknowledgement);
+    if (!permit || !consumeIntergamePermit(permit, acknowledgement)) return;
+    const adapter = state.matchAdapter as EngineAdapter | null;
+    if (!adapter) return;
+    // Re-check immediately before crossing the host, guest, native, or WASM sink.
+    const actor = launch.type === "HumanGuest" ? 1 : 0;
+    await adapter.submitAction(intergameAction(command.payload), actor);
+    const receipted = controller.receipt(command.commandId, acknowledgement, crypto.randomUUID());
+    if (!receipted) return;
+    await saveDraftIntergameCommands(command.matchId, controller.snapshot());
+    if (state.role === "host") {
+      activeHostAdapter?.submitAuthorized(state.seatIndex!, receipted);
+    } else {
+      activeGuestAdapter?.acknowledgeAuthorized(commandAcknowledgement(receipted), receipted.receiptId!);
     }
   },
 
   handleBetweenGamesPrompt: (prompt) => {
+    // No `phase` write: entering the overlay is not a phase transition. The pod
+    // session is already `matchInProgress` here (`startMatch` writes it before
+    // the match adapter that emits this prompt exists), and the screen is
+    // derived by `draftPodScreen` from this prompt.
     set({
-      phase: "betweenGames",
       sideboardPrompt: {
         matchId: prompt.matchId,
         gameNumber: prompt.gameNumber,
@@ -846,30 +1416,29 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveSession = false) => {
+    const epoch = ++draftAdapterEpoch;
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
-    reportedMatchResultIds.clear();
 
-    if (activeHostAdapter) {
-      await activeHostAdapter.dispose({ preserveSession });
-      activeHostAdapter = null;
-      if (!preserveSession) {
-        clearActiveDraftPod();
-      }
-    }
-    if (activeGuestAdapter) {
-      await activeGuestAdapter.dispose();
-      activeGuestAdapter = null;
-    }
+    const detached = detachDraftAdapters();
+    const teardown = disposeDetachedDraftAdapters(detached, preserveSession);
+    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    await teardown;
+    if (epoch !== draftAdapterEpoch) return;
+    if (detached.host && !preserveSession) clearActiveDraftPod();
     set(initialState);
   },
 
   reset: () => {
+    ++draftAdapterEpoch;
     disposeMatchAdapter(set);
-    reportedMatchResultIds.clear();
+    const detached = detachDraftAdapters();
+    const teardown = disposeDetachedDraftAdapters(detached, true);
+    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    void teardown;
     set(initialState);
   },
-}));
+})));
 
 // ── Event handlers ─────────────────────────────────────────────────────
 
@@ -949,6 +1518,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
         timerRemainingMs: event.view.timer_remaining_ms ?? null,
         standings: event.view.standings ?? [],
         currentRound: event.view.current_round ?? 0,
+        nextPairingRound: event.view.next_pairing_round ?? 1,
         pairings: event.view.pairings ?? [],
       });
       {
@@ -961,10 +1531,12 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "lobbyFull":
       break;
-    case "draftStarted":
-      set({ view: event.view, phase: "drafting" });
-      saveDraftPodProgress("drafting", event.view);
+    case "draftStarted": {
+      const activePhase = activePhaseForDraftViewStatus(event.view.status);
+      set({ view: event.view, phase: phaseForDraftViewStatus(event.view.status) });
+      if (activePhase) saveDraftPodProgress(activePhase, event.view);
       break;
+    }
     case "draftComplete":
       set({ phase: "deckbuilding" });
       saveDraftPodProgress("deckbuilding");
@@ -980,15 +1552,27 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ paused: false, pauseReason: null });
       break;
     case "pairingsGenerated":
-      set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
+      // No `error: null` here. `clearErrorOnPhaseChange` retires the banner one
+      // step earlier, when `roundAdvanced` / `statusChanged("pairing")` moves the
+      // phase into `pairing` — off `roundComplete` at a round boundary, off
+      // `deckbuilding` at round 0 — and it does the same for guests, which this
+      // host-only arm never could.
+      set({
+        phase: "matchInProgress",
+        currentRound: event.round,
+        pairings: event.pairings,
+      });
       saveDraftPodProgress("matchInProgress");
       break;
     case "matchStart":
       set({ matchPairing: event.launch, phase: "matchInProgress" });
+      void retryDraftSettlement(event.launch, "host");
       break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
-      set({ phase: "pairing", currentRound: event.newRound });
+      // `currentRound` is engine-owned: `viewUpdated` and `pairingsGenerated`
+      // both write it from engine state moments later.
+      set({ phase: "pairing" });
       saveDraftPodProgress("pairing");
       break;
     case "roundComplete":
@@ -1021,8 +1605,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       saveDraftPodProgress("matchInProgress");
       break;
     case "bo3SideboardPrompt":
+      // No `phase` write — see `draftPodScreen`. The pod session is already
+      // `matchInProgress` when a prompt arrives.
       set({
-        phase: "betweenGames",
         sideboardPrompt: {
           matchId: event.matchId,
           gameNumber: event.gameNumber,
@@ -1054,6 +1639,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
         sideboardSubmitted: false,
       });
       break;
+    case "bo3AuthorizedCommand":
+      void useMultiplayerDraftStore.getState().submitAuthorized(event.command, event.acknowledgement);
+      break;
   }
 }
 
@@ -1079,6 +1667,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         timerRemainingMs: event.view.timer_remaining_ms ?? null,
         standings: event.view.standings ?? [],
         currentRound: event.view.current_round ?? 0,
+        nextPairingRound: event.view.next_pairing_round ?? 1,
         pairings: event.view.pairings ?? [],
       });
       break;
@@ -1115,7 +1704,15 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         matchPairing: event.launch,
         phase: "matchInProgress",
       });
+      void retryDraftSettlement(event.launch, "guest");
       break;
+    case "matchSettlementAcknowledged": {
+      const binding = useMultiplayerDraftStore.getState().matchPairing?.binding;
+      if (binding?.matchId === event.matchId && binding.revision === event.revision) {
+        void clearDraftSettlementOutbox(binding);
+      }
+      break;
+    }
     case "kicked":
       set({ phase: "kicked", error: event.reason });
       break;
@@ -1126,11 +1723,14 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ error: event.message });
       break;
     case "reconnecting":
+      break;
     case "reconnectFailed":
+      set({ error: event.failure.message, guestRecoveryFailure: event.failure });
       break;
     case "bo3SideboardPrompt":
+      // No `phase` write — see `draftPodScreen`. The pod session is already
+      // `matchInProgress` when a prompt arrives.
       set({
-        phase: "betweenGames",
         sideboardPrompt: {
           matchId: event.matchId,
           gameNumber: event.gameNumber,
@@ -1161,6 +1761,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         playDrawPrompt: null,
         sideboardSubmitted: false,
       });
+      break;
+    case "bo3AuthorizedCommand":
+      void useMultiplayerDraftStore.getState().submitAuthorized(event.command, event.acknowledgement);
       break;
     case "bo3ScoreUpdate":
       // Informational — standings update comes via viewUpdated

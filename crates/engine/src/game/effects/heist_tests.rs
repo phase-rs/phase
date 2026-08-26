@@ -106,11 +106,11 @@ fn heist_offers_random_nonland_candidates_from_opponent_library() {
 
     // A HeistExile continuation is parked to finalize the chosen card.
     assert!(
-        state.pending_continuation.is_some(),
+        state.active_ability_continuation().is_some(),
         "Heist must stash a HeistExile continuation",
     );
     assert!(matches!(
-        &state.pending_continuation.as_ref().unwrap().chain.effect,
+        &state.active_ability_continuation().unwrap().chain.effect,
         Effect::HeistExile
     ));
     assert!(events.iter().any(|e| matches!(
@@ -175,7 +175,7 @@ fn heist_with_no_nonland_cards_is_a_noop() {
         !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
         "no choice when the opponent has no heistable nonland cards",
     );
-    assert!(state.pending_continuation.is_none());
+    assert!(state.active_ability_continuation().is_none());
     assert!(events.iter().any(|e| matches!(
         e,
         GameEvent::EffectResolved {

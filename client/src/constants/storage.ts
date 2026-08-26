@@ -1,6 +1,7 @@
 import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { projectSavedDeckSpecialSlots } from "../services/savedDeckProjection";
 
 /** Prefix for saved deck data in localStorage. Full key: `${STORAGE_KEY_PREFIX}${deckName}` */
 export const STORAGE_KEY_PREFIX = "phase-deck:";
@@ -52,6 +53,13 @@ export const ACTIVE_QUICK_DRAFT_KEY = "phase-active-quick-draft";
 
 /** Key for active draft-pod metadata in localStorage (synchronous resume detection) */
 export const ACTIVE_DRAFT_POD_KEY = "phase-active-draft-pod";
+
+/**
+ * Non-secret pointer to the most recent guest draft. The reconnect capability
+ * itself remains in IndexedDB; this record exists only so a reloaded guest can
+ * find the pod again from its room code.
+ */
+export const ACTIVE_DRAFT_GUEST_KEY = "phase-active-draft-guest";
 
 /** Prefix for quick-draft session blobs in IndexedDB. Full key: `${QUICK_DRAFT_KEY_PREFIX}${draftId}` */
 export const QUICK_DRAFT_KEY_PREFIX = "phase-quick-draft:";
@@ -312,13 +320,22 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as ParsedDeck & Record<string, unknown>;
-    const repaired = repairParsedDeck(parsed);
-    if (parsed.companion && !repaired.sideboard.some((e) => e.name === parsed.companion)) {
-      repaired.sideboard.push({ count: 1, name: parsed.companion });
-    }
-    return repaired;
+    return projectSavedDeckSpecialSlots(parsed, repairParsedDeck(parsed));
   } catch {
     return null;
+  }
+}
+
+/** Read the persisted deck-construction format without projecting deck data. */
+export function loadSavedDeckFormat(deckName: string): string | undefined {
+  if (isRandomDeckSelection(deckName)) return undefined;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { format?: unknown };
+    return typeof parsed.format === "string" ? parsed.format : undefined;
+  } catch {
+    return undefined;
   }
 }
 

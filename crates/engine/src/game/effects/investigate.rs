@@ -47,6 +47,9 @@ pub fn resolve(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: ability.controller,
         action: PlayerActionKind::Investigate,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
     });
 
     Ok(())

@@ -5,15 +5,44 @@
     "close": "Zamknij",
     "closeNamed": "Zamknij {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "najwyższa liczba",
+    "lowestNumber": "najniższa liczba",
+    "chosenNumber": "wybrana liczba"
+  },
+  "scryOutcome": {
+    "title": "Wróżenie zakończone",
+    "you": "Ty",
+    "result": "{{player}} — {{top}} na górze · {{bottom}} na dole"
+  },
   "modal": {
     "defaultEyebrow": "Narzędzie warsztatu"
   },
   "pausedBanner": {
-    "message": "Gra wstrzymana — {{reason}}"
+    "message": "Gra wstrzymana — {{reason}}",
+    "resume": "Wznów"
   },
   "fullscreen": {
     "enter": "Włącz pełny ekran",
     "exit": "Wyłącz pełny ekran"
+  },
+  "nativeEngineProgress": {
+    "title": "Aktualizowanie silnika natywnego",
+    "resolving": "Wyszukiwanie właściwego lokalnego serwera…",
+    "downloadingBinary": "Pobieranie zaktualizowanego serwera…",
+    "verifying": "Weryfikowanie serwera…",
+    "downloadingData": "Pobieranie danych gry…",
+    "spawning": "Uruchamianie lokalnego serwera…",
+    "ready": "Silnik natywny jest gotowy",
+    "failed": "Nie można przygotować silnika natywnego"
+  },
+  "engineBadge": {
+    "native": "Silnik natywny",
+    "nativeTooltip": "Ta gra korzysta z natywnego silnika aplikacji desktopowej.",
+    "inBrowser": "Silnik przeglądarki",
+    "inBrowserTooltip": "Silnik natywny niedostępny — ta gra działa w przeglądarce.",
+    "versionMismatchTooltip": "Niezgodna wersja silnika natywnego — ta gra działa w przeglądarce.",
+    "notAttemptedTooltip": "Ta gra działa w przeglądarce — silnik natywny nie został użyty."
   },
   "buildBadge": {
     "downloading": "pobieranie… {{progress}}%",
@@ -22,6 +51,7 @@
     "updatePending": "aktualizacja oczekuje po zakończeniu gry",
     "cards": "karty {{age}} ({{commit}})",
     "cardDataTitle": "Dane kart wygenerowane {{date}} z {{commit}}",
+    "desktopAppVersion": "Aplikacja komputerowa v{{version}}",
     "checkForUpdates": "Sprawdź aktualizacje",
     "updaterDebugInfo": "Informacje debugowania aktualizatora",
     "updaterIssue": "Problem z aktualizatorem: {{error}}",
@@ -29,10 +59,11 @@
     "updated": "zaktualizowano"
   },
   "comboDetector": {
-    "label": "Wykrywacz combosów",
+    "label": "Wykrywacz combosów (eksperymentalne)",
     "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
     "on": "Wł.",
-    "off": "Wył."
+    "off": "Wył.",
+    "interactive": "Interaktywny"
   },
   "gameMenu": {
     "sections": {
@@ -54,10 +85,16 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Przełącz na widok podzielonego stołu",
     "switchToLegacyView": "Przełącz na skupiony widok legacy",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Zobacz wszystkich przeciwników naraz w widoku podzielonego stołu.",
+      "trySplit": "Wypróbuj widok podzielony",
+      "dismiss": "Nie teraz"
+    },
     "helpShortcuts": "Pomoc i skróty",
     "showAiHand": "Pokaż rękę AI",
     "hideAiHand": "Ukryj rękę AI",
     "requestTakeback": "Poproś o wycofanie ruchu",
+    "undoLastAction": "Cofnij ostatnią akcję",
     "concede": "Poddaj się",
     "backToDraft": "Wróć do draftu",
     "mainMenu": "Menu główne",
@@ -65,6 +102,7 @@
     "cardDataTitle": "Dane kart: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Dźwięk niedostępny — serwer audio systemu nie odpowiada. Uruchom aplikację ponownie, aby spróbować jeszcze raz.",
     "mute": "Wycisz",
     "unmute": "Wyłącz wyciszenie",
     "volume": "Głośność"
@@ -245,7 +283,13 @@
     "youPlayFirst": "Zaczynasz",
     "playerPlaysFirst": "{{name}} zaczyna",
     "heads": "Orzeł",
-    "tails": "Reszka"
+    "tails": "Reszka",
+    "coinFlip": "Rzut monetą",
+    "wonCoinFlip": "{{name}} wygrywa rzut monetą",
+    "lostCoinFlip": "{{name}} przegrywa rzut monetą",
+    "turnOrder": "Kolejność tur",
+    "turnOrderItem": "Tura {{turn}}: {{name}}",
+    "youTakeTurn": "Rozgrywasz turę {{turn}}"
   },
   "chrome": {
     "back": "Wstecz",

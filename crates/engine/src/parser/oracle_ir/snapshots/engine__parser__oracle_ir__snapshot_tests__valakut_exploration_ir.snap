@@ -1,0 +1,415 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 141,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled."
+      },
+      "node": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 34,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "exile the top card of your library"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ExileTop",
+                        "player": {
+                          "type": "Controller"
+                        },
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "position": {
+                          "type": "Top"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 36,
+                        "end_byte": 91,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "You may play that card for as long as it remains exiled"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "GrantCastingPermission",
+                        "permission": {
+                          "type": "PlayFromExile",
+                          "duration": "Permanent",
+                          "granted_to": 0
+                        },
+                        "target": {
+                          "type": "TrackedSet",
+                          "id": 0
+                        }
+                      },
+                      "duration": {
+                        "ForAsLongAs": {
+                          "condition": {
+                            "type": "Unrecognized",
+                            "text": "it remains exiled"
+                          }
+                        }
+                      },
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": true,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "exile the top card of your library. you may play that card for as long as it remains exiled.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.",
+            "die_results": []
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 142,
+          "end_byte": 297,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "At the beginning of your end step, if there are cards exiled with ~, put them into their owner's graveyard, then ~ deals that much damage to each opponent."
+      },
+      "node": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "Phase",
+            "partial_def": {
+              "mode": "Phase",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": "End",
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": {
+                "type": "OnlyDuringYourTurn"
+              },
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 37,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "put them into their owner's graveyard"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ChangeZoneAll",
+                        "origin": "Exile",
+                        "destination": "Graveyard",
+                        "target": {
+                          "type": "ExiledBySource"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Then",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 44,
+                        "end_byte": 85,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "~ deals that much damage to each opponent"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "DamageEachPlayer",
+                        "amount": {
+                          "type": "Ref",
+                          "qty": {
+                            "type": "EventContextAmount"
+                          }
+                        },
+                        "player_filter": {
+                          "type": "Opponent"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": {
+                "type": "QuantityComparison",
+                "lhs": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "CardsExiledBySource"
+                  }
+                },
+                "comparator": "GE",
+                "rhs": {
+                  "type": "Fixed",
+                  "value": 1
+                }
+              },
+              "trigger_subject": {
+                "type": "Any"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "if there are cards exiled with ~, put them into their owner's graveyard, then ~ deals that much damage to each opponent.",
+              "relative_player_scope": null
+            },
+            "source_text": "At the beginning of your end step, if there are cards exiled with ~, put them into their owner's graveyard, then ~ deals that much damage to each opponent.",
+            "die_results": []
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.\nAt the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+  "card_name": "Valakut Exploration"
+}

@@ -1,12 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
+  isOfficialMultiplayerServerUrl,
 } from "../../config/multiplayerServer";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import {
   DEFAULT_SERVER,
   SERVER_PRESETS,
+  detectServerUrl,
   formatJoinShare,
   mixedContentBlockReason,
   parseJoinCode,
@@ -24,6 +27,61 @@ describe("server defaults", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("official server hosts", () => {
+  // Each release channel gets its own broker; both are ours, so both must read
+  // as official — that is what lets the persisted-address migration repoint a
+  // returning browser onto its own channel's lobby.
+  it("recognises every channel's lobby as official", () => {
+    expect(isOfficialMultiplayerServerUrl("wss://lobby.phase-rs.dev/ws")).toBe(true);
+    expect(isOfficialMultiplayerServerUrl("wss://lobby-preview.phase-rs.dev/ws")).toBe(
+      true,
+    );
+    expect(isOfficialMultiplayerServerUrl("wss://us.phase-rs.dev/ws")).toBe(true);
+  });
+
+  it("does not treat a self-hosted address as official", () => {
+    expect(isOfficialMultiplayerServerUrl("wss://play.example.com/ws")).toBe(false);
+    expect(isOfficialMultiplayerServerUrl("not a url")).toBe(false);
+  });
+
+  // A build whose default IS its official broker must not advertise a
+  // "self-hosted" preset — that row would otherwise become SERVER_PRESETS[0].
+  it("offers no self-hosted preset when the default is the official broker", () => {
+    if (DEFAULT_MULTIPLAYER_SERVER_URL !== OFFICIAL_MULTIPLAYER_SERVER_URL) return;
+    expect(SERVER_PRESETS).toHaveLength(1);
+    expect(SERVER_PRESETS[0].labelKey).toBe("serverPicker.official");
+    expect(DEFAULT_SERVER).toBe(OFFICIAL_MULTIPLAYER_SERVER_URL);
+  });
+});
+
+describe("detectServerUrl", () => {
+  const CHOSEN = "wss://play.example.com/ws";
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    vi.unstubAllGlobals();
+  });
+
+  // The desktop shell talks to its own native engine over a Tauri IPC bridge on
+  // an ephemeral port, so a reachable localhost phase-server is always someone
+  // else's and must never displace the server the player picked.
+  it("keeps the chosen server in the desktop shell even when localhost answers", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response("ok", { status: 200 })));
+    vi.stubGlobal("fetch", fetchSpy);
+    useMultiplayerStore.setState({ serverAddress: CHOSEN });
+
+    await expect(detectServerUrl()).resolves.toBe(CHOSEN);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to this build's default when no valid address is stored", async () => {
+    useMultiplayerStore.setState({ serverAddress: "" });
+
+    await expect(detectServerUrl()).resolves.toBe(DEFAULT_SERVER);
   });
 });
 

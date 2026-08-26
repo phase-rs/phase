@@ -8,7 +8,7 @@ use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::AttackTargetFilter;
@@ -27,6 +27,22 @@ pub(crate) fn counter_condition_matches(
     let count: u32 = match counters {
         CounterMatch::Any => obj.counters.values().sum(),
         CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
+    };
+    count >= minimum && maximum.is_none_or(|max| count <= max)
+}
+
+/// CR 122.1 + CR 608.2h: LKI counterpart to [`counter_condition_matches`]
+/// for a triggered source that no longer has an exact live object. Both
+/// helpers deliberately share the same CounterMatch/count semantics.
+pub(crate) fn counter_condition_matches_lki(
+    lki: &LKISnapshot,
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> bool {
+    let count: u32 = match counters {
+        CounterMatch::Any => lki.counters.values().sum(),
+        CounterMatch::OfType(counter_type) => lki.counters.get(counter_type).copied().unwrap_or(0),
     };
     count >= minimum && maximum.is_none_or(|max| count <= max)
 }
@@ -135,6 +151,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         | AttackTargetFilter::Planeswalker
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
+        | AttackTargetFilter::Monarch
         | AttackTargetFilter::Battle => false,
     }
 }
@@ -157,6 +174,11 @@ pub(crate) fn eval_is_initiative(state: &GameState, controller: PlayerId) -> boo
 /// CR 702.131a + CR 702.131c: True when the given player has the city's blessing.
 pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) -> bool {
     state.city_blessing.contains(&controller)
+}
+
+/// CR 702.195b: True when the given player has the enduring story designation.
+pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
+    state.enduring_story.contains(&controller)
 }
 
 /// CR 400.7: True when the source permanent entered the battlefield this turn.

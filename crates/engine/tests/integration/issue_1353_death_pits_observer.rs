@@ -43,11 +43,11 @@ fn death_pits_destroys_creature_damaged_while_observer_unharmed() {
     let mut runner = scenario.build();
 
     let trigger = &runner.state().objects[&death_pits].trigger_definitions[0];
-    assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+    assert_eq!(trigger.definition.mode, TriggerMode::DamageReceived);
     assert!(
-        matches!(trigger.valid_card, Some(TargetFilter::Typed(_))),
+        matches!(trigger.definition.valid_card, Some(TargetFilter::Typed(_))),
         "Death Pits must watch creatures, not SelfRef, got {:?}",
-        trigger.valid_card
+        trigger.definition.valid_card
     );
 
     let mut events = Vec::new();

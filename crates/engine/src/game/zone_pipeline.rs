@@ -1,12 +1,4 @@
-//! Unified zone-change pipeline (Phase A carve-out).
-//!
-//! This module is the home of the single zone-change entry point. Phase A moves
-//! the most-complete pipeline copy (`change_zone::execute_zone_move` and its
-//! delivery tail) here verbatim, exposes the new request/cause types and the
-//! `move_object` wrapper, and seeds the `ApprovedZoneChange` proof token used to
-//! fence delivery in later phases. Existing callers continue to reach the moved
-//! functions through `pub(crate) use` shims left at their old `change_zone.rs`
-//! paths, so no behavior changes in this phase.
+//! Unified zone-change pipeline.
 //!
 //! Layer discipline (PLAN §2): `zones.rs` keeps every guard that must hold
 //! unconditionally (CR 111.8 token guard, CR 614.1d ETB block, CR 400.7 cleanup,
@@ -18,24 +10,28 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
-    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    EffectKind, KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, EnteringAuraAuthority, ExileLinkKind, GameState, LiminalEntryKind,
+    LogicalZoneChangeGroup, MergedCardComponentRoute, PendingBatchDeliveries,
+    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingCounterPostAction,
+    PendingLiminalEntryResume, PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor,
+    ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
 
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
@@ -45,11 +41,6 @@ use crate::types::ability::FaceDownProfile;
 /// ordering); the exempt variants are pipeline-internal and skip the replacement
 /// consult. Each exempt variant carries its CR citation so adding one is a
 /// reviewable diff (PLAN §3 "exemptions are data, not a second function").
-//
-// Phase A introduces the request/cause/mods vocabulary; the call sites that
-// construct each variant land in Phases B–D, so several arms are unconstructed
-// in this phase.
-#[allow(dead_code)]
 pub enum ZoneChangeCause {
     /// Resolving effect or ability instruction. `source` feeds
     /// `ProposedEvent::ZoneChange.cause`.
@@ -83,7 +74,7 @@ pub enum ZoneChangeCause {
     /// — because `Draw` is the only producer; every other cause would carry a
     /// dead empty set. Built only by [`ZoneMoveRequest::draw`].
     Draw {
-        seed_applied: HashSet<ReplacementId>,
+        seed_applied: HashSet<AppliedReplacementKey>,
     },
     // ---- exempt causes: pipeline-internal, replacement consult skipped ----
     /// CR 601.2a: "the player first moves that card ... to the stack" — part of
@@ -93,7 +84,11 @@ pub enum ZoneChangeCause {
     PregameProcedure,
     /// CR 800.4a: owner left the game; all objects they own leave the game.
     PlayerLeftGame,
-    /// CR 730.3: merged-component routing already inside a delivering move.
+    /// CR 730.3d + CR 903.9b-c: a merged permanent's physical components are
+    /// delivered by the same pausable replacement-aware batch as other
+    /// simultaneous moves. The special delivery shape preserves the component
+    /// event's `from: None` observability without exempting it from replacement
+    /// consultation.
     MergedComponentRouting,
     /// Debug/admin tooling (engine_debug.rs). Loud by construction.
     DebugCommand,
@@ -110,8 +105,6 @@ impl ZoneChangeCause {
     ///   bottom-of-library returns happen before any effect exists to replace.
     /// - `PlayerLeftGame` (CR 800.4a): "This is not a state-based action"; all
     ///   objects the player owns leave the game as a single rules action.
-    /// - `MergedComponentRouting` (CR 730.3): the merged-permanent move already
-    ///   consulted replacements; the component split is internal routing.
     /// - `DebugCommand`: operator intent is "force the state".
     ///
     /// The unconditional primitive guards (CR 111.8 token, CR 614.1d ETB block,
@@ -135,8 +128,11 @@ impl ZoneChangeCause {
             ZoneChangeCause::CastingToStack { .. }
             | ZoneChangeCause::PregameProcedure
             | ZoneChangeCause::PlayerLeftGame
-            | ZoneChangeCause::MergedComponentRouting
             | ZoneChangeCause::DebugCommand => true,
+            // CR 730.3d + CR 903.9c: component moves inherit the original
+            // event's applied replacements, then consult any component-specific
+            // replacement (including CR 903.9b) through the normal pipeline.
+            ZoneChangeCause::MergedComponentRouting => false,
         }
     }
 }
@@ -144,13 +140,15 @@ impl ZoneChangeCause {
 /// Destination modifiers — the union of what the pipeline copies need to seed
 /// onto the proposed `ZoneChange` before the replacement consult.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct EntryMods {
     /// CR 614.1c effect seed. Reuses the three-state `EtbTapState`
     /// (`Unspecified` / `Tapped` / `Untapped`) rather than a bool, matching the
     /// pipeline carrier `ProposedEvent::ZoneChange.enter_tapped` and preserving
     /// the Unspecified-vs-Untapped distinction at the request boundary.
     pub enter_tapped: EtbTapState,
+    /// CR 508.4: A creature put onto the battlefield attacking joins combat
+    /// without being declared as an attacker.
+    pub enters_attacking: bool,
     /// CR 712.14a. Genuinely two-valued (enters showing back face or not) — no
     /// Unspecified third state to preserve, unlike `enter_tapped`.
     pub enter_transformed: bool,
@@ -160,6 +158,9 @@ pub struct EntryMods {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     /// CR 708.2a + CR 708.3 face-down entry profile.
     pub face_down_profile: Option<FaceDownProfile>,
+    /// CR 608.2c: whether this entry is the producer a following demonstrative
+    /// anaphor refers back to. `Silent` unless a producer opted in.
+    pub chain_referent: crate::types::zones::ChainReferentIntent,
     /// CR 303.4f pre-resolved aura host.
     pub attach_to: Option<AttachTarget>,
 }
@@ -169,11 +170,14 @@ pub struct EntryMods {
 /// `exiled_by_source` bookkeeping always travel together, so they fold into one
 /// struct that also rides in `DeliveryCtx`.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct ExileLinkSpec {
     /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
     /// link; other durations / `None` fall back to `tracking`.
     pub duration: Option<Duration>,
+    /// Resolved controller for a monarch-bounded link. `Some` is captured when
+    /// the originating ability resolves; `None` means that duration cannot
+    /// create a monarch link.
+    pub controller: Option<PlayerId>,
     /// `TrackBySource` records an "exiled with" link; `None` records nothing
     /// unless `duration` requires it.
     pub tracking: ZoneDeliveryExileTracking,
@@ -183,7 +187,6 @@ pub struct ExileLinkSpec {
 ///
 /// `from` is read from the object's current zone inside `move_object` (every
 /// pipeline copy except change_zone already did this).
-#[allow(dead_code)]
 pub struct ZoneMoveRequest {
     pub object_id: ObjectId,
     pub to: Zone,
@@ -195,11 +198,111 @@ pub struct ZoneMoveRequest {
     pub placement: Option<LibraryPosition>,
     /// Exile-link context (duration-bound returns + exiled-by-source tracking).
     pub exile_links: ExileLinkSpec,
+    /// CR 614.5: replacement definitions already applied to the event or
+    /// modified event from which this physical-card move was derived.
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 406.3: Mark the object face down if this delivery actually settles in
+    /// exile. This is deliberately a delivery modifier, not an effect epilogue:
+    /// a later batch member may park on CR 616.1 while earlier members must
+    /// already be hidden.
+    pub face_down_in_exile: bool,
 }
 
-// Builder constructors are the Phase B+ call-site ergonomics; unused in Phase A.
-#[allow(dead_code)]
 impl ZoneMoveRequest {
+    fn into_pending(self) -> PendingBatchZoneMoveRequest {
+        let cause = match self.cause {
+            ZoneChangeCause::Effect { source } => PendingBatchZoneChangeCause::Effect { source },
+            ZoneChangeCause::Cost { source } => PendingBatchZoneChangeCause::Cost { source },
+            ZoneChangeCause::SpellResolutionDefault => {
+                PendingBatchZoneChangeCause::SpellResolutionDefault
+            }
+            ZoneChangeCause::StateBasedAction => PendingBatchZoneChangeCause::StateBasedAction,
+            ZoneChangeCause::CommanderRuleReturn => {
+                PendingBatchZoneChangeCause::CommanderRuleReturn
+            }
+            ZoneChangeCause::Draw { seed_applied } => {
+                PendingBatchZoneChangeCause::Draw { seed_applied }
+            }
+            ZoneChangeCause::CastingToStack { source } => {
+                PendingBatchZoneChangeCause::CastingToStack { source }
+            }
+            ZoneChangeCause::PregameProcedure => PendingBatchZoneChangeCause::PregameProcedure,
+            ZoneChangeCause::PlayerLeftGame => PendingBatchZoneChangeCause::PlayerLeftGame,
+            ZoneChangeCause::MergedComponentRouting => {
+                PendingBatchZoneChangeCause::MergedComponentRouting
+            }
+            ZoneChangeCause::DebugCommand => PendingBatchZoneChangeCause::DebugCommand,
+        };
+        PendingBatchZoneMoveRequest {
+            object_id: self.object_id,
+            destination: self.to,
+            cause,
+            enter_tapped: self.mods.enter_tapped,
+            enters_attacking: self.mods.enters_attacking,
+            enter_transformed: self.mods.enter_transformed,
+            controller_override: self.mods.controller_override,
+            enter_with_counters: self.mods.enter_with_counters,
+            face_down_profile: self.mods.face_down_profile,
+            chain_referent: self.mods.chain_referent,
+            attach_to: self.mods.attach_to,
+            library_placement: self.placement,
+            exile_duration: self.exile_links.duration,
+            exile_controller: self.exile_links.controller,
+            exile_tracking: self.exile_links.tracking,
+            replacement_applied: self.replacement_applied,
+            face_down_in_exile: self.face_down_in_exile,
+        }
+    }
+
+    fn from_pending(pending: PendingBatchZoneMoveRequest) -> Self {
+        let cause = match pending.cause {
+            PendingBatchZoneChangeCause::Effect { source } => ZoneChangeCause::Effect { source },
+            PendingBatchZoneChangeCause::Cost { source } => ZoneChangeCause::Cost { source },
+            PendingBatchZoneChangeCause::SpellResolutionDefault => {
+                ZoneChangeCause::SpellResolutionDefault
+            }
+            PendingBatchZoneChangeCause::StateBasedAction => ZoneChangeCause::StateBasedAction,
+            PendingBatchZoneChangeCause::CommanderRuleReturn => {
+                ZoneChangeCause::CommanderRuleReturn
+            }
+            PendingBatchZoneChangeCause::Draw { seed_applied } => {
+                ZoneChangeCause::Draw { seed_applied }
+            }
+            PendingBatchZoneChangeCause::CastingToStack { source } => {
+                ZoneChangeCause::CastingToStack { source }
+            }
+            PendingBatchZoneChangeCause::PregameProcedure => ZoneChangeCause::PregameProcedure,
+            PendingBatchZoneChangeCause::PlayerLeftGame => ZoneChangeCause::PlayerLeftGame,
+            PendingBatchZoneChangeCause::MergedComponentRouting => {
+                ZoneChangeCause::MergedComponentRouting
+            }
+            PendingBatchZoneChangeCause::DebugCommand => ZoneChangeCause::DebugCommand,
+        };
+        Self {
+            object_id: pending.object_id,
+            to: pending.destination,
+            cause,
+            mods: EntryMods {
+                enter_tapped: pending.enter_tapped,
+                enters_attacking: pending.enters_attacking,
+                enter_transformed: pending.enter_transformed,
+                controller_override: pending.controller_override,
+                enter_with_counters: pending.enter_with_counters,
+                face_down_profile: pending.face_down_profile,
+                chain_referent: pending.chain_referent,
+                attach_to: pending.attach_to,
+            },
+            placement: pending.library_placement,
+            exile_links: ExileLinkSpec {
+                duration: pending.exile_duration,
+                controller: pending.exile_controller,
+                tracking: pending.exile_tracking,
+            },
+            replacement_applied: pending.replacement_applied,
+            face_down_in_exile: pending.face_down_in_exile,
+        }
+    }
+
     /// Effect- or ability-driven move with no destination modifiers.
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
@@ -209,6 +312,8 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -221,6 +326,8 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -237,6 +344,22 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
+        }
+    }
+
+    /// CR 704: state-based action zone change with no destination modifiers.
+    pub fn state_based_action(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::StateBasedAction,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -249,14 +372,18 @@ impl ZoneMoveRequest {
     /// outer `ReplacementEvent::Draw` pass's applied set so the inner `Moved`
     /// consult does not double-apply a def that already fired at draw level
     /// (CR 614.5, PLAN Risk #5).
-    pub fn draw(object_id: ObjectId, seed_applied: HashSet<ReplacementId>) -> Self {
+    pub fn draw(object_id: ObjectId, seed_applied: HashSet<AppliedReplacementKey>) -> Self {
         Self {
             object_id,
             to: Zone::Hand,
-            cause: ZoneChangeCause::Draw { seed_applied },
+            cause: ZoneChangeCause::Draw {
+                seed_applied: seed_applied.clone(),
+            },
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: seed_applied,
+            face_down_in_exile: false,
         }
     }
 
@@ -270,6 +397,8 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -285,6 +414,8 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -298,6 +429,25 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
+        }
+    }
+
+    /// CR 730.3d + CR 903.9b-c: Route one absorbed component through the
+    /// replacement pipeline. The delivery recognizes its split marker and
+    /// preserves `ZoneChanged { from: None }`, so this is not an independent
+    /// battlefield exit even though its would-move event is replaceable.
+    pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::MergedComponentRouting,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -310,6 +460,8 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -352,10 +504,32 @@ impl ZoneMoveRequest {
         self
     }
 
+    /// CR 608.2c: mark this entry as the producer a following demonstrative
+    /// anaphor binds to. Opt-in, so an unmarked delivery never touches the
+    /// game-lifetime referent slot.
+    pub fn publishing_chain_referent(mut self) -> Self {
+        self.mods.chain_referent = crate::types::zones::ChainReferentIntent::Publishes;
+        self
+    }
+
     /// Library placement override (`LibraryPosition::Top` / `Bottom` /
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 406.3: Conceal this card immediately if the replacement-aware move
+    /// delivers it to Exile.
+    pub fn face_down_in_exile(mut self) -> Self {
+        self.face_down_in_exile = true;
+        self
+    }
+
+    /// CR 614.5: seed a child/modified move with the replacements already
+    /// applied to its originating event.
+    pub fn with_replacement_applied(mut self, applied: HashSet<AppliedReplacementKey>) -> Self {
+        self.replacement_applied = applied;
         self
     }
 
@@ -406,33 +580,26 @@ impl ZoneMoveRequest {
 /// these would mint a token outside the pipeline (deserialization, cloning a
 /// stashed token, `Default::default()`) and silently reopen the loophole. A CI
 /// grep for derives adjacent to this type backs the review rule.
-//
-// Phase A seeds the token + its three mint paths; the consuming callers
-// (`deliver`, the bucket-A migrations) arrive in Phase B, so the field and
-// constructors are not yet read in this phase.
-#[allow(dead_code)]
 pub struct ApprovedZoneChange {
     event: ProposedEvent,
     _seal: (),
 }
 
-// Phase B wires every mint path and `deliver` consumer; Phase A only seeds them.
-#[allow(dead_code)]
 impl ApprovedZoneChange {
     /// The third mint path (PLAN §6.2): seal an event that has already completed
     /// a full replacement pass OUTSIDE this module — the outer Destroy /
     /// Sacrifice / Discard pass lowers into a `ZoneChange` carrying its
-    /// `applied: HashSet<ReplacementId>`. Legal ONLY on `ZoneChange` payloads;
+    /// `applied: HashSet<AppliedReplacementKey>`. Legal ONLY on `ZoneChange` payloads;
     /// returns `Err(event)` for anything else so the caller can fall back.
     /// Re-proposing such an event through `move_object` would discard `applied`
     /// and double-apply Moved definitions / redo CR 616.1 ordering.
     pub(crate) fn approve_post_replacement(
         event: ProposedEvent,
-    ) -> Result<ApprovedZoneChange, ProposedEvent> {
+    ) -> Result<ApprovedZoneChange, Box<ProposedEvent>> {
         if matches!(event, ProposedEvent::ZoneChange { .. }) {
             Ok(ApprovedZoneChange { event, _seal: () })
         } else {
-            Err(event)
+            Err(Box::new(event))
         }
     }
 
@@ -455,8 +622,9 @@ impl ApprovedZoneChange {
 /// was never destroyed (verified against `reset_for_battlefield_entry` and the
 /// field's writer set; the capture/restore was a defensive no-op since PR
 /// #1119 introduced it). The cast-link family that IS cleared on entry
-/// (CR 400.7d: kicker / additional-cost / convoke / cast-timing memory) is
-/// preserved structurally by the delivery itself — see [`CastLinkSnapshot`].
+/// (CR 400.7d: kicker / Gift recipient / additional-cost / convoke / cast-timing
+/// memory) is preserved structurally by the delivery itself — see
+/// [`CastLinkSnapshot`].
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
@@ -485,6 +653,8 @@ struct CastLinkSnapshot {
     cast_controller: Option<PlayerId>,
     cast_timing_permission: Option<CastTimingPermission>,
     kickers_paid: Vec<KickerVariant>,
+    /// CR 702.174a: Opponent promised the Gift when this spell was cast.
+    gift_recipient: Option<PlayerId>,
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
@@ -504,19 +674,43 @@ pub(crate) enum ZoneMoveResult {
     NeedsAuraAttachmentChoice,
 }
 
+/// Exact completion information used by logical zone-change owners. The public
+/// result surface deliberately remains the established three-way enum; callers
+/// that do not own a logical group do not need terminal provenance.
+pub(crate) enum ZoneMoveTerminalResult {
+    Completed(ZoneMoveCompletion),
+    NeedsChoice(PlayerId),
+    NeedsAuraAttachmentChoice,
+}
+
+impl ZoneMoveTerminalResult {
+    pub(crate) fn into_zone_move_result(self) -> ZoneMoveResult {
+        match self {
+            Self::Completed(_) => ZoneMoveResult::Done,
+            Self::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            Self::NeedsAuraAttachmentChoice => ZoneMoveResult::NeedsAuraAttachmentChoice,
+        }
+    }
+}
+
+/// Derive the only valid completed-delivery classification from an explicit
+/// slice and the pre-delivery incarnation. A redirect is still `Moved`; an
+/// accepted delivery with no exact `ZoneChanged` record is `Remained`.
+pub(crate) fn zone_move_completion_from_delivery(
+    member: ObjectIncarnationRef,
+    delivery_events: &[GameEvent],
+) -> ZoneMoveCompletion {
+    PendingZoneChangeDelivery::completion_from_delivery_events(member, delivery_events)
+}
+
 pub(crate) enum ZoneDeliveryResult {
     Done,
     NeedsChoice(PlayerId),
 }
 
-/// THE single zone-change entry point (Phase A: thin wrapper over the carved-out
-/// `execute_zone_move` engine). Reads `from` from the object's current zone,
-/// unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through the
-/// replacement pipeline + delivery tail.
-///
-/// In this phase the entry has no production callers yet — call-site migration
-/// is Phase B+ — so it preserves the exact behavior of `execute_zone_move` for
-/// every modifier combination it forwards.
+/// THE single zone-change entry point. Reads `from` from the object's current
+/// zone, unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through
+/// the replacement pipeline + delivery tail.
 ///
 /// `pub(crate)` while `ZoneMoveResult` is `pub(crate)`: every caller lives in the
 /// engine crate. (PLAN §1.3 writes `pub fn`; widening to `pub` only matters once
@@ -526,11 +720,33 @@ pub(crate) fn move_object(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    let Some(from_zone) = state.objects.get(&req.object_id).map(|o| o.zone) else {
+    move_object_with_terminal(state, req, events).into_zone_move_result()
+}
+
+#[cfg(feature = "test-support")]
+pub fn move_object_for_test(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    matches!(
+        move_object(state, req, events),
+        ZoneMoveResult::NeedsChoice(_)
+    )
+}
+
+pub(crate) fn move_object_with_terminal(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    let Some(object) = state.objects.get(&req.object_id) else {
         // The object no longer exists (already moved / ceased to exist); nothing
         // to do. The unconditional guards in `zones.rs` would no-op anyway.
-        return ZoneMoveResult::Done;
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    let from_zone = object.zone;
+    let member = ObjectIncarnationRef::from_object(object);
 
     // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
     // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
@@ -546,9 +762,11 @@ pub(crate) fn move_object(
             .get(&req.object_id)
             .expect("object exists (zone read above)");
         // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7).
-        if zones::token_is_outside_battlefield_and_stack(obj) {
-            return ZoneMoveResult::Done;
+        // remains in place and ceases to exist at the next SBA (CR 111.7). An
+        // exact CR 601.2a pending spell plus its announcement placeholder makes
+        // the retained-origin representation stack-resident until this delivery.
+        if zones::token_is_outside_battlefield_and_stack(state, obj) {
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
         // permanent onto the battlefield — no entry event occurs, so no
@@ -556,7 +774,7 @@ pub(crate) fn move_object(
         // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
         // no-op guard.
         if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
-            return ZoneMoveResult::Done;
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
     }
 
@@ -584,18 +802,19 @@ pub(crate) fn move_object(
     // requested index and the tail's auto-shuffle is suppressed (CR 701.24a: a
     // placement is not a shuffle).
     //
-    // Phase E tranche 2: 11 raw library-position callers still bypass this consult
-    // by calling `zones::move_to_library_position` / `move_to_library_at_index`
-    // directly instead of routing through `move_object`'s placement arm. They are:
-    //   - engine_resolution_choices.rs (×5)
-    //   - reveal_until.rs:~400 (`shuffle_to_bottom`)
-    //   - drawn_this_turn_choice.rs:~114
-    //   - discover.rs:~103 (put-back of unhit cards)
-    //   - put_on_top.rs:~153 / ~158
-    //   - cascade.rs:~154 (bottom-in-random-order)
-    // Migrating each onto this arm is a guaranteed no-op today (zero pool
-    // `Moved` defs target the library) but pins the redirect consult for the
-    // future. Re-verify the census before lifting:
+    // Phase E tranche 2: six production raw library-position callers still bypass
+    // this consult by calling `zones::move_to_library_position` /
+    // `move_to_library_at_index` directly instead of routing through
+    // `move_object`'s placement arm. They are:
+    //   - engine_resolution_choices.rs: clash return (~2989)
+    //   - engine_resolution_choices.rs: EffectZoneChoice bottom placement (~7260)
+    //   - engine_resolution_choices.rs: EffectZoneChoice top/Nth placement (~7272)
+    //   - engine_resolution_choices.rs: EffectZoneChoice mixed-source reorder (~7333)
+    //   - zone_pipeline.rs: exempt library-placement delivery (~821)
+    //   - zone_pipeline.rs: replacement delivery placement (~2353)
+    // Migrating each onto this arm is a production no-op today (the only
+    // `Moved` definition targeting the library is test-only) but pins the
+    // redirect consult for the future. Re-verify the census before lifting:
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
@@ -617,20 +836,40 @@ pub(crate) fn move_object(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this rebuilt-tail path.
+                    // Exhaustiveness arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
+                let delivery_start = events.len();
                 zones::move_to_library_at_index(state, req.object_id, index, events);
-                return ZoneMoveResult::Done;
+                return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                    member,
+                    &events[delivery_start..],
+                ));
             }
             let source_id = req.source();
-            let proposed =
+            let mut proposed =
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
+            if let ProposedEvent::ZoneChange {
+                applied,
+                chain_referent,
+                ..
+            } = &mut proposed
+            {
+                *chain_referent = req.mods.chain_referent;
+                *applied = req.replacement_applied.clone();
+            }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
+                    let delivery_start = events.len();
                     match deliver_replaced_zone_change(
                         state,
                         event,
                         source_id,
                         req.exile_links.duration.as_ref(),
+                        req.exile_links.controller,
                         matches!(
                             req.exile_links.tracking,
                             ZoneDeliveryExileTracking::TrackBySource
@@ -639,17 +878,21 @@ pub(crate) fn move_object(
                         Some(position),
                         events,
                     ) {
-                        ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+                        ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                        ),
                         ZoneDeliveryResult::NeedsChoice(player) => {
-                            ZoneMoveResult::NeedsChoice(player)
+                            ZoneMoveTerminalResult::NeedsChoice(player)
                         }
                     }
                 }
-                ReplacementResult::Prevented => ZoneMoveResult::Done,
+                ReplacementResult::Prevented => {
+                    ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+                }
                 ReplacementResult::NeedsChoice(player) => {
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
-                    replacement::park_waiting_for(state, player);
+                    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                     // CR 701.24a: stash the requested library placement on the
                     // parked record so the resume path
                     // (`engine_replacement::handle_replacement_choice`) threads it
@@ -663,7 +906,7 @@ pub(crate) fn move_object(
                     if let Some(pending) = state.pending_replacement.as_mut() {
                         pending.library_placement = Some(position);
                     }
-                    ZoneMoveResult::NeedsChoice(player)
+                    ZoneMoveTerminalResult::NeedsChoice(player)
                 }
             };
         }
@@ -689,24 +932,41 @@ pub(crate) fn move_object(
     // `Draw` cause variant — no other cause produces one.
     if let ZoneChangeCause::Draw { seed_applied } = req.cause {
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
-        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
-            *applied = seed_applied;
+        if let ProposedEvent::ZoneChange {
+            applied,
+            chain_referent,
+            ..
+        } = &mut proposed
+        {
+            *chain_referent = req.mods.chain_referent;
+            *applied = req.replacement_applied;
+            applied.extend(seed_applied);
         }
         return match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
-                state,
-                event,
-                source_id,
-                exile_links.duration.as_ref(),
-                track_exiled_by_source,
-                PostReplacementDrainOwner::DeliveryTail,
-                None,
-                events,
-            ) {
-                ZoneDeliveryResult::Done => ZoneMoveResult::Done,
-                ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
-            },
-            ReplacementResult::Prevented => ZoneMoveResult::Done,
+            ReplacementResult::Execute(event) => {
+                let delivery_start = events.len();
+                match deliver_replaced_zone_change(
+                    state,
+                    event,
+                    source_id,
+                    exile_links.duration.as_ref(),
+                    exile_links.controller,
+                    track_exiled_by_source,
+                    PostReplacementDrainOwner::DeliveryTail,
+                    None,
+                    events,
+                ) {
+                    ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                        zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                    ),
+                    ZoneDeliveryResult::NeedsChoice(player) => {
+                        ZoneMoveTerminalResult::NeedsChoice(player)
+                    }
+                }
+            }
+            ReplacementResult::Prevented => {
+                ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+            }
             ReplacementResult::NeedsChoice(player) => {
                 // CR 616.1: park the surfaced ordering prompt (mirrors the
                 // placement / `execute_zone_move` NeedsChoice arms). No
@@ -716,8 +976,8 @@ pub(crate) fn move_object(
                 // `valid_card: None` class is destination-gated to Graveyard), so
                 // this is unreachable for the current pool — parked for
                 // correctness if a future to-Hand redirect surfaces a choice.
-                replacement::park_waiting_for(state, player);
-                ZoneMoveResult::NeedsChoice(player)
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                ZoneMoveTerminalResult::NeedsChoice(player)
             }
         };
     }
@@ -748,16 +1008,32 @@ pub(crate) fn move_object(
         // pregame library goes through the placement arm, elimination's
         // battlefield departure wants the `mark_layers_full`).
         if matches!(req.cause, ZoneChangeCause::DebugCommand) {
+            let delivery_start = events.len();
             zones::move_to_zone(state, req.object_id, req.to, events);
-            return ZoneMoveResult::Done;
+            // pod-lab loop-3 Q5: debug-staged board setup (GameScenario, the
+            // shared seam nearly every engine integration test builds boards
+            // through) stays maximally conservative and out of scope for the
+            // move_to_zone incremental-flush carve-out below — there is zero
+            // gameplay perf benefit to incrementalizing test/debug setup, and
+            // the blast radius of a subtle divergence here is the whole test
+            // suite. Unconditional, regardless of what move_to_zone's own
+            // (now axis-gated) internal decision would otherwise have been.
+            crate::game::layers::mark_layers_full(state);
+            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ));
         }
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
             enter_transformed,
             enter_tapped,
+            enters_attacking,
             controller_override,
             enter_with_counters,
             face_down_profile,
+            chain_referent,
+            applied,
             ..
         } = &mut proposed
         {
@@ -765,11 +1041,15 @@ pub(crate) fn move_object(
             if !req.mods.enter_tapped.is_unspecified() {
                 *enter_tapped = req.mods.enter_tapped;
             }
+            *enters_attacking = req.mods.enters_attacking;
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+            *chain_referent = req.mods.chain_referent;
+            *applied = req.replacement_applied;
         }
         let approved = ApprovedZoneChange::seal(proposed);
+        let delivery_start = events.len();
         return match deliver(
             state,
             approved,
@@ -784,12 +1064,14 @@ pub(crate) fn move_object(
             },
             events,
         ) {
-            ZoneDeliveryResult::Done => ZoneMoveResult::Done,
-            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                zone_move_completion_from_delivery(member, &events[delivery_start..]),
+            ),
+            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveTerminalResult::NeedsChoice(player),
         };
     }
 
-    execute_zone_move(
+    execute_zone_move_with_applied_terminal(
         state,
         req.object_id,
         from_zone,
@@ -801,48 +1083,65 @@ pub(crate) fn move_object(
         exile_links.duration.as_ref(),
         req.mods.enter_transformed,
         req.mods.enter_tapped,
+        req.mods.enters_attacking,
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
+        req.mods.chain_referent,
         track_exiled_by_source,
         None,
         None,
+        exile_links.controller,
+        req.replacement_applied,
         events,
     )
 }
 
 /// Result of a batch zone-move (`move_objects_simultaneously`).
 pub(crate) enum BatchMoveResult {
-    /// Every requested object was delivered.
+    /// Every requested object and any inline completion tail were delivered.
     Done,
-    /// A per-object `Moved` replacement surfaced a CR 616.1 choice mid-batch.
-    /// `state.waiting_for` is already parked (with the choosing player) and the
-    /// undelivered tail is stashed in `state.pending_batch_deliveries`, so the
-    /// caller only needs to know that it paused — the resume path
-    /// (`drain_pending_batch_deliveries`) finishes the batch.
+    /// A per-object `Moved` replacement surfaced a CR 616.1 choice while
+    /// delivering the batch or an inline completion tail. `state.waiting_for`
+    /// is already parked (with the choosing player) and the undelivered tail is
+    /// stashed in the active `BatchDelivery` frame, so the caller only needs to
+    /// know that it paused — the resume path (`drain_pending_batch_deliveries`)
+    /// finishes the batch.
     NeedsChoice,
+}
+
+/// Internal batch-loop result carrying the one logical zone-change owner until
+/// its true completion. A pause moves that exact owner into
+/// `PendingBatchDeliveries`, rather than reconstructing a tail-only group.
+enum BatchDeliveryResult {
+    Done(Box<LogicalZoneChangeGroup>),
+    NeedsChoice,
+}
+
+/// Whether a delivery loop began a new child batch or resumed its active owner.
+/// This is structural state, not a boolean: a new batch must not overwrite an
+/// outer BatchDelivery parent, while a resumed batch must replace its exact
+/// owner in place when it pauses again.
+#[derive(Clone, Copy)]
+enum BatchDeliveryParking {
+    NewChild,
+    ReparkActive,
 }
 
 /// CR 603.10a batch entry: move many objects to one destination through the
 /// pipeline as a single simultaneous departure batch (the mill / mass-bounce /
 /// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
 /// redirects (Rest in Peace / Leyline of the Void class) fire on every one;
-/// after the batch completes, CR 603.10a co-departure is stamped over the
-/// attempted set. This is universally safe for non-battlefield origins such as
-/// a mill: `departed_subset` DOES include the milled cards (it filters on
-/// current zone != Battlefield, and a card now in a graveyard passes), but
-/// `mark_simultaneous_departures` only stamps `ZoneChanged` events whose
-/// `from` is `Some(Zone::Battlefield)` (the zones.rs event gate) — a
-/// library-origin move produces no such event, so nothing is stamped.
+/// after the batch completes, its logical owner derives the CR 603.10a
+/// co-departure set from exactly the originally announced battlefield members.
+/// Nonbattlefield batches such as a mill receive an owner with an empty
+/// prospective-member set while still retaining their exact event occurrences.
 ///
 /// On a mid-batch CR 616.1 ordering choice the surfaced prompt is parked and the
-/// undelivered tail is stashed in `state.pending_batch_deliveries`; the resume
-/// path drains it (`drain_pending_batch_deliveries`). The simultaneous-departure
-/// stamp is applied per delivered segment (the realistic single-redirect path
-/// never pauses, so the full batch is stamped together; only two simultaneous
-/// `Moved` redirects on one object can split a batch — no parsed card does, so
-/// the per-segment co-departure grouping in that doubly-rare case is acceptable
-/// and documented rather than threaded across the pause boundary).
+/// undelivered tail is stashed in the active `BatchDelivery` frame; the resume
+/// path drains it (`drain_pending_batch_deliveries`). The owner crosses that
+/// boundary unchanged, so its final settlement covers the whole batch rather
+/// than one delivered segment.
 pub(crate) fn move_objects_simultaneously(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
@@ -859,36 +1158,57 @@ pub(crate) fn move_objects_simultaneously(
 /// reorder; manifest dread graveyard pile + reveal-marker cleanup): the moves run
 /// through the pipeline so each card's `Moved` redirects fire, and the cleanup
 /// that used to run inline at the end of the loop now rides on the parked tail so
-/// a pause can never run it early or twice.
+/// a pause can never run it early or twice. Its return value covers the whole
+/// delivery, including an inline completion tail: `Done` means that tail also
+/// settled; `NeedsChoice` means a CR 616.1 replacement choice parked it. Callers
+/// may therefore restore priority or run their own tail only after `Done`.
 pub(crate) fn move_objects_simultaneously_then(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let event_start = events.len();
+    let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    let logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(state, reqs, &ids, events) {
-        BatchMoveResult::Done => {
+    match deliver_batch(
+        state,
+        reqs,
+        logical_zone_change_group,
+        BatchDeliveryParking::NewChild,
+        events,
+    ) {
+        BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+            crate::game::triggers::complete_logical_zone_trigger_collection(
+                state,
+                &mut logical_zone_change_group,
+                &mut events[event_start..],
+            )
+            .expect("completed batch owns every terminal zone-change outcome");
+            crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                state,
+                &logical_zone_change_group,
+                &events[event_start..],
+            );
             // Synchronous completion (the common single-redirect path): run the
-            // cleanup now.
-            if let Some(completion) = completion {
-                run_batch_completion(state, completion, events);
-            }
-            BatchMoveResult::Done
+            // cleanup now, and surface a pause it raises to the enclosing caller.
+            completion.map_or(BatchMoveResult::Done, |completion| {
+                run_batch_completion(state, completion, events)
+            })
         }
-        BatchMoveResult::NeedsChoice => {
-            // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
-            // it was non-empty; when the paused object was the LAST in the batch
-            // the tail is empty and nothing was stashed. Either way, ensure a
-            // pending record carries the completion so the drain runs it once the
-            // paused object's redirect resolves. `destination` is irrelevant for
-            // an empty tail (no object re-delivers), so the first request's
-            // destination is a safe placeholder.
-            if let Some(completion) = completion {
-                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard)).completion =
-                    Some(completion);
-            }
+        BatchDeliveryResult::NeedsChoice => {
+            // `deliver_batch` always stashes the exact owner, including when the
+            // paused object was the last member and the undelivered tail is empty.
+            // Attach the completion to that same owner so its drain can run it
+            // once, after logical settlement.
+            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            pending.completion = completion;
+            pending.attempted = ids;
+            pending.zone_change_record_start = zone_change_record_start;
+            pending.deferred_events.extend(events.drain(event_start..));
             BatchMoveResult::NeedsChoice
         }
     }
@@ -902,8 +1222,8 @@ fn run_batch_completion(
     state: &mut GameState,
     completion: BatchCompletion,
     events: &mut Vec<GameEvent>,
-) {
-    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
+) -> BatchMoveResult {
+    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events)
 }
 
 /// CR 303.4f / CR 616.1 + CR 603.10a: Hang a [`BatchCompletion`] off the current
@@ -918,13 +1238,22 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
     ensure_batch_record(state, Zone::Graveyard).completion = Some(completion);
 }
 
-/// Return the live parked-batch record, creating an empty-tail one (the
-/// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
-/// to hang a [`BatchCompletion`] off a paused batch.
+/// Return the live parked-batch record, creating an empty-tail one only for a
+/// standalone paused delivery that needs a [`BatchCompletion`]. A batch pause
+/// always arrives here with its original logical owner already stashed.
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
-    state
-        .pending_batch_deliveries
-        .get_or_insert_with(|| PendingBatchDeliveries {
+    if state.active_batch_delivery().is_none() {
+        let zone_change_record_start = state.zone_changes_this_turn.len();
+        let paused_current = state.pending_zone_change_delivery_from_replacement();
+        let announced_members = paused_current
+            .iter()
+            .map(|delivery| delivery.member.object_id)
+            .collect::<Vec<_>>();
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
+        state.push_batch_delivery(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current,
             remaining: Vec::new(),
             destination,
             source_id: None,
@@ -932,35 +1261,80 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             exile_tracking: ZoneDeliveryExileTracking::None,
             library_placement: None,
             completion: None,
-        })
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start,
+            deferred_events: Vec::new(),
+        });
+    }
+    state
+        .active_batch_delivery_mut()
+        .expect("pending batch record was just initialized")
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
-/// `move_object`; on a pause, parks the prompt and stashes the undelivered tail
-/// (rebuilt as `Effect`-cause requests to the same destination — the mill /
-/// mass-bounce attribution). `attempted` is the full id set whose departed
-/// subset is stamped on completion of this segment.
+/// `move_object_with_terminal`; on a pause, parks the prompt and stashes the
+/// undelivered tail with each request's exact heterogeneous context. The exact
+/// same logical owner flows into the parked record, which settles only after
+/// every requested move has a terminal result.
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
-    attempted: &[ObjectId],
+    mut logical_zone_change_group: LogicalZoneChangeGroup,
+    parking: BatchDeliveryParking,
     events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
+) -> BatchDeliveryResult {
+    let segment_start = events.len();
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
-        match move_object(state, req, events) {
-            ZoneMoveResult::Done => {}
-            ZoneMoveResult::NeedsChoice(_) => {
+        let face_down_in_exile = req.face_down_in_exile;
+        let anticipated_pause = anticipated_zone_change_delivery(state, &req);
+        let delivery_start = events.len();
+        let object_id = req.object_id;
+        match move_object_with_terminal(state, req, events) {
+            ZoneMoveTerminalResult::Completed(completion) => {
+                if face_down_in_exile {
+                    mark_face_down_if_exiled(state, object_id);
+                }
+                logical_zone_change_group
+                    .record_delivery_completion(object_id, completion)
+                    .expect("batch member records its exact terminal outcome");
+            }
+            ZoneMoveTerminalResult::NeedsChoice(_) => {
                 // CR 616.1: `move_object` already parked the surfaced prompt
                 // (centralized park at its `replace_event` NeedsChoice arm);
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                stash_batch_tail(state, queue.collect(), destination);
-                return BatchMoveResult::NeedsChoice;
+                let mut paused_current = state
+                    .pending_zone_change_delivery_from_replacement()
+                    .or_else(|| {
+                        anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary
+                        })
+                    })
+                    .expect("parked batch zone change must retain an exact boundary");
+                paused_current.face_down_in_exile = face_down_in_exile;
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[segment_start..delivery_start],
+                )
+                .expect("paused batch retains its exact delivered segment");
+                stash_batch_tail(
+                    state,
+                    logical_zone_change_group,
+                    queue.collect(),
+                    destination,
+                    Some(paused_current),
+                    parking,
+                );
+                return BatchDeliveryResult::NeedsChoice;
             }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
                 // resume path. No batch flow targets a battlefield aura entry
@@ -973,84 +1347,165 @@ fn deliver_batch(
                 // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
                 // chain-resume sibling (engine.rs:3572) both call
                 // `drain_pending_batch_deliveries` when
-                // `pending_batch_deliveries.is_some()`, so the aura-attachment
+                // `active_batch_delivery().is_some()`, so the aura-attachment
                 // pause finishes the parked batch the same way the replacement-
                 // choice resume does. (Updated for d5a12b8c6, which added the
                 // aura-resume drain; the prior note here that the tail would be
                 // "silently drained by the NEXT unrelated resume" is no longer
                 // accurate.)
-                stash_batch_tail(state, queue.collect(), destination);
-                return BatchMoveResult::NeedsChoice;
+                let paused_current = anticipated_pause.map(|mut boundary| {
+                    boundary.append_delivery_events(&events[delivery_start..]);
+                    boundary.mark_counted();
+                    boundary.face_down_in_exile = face_down_in_exile;
+                    boundary
+                });
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[segment_start..delivery_start],
+                )
+                .expect("paused Aura batch retains its exact delivered segment");
+                stash_batch_tail(
+                    state,
+                    logical_zone_change_group,
+                    queue.collect(),
+                    destination,
+                    paused_current,
+                    parking,
+                );
+                return BatchDeliveryResult::NeedsChoice;
             }
         }
     }
-    // CR 603.10a + CR 608.2f: every object that actually left the battlefield in
-    // this segment departed together — stamp co-departure so leaves-the-
-    // battlefield observers among the group see each other via last-known info.
-    // For non-battlefield origins (mill) this is a no-op via the EVENT gate, not
-    // the subset filter: `departed_subset` includes milled cards (their current
-    // zone — graveyard — is not Battlefield), but `mark_simultaneous_departures`
-    // only stamps `ZoneChanged` events with `from: Some(Zone::Battlefield)`, and
-    // a library-origin move emits none.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, attempted));
-    BatchMoveResult::Done
+    BatchDeliveryResult::Done(Box::new(logical_zone_change_group))
+}
+
+fn mark_face_down_if_exiled(state: &mut GameState, object_id: ObjectId) {
+    if let Some(object) = state
+        .objects
+        .get_mut(&object_id)
+        .filter(|object| object.zone == Zone::Exile)
+    {
+        object.face_down = true;
+    }
 }
 
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
-/// can finish it. Captures the batch-uniform request context (CR 400.7
-/// attribution source, CR 614.1c tap-state, exile tracking, explicit library
-/// placement) from the first tail request so the rebuilt requests are
-/// equivalent to the originals — without this the re-stash collapsed every tail
-/// request to `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's
-/// `enter_tapped` mod, ability-source attribution, and reveal-until bottom
-/// placement across the pause boundary.
-///
-/// Batch-uniform contract (mirrors the single-`destination` design): every
-/// batch caller builds requests with one shared mod/attribution set, so the
-/// first tail request is representative. A request whose source equals its own
-/// `object_id` is the self-anchor idiom (mill) and stashes `source_id: None` so
-/// the drain re-anchors each object to itself.
-fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destination: Zone) {
-    let Some(first) = tail.first() else {
-        return;
-    };
-    let source_id = first.source().filter(|&s| s != first.object_id);
-    let enter_tapped = first.mods.enter_tapped;
-    let exile_tracking = first.exile_links.tracking;
-    let library_placement = first.placement.clone();
-    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-        remaining: tail.into_iter().map(|r| r.object_id).collect(),
+/// can finish it. New saves serialize every request's complete heterogeneous
+/// context. The legacy uniform projection remains populated for old-save wire
+/// compatibility but is not authoritative for newly parked actions.
+fn stash_batch_tail(
+    state: &mut GameState,
+    logical_zone_change_group: LogicalZoneChangeGroup,
+    tail: Vec<ZoneMoveRequest>,
+    destination: Zone,
+    paused_current: Option<PendingZoneChangeDelivery>,
+    parking: BatchDeliveryParking,
+) {
+    let source_id = tail
+        .first()
+        .and_then(|first| first.source().filter(|&source| source != first.object_id));
+    let enter_tapped = tail
+        .first()
+        .map_or(EtbTapState::Unspecified, |first| first.mods.enter_tapped);
+    let exile_tracking = tail
+        .first()
+        .map_or(ZoneDeliveryExileTracking::None, |first| {
+            first.exile_links.tracking
+        });
+    let library_placement = tail.first().and_then(|first| first.placement.clone());
+    let replacement_applied = tail
+        .first()
+        .map_or_else(HashSet::new, |first| first.replacement_applied.clone());
+    let remaining = tail.iter().map(|request| request.object_id).collect();
+    let requests = tail
+        .into_iter()
+        .map(ZoneMoveRequest::into_pending)
+        .collect();
+    let pending = PendingBatchDeliveries {
+        logical_zone_change_group,
+        paused_current,
+        remaining,
         destination,
         source_id,
         enter_tapped,
         exile_tracking,
         library_placement,
+        replacement_applied,
         // The post-loop cleanup (if any) is attached by the batch caller after
         // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
         // has no completion to stash.
         completion: None,
-    });
+        requests,
+        attempted: Vec::new(),
+        zone_change_record_start: state.zone_changes_this_turn.len(),
+        deferred_events: Vec::new(),
+    };
+    match parking {
+        BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
+        BatchDeliveryParking::ReparkActive => state
+            .replace_active_batch_delivery(pending)
+            .expect("re-paused batch delivery must own the active frame"),
+    }
+}
+
+/// Captures the pre-delivery identity and the proposed event a batch member is
+/// about to attempt. Replacement pauses overwrite this with the authoritative
+/// parked `PendingReplacement` event; Aura/copy-target pauses retain this
+/// request-derived event because their prompt is surfaced after delivery.
+fn anticipated_zone_change_delivery(
+    state: &GameState,
+    request: &ZoneMoveRequest,
+) -> Option<PendingZoneChangeDelivery> {
+    let object = state.objects.get(&request.object_id)?;
+    let mut expected_event =
+        ProposedEvent::zone_change(request.object_id, object.zone, request.to, request.source());
+    if let ProposedEvent::ZoneChange {
+        enter_tapped,
+        enters_attacking,
+        enter_transformed,
+        controller_override,
+        enter_with_counters,
+        face_down_profile,
+        chain_referent,
+        attach_to,
+        applied,
+        ..
+    } = &mut expected_event
+    {
+        *enter_tapped = request.mods.enter_tapped;
+        *enters_attacking = request.mods.enters_attacking;
+        *enter_transformed = request.mods.enter_transformed;
+        *controller_override = request.mods.controller_override;
+        *enter_with_counters = request.mods.enter_with_counters.clone();
+        *face_down_profile = request.mods.face_down_profile.clone().map(Box::new);
+        *chain_referent = request.mods.chain_referent;
+        *attach_to = request.mods.attach_to;
+        *applied = request.replacement_applied.clone();
+    }
+    Some(PendingZoneChangeDelivery::new(
+        crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+        expected_event,
+    ))
 }
 
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
 /// per-object replacement choice that paused it resolved (and its object's
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
-/// the next object surfaces its own prompt. Rebuilds each tail request with the
-/// stashed batch-uniform context (attribution source, tap-state, exile
-/// tracking, library placement) so the resumed deliveries match the originals.
+/// the next object surfaces its own prompt. Rebuilds each tail request from its
+/// exact serialized context so heterogeneous destinations, causes, entry mods,
+/// exile links, and placements all match the original action.
 ///
 /// RE-PAUSE CONTRACT (the explicit guarantee for "a LATER item in the same batch
 /// parks after the first one already parked and was resumed"): everything a batch
 /// needs to finish identically across an arbitrary number of sequential parks is
-/// held in `state.pending_batch_deliveries` — NOT on the stack and NOT in the
-/// resuming caller — so each park can re-stash it for the next one:
+/// held in the active `BatchDelivery` frame — not in the resuming caller — so
+/// each park can replace that exact owner for the next one:
 ///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
 ///     still-undelivered suffix on every re-park, so no object is ever dropped;
-///   * the **batch-uniform request context** (`destination`, `source_id`,
-///     `enter_tapped`, `exile_tracking`, `library_placement`) — re-applied to
-///     every rebuilt request so the second-park resume produces requests
-///     equivalent to the originals (e.g. seek's `enter_tapped`, mill's
-///     self-anchored attribution, reveal-until's bottom placement);
+///   * the **exact request context** (`requests`) — every undelivered request
+///     retains its own destination, cause, entry mods, placement, exile links,
+///     and applied replacements;
 ///   * the **post-loop `completion`** — taken out here, then re-attached via
 ///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
 ///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
@@ -1063,47 +1518,122 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if let Some(pending) = state.pending_batch_deliveries.take() {
-        let completion = pending.completion;
-        let ids = pending.remaining.clone();
-        let reqs: Vec<ZoneMoveRequest> = pending
-            .remaining
-            .into_iter()
-            .map(|obj_id| {
-                let mut req = ZoneMoveRequest::effect(
-                    obj_id,
-                    pending.destination,
-                    pending.source_id.unwrap_or(obj_id),
+    if let Some(pending) = state.active_batch_delivery().cloned() {
+        let PendingBatchDeliveries {
+            mut logical_zone_change_group,
+            paused_current,
+            remaining,
+            destination,
+            source_id,
+            enter_tapped,
+            exile_tracking,
+            library_placement,
+            completion,
+            replacement_applied,
+            requests,
+            attempted,
+            zone_change_record_start,
+            mut deferred_events,
+        } = pending;
+        deferred_events.append(events);
+        let attempted = if attempted.is_empty() {
+            remaining.clone()
+        } else {
+            attempted
+        };
+        let reqs: Vec<ZoneMoveRequest> = if requests.is_empty() {
+            remaining
+                .into_iter()
+                .map(|obj_id| {
+                    let mut req =
+                        ZoneMoveRequest::effect(obj_id, destination, source_id.unwrap_or(obj_id));
+                    req.mods.enter_tapped = enter_tapped;
+                    req.exile_links.tracking = exile_tracking;
+                    if let Some(position) = library_placement.clone() {
+                        req = req.at_library_position(position);
+                    }
+                    req.replacement_applied = replacement_applied.clone();
+                    req
+                })
+                .collect()
+        } else {
+            requests
+                .into_iter()
+                .map(ZoneMoveRequest::from_pending)
+                .collect()
+        };
+        if let Some(paused_current) = paused_current {
+            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                state,
+                &mut logical_zone_change_group,
+                &paused_current.delivery_events,
+            )
+            .expect("resumed batch retains its exact paused delivery");
+            let terminal_completion = paused_current
+                .terminal_completion
+                .expect("resumed batch delivery records its exact terminal completion");
+            logical_zone_change_group
+                .record_delivery_completion(paused_current.member.object_id, terminal_completion)
+                .expect("resumed batch member records its exact terminal outcome");
+        }
+        match deliver_batch(
+            state,
+            reqs,
+            logical_zone_change_group,
+            BatchDeliveryParking::ReparkActive,
+            events,
+        ) {
+            BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+                crate::game::triggers::complete_logical_zone_trigger_collection(
+                    state,
+                    &mut logical_zone_change_group,
+                    events,
+                )
+                .expect("completed batch drain owns every terminal zone-change outcome");
+                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                    &logical_zone_change_group,
+                    &mut deferred_events,
                 );
-                req.mods.enter_tapped = pending.enter_tapped;
-                req.exile_links.tracking = pending.exile_tracking;
-                if let Some(position) = pending.library_placement.clone() {
-                    req = req.at_library_position(position);
-                }
-                req
-            })
-            .collect();
-        let destination = pending.destination;
-        match deliver_batch(state, reqs, &ids, events) {
-            BatchMoveResult::Done => {
-                // CR 603.10a + CR 616.1: the whole pile has now landed. Run the
-                // post-loop cleanup exactly once on true completion (it never ran
-                // inline because the loop paused). `Done` here is reachable only
-                // when `deliver_batch` did NOT re-park, so the completion fires at
-                // most once per batch.
+                deferred_events.append(events);
+                events.append(&mut deferred_events);
+                // This completed owner has already collected every one of its
+                // retained ZoneChanged occurrences.  The replacement-resume
+                // action still reaches the generic priority scan, so claim the
+                // exact occurrences now rather than collecting them a second
+                // time through that scan.
+                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                    state,
+                    &logical_zone_change_group,
+                    events,
+                );
+                state
+                    .take_active_batch_delivery()
+                    .expect("settled batch delivery must own the active frame")
+                    .expect("settled batch delivery frame must exist");
+                // CR 603.10a + CR 616.1: logical settlement has completed before
+                // the one post-batch cleanup can run.
                 if let Some(completion) = completion {
-                    run_batch_completion(state, completion, events);
+                    // The parked/settled result is deliberately unused here: the
+                    // drain's callers are state-mediated (engine_replacement
+                    // re-reads `state.waiting_for` after the drain and gates
+                    // every later drain stage on Priority), so a completion that
+                    // parks a new CR 616.1 choice propagates via the parked
+                    // prompt + fresh BatchDelivery frame, not via
+                    // this return value. Witnessed by the compound double-pause
+                    // test (miss batch redirect, then hit-delivery redirect).
+                    let _ = run_batch_completion(state, completion, events);
                 }
             }
-            BatchMoveResult::NeedsChoice => {
-                // Re-parked on the next object's CR 616.1 choice;
-                // `deliver_batch` stashed a fresh tail (or, when the re-paused
-                // object was the last in the tail, stashed nothing — create an
-                // empty record). Re-attach the cleanup so it survives the next
-                // pause boundary and runs once the remaining tail finally drains.
-                if let Some(completion) = completion {
-                    ensure_batch_record(state, destination).completion = Some(completion);
-                }
+            BatchDeliveryResult::NeedsChoice => {
+                // `deliver_batch` already re-parked the exact same owner,
+                // including a pause on its final member. Re-attach only the
+                // completion and external output; never replace that owner.
+                let reparking = ensure_batch_record(state, destination);
+                reparking.completion = completion;
+                reparking.attempted = attempted;
+                reparking.zone_change_record_start = zone_change_record_start;
+                deferred_events.append(events);
+                reparking.deferred_events = deferred_events;
             }
         }
     }
@@ -1128,6 +1658,7 @@ pub(crate) fn deliver(
         approved.event,
         ctx.source_id,
         ctx.exile_links.duration.as_ref(),
+        ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
         // CR 701.24a: most `deliver` callers (bucket-A destroy / sacrifice / SBA /
@@ -1193,8 +1724,10 @@ fn append_zone_delivery_tail_after_counter_pause(
     cause: Option<ObjectId>,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
+    enters_attacking: bool,
     clear_pending_etb_counters: Option<ObjectId>,
 ) -> ZoneDeliveryResult {
     let mut actions = Vec::new();
@@ -1208,8 +1741,10 @@ fn append_zone_delivery_tail_after_counter_pause(
         cause,
         source_id,
         duration: duration.cloned(),
+        exile_controller,
         exile_tracking,
         drain,
+        enters_attacking,
     });
     crate::game::effects::counters::append_pending_counter_post_actions(state, actions);
     replacement_pause_delivery_result(state)
@@ -1224,6 +1759,7 @@ pub(crate) fn apply_zone_delivery_tail(
     cause: Option<ObjectId>,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
     // CR 701.24a: when a specific library position was requested, the object was
@@ -1260,14 +1796,22 @@ pub(crate) fn apply_zone_delivery_tail(
         if let Some(source_id) = cause.or(source_id) {
             let kind = match duration {
                 Some(Duration::UntilHostLeavesPlay) => {
-                    ExileLinkKind::UntilSourceLeaves { return_zone: from }
+                    Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
+                }
+                Some(Duration::UntilOpponentBecomesMonarch) => {
+                    exile_controller.map(|controller| ExileLinkKind::UntilOpponentBecomesMonarch {
+                        return_zone: from,
+                        controller,
+                    })
                 }
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
-                    ExileLinkKind::TrackedBySource
+                    Some(ExileLinkKind::TrackedBySource)
                 }
-                _ => return ZoneDeliveryResult::Done,
+                _ => None,
             };
-            crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            if let Some(kind) = kind {
+                crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            }
         }
     }
     // CR 614.12a: Drain mandatory replacement post-effects after the zone
@@ -1288,7 +1832,7 @@ pub(crate) fn apply_zone_delivery_tail(
     // only after `apply_pending_spell_resolution` (Phase-B divergence
     // reconciliation — the tail is parameterized instead of copied).
     if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
-        && state.post_replacement_continuation.is_some()
+        && state.has_post_replacement_drain()
     {
         // CR 603.6d + CR 614.12a: For an "as-enters" (battlefield-entry) Moved
         // post-effect, the effect resolves against the zone-changing object (the
@@ -1307,7 +1851,7 @@ pub(crate) fn apply_zone_delivery_tail(
         // must keep the host source slot — its post-effect belongs to the host,
         // not the moved card.
         if to == Zone::Battlefield {
-            state.post_replacement_source = None;
+            state.clear_post_replacement_source();
         }
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
@@ -1318,6 +1862,25 @@ pub(crate) fn apply_zone_delivery_tail(
         );
         if let Some(wf) = waiting_for {
             if !matches!(wf, WaitingFor::Priority { .. }) {
+                if matches!(wf, WaitingFor::CopyTargetChoice { .. }) {
+                    if let Some(LiminalEntryKind::Meld {
+                        context,
+                        attack_target,
+                        ..
+                    }) = state
+                        .liminal_entries
+                        .get(&object_id)
+                        .map(|entry| entry.kind.clone())
+                    {
+                        state.pending_liminal_entry_resume =
+                            Some(PendingLiminalEntryResume::Meld {
+                                source_id: object_id,
+                                player: wf.acting_player().unwrap_or(state.active_player),
+                                context,
+                                attack_target,
+                            });
+                    }
+                }
                 state.waiting_for = wf;
                 return replacement_pause_delivery_result(state);
             }
@@ -1326,8 +1889,40 @@ pub(crate) fn apply_zone_delivery_tail(
     ZoneDeliveryResult::Done
 }
 
+/// CR 614.12 + CR 303.4f: the characteristics the CR 303.4f/g consult must read
+/// for `object_id` — "the characteristics of the permanent as it would exist on
+/// the battlefield".
+///
+/// A liminal entry IS that projection, and while it is pending the object still
+/// stored under the same id is the entrant's PRE-entry self: for a meld
+/// (`LiminalEntryKind::Meld`) that is the exiled front-face component card, which
+/// is not an Aura and carries none of the result face's `Enchant` abilities.
+/// Reading `state.objects` alone therefore made the consult blind to every
+/// card-backed liminal Aura entrant. Same dual lookup, in the same precedence,
+/// that the intrinsic enter-with-counters seeding in
+/// `consult_and_deliver_zone_change` and `copy_effect_for_source` already use.
+fn entering_object_projection(state: &GameState, object_id: ObjectId) -> Option<&GameObject> {
+    state
+        .liminal_entries
+        .get(&object_id)
+        .map(|entry| entry.object.projected())
+        .or_else(|| state.objects.get(&object_id))
+}
+
 fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {
-    let obj = state.objects.get(&object_id)?;
+    aura_enchant_filter_of(entering_object_projection(state, object_id)?)
+}
+
+/// CR 303.4 + CR 702.5: the Enchant ability an ENTRANT will have on the
+/// battlefield, read from an explicitly supplied projection.
+///
+/// Split from [`aura_enchant_filter`] so a seam holding a projection that is not
+/// (yet) the object stored under its id can consult it — CR 614.12's "the
+/// characteristics of the permanent as it would exist on the battlefield". Two
+/// seams need that: a liminal entrant, whose id still holds the pre-entry
+/// component card, and a non-liminal copy token whose CR 707.9 exceptions are
+/// applied by a later, unjournaled seam.
+pub(crate) fn aura_enchant_filter_of(obj: &GameObject) -> Option<TargetFilter> {
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         return None;
     }
@@ -1354,25 +1949,77 @@ fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetF
     }
 }
 
+/// CR 303.4f: the legal hosts for an entering Aura.
+///
+/// `entrant` is the CR 614.12 projection of the ATTACHMENT — the characteristics
+/// the Aura will have on the battlefield. Every host-legality check below that
+/// reads the attachment side reads it, never `state.objects[aura_id]`: for a
+/// liminal entrant that id still holds the pre-entry component card (a meld's
+/// exiled front face), whose typeline, colors and controller are not the entering
+/// permanent's, and for a non-liminal copy token the CR 707.9 exceptions have not
+/// been stamped onto the stored object yet.
 fn legal_aura_attachment_targets(
     state: &GameState,
     aura_id: ObjectId,
+    entrant: Option<&GameObject>,
     controller: PlayerId,
     enchant_filter: &TargetFilter,
 ) -> Vec<TargetRef> {
     let ctx = crate::game::filter::FilterContext::from_source_with_controller(aura_id, controller);
-    let mut targets: Vec<TargetRef> = state
-        .battlefield
-        .iter()
-        .copied()
+    // CR 303.4f: the controller chooses a legal object per the Aura's current
+    // enchant ability. Enumerate candidate hosts across whatever zone(s) that
+    // ability implies — an ordinary Aura (Pacifism) imposes no zone property and
+    // defaults to the battlefield, while a graveyard/hand-scoped enchant ability
+    // (Animate Dead, Dance of the Dead, Spellweaver Volute, Don't Worry About It)
+    // carries a `FilterProp::InZone`/`InAnyZone` that `extract_zones` surfaces.
+    // Mirrors `object_count_matching_ids` in `game/quantity.rs`. Using
+    // `zone_object_ids` for the battlefield case also (correctly) excludes
+    // phased-out permanents per CR 702.26b — they're treated as nonexistent and
+    // can never be a legal new host.
+    let zones = enchant_filter.extract_zones();
+    let zones = if zones.is_empty() {
+        vec![Zone::Battlefield]
+    } else {
+        zones
+    };
+    let mut targets: Vec<TargetRef> = zones
+        .into_iter()
+        .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+        // CR 303.4d: an Aura can't enchant itself.
         .filter(|id| *id != aura_id)
+        // CR 115.1b + CR 303.4f: this consult is a controller CHOICE, not a
+        // targeting event (an Aura permanent doesn't target) — use
+        // `matches_target_filter`, never the `find_legal_targets` enumerator, so
+        // hexproof (CR 702.11) / shroud (CR 702.18) never remove a legal host.
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
-        .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
+        // CR 701.3a + CR 702.16c: host-side prohibitions and protection, read
+        // against the CR 614.12 entrant projection so a protection or
+        // attachment-restriction match is computed from the characteristics the
+        // permanent will have on the battlefield.
+        .filter(|id| {
+            crate::game::effects::attach::can_attach_to_object_projected(
+                state, aura_id, entrant, *id,
+            )
+        })
         .map(TargetRef::Object)
         .collect();
 
     targets.extend(state.players.iter().filter_map(|player| {
-        if player.is_eliminated || player.is_phased_out() {
+        // Hygiene routing, behaviour-neutral by construction: `is_eliminated ||
+        // is_phased_out()` on an iterated member is the negation of what
+        // `players::player_exists_for_choice` spells for a member already known to be in
+        // `state.players`. Routed so an existence fix propagates here for free.
+        if !crate::game::players::player_exists_for_choice(state, player.id) {
+            return None;
+        }
+        // CR 303.4c + CR 702.16c: the player-host mirror of the object-host
+        // legality filter above. Without it an illegal player counts as a legal
+        // host, which suppresses the CR 303.4g denial: the Curse token copy is
+        // created, `attach_to_player` no-ops on the illegality, and CR 704.5m
+        // sweeps it — exactly the entered-then-died bug this seam exists to
+        // prevent, on the player axis.
+        if !crate::game::effects::attach::can_attach_to_player_projected(state, entrant, player.id)
+        {
             return None;
         }
         if crate::game::filter::player_matches_target_filter_in_state(
@@ -1380,6 +2027,7 @@ fn legal_aura_attachment_targets(
             enchant_filter,
             player.id,
             Some(controller),
+            Some(aura_id),
         ) {
             Some(TargetRef::Player(player.id))
         } else {
@@ -1388,6 +2036,1153 @@ fn legal_aura_attachment_targets(
     }));
 
     targets
+}
+
+/// CR 303.4g: the fate of an Aura that is entering the battlefield when "there
+/// is no legal object or player for it to enchant".
+///
+/// Three outcomes, because the rule states three — and NONE of them is "enter
+/// unattached and let the CR 704.5m state-based action sweep it". The rule
+/// denies the entry itself, so a seam that can still decide must decide here;
+/// anything the game could observe of that entry is an event the rules say never
+/// happened.
+pub(crate) enum UnhostedAuraEntry {
+    /// CR 303.4g: "If the Aura is a token, it isn't created."
+    NotCreated,
+    /// CR 303.4g: "the Aura remains in its current zone" — the entry does not
+    /// happen and the card stays exactly where it was.
+    RemainInCurrentZone,
+    /// CR 303.4g: "…unless that zone is the stack. In that case, the Aura is put
+    /// into its owner's graveyard instead of entering the battlefield."
+    OwnersGraveyard,
+}
+
+/// CR 303.4g: select the disposition from the two facts the rule keys on — the
+/// entrant's CR 111.1 token-ness, and the zone it is entering from.
+///
+/// Every entrant this authority answers for HAS a from-zone, because both of the
+/// rule's non-token dispositions are phrased against one ("remains in its
+/// current zone", "unless that zone is the stack"). That is the whole population
+/// of the `ProposedEvent::ZoneChange` entry path. The other entry path,
+/// `ProposedEvent::TokenEntry`, carries a `LiminalEntrant::Token` — a CR 111.1
+/// token, in no zone at all — for which the rule's token clause is the only
+/// applicable disposition, so that seam never asks this question.
+pub(crate) fn unhosted_aura_entry(entrant: &GameObject, from: Zone) -> UnhostedAuraEntry {
+    // CR 111.1: token-ness is the ONLY discriminator the rule's token clause
+    // names, and it outranks the origin — a token is not created regardless of
+    // which zone the effect was putting it onto the battlefield from.
+    if entrant.is_token {
+        return UnhostedAuraEntry::NotCreated;
+    }
+    match from {
+        Zone::Stack => UnhostedAuraEntry::OwnersGraveyard,
+        _ => UnhostedAuraEntry::RemainInCurrentZone,
+    }
+}
+
+/// Disposition of an object that has just become an Aura while already on the
+/// battlefield (the copy path — see [`resolve_entering_aura_attachment`]).
+///
+/// `Attached` and `NoLegalHost` are deliberately distinct even though neither
+/// raises a prompt: CR 303.4g gives the no-host case its OWN rule ("the Aura
+/// remains in its current zone … If the Aura is a token, it isn't created"),
+/// which a caller that can still decline to create the entrant must be able to
+/// act on. Collapsing them loses exactly that information.
+pub(crate) enum EnteringAuraAttachment {
+    /// The object is not an Aura needing attachment (not an Aura, an Aura that's
+    /// also a creature per CR 303.4d, or already attached).
+    NotApplicable,
+    /// CR 303.4f: attachment resolved without a player choice — the sole legal
+    /// host was auto-attached.
+    Attached,
+    /// CR 303.4g: there is no legal object or player for the Aura to enchant.
+    /// The Aura was left unattached; what that means is the caller's decision
+    /// (see the callers' own CR 303.4g/CR 704.5m rationale).
+    NoLegalHost,
+    /// CR 303.4f: multiple legal hosts, so the controller must choose one.
+    NeedsChoice {
+        controller: PlayerId,
+        legal_targets: Vec<TargetRef>,
+    },
+}
+
+/// CR 303.4f + CR 303.4g: Resolve the enter-time attachment for an object that
+/// has BECOME an Aura while already on the battlefield.
+///
+/// The normal aura entry attaches during `move_object`, before the permanent is
+/// on the battlefield, via the entry event's `attach_to` slot (see the
+/// `aura_enchant_filter` consult in `consult_and_deliver_zone_change`). A
+/// permanent that enters as a plain enchantment and only becomes an Aura when
+/// its `BecomeCopy` replacement resolves (Copy Enchantment, Estrid's Invocation)
+/// never passed through that slot — `BecomeCopy` is realized post-entry — so its
+/// attachment is resolved here, once the copy is realized and layers are
+/// flushed.
+///
+/// CR 303.4f: because the Aura is entering by a means other than resolving as an
+/// Aura spell and the effect doesn't specify a host, its controller chooses what
+/// it enchants. CR 303.4g: with no legal host the Aura can't enter — this
+/// function reports that as [`EnteringAuraAttachment::NoLegalHost`] and leaves
+/// the object untouched, because only the CALLER knows whether the entrant can
+/// still be withheld (a token that isn't created) or has already entered and is
+/// therefore the CR 704.5m unattached-Aura SBA's problem.
+///
+/// Composed from [`entering_aura_hosts`] (decide) and
+/// [`apply_entering_aura_hosts`] (act), which a caller that must interpose an
+/// irreversible step between the two — the liminal token path, whose CR 733
+/// birth journal append is append-only and must not be written for a token CR
+/// 303.4g says isn't created — invokes separately.
+pub(crate) fn resolve_entering_aura_attachment(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> EnteringAuraAttachment {
+    let hosts = entering_aura_hosts(state, object_id);
+    apply_entering_aura_hosts(state, object_id, hosts)
+}
+
+/// The legal hosts an entering Aura may be attached to, decided but NOT applied.
+///
+/// `Hosts::legal_targets` may be empty — that IS the CR 303.4g case, and it is
+/// reported rather than acted on so a caller can answer CR 303.4g's "if the Aura
+/// is a token, it isn't created" BEFORE taking any step it cannot take back.
+pub(crate) enum EnteringAuraHosts {
+    /// Same disposition as [`EnteringAuraAttachment::NotApplicable`].
+    NotApplicable,
+    Hosts {
+        controller: PlayerId,
+        legal_targets: Vec<TargetRef>,
+        /// CR 614.12: the object whose characteristics `legal_targets` was
+        /// decided against, carried so the act half can judge CR 701.3a legality
+        /// against the SAME object rather than re-deriving it from the id.
+        entrant: EnteringAuraEntrant,
+    },
+}
+
+/// CR 614.12: which object an entering Aura's attachment legality is judged
+/// against — the decide half's finding, carried to the act half.
+///
+/// The two halves are separated by at least a function boundary and, on the
+/// multi-host route, by a player-choice pause. Deriving the attachment side
+/// twice is what let them disagree: CR 303.4f offers a host that is legal for
+/// the Aura AS IT ENTERS, and CR 701.3b silently no-ops an attach at a host the
+/// gate then judges illegal. Naming the authority instead of re-deriving it
+/// makes that disagreement unrepresentable.
+#[derive(Debug, Clone)]
+pub(crate) enum EnteringAuraEntrant {
+    /// The object stored under the Aura's id already IS the entrant, so the act
+    /// half reads it LIVE. Deliberately not a snapshot: for these seams the
+    /// permanent is already on the battlefield with its final characteristics,
+    /// and a stale clone could only mask a legitimate mid-flight change.
+    Stored,
+    /// The stored object is not the entrant yet — the deciding seam supplied a
+    /// projection (a CR 707.9 copy exception applied by a later seam, or a
+    /// liminal entry whose id still holds the pre-entry component). The act half
+    /// must use it, or it will judge a different object than the chooser was
+    /// offered.
+    Projected(Box<GameObject>),
+}
+
+impl EnteringAuraEntrant {
+    /// The borrowed view the CR 701.3a legality gate consumes.
+    fn authority(&self) -> crate::game::effects::attach::AttachmentAuthority<'_> {
+        match self {
+            Self::Stored => crate::game::effects::attach::AttachmentAuthority::Stored,
+            Self::Projected(entrant) => {
+                crate::game::effects::attach::AttachmentAuthority::Projected(entrant)
+            }
+        }
+    }
+}
+
+/// Decide half of [`resolve_entering_aura_attachment`] — pure with respect to
+/// the game state.
+pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> EnteringAuraHosts {
+    // CR 614.12: a LIVE liminal entry means the id's stored object is not the
+    // entrant (a meld's exiled front face, a token whose body is still parked),
+    // so the projection has to travel to the act half as well — the same class
+    // of decide/act disagreement the copy-token seam hits. No production caller
+    // of this function reaches it with a live entry today (the liminal token
+    // seam removes its entry before consulting, and every
+    // `resolve_entering_aura_attachment` caller runs on a realized battlefield
+    // permanent), so this arm closes the class rather than fixing a live bug.
+    if let Some(entry) = state.liminal_entries.get(&object_id) {
+        let entrant = entry.object.projected().clone();
+        return entering_aura_hosts_projected(state, object_id, &entrant);
+    }
+    let Some(entrant) = state.objects.get(&object_id) else {
+        return EnteringAuraHosts::NotApplicable;
+    };
+    entering_aura_hosts_with(
+        state,
+        object_id,
+        entrant,
+        // Read live by the act half: for these seams the stored object IS the
+        // entrant, and this preserves their exact pre-existing behaviour.
+        EnteringAuraEntrant::Stored,
+    )
+}
+
+/// CR 614.12: [`entering_aura_hosts`] against an explicitly supplied projection
+/// of the ENTRANT.
+///
+/// The non-liminal copy-token seam owns a projection its stored object does not
+/// match yet: on that path the CR 707.9b/9c "except …" exceptions are applied by
+/// a later, unjournaled seam (`apply_token_modifications`), so the object under
+/// this id still carries the UNMODIFIED copied body. An exception that adds or
+/// removes `Creature` (CR 303.4d), adds or removes the `Aura` subtype, or changes
+/// the entrant's colors (CR 702.16c protection) flips this verdict — and a wrong
+/// verdict here is a token silently never created (CR 303.4g). The liminal seam
+/// folds the same exceptions BEFORE its own consult, so passing the projection is
+/// what makes the two seams agree on what the entrant is.
+pub(crate) fn entering_aura_hosts_projected(
+    state: &GameState,
+    object_id: ObjectId,
+    entrant: &GameObject,
+) -> EnteringAuraHosts {
+    entering_aura_hosts_with(
+        state,
+        object_id,
+        entrant,
+        // The whole point of the projected entry point: the act half must judge
+        // CR 701.3a legality against this object, not against the id's stored
+        // one, or CR 303.4f can offer a host CR 701.3b then refuses to attach to.
+        EnteringAuraEntrant::Projected(Box::new(entrant.clone())),
+    )
+}
+
+/// Shared body of [`entering_aura_hosts`] and [`entering_aura_hosts_projected`],
+/// parameterized by which object the act half must judge legality against.
+fn entering_aura_hosts_with(
+    state: &GameState,
+    object_id: ObjectId,
+    entrant: &GameObject,
+    authority: EnteringAuraEntrant,
+) -> EnteringAuraHosts {
+    let Some(enchant_filter) = aura_enchant_filter_of(entrant) else {
+        return EnteringAuraHosts::NotApplicable;
+    };
+    // Existence and battlefield residency are read from the STORED object: they
+    // are facts about where the entrant is, which no projection may override.
+    let Some(obj) = state.objects.get(&object_id) else {
+        return EnteringAuraHosts::NotApplicable;
+    };
+    // CR 303.4 + CR 704.5m: entry-time attachment only applies to an Aura that is
+    // actually on the battlefield. Defensive guard — if an intermediate entry
+    // trigger or replacement moved the realized copy off the battlefield before
+    // this runs (it is the LAST step of `finish_copy_target_choice_entry`),
+    // attaching it or prompting for a host of a non-battlefield Aura would be
+    // invalid state; do nothing and let it resolve wherever it now lives.
+    if obj.zone != Zone::Battlefield {
+        return EnteringAuraHosts::NotApplicable;
+    }
+    // Only resolve entry attachment for an as-yet-unattached Aura; a copy that
+    // was already attached by some other effect must not be re-homed here.
+    if obj.attached_to.is_some() {
+        return EnteringAuraHosts::NotApplicable;
+    }
+    // CR 303.4f: "that player" is the entrant's controller — read from the
+    // projection, which is where a controller-changing entry effect lands first.
+    let controller = entrant.controller;
+    EnteringAuraHosts::Hosts {
+        legal_targets: legal_aura_attachment_targets(
+            state,
+            object_id,
+            Some(entrant),
+            controller,
+            &enchant_filter,
+        ),
+        controller,
+        entrant: authority,
+    }
+}
+
+/// Act half of [`resolve_entering_aura_attachment`]: attach the sole legal host
+/// (CR 303.4f), or report the disposition the caller must handle.
+///
+/// CR 303.4f + CR 701.3b: every attach below goes through the decide half's
+/// [`EnteringAuraEntrant`]. The act half must not re-derive the attachment's
+/// characteristics from `object_id` — on the non-liminal copy-token seam that id
+/// still holds the pre-exception body, so a re-derived CR 701.3a gate can reject
+/// a host CR 303.4f legally offered and (CR 701.3b) no-op the attach, leaving the
+/// Aura for the CR 704.5m sweep.
+pub(crate) fn apply_entering_aura_hosts(
+    state: &mut GameState,
+    object_id: ObjectId,
+    hosts: EnteringAuraHosts,
+) -> EnteringAuraAttachment {
+    // Any authority parked by an earlier entering-Aura decision is spent or
+    // stale by the time another one is being ACTED on: the only way to reach
+    // this function with one parked is to have resumed past that pause (which
+    // takes it) or to have abandoned it. Cleared here rather than at the pause
+    // so no path can leave one behind.
+    state.entering_aura_authority = None;
+    let EnteringAuraHosts::Hosts {
+        controller,
+        legal_targets,
+        entrant,
+    } = hosts
+    else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
+    match legal_targets.as_slice() {
+        // CR 303.4g: no legal object or player to enchant — report it and let the
+        // caller decide the entrant's fate.
+        [] => EnteringAuraAttachment::NoLegalHost,
+        [TargetRef::Object(id)] => {
+            crate::game::effects::attach::attach_to_with_authority(
+                state,
+                object_id,
+                *id,
+                entrant.authority(),
+            );
+            EnteringAuraAttachment::Attached
+        }
+        [TargetRef::Player(id)] => {
+            crate::game::effects::attach::attach_to_player_with_authority(
+                state,
+                object_id,
+                *id,
+                entrant.authority(),
+            );
+            EnteringAuraAttachment::Attached
+        }
+        _ => {
+            // CR 303.4f: the choice returns to the event loop, so the entrant has
+            // to outlive this stack frame for the resume path's gate. Only a
+            // genuine projection is parked — a `Stored` authority would freeze a
+            // snapshot the resume path is better off reading live, and parking
+            // nothing is exactly the pre-existing behaviour every non-projected
+            // seam (Copy Enchantment's `BecomeCopy`, `ReturnAsAura`, the plain
+            // ZoneChange entry) already has.
+            if let EnteringAuraEntrant::Projected(entrant) = entrant {
+                state.entering_aura_authority = Some(EnteringAuraAuthority {
+                    aura_id: object_id,
+                    entrant,
+                });
+            }
+            EnteringAuraAttachment::NeedsChoice {
+                controller,
+                legal_targets,
+            }
+        }
+    }
+}
+
+/// CR 303.4f + CR 701.3b: attach an entering Aura to the host its controller
+/// chose, judged against the entrant the choice was offered for.
+///
+/// The single authority behind the `WaitingFor::ReturnAsAuraTarget` resume arm's
+/// attach. That arm is shared by seams that park no
+/// [`EnteringAuraAuthority`] — `ReturnAsAura` (Old-Growth Troll), the plain
+/// non-spell Aura ZoneChange entry, and the on-battlefield `BecomeCopy`
+/// realization — and for all of those the absent authority selects
+/// [`EnteringAuraEntrant::Stored`], i.e. byte-for-byte the `attach_to` /
+/// `attach_to_player` behaviour they had before.
+pub(crate) fn attach_chosen_entering_aura_host(
+    state: &mut GameState,
+    aura_id: ObjectId,
+    chosen: &TargetRef,
+) -> Option<TargetRef> {
+    // Taken unconditionally: a parked authority belongs to exactly one pause, so
+    // whichever pause is resuming, it must not survive into a later one. It is
+    // then honoured only for the Aura it was parked for.
+    let parked = state
+        .entering_aura_authority
+        .take()
+        .filter(|authority| authority.aura_id == aura_id)
+        .map(|authority| EnteringAuraEntrant::Projected(authority.entrant));
+    let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
+    match chosen {
+        TargetRef::Object(host_id) => crate::game::effects::attach::attach_to_with_authority(
+            state,
+            aura_id,
+            *host_id,
+            entrant.authority(),
+        ),
+        TargetRef::Player(host_player) => {
+            crate::game::effects::attach::attach_to_player_with_authority(
+                state,
+                aura_id,
+                *host_player,
+                entrant.authority(),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod entering_aura_attachment_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn creature(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_100),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        id
+    }
+
+    /// An unattached Aura token on the battlefield with `enchant creature`,
+    /// controlled by `controller`.
+    fn aura(state: &mut GameState, controller: PlayerId, enchant: TargetFilter) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_200),
+            controller,
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.is_token = true;
+        obj.keywords.push(Keyword::Enchant(enchant));
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
+    fn enchant_creature() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+    }
+
+    /// CR 303.4d: an Aura that's also a creature can't enchant anything, so
+    /// entry-time attachment does not apply to it at all. This is the arm that
+    /// must NOT be folded into CR 303.4g — the entrant is still created.
+    #[test]
+    fn an_aura_creature_is_not_applicable() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+        state
+            .objects
+            .get_mut(&id)
+            .expect("aura")
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::NotApplicable
+        ));
+    }
+
+    /// CR 303.4g: zero legal hosts is its OWN verdict, distinct from `Attached`.
+    /// Reported, not acted on — the object is left exactly as it was so the
+    /// caller can still decline to create it.
+    #[test]
+    fn no_legal_host_is_reported_and_nothing_is_attached() {
+        let mut state = GameState::new_two_player(1);
+        let id = aura(&mut state, P0, enchant_creature());
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::NoLegalHost
+        ));
+        assert!(
+            state.objects[&id].attached_to.is_none(),
+            "CR 303.4g: the no-host verdict must not attach anything"
+        );
+        assert!(
+            state.objects.contains_key(&id),
+            "the decision seam does not itself un-create the entrant — that is the caller's call"
+        );
+    }
+
+    /// CR 303.4f: one legal host is not a choice — attach it, and say so with a
+    /// verdict distinct from "there was nothing to attach to".
+    #[test]
+    fn a_sole_legal_host_is_attached() {
+        let mut state = GameState::new_two_player(1);
+        let host = creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::Attached
+        ));
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
+        );
+    }
+
+    /// CR 303.4f: more than one legal host IS a choice.
+    #[test]
+    fn multiple_legal_hosts_need_a_choice() {
+        let mut state = GameState::new_two_player(1);
+        let host_a = creature(&mut state, P0, "Host A");
+        let host_b = creature(&mut state, P0, "Host B");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        } = resolve_entering_aura_attachment(&mut state, id)
+        else {
+            panic!("two legal hosts must produce a choice");
+        };
+        assert_eq!(controller, P0);
+        assert_eq!(
+            legal_targets,
+            vec![TargetRef::Object(host_a), TargetRef::Object(host_b)]
+        );
+        assert!(
+            state.objects[&id].attached_to.is_none(),
+            "an unanswered choice attaches nothing"
+        );
+    }
+
+    /// CR 303.4f: "that player" is the player the Aura is entering under the
+    /// control of. It is read off the OBJECT, never off the active player — which
+    /// is what makes an opponent-controlled copy token prompt its own controller.
+    #[test]
+    fn entering_aura_hosts_reports_the_objects_own_controller() {
+        let mut state = GameState::new_two_player(1);
+        state.active_player = P0;
+        creature(&mut state, P1, "Their A");
+        creature(&mut state, P1, "Their B");
+        // The Aura is P1's; a controller-scoped enchant ability therefore binds
+        // to P1's creatures even though P0 is the active player.
+        let id = aura(
+            &mut state,
+            P1,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        );
+
+        let EnteringAuraHosts::Hosts {
+            controller,
+            legal_targets,
+            entrant,
+        } = entering_aura_hosts(&state, id)
+        else {
+            panic!("an unattached Aura on the battlefield has a host verdict");
+        };
+        assert!(
+            matches!(entrant, EnteringAuraEntrant::Stored),
+            "no liminal entry and no supplied projection: the act half must read \
+             the stored object live, not a snapshot"
+        );
+        assert_eq!(
+            controller, P1,
+            "CR 303.4f: the chooser is the Aura's controller, not the active player"
+        );
+        assert_eq!(legal_targets.len(), 2);
+    }
+
+    /// The decide half is pure: asking twice does not attach anything.
+    #[test]
+    fn entering_aura_hosts_does_not_mutate() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let before = state.objects[&id].clone();
+        let _ = entering_aura_hosts(&state, id);
+        let _ = entering_aura_hosts(&state, id);
+        assert_eq!(state.objects[&id].attached_to, before.attached_to);
+        assert_eq!(state.objects[&id].timestamp, before.timestamp);
+    }
+
+    /// An unattached card-backed Aura in `zone`, with `enchant creature`.
+    fn card_aura(state: &mut GameState, controller: PlayerId, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_300),
+            controller,
+            "Card Aura".to_string(),
+            zone,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords.push(Keyword::Enchant(enchant_creature()));
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
+    /// A Curse-shaped card-backed Aura in `zone`: `enchant player`, so its only
+    /// candidate hosts are players.
+    fn card_aura_enchanting_players(
+        state: &mut GameState,
+        controller: PlayerId,
+        zone: Zone,
+    ) -> ObjectId {
+        let id = card_aura(state, controller, zone);
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.name = "Card Curse".to_string();
+        obj.keywords = vec![Keyword::Enchant(TargetFilter::Player)];
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
+    /// CR 303.4g: "If the Aura is a token, it isn't created." Token-ness outranks
+    /// the origin — a token is never created regardless of which zone the effect
+    /// was putting it onto the battlefield from.
+    #[test]
+    fn a_token_entrant_is_never_created_whatever_its_origin() {
+        let mut state = GameState::new_two_player(1);
+        let id = aura(&mut state, P0, enchant_creature());
+        let entrant = state.objects[&id].clone();
+
+        for from in [Zone::Stack, Zone::Graveyard, Zone::Exile] {
+            assert!(matches!(
+                unhosted_aura_entry(&entrant, from),
+                UnhostedAuraEntry::NotCreated
+            ));
+        }
+    }
+
+    /// CR 303.4g: a card-backed Aura "remains in its current zone, unless that
+    /// zone is the stack. In that case, the Aura is put into its owner's
+    /// graveyard instead of entering the battlefield."
+    ///
+    /// Every entrant this authority answers for has a from-zone: it is asked
+    /// only from the `ProposedEvent::ZoneChange` entry path. The other entry
+    /// path carries a CR 111.1 `LiminalEntrant::Token`, for which the rule's
+    /// token clause is the only applicable disposition, so a from-nothing
+    /// card-backed entrant is not a state this authority (or the type it is
+    /// asked about) can be in.
+    #[test]
+    fn a_card_backed_entrants_disposition_is_selected_by_its_origin() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Graveyard);
+        let entrant = state.objects[&id].clone();
+
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, Zone::Graveyard),
+            UnhostedAuraEntry::RemainInCurrentZone
+        ));
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, Zone::Exile),
+            UnhostedAuraEntry::RemainInCurrentZone
+        ));
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, Zone::Stack),
+            UnhostedAuraEntry::OwnersGraveyard
+        ));
+    }
+
+    /// CR 303.4g through the real pipeline: an Aura card put onto the battlefield
+    /// from a NON-stack zone with no legal host remains where it was.
+    #[test]
+    fn unhosted_card_aura_from_a_non_stack_zone_remains_in_that_zone() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Graveyard);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: the Aura remains in its current zone"
+        );
+        assert!(!state.battlefield.iter().any(|&bid| bid == id));
+    }
+
+    /// CR 303.4g's stack exception, through the real pipeline: an Aura put onto
+    /// the battlefield FROM THE STACK with no legal host cannot remain there — it
+    /// goes to its owner's graveyard instead of entering.
+    ///
+    /// This is the assertion that flips when the exception is removed: before the
+    /// fix this path took the same unconditional `Remained` arm as the graveyard
+    /// case above and left the Aura sitting on the stack forever.
+    #[test]
+    fn unhosted_card_aura_from_the_stack_goes_to_its_owners_graveyard() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: a stack-origin unhosted Aura is put into its owner's graveyard"
+        );
+        assert!(
+            state.players[0].graveyard.iter().any(|&gid| gid == id),
+            "the owner's graveyard actually holds it"
+        );
+        assert!(
+            !state.battlefield.iter().any(|&bid| bid == id),
+            "it is put into the graveyard INSTEAD OF entering the battlefield"
+        );
+    }
+
+    /// CR 400.7 + CR 603.6a: the CR 303.4g graveyard placement is a real zone
+    /// change, so it EMITS a `ZoneChanged` that "whenever a card is put into a
+    /// graveyard from anywhere" triggers can see.
+    ///
+    /// Honest scope: this does NOT discriminate against the destination-rewrite
+    /// form this arm replaced — that delivered the same event and emitted the same
+    /// pair. It pins the property against the OTHER regression available here, a
+    /// raw `zones::` placement, which emits nothing at all and so fires no "put
+    /// into a graveyard from anywhere" trigger. (The liminal seam's card-backed
+    /// sibling was exactly such a raw placement; it no longer exists — a
+    /// `ProposedEvent::TokenEntry` entrant is a CR 111.1 token by construction,
+    /// so this path is the only place a CR 303.4g graveyard placement happens.)
+    /// The revert-discriminating assertion for the routing change itself is in
+    /// the redirect test below.
+    #[test]
+    fn the_stack_origin_graveyard_placement_emits_a_zone_changed() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                crate::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Stack),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == id
+            )),
+            "CR 400.7: the graveyard placement must be observable (got {events:?})"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                crate::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == id
+            )),
+            "CR 303.4g: nothing may observe the denied battlefield entry"
+        );
+    }
+
+    /// CR 614.6 discriminating regression: the CR 303.4g graveyard placement is a
+    /// FRESH event, so a board-wide `Moved` graveyard→exile redirect (Rest in
+    /// Peace / Leyline of the Void) fires on it and the Aura ends in EXILE.
+    ///
+    /// The revert-failing assertion is `zone == Exile`. Rewriting the approved
+    /// entry event's destination — the shape this replaced — skipped a second
+    /// consult entirely, so the Aura landed in the graveyard with Rest in Peace on
+    /// the battlefield. Structural twin of
+    /// `engine_replacement::prevented_etb_graveyard_fallback_consults_moved_redirects`.
+    #[test]
+    fn the_stack_origin_graveyard_placement_consults_moved_redirects() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(1);
+        // Rest in Peace-class redirect. Deliberately NOT a creature: a creature
+        // would be a legal host for `enchant creature` and CR 303.4g would never
+        // be reached.
+        let rip = create_object(
+            &mut state,
+            CardId(90_400),
+            P1,
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 614.6: the CR 303.4g graveyard placement is a fresh, replaceable \
+             event — a graveyard→exile redirect must fire on it"
+        );
+        assert!(
+            !state.players[0].graveyard.iter().any(|&gid| gid == id),
+            "the Aura must not reach the graveyard with Rest in Peace out"
+        );
+        assert!(
+            !state.battlefield.iter().any(|&bid| bid == id),
+            "CR 303.4g: it still never enters the battlefield"
+        );
+    }
+
+    /// Reach-guard for the redirect regression: with Rest in Peace out but a
+    /// legal host present, the Aura enters normally. Without this, the exile
+    /// assertion above could pass for the wrong reason (an entry blocked upstream
+    /// and swept by some other rule).
+    #[test]
+    fn a_moved_redirect_does_not_disturb_a_hosted_entry() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(1);
+        let rip = create_object(
+            &mut state,
+            CardId(90_400),
+            P1,
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+        let host = creature(&mut state, P0, "Host");
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
+        );
+    }
+
+    /// CR 303.4c + CR 702.16c: a player who cannot legally be enchanted is not a
+    /// legal host, so an Aura whose only candidate is that player takes the
+    /// CR 303.4g arm rather than entering and being swept by CR 704.5m.
+    ///
+    /// Revert-failing assertion: `zone == Zone::Graveyard`. Without the
+    /// `can_attach_to_player` filter the protected player counted as legal, the
+    /// entry was allowed, and `attach_to_player` silently no-opped on the
+    /// illegality.
+    #[test]
+    fn a_player_host_that_cannot_be_enchanted_is_not_a_legal_host() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Stack);
+        // CR 702.16j: protection from everything on BOTH players, so no player is
+        // a legal host and the enchant-player filter's population is empty.
+        for player in [P0, P1] {
+            state.add_transient_continuous_effect(
+                id,
+                P0,
+                crate::types::ability::Duration::UntilEndOfTurn,
+                TargetFilter::SpecificPlayer { id: player },
+                vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::Everything,
+                    ),
+                }],
+                None,
+            );
+        }
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: no legal player host, so the stack-origin Aura is put into \
+             its owner's graveyard instead of entering"
+        );
+        assert!(!state.battlefield.iter().any(|&bid| bid == id));
+    }
+
+    /// Reach-guard twin of the test above: the same Aura with an unprotected
+    /// player present enters and attaches to that player, so the negative there
+    /// is not passing because enchant-player hosts are never offered at all.
+    #[test]
+    fn an_unprotected_player_is_still_a_legal_host() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Stack);
+        state.add_transient_continuous_effect(
+            id,
+            P0,
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: P0 },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::Everything),
+            }],
+            None,
+        );
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Player(P1)),
+            "CR 303.4f: the sole legal player host is attached as the Aura enters"
+        );
+    }
+
+    /// Reach-guard for the two pipeline tests above: the same move with a legal
+    /// host on the battlefield DOES enter and attach, so their negatives are not
+    /// passing because the entry was blocked somewhere upstream of CR 303.4f/g.
+    #[test]
+    fn a_hosted_card_aura_from_the_stack_enters_and_attaches() {
+        let mut state = GameState::new_two_player(1);
+        let host = creature(&mut state, P0, "Host");
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host)),
+            "CR 303.4f: the sole legal host is attached as the Aura enters"
+        );
+    }
+
+    /// A Serra's Emissary-shaped permanent: its controller has CR 702.16c
+    /// protection from the card type it chose as it entered (CR 205.2).
+    fn chosen_card_type_protection(
+        state: &mut GameState,
+        controller: PlayerId,
+        chosen: CoreType,
+    ) -> ObjectId {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::statics::StaticMode;
+
+        let id = create_object(
+            state,
+            CardId(90_400),
+            controller,
+            format!("Emissary vs {chosen:?}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardType(chosen));
+        let protection = crate::types::ability::StaticDefinition::new(
+            StaticMode::PlayerProtection(ProtectionTarget::ChosenCardType),
+        )
+        .affected(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        obj.static_definitions.push(protection.clone());
+        obj.base_static_definitions = std::sync::Arc::new(vec![protection]);
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+        id
+    }
+
+    /// CR 303.4f + CR 701.3b + CR 303.4i on the PLAYER half of the act half: the
+    /// attach must be judged against the entrant the decide half was given, not
+    /// against the object stored under the Aura's id.
+    ///
+    /// `attach_to_player` carries its own CR 303.4i legality gate, so the object
+    /// half's fix does not cover it. This is a SEAM test rather than a
+    /// production-pipeline one, and deliberately so: `player_protection_from_object`
+    /// is the only projection-sensitive input to that gate, and of the qualities it
+    /// implements at the player level only `ChosenCardType` reads the attachment's
+    /// characteristics — while every copy exception the parser produces moves the
+    /// card-type set in the RESTRICTIVE direction. No production input can
+    /// therefore reach this arm today; the fixture states the seam contract
+    /// directly instead of inventing a card. See the note on
+    /// `yenna_aura_token_copy::chosen_player_host_resume_survives_the_color_exception`.
+    ///
+    /// P1 is protected from artifacts, P0 from enchantments. The STORED body is an
+    /// artifact enchantment (illegal for both); the ENTRANT is a plain enchantment
+    /// (illegal for P0, legal for P1) — the shape a `SetCardTypes` copy exception
+    /// yields. The revert-failing assertion is `attached_to == Some(Player(P1))`:
+    /// with the act half reading the stored body, P1's protection from artifacts
+    /// rejects the attach and CR 701.3b leaves the Aura unattached.
+    #[test]
+    fn player_host_attach_uses_the_supplied_entrant() {
+        let mut state = GameState::new_two_player(1);
+        chosen_card_type_protection(&mut state, P0, CoreType::Enchantment);
+        chosen_card_type_protection(&mut state, P1, CoreType::Artifact);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Battlefield);
+        {
+            let obj = state.objects.get_mut(&id).expect("aura");
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // The CR 614.12 entrant: the same object without the artifact type.
+        let mut entrant = state.objects[&id].clone();
+        entrant
+            .card_types
+            .core_types
+            .retain(|t| *t != CoreType::Artifact);
+        entrant.base_card_types = entrant.card_types.clone();
+
+        let hosts = entering_aura_hosts_projected(&state, id, &entrant);
+        let EnteringAuraHosts::Hosts { legal_targets, .. } = &hosts else {
+            panic!("an unattached Curse on the battlefield has a host verdict");
+        };
+        assert_eq!(
+            legal_targets,
+            &vec![TargetRef::Player(P1)],
+            "reach-guard: judged against the ENTRANT, P1 is the sole legal player \
+             host (P0 is protected from enchantments either way)"
+        );
+
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, hosts),
+            EnteringAuraAttachment::Attached
+        ));
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Player(P1)),
+            "CR 303.4i: the player gate must read the ENTRANT — the stored body's \
+             artifact type is not the Aura that is entering"
+        );
+    }
+
+    /// CR 303.4f: the multi-host pause parks the entrant, and only a real
+    /// projection — never a `Stored` authority — is parked.
+    ///
+    /// Parking a snapshot for a seam whose stored object already IS the entrant
+    /// would freeze characteristics the resume is better off reading live, and
+    /// would change behaviour for the three pre-existing `ReturnAsAuraTarget`
+    /// producers that share the resume arm.
+    #[test]
+    fn only_a_projected_entrant_is_parked_across_the_host_choice() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host A");
+        creature(&mut state, P0, "Host B");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let stored_hosts = entering_aura_hosts(&state, id);
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, stored_hosts),
+            EnteringAuraAttachment::NeedsChoice { .. }
+        ));
+        assert!(
+            state.entering_aura_authority.is_none(),
+            "a `Stored` authority is never parked — the resume reads the object live"
+        );
+
+        let entrant = state.objects[&id].clone();
+        let projected_hosts = entering_aura_hosts_projected(&state, id, &entrant);
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, projected_hosts),
+            EnteringAuraAttachment::NeedsChoice { .. }
+        ));
+        let parked = state
+            .entering_aura_authority
+            .as_ref()
+            .expect("a projected entrant is parked for the resume");
+        assert_eq!(parked.aura_id, id);
+
+        // Spent by the resume, and honoured only for its own Aura.
+        let other = aura(&mut state, P0, enchant_creature());
+        assert!(
+            attach_chosen_entering_aura_host(&mut state, other, &TargetRef::Object(id)).is_none()
+                || state.entering_aura_authority.is_none(),
+            "a resume for a different Aura must not consume the parked entrant as its own"
+        );
+        assert!(
+            state.entering_aura_authority.is_none(),
+            "the parked authority never survives a `ReturnAsAuraTarget` resume"
+        );
+    }
 }
 
 /// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
@@ -1422,6 +3217,11 @@ pub(crate) fn apply_face_down_entry_profile(
         // survive the entry guard (which runs before exit cleanup); this is the
         // authoritative final assertion that survives it.
         obj.face_down = true;
+        // The public record of WHICH keyword action put this permanent face
+        // down. Re-stamped on every face-down entry, and only meaningful while
+        // `face_down` is true — the many turn-face-up paths leave it alone
+        // rather than each having to remember to clear it.
+        obj.face_down_cause = Some(profile.cause);
         obj.back_face = Some(original);
     }
 }
@@ -1536,6 +3336,7 @@ pub(crate) fn deliver_replaced_zone_change(
     event: ProposedEvent,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
     library_placement: Option<LibraryPosition>,
@@ -1549,17 +3350,79 @@ pub(crate) fn deliver_replaced_zone_change(
         attach_to,
         enter_transformed: should_transform,
         enter_tapped: should_tap,
+        enters_attacking,
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        chain_referent,
+        enter_as_copy,
+        discard_frame,
+        applied,
         ..
     } = event
     {
+        if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
+            entry.replacement_applied = applied.clone();
+        }
         let exile_tracking = if track_exiled_by_source {
             ZoneDeliveryExileTracking::TrackBySource
         } else {
             ZoneDeliveryExileTracking::None
         };
+        // CR 701.9a + CR 400.7: Capture the card while it is still in hand.
+        // The discard frame, not a current-zone lookup, owns the eventual
+        // contingent condition's facts through redirects and replacement pauses.
+        let discard_lki = discard_frame.and_then(|_| {
+            (from == Zone::Hand)
+                .then(|| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .map(|object| object.snapshot_for_mana_spent())
+                })
+                .flatten()
+        });
+
+        let merged_permanent_leave = from == Zone::Battlefield
+            && state
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| !object.merged_components.is_empty());
+        if merged_permanent_leave {
+            // CR 730.3d + CR 903.9c: the merged permanent's already-approved
+            // event is expanded into a single pausable batch. Each component
+            // inherits `applied`, so a replacement that affected the merged
+            // event is not consulted again; the batch nevertheless consults
+            // component-specific replacements, including CR 903.9b.
+            state.merged_card_component_route = None;
+            return match crate::game::merge::move_merged_permanent_on_leave(
+                state, object_id, to, &applied, events,
+            ) {
+                BatchMoveResult::Done => apply_zone_delivery_tail(
+                    state,
+                    object_id,
+                    from,
+                    to,
+                    cause,
+                    source_id,
+                    duration,
+                    exile_controller,
+                    exile_tracking,
+                    drain,
+                    library_placement.as_ref(),
+                    events,
+                ),
+                BatchMoveResult::NeedsChoice => replacement_pause_delivery_result(state),
+            };
+        }
+
+        let split_component_survivor = state.objects.get(&object_id).and_then(|object| {
+            (from == Zone::Battlefield
+                && object.zone == Zone::Battlefield
+                && !state.battlefield.contains(&object_id))
+            .then_some(object.split_from_merge_survivor)
+            .flatten()
+        });
 
         // CR 614.1c: Static replacement effects that modify how an object enters
         // must already be functioning before that object enters. Snapshot the
@@ -1583,10 +3446,10 @@ pub(crate) fn deliver_replaced_zone_change(
         // before the FIRST co-entering devourer enters; persisted (is_none gate) so all
         // co-entering devourers share it. Excludes self + every co-arriver.
         if to == Zone::Battlefield
-            && state.devour_eligible_snapshot.is_none()
+            && state.active_devour_eligible_snapshot().is_none()
             && crate::game::engine_replacement::object_has_devour_replacement(state, object_id)
         {
-            state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+            state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
         }
 
         // CR 400.7d + CR 608.3: a permanent spell's resolution turns the spell
@@ -1607,6 +3470,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cast_controller: obj.cast_controller,
                     cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
                     kickers_paid: obj.kickers_paid.clone(),
+                    gift_recipient: obj.gift_recipient,
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
@@ -1667,8 +3531,17 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.face_down = true;
             }
         }
+        // pod-lab loop-3 Q5: tracks whether this delivery took the plain,
+        // non-merge, non-library-placement `move_to_zone` branch — the ONLY
+        // branch whose own internal dirty-mark decision (see the carve-out
+        // added to `move_to_zone` above) is trustworthy enough to let the
+        // redundant check below skip re-marking `Full`. `false` for both the
+        // library-placement branch and the merge-survivor branch, neither of
+        // which is analyzed by that carve-out.
+        let took_plain_zone_transfer;
         match (to, library_placement.as_ref()) {
             (Zone::Library, Some(position)) => {
+                took_plain_zone_transfer = false;
                 let index = match position {
                     LibraryPosition::Top => Some(0),
                     LibraryPosition::Bottom => None,
@@ -1685,10 +3558,40 @@ pub(crate) fn deliver_replaced_zone_change(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this path. Exhaustiveness
+                    // arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }
-            _ => zones::move_to_zone(state, object_id, to, events),
+            _ => {
+                if split_component_survivor.is_some() {
+                    // CR 903.9b + CR 903.9c: this component has completed its
+                    // replacement consult. Deliver the resulting destination
+                    // with the CR 730.3 `from: None` event shape rather than
+                    // pretending it independently left the battlefield.
+                    took_plain_zone_transfer = false;
+                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                } else {
+                    took_plain_zone_transfer = true;
+                    // CR 712.14a: carry the effect-driven "enters transformed"
+                    // intent into the battlefield-entry guard so a non-permanent
+                    // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
+                    // back face. `should_transform` is destructured from
+                    // `ProposedEvent::ZoneChange.enter_transformed` above; the
+                    // flag is inert for any non-battlefield destination (the guard
+                    // gates on `to == Battlefield`).
+                    zones::move_to_zone_with_entry_flags(
+                        state,
+                        object_id,
+                        to,
+                        events,
+                        should_transform,
+                    );
+                }
+            }
         }
         // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
         // any clause-2 routing override; clear it so it never leaks into a later
@@ -1704,6 +3607,46 @@ pub(crate) fn deliver_replaced_zone_change(
                 .objects
                 .get(&object_id)
                 .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        // CR 701.9a + CR 614.1: The inner move has now completed with its
+        // final replacement-selected destination. Append one operation-owned
+        // result exactly once; a prevented move never reaches this delivery.
+        if let (Some(frame_id), Some(lki), Some(final_zone)) = (
+            discard_frame,
+            discard_lki,
+            state.objects.get(&object_id).map(|object| object.zone),
+        ) {
+            if final_zone != Zone::Hand {
+                let (recorded, source_id) = {
+                    let frame = state
+                        .resolution_stack
+                        .active_discard_or_direct_continuation_parent_mut(frame_id)
+                        .expect("discard provenance must name the active discard operation");
+                    let recorded = frame.results.is_empty();
+                    let source_id = frame.source_id;
+                    if recorded {
+                        frame
+                            .results
+                            .push(crate::types::ability::DiscardedCardResult {
+                                object_id,
+                                lki: lki.clone(),
+                                final_zone,
+                            });
+                    }
+                    (recorded, source_id)
+                };
+                if recorded {
+                    crate::game::restrictions::record_discard(state, lki.owner);
+                    if final_zone == Zone::Graveyard {
+                        crate::game::restrictions::record_card_discarded(state, object_id);
+                    }
+                    events.push(GameEvent::Discarded {
+                        player_id: lki.owner,
+                        object_id,
+                        source_id,
+                    });
+                }
+            }
+        }
         // Roll back the face-down preflight flag when the entry was rejected, so a
         // blocked manifest/morph leaves the card unchanged in its origin zone
         // rather than stranded face down (corrupting hidden state for a move that
@@ -1733,6 +3676,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     obj.cast_timing_permission = Some((permission, state.turn_number));
                 }
                 obj.kickers_paid = link.kickers_paid;
+                obj.gift_recipient = link.gift_recipient;
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
@@ -1746,7 +3690,20 @@ pub(crate) fn deliver_replaced_zone_change(
         // and before the zone-change record snapshots is_token. That is the sole
         // path a copy (only ever created on the stack by `Effect::CastCopyOfCard`)
         // reaches the battlefield, so no un-flipped copy can arrive here.
-        if to == Zone::Battlefield || from == Zone::Battlefield {
+        // pod-lab loop-3 Q5: `move_to_zone` (above) already made the correct,
+        // precise dirty-mark decision for a plain transfer that actually
+        // landed on the battlefield — this check no longer re-clobbers it to
+        // `Full`. Gated on `entered_battlefield && took_plain_zone_transfer`
+        // together, not `took_plain_zone_transfer` alone: a rejected entry
+        // (Grafdigger's Cage-class `CantEnterBattlefieldFrom`, CR 614.1d) has
+        // `entered_battlefield == false` and must keep this unconditional
+        // mark, since `move_to_zone` never reached its own mark block for a
+        // rejected entry at all. A merge-survivor delivery or a
+        // library-placement delivery is `took_plain_zone_transfer == false`
+        // and is untouched, exactly as before.
+        if from == Zone::Battlefield
+            || (to == Zone::Battlefield && !(entered_battlefield && took_plain_zone_transfer))
+        {
             crate::game::layers::mark_layers_full(state);
         }
         // CR 708.3: An object put onto the battlefield face down is turned face
@@ -1767,6 +3724,49 @@ pub(crate) fn deliver_replaced_zone_change(
             if let Some(profile) = &face_down_profile {
                 apply_face_down_entry_profile(state, object_id, profile);
             }
+            // CR 608.2c: a permanent the instruction just produced is the
+            // chain's most-recent created referent, so a following "it" / "that
+            // creature" anaphor (`TargetFilter::LastCreated`) binds to it —
+            // "manifest dread, then attach this Equipment to that creature"
+            // (#7531).
+            //
+            // Keyed on the intent the REQUEST carried, not on any property of
+            // the entrant: two effects can deliver an identical face-down
+            // permanent and only one of them be the producer the sentence
+            // refers back to. Published here rather than at the producing
+            // effect so the synchronous arm, the manifest-dread continuation
+            // and the CR 616.1 parked-entry resume all reach it — the intent
+            // rides the parked event with the rest of the request — and only
+            // once the entry has actually settled (`entered_battlefield`), so a
+            // `CantEnterBattlefieldFrom` rejection publishes nothing.
+            if chain_referent.publishes() {
+                crate::game::morph::publish_face_down_entry_referent(state, object_id);
+            }
+        }
+        // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
+        // selected its copy source before this delivery and carried those
+        // copiable values on the proposed event. Install the copy effect before
+        // ETB counters/triggers run so the permanent is observed as the copied
+        // object as it enters, without overwriting its printed/base identity.
+        if entered_battlefield {
+            if let Some(copy) = enter_as_copy {
+                let copy = *copy;
+                let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
+                    source_id: copy.source_id,
+                    controller: copy.controller,
+                    duration_subject_id: copy.source_id,
+                    duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
+                    values: *copy.values,
+                    display_source: copy.display_source,
+                    printed_ref: copy.printed_ref,
+                    token_image_ref: copy.token_image_ref,
+                    additional_modifications: copy.additional_modifications,
+                    effect_kind: EffectKind::BecomeCopy,
+                };
+                let _ = crate::game::effects::become_copy::apply_precomputed_copy_values(
+                    state, object_id, payload, events,
+                );
+            }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
         if should_transform && to == Zone::Battlefield {
@@ -1777,10 +3777,22 @@ pub(crate) fn deliver_replaced_zone_change(
             }
         }
         // CR 614.1: Apply enter-tapped if the effect or replacement set it.
-        if should_tap.resolve(false) && to == Zone::Battlefield {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
+        // CR 701.26a: Only an untapped permanent can be tapped, so route the
+        // entry tap through the single object-status authority — it captures
+        // the exact incarnation and prior state as a resolved command instead
+        // of writing `tapped` raw. The existence guard preserves the prior
+        // silent skip when the object is no longer present.
+        if should_tap.resolve(false)
+            && to == Zone::Battlefield
+            && state.objects.contains_key(&object_id)
+        {
+            crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                true,
+            )
+            .expect("an entering permanent must satisfy the resolved tap precondition");
         }
         // CR 603.6a + CR 400.7: Record which ability placed this permanent so
         // anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
@@ -1791,9 +3803,11 @@ pub(crate) fn deliver_replaced_zone_change(
         // visible at ETB trigger fire-time (CR 603.4).
         if to == Zone::Battlefield {
             if let Some(src) = source_id {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    obj.entered_via_ability_source = Some(src);
-                }
+                // CR 733: route the stamp through its single authority so the
+                // provenance is captured as a resolved command instead of written
+                // raw. The authority keeps the prior silent skip when the object
+                // is no longer present.
+                zones::stamp_battlefield_entry_provenance(state, object_id, src);
             }
         }
         // CR 110.2a: Apply controller override if the effect specifies
@@ -1873,8 +3887,10 @@ pub(crate) fn deliver_replaced_zone_change(
                     cause,
                     source_id,
                     duration,
+                    exile_controller,
                     exile_tracking,
                     drain,
+                    enters_attacking,
                     pending_etb_cleanup,
                 );
             }
@@ -1904,13 +3920,15 @@ pub(crate) fn deliver_replaced_zone_change(
                     cause,
                     source_id,
                     duration,
+                    exile_controller,
                     exile_tracking,
                     drain,
+                    enters_attacking,
                     None,
                 );
             }
         }
-        return apply_zone_delivery_tail(
+        let result = apply_zone_delivery_tail(
             state,
             object_id,
             from,
@@ -1918,11 +3936,25 @@ pub(crate) fn deliver_replaced_zone_change(
             cause,
             source_id,
             duration,
+            exile_controller,
             exile_tracking,
             drain,
             library_placement.as_ref(),
             events,
         );
+        if matches!(result, ZoneDeliveryResult::Done) && enters_attacking && entered_battlefield {
+            let controller = state
+                .objects
+                .get(&object_id)
+                .map(|object| object.controller)
+                .expect("a settled battlefield entrant must exist");
+            if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
+                state, object_id, controller,
+            ) {
+                return ZoneDeliveryResult::NeedsChoice(player);
+            }
+        }
+        return result;
     }
     ZoneDeliveryResult::Done
 }
@@ -1930,6 +3962,7 @@ pub(crate) fn deliver_replaced_zone_change(
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EntryControllerChoice { player, .. }
         // CR 614.12a: a Devour as-enters sacrifice surfaced its own
         // `EffectZoneChoice`; carry its chooser so the caller's `park_waiting_for`
         // doesn't clobber the already-surfaced prompt.
@@ -1959,6 +3992,7 @@ pub(crate) fn execute_zone_move(
     duration: Option<&Duration>,
     enter_transformed: bool,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -1967,7 +4001,207 @@ pub(crate) fn execute_zone_move(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    execute_zone_move_with_terminal(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        events,
+    )
+    .into_zone_move_result()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_zone_move_with_controller(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    execute_zone_move_with_terminal_and_controller(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        exile_controller,
+        events,
+    )
+    .into_zone_move_result()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_zone_move_with_terminal(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    execute_zone_move_with_terminal_and_controller(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_zone_move_with_terminal_and_controller(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    execute_zone_move_with_applied_terminal(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        crate::types::zones::ChainReferentIntent::Silent,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        exile_controller,
+        HashSet::new(),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_zone_move_with_applied_terminal(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    // CR 608.2c: whether this entry is the producer a following demonstrative
+    // anaphor binds to. Only `move_object_with_terminal` forwards a request's
+    // intent; the four public `execute_zone_move*` wrappers are raw movers with
+    // no originating instruction to speak for, and pass `Silent`.
+    chain_referent: crate::types::zones::ChainReferentIntent,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    let Some(member) = state
+        .objects
+        .get(&obj_id)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    };
+    // CR 712.14a: A single-faced object instructed to enter transformed
+    // cannot enter the battlefield. A single-faced copy of a transforming
+    // Saga therefore remains in exile after its final chapter resolves.
+    if dest_zone == Zone::Battlefield
+        && enter_transformed
+        && state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| obj.back_face.is_none())
+    {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
+    if let ProposedEvent::ZoneChange {
+        applied,
+        chain_referent: ref mut intent,
+        ..
+    } = &mut proposed
+    {
+        *applied = replacement_applied;
+        *intent = chain_referent;
+    }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
     // preserve it through the pipeline.
@@ -1994,6 +4228,16 @@ pub(crate) fn execute_zone_move(
         } = proposed
         {
             *et = enter_tapped;
+        }
+    }
+
+    if enters_attacking {
+        if let ProposedEvent::ZoneChange {
+            enters_attacking: ref mut entering_attacking,
+            ..
+        } = proposed
+        {
+            *entering_attacking = true;
         }
     }
 
@@ -2036,8 +4280,30 @@ pub(crate) fn execute_zone_move(
     // counters" replacement when a planeswalker or battle enters the
     // battlefield from any source (effect-driven entry — bounce-return,
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
-    if dest_zone == Zone::Battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
+    //
+    // CR 708.2a + CR 708.3: the INTRINSIC seeding below is skipped for a
+    // face-down entry — the object enters as the profile's body (a 2/2
+    // creature) with no loyalty/defense characteristic, so a manifested
+    // planeswalker card must not enter with loyalty counters (issue #7822).
+    // Only the intrinsic half is gated: an effect explicitly instructing entry
+    // counters on a face-down entrant (`effect_enter_with_counters` below) is
+    // a separate instruction whose counters are markers on the resulting
+    // object (CR 122.1) and must survive. The gate reads the proposed event,
+    // on which the profile was just stamped above.
+    let enters_face_down = matches!(
+        &proposed,
+        ProposedEvent::ZoneChange {
+            face_down_profile: Some(_),
+            ..
+        }
+    );
+    if dest_zone == Zone::Battlefield && !enters_face_down {
+        if let Some(obj) = state
+            .liminal_entries
+            .get(&obj_id)
+            .map(|entry| entry.object.projected())
+            .or_else(|| state.objects.get(&obj_id))
+        {
             // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
             // double-faced card exiled and returned with its back face up, like
             // a creature-front // planeswalker-back DFC) will have its back
@@ -2052,12 +4318,14 @@ pub(crate) fn execute_zone_move(
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
                 (true, Some(back)) => {
                     crate::game::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        None,
                         back.defense,
                         &back.card_types,
                     )
                 }
-                _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
+                _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
             };
             if !intrinsic.is_empty() {
                 if let ProposedEvent::ZoneChange {
@@ -2069,6 +4337,11 @@ pub(crate) fn execute_zone_move(
                 }
             }
         }
+    }
+    // CR 122.1 + CR 614.1c: effect-driven enter-with-counters apply to EVERY
+    // battlefield entry, face-down included — the explicit instruction is
+    // independent of the intrinsic loyalty/defense seeding gated above.
+    if dest_zone == Zone::Battlefield {
         // CR 122.1 + CR 614.1c: Seed effect-driven enter-with-counters from
         // `Effect::ChangeZone.enter_with_counters` (Darkness Crystal class:
         // "put target creature card ... onto the battlefield with two
@@ -2117,8 +4390,14 @@ pub(crate) fn execute_zone_move(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
+            // CR 303.4g: set when the unhosted entrant came from the stack and so
+            // must be put into its owner's graveyard rather than remain. Acted on
+            // after the borrow of `event` ends — the battlefield entry is denied
+            // and a FRESH graveyard move is proposed in its place.
+            let mut unhosted_to_owners_graveyard = false;
             if let ProposedEvent::ZoneChange {
                 object_id,
+                from,
                 to: Zone::Battlefield,
                 attach_to,
                 controller_override,
@@ -2127,17 +4406,51 @@ pub(crate) fn execute_zone_move(
             {
                 if attach_to.is_none() {
                     if let Some(enchant_filter) = aura_enchant_filter(state, *object_id) {
+                        // CR 614.12: read the entrant's projected characteristics,
+                        // not the pre-entry object still stored under this id — for
+                        // a meld the latter is the exiled component card and has
+                        // the wrong controller as well as the wrong typeline.
                         let controller = (*controller_override)
-                            .or_else(|| state.objects.get(object_id).map(|obj| obj.controller))
+                            .or_else(|| {
+                                entering_object_projection(state, *object_id)
+                                    .map(|obj| obj.controller)
+                            })
                             .unwrap_or(PlayerId(0));
                         let legal_targets = legal_aura_attachment_targets(
                             state,
                             *object_id,
+                            entering_object_projection(state, *object_id),
                             controller,
                             &enchant_filter,
                         );
                         match legal_targets.as_slice() {
-                            [] => return ZoneMoveResult::Done,
+                            // CR 303.4g: no legal object or player to enchant, so
+                            // this entry does not happen. Decided BEFORE
+                            // `deliver_replaced_zone_change`, i.e. before the
+                            // object is inserted into the battlefield, before the
+                            // meld commit journals anything, and before any entry
+                            // event — the rule denies the entry, so nothing may
+                            // observe one.
+                            [] => {
+                                match entering_object_projection(state, *object_id)
+                                    .map(|entrant| unhosted_aura_entry(entrant, *from))
+                                {
+                                    Some(UnhostedAuraEntry::OwnersGraveyard) => {
+                                        unhosted_to_owners_graveyard = true;
+                                    }
+                                    // "The Aura remains in its current zone" —
+                                    // and, for a token already in a zone, "isn't
+                                    // created" has nothing left to withhold, so
+                                    // both leave the object exactly where it is.
+                                    Some(UnhostedAuraEntry::NotCreated)
+                                    | Some(UnhostedAuraEntry::RemainInCurrentZone)
+                                    | None => {
+                                        return ZoneMoveTerminalResult::Completed(
+                                            ZoneMoveCompletion::Remained,
+                                        );
+                                    }
+                                }
+                            }
                             [TargetRef::Object(id)] => {
                                 *attach_to =
                                     Some(crate::game::game_object::AttachTarget::Object(*id));
@@ -2152,21 +4465,59 @@ pub(crate) fn execute_zone_move(
                         }
                     }
                 }
+                // CR 303.4i specified-host Remain is handled after delivery when
+                // `attach_to` fails / SBA (CR 704.5m). Pre-move filter checks while
+                // the Aura is still in GY falsely Remained legal Gift/Lynde hosts.
+            }
+            if unhosted_to_owners_graveyard {
+                // CR 303.4g: "…the Aura is put into its owner's graveyard instead
+                // of entering the battlefield."
+                //
+                // CR 614.6: the approved battlefield entry never happens, and the
+                // graveyard placement that replaces it is a FRESH, never-consulted
+                // event — so it routes through the pipeline rather than being
+                // written as a destination rewrite of the already-approved event.
+                // A board-wide `Moved` graveyard→exile redirect (Rest in Peace /
+                // Leyline of the Void) therefore fires on it. Same house decision
+                // as `engine_replacement.rs`'s CR 608.3e prevented-permanent
+                // graveyard fallback, which is the structural twin of this arm.
+                //
+                // The already-applied set rides along on the fresh request so no
+                // replacement can be spent twice: every def that applied to this
+                // entry was consulted against `to: Battlefield`, and the new
+                // proposal is `to: Graveyard`, so a battlefield-scoped entry
+                // replacement cannot re-match it either way — carrying `applied`
+                // makes that structural fact explicit instead of implicit.
+                let applied = event.applied_set().clone();
+                return move_object_with_terminal(
+                    state,
+                    ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
+                        .with_replacement_applied(applied),
+                    events,
+                );
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
+                let delivery_start = events.len();
                 match deliver_replaced_zone_change(
                     state,
                     event,
                     Some(source_id),
                     duration,
+                    exile_controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
                     library_placement,
                     events,
                 ) {
-                    ZoneDeliveryResult::Done => {}
+                    ZoneDeliveryResult::Done => {
+                        debug_assert_eq!(
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                            ZoneMoveCompletion::Moved,
+                            "an Aura host choice follows a completed battlefield entry"
+                        );
+                    }
                     ZoneDeliveryResult::NeedsChoice(player) => {
-                        return ZoneMoveResult::NeedsChoice(player);
+                        return ZoneMoveTerminalResult::NeedsChoice(player);
                     }
                 }
                 state.waiting_for = WaitingFor::ReturnAsAuraTarget {
@@ -2184,13 +4535,15 @@ pub(crate) fn execute_zone_move(
                         controller,
                     )),
                 };
-                return ZoneMoveResult::NeedsAuraAttachmentChoice;
+                return ZoneMoveTerminalResult::NeedsAuraAttachmentChoice;
             }
+            let delivery_start = events.len();
             match deliver_replaced_zone_change(
                 state,
                 event,
                 Some(source_id),
                 duration,
+                exile_controller,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
                 library_placement,
@@ -2198,12 +4551,17 @@ pub(crate) fn execute_zone_move(
             ) {
                 ZoneDeliveryResult::Done => {}
                 ZoneDeliveryResult::NeedsChoice(player) => {
-                    return ZoneMoveResult::NeedsChoice(player);
+                    return ZoneMoveTerminalResult::NeedsChoice(player);
                 }
             }
-            ZoneMoveResult::Done
+            ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ))
         }
-        ReplacementResult::Prevented => ZoneMoveResult::Done,
+        ReplacementResult::Prevented => {
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+        }
         ReplacementResult::NeedsChoice(player) => {
             // CR 616.1: `replace_event` sets only `pending_replacement` — the
             // wait-state was historically each caller's to set, and callers that
@@ -2222,9 +4580,74 @@ pub(crate) fn execute_zone_move(
             // delivery-tail NeedsChoice path above is NOT parked here — its
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
-            replacement::park_waiting_for(state, player);
-            ZoneMoveResult::NeedsChoice(player)
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.exile_controller = exile_controller;
+                pending.exile_duration = duration.cloned();
+                pending.exile_tracking = if track_exiled_by_source {
+                    ZoneDeliveryExileTracking::TrackBySource
+                } else {
+                    ZoneDeliveryExileTracking::None
+                };
+            }
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            ZoneMoveTerminalResult::NeedsChoice(player)
         }
+    }
+}
+
+#[cfg(test)]
+mod announced_spell_residency_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn casting_to_stack_rejects_same_id_activated_ability_entry() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Activated Source".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&object_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(state.stack.iter().any(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+        }));
+
+        // CR 109.1 / CR 602.2a: A same-id activated ability is a distinct
+        // noncard stack object, so it cannot satisfy the spell-residency gate.
+        let mut events = Vec::new();
+        let result = move_object_with_terminal(
+            &mut state,
+            ZoneMoveRequest::casting_to_stack(object_id, object_id),
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(events.is_empty());
     }
 }
 
@@ -2237,6 +4660,7 @@ mod w3_library_placement_tests {
     };
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::ResolutionFrame;
 
     /// Install a board-wide `Moved` replacement: "any object that would be put
     /// into a library is exiled instead" (synthetic — no such card exists in the
@@ -2605,23 +5029,40 @@ mod w3_library_placement_tests {
         ));
         assert_eq!(
             state
-                .pending_batch_deliveries
-                .as_ref()
+                .active_batch_delivery()
                 .map(|pending| pending.remaining.clone()),
             Some(vec![second]),
             "the first park must stash the undelivered tail"
         );
         assert_eq!(
             state
-                .pending_batch_deliveries
-                .as_ref()
+                .active_batch_delivery()
                 .and_then(|pending| pending.library_placement.clone()),
             Some(LibraryPosition::Bottom),
             "the stashed tail must preserve bottom placement"
         );
+        let logical_group_id = state
+            .active_batch_delivery()
+            .expect("the first paused member retains a batch owner")
+            .logical_zone_change_group
+            .logical_group_id;
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline first optional redirect");
+        let final_member_pause = state
+            .active_batch_delivery()
+            .expect("a pause on the final member still retains the batch owner");
+        assert_eq!(
+            final_member_pause
+                .logical_zone_change_group
+                .logical_group_id,
+            logical_group_id,
+            "a re-park must carry the original logical group rather than a tail-only owner"
+        );
+        assert!(
+            final_member_pause.remaining.is_empty() && final_member_pause.paused_current.is_some(),
+            "the final paused member retains an owner even with no undelivered tail"
+        );
         assert_eq!(
             state
                 .pending_replacement
@@ -2844,6 +5285,71 @@ mod w3_library_placement_tests {
             vec![placed, a, b],
             "after two declined parks the placement must still honor LibraryPosition::Top"
         );
+    }
+
+    /// A newly produced simultaneous move must park as a child of an existing
+    /// BatchDelivery owner, not replace that parent. The real batch producer
+    /// below reaches a CR 616.1 ordering prompt; this fails if initial parking
+    /// uses the re-pause transition instead of `push_batch_delivery`.
+    #[test]
+    fn new_batch_delivery_parks_inside_an_existing_batch_parent() {
+        let mut state = GameState::new_two_player(43);
+        let mut parent_group = state.allocate_logical_zone_change_group(&[]);
+        parent_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parent batch retains its pre-delivery latch");
+        let parent_group_id = parent_group.logical_group_id;
+        state.push_batch_delivery(PendingBatchDeliveries {
+            logical_zone_change_group: parent_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+        install_library_to_exile_redirect(&mut state);
+        install_library_to_exile_redirect(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(90031),
+            PlayerId(0),
+            "Nested batch first".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(90032),
+            PlayerId(0),
+            "Nested batch second".to_string(),
+            Zone::Graveyard,
+        );
+
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut state,
+                vec![
+                    ZoneMoveRequest::effect(first, Zone::Library, first),
+                    ZoneMoveRequest::effect(second, Zone::Library, second),
+                ],
+                &mut Vec::new(),
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        let frames = state.resolution_stack.iter().collect::<Vec<_>>();
+        assert!(matches!(
+            frames.as_slice(),
+            [ResolutionFrame::BatchDelivery(parent), ResolutionFrame::BatchDelivery(child)]
+                if parent.logical_zone_change_group.logical_group_id == parent_group_id
+                    && child.remaining == vec![second]
+        ));
     }
 }
 
@@ -3119,5 +5625,759 @@ mod face_down_exile_entry_tests {
             "the face-down profile must not be applied to a card whose entry was \
              rejected — the hidden card must be left unchanged"
         );
+    }
+}
+
+/// pod-lab loop-3 Q5: verifies the `move_to_zone`/`deliver_replaced_zone_change`
+/// incremental-flush carve-out through the FULL production pipeline
+/// (`move_object`/`ZoneMoveRequest::effect`), not just `zones::move_to_zone` in
+/// isolation — so `entered_battlefield`/`took_plain_zone_transfer`, computed in
+/// this file, are genuinely exercised. Every assertion reads
+/// `state.layers_dirty` directly (the dirty-lattice/flush-arm seam itself),
+/// not just final board state, per this fix's own verification-matrix
+/// requirement that a test must fail if the carve-out is reverted or
+/// mis-scoped — board state alone is identical either way for a plain
+/// creature entry, so it cannot prove which path was taken.
+#[cfg(test)]
+mod layers_incremental_flush_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::LayersDirty;
+    use crate::types::identifiers::CardId;
+    use crate::types::statics::StaticMode;
+
+    fn reset_clean(state: &mut GameState) {
+        state.layers_dirty = LayersDirty::Clean;
+    }
+
+    /// Row 1 (verification matrix): the dominant real-game case — a plain
+    /// creature resolving from the Stack — takes the cheap `EnteredObjects`
+    /// path, not `Full`. This is the fix's entire perf payoff; if this
+    /// assertion regresses to `Full`, the carve-out has been reverted or
+    /// over-narrowed.
+    #[test]
+    fn stack_to_battlefield_plain_entry_marks_entered_not_full() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80001),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(80002),
+            PlayerId(0),
+            "Vanilla Creature".to_string(),
+            Zone::Stack,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(spell, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&spell].zone, Zone::Battlefield);
+        match &state.layers_dirty {
+            LayersDirty::EnteredObjects(ids) => {
+                assert!(
+                    ids.contains(&spell),
+                    "the entering object must be tracked in EnteredObjects"
+                );
+            }
+            other => panic!(
+                "a plain Stack-to-Battlefield entry must take the incremental \
+                 EnteredObjects path, got {other:?}"
+            ),
+        }
+    }
+
+    /// Row 2: Hand->Battlefield (land plays, Elvish Piper, Sneak Attack, Show
+    /// and Tell) must keep forcing `Full` UNCONDITIONALLY. `layers.rs`'s
+    /// zone-reading classifier hardcodes `QuantityRef::HandSize` to `false`,
+    /// so a live HandSize-gated static (Carnage Interpreter class) would go
+    /// undetected by `static_dependency_before`/`after` alone — this
+    /// unconditional exclusion is that class's only protection.
+    #[test]
+    fn hand_to_battlefield_still_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80011),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(80012),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(land, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a Hand-origin battlefield entry must still force a full \
+             re-evaluation, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Row 7b (round-3 review blocker): Exile->Battlefield (reanimation,
+    /// flicker return, "you may cast this from exile") must ALSO keep forcing
+    /// `Full` unconditionally, for the identical reason as Hand.
+    /// `QuantityRef::CardsExiledBySource`/`ExiledCardPower`/`TrackedSetSize`/
+    /// `FilteredTrackedSetSize`/`TrackedSetAggregate` (Unlicensed Hearse,
+    /// Veteran Survivor, Sutured Ghoul class) are ALL hardcoded to `false` in
+    /// the same classifier, and their count is live-filtered on
+    /// `obj.zone == Zone::Exile` — it changes the instant a linked card
+    /// leaves Exile, with no Axis-2 flush-time analog to catch it.
+    #[test]
+    fn exile_to_battlefield_still_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80021),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(80022),
+            PlayerId(0),
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(exiled, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&exiled].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "an Exile-origin battlefield entry must still force a full \
+             re-evaluation, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Row 3: a battlefield entry REJECTED by a `CantEnterBattlefieldFrom`
+    /// static (Grafdigger's Cage class, CR 614.1d) must still mark `Full` via
+    /// `zone_pipeline.rs`'s `entered_battlefield` gate — `move_to_zone` never
+    /// reaches its own (now axis-gated) mark block for a rejected entry at
+    /// all, so this file's redundant check is the ONLY thing marking
+    /// anything for this case, exactly as before the carve-out existed.
+    #[test]
+    fn rejected_battlefield_entry_still_marks_full() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80031),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let cage = create_object(
+            &mut state,
+            CardId(80032),
+            PlayerId(0),
+            "Grafdigger's Cage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&cage).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantEnterBattlefieldFrom).affected(
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Library],
+                            }]),
+                    ),
+                ),
+            );
+        }
+        let caged = create_object(
+            &mut state,
+            CardId(80033),
+            PlayerId(0),
+            "Caged Creature".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&caged).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(caged, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&caged].zone,
+            Zone::Library,
+            "a CantEnterBattlefieldFrom static must keep the card in its origin zone"
+        );
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a rejected battlefield entry must still force a full \
+             re-evaluation via entered_battlefield, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// F5 (CodeRabbit, PR #6777 round): the incremental `EnteredObjects` path
+    /// (Row 1) is only safe when nothing on the board reads membership of the
+    /// entering object's origin or destination zone. A Graveyard->Battlefield
+    /// entry (reanimation) is neither the Hand nor Exile carve-out, so it
+    /// would wrongly take the cheap path unless `static_dependency_before`/
+    /// `after` itself catches it: a live static (Tarmogoyf class) whose
+    /// `affected` filter reads `Zone::Graveyard` must still force `Full` when
+    /// a card leaves that zone for the battlefield. Round 4: the watcher
+    /// carries a real modification (it sources a live effect) and the fixture
+    /// is primed by a real flush, so the before arm is proven through the
+    /// INDEXED path — bucket membership asserted, no empty-index fallback.
+    #[test]
+    fn battlefield_entry_with_static_dependency_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = create_object(
+            &mut state,
+            CardId(80041),
+            PlayerId(0),
+            "Graveyard Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the watcher sources a LIVE continuous effect — active effects
+            // are built by iterating `def.modifications`
+            // (`active_continuous_effects_from_static_definitions`), so an
+            // affected-filter-only def would source nothing.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80042),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let reanimated = create_object(
+            &mut state,
+            CardId(80043),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&reanimated).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // Round-4 fix (maintainer, PR #6777): prime with a real flush so the
+        // live watcher is INDEXED, then prove the before arm fires through the
+        // indexed path (buckets non-empty — no empty-index fallback involved).
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: the live graveyard-reading watcher is indexed after the priming flush"
+        );
+        assert!(
+            crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "the indexed watcher must make the pre-transition dependency check true"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(reanimated, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&reanimated].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a Graveyard-origin battlefield entry with a live zone-membership-dependent static must force a full re-evaluation via static_dependency_before/after, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// F5 discrimination companion (maintainer, PR #6777 round 2): the sibling
+    /// test's watcher static is live on the battlefield BEFORE the transition,
+    /// and `move_object` ORs `static_dependency_before || static_dependency_after`
+    /// — so that test alone cannot catch the post-entry arm being dropped.
+    /// Here the zone-reading static rides ON the entering object itself: while
+    /// it sits in the Graveyard it is not a static-effect source (only
+    /// battlefield/command objects generate continuous effects), so the
+    /// before-check is false, and only the post-entry re-check
+    /// (`static_dependency_after`) can see the now-live static and force
+    /// `Full`. Removing the after arm turns this mark into the cheap
+    /// `EnteredObjects` path and fails this test.
+    #[test]
+    fn battlefield_entry_whose_own_zone_reading_static_marks_full_post_entry() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80044),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80045),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the arriving watcher sources a LIVE continuous effect once on
+            // the battlefield (active effects iterate `def.modifications`).
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+
+        // Round-3 fix (maintainer, PR #6777): prime with a REAL layer flush so
+        // the fixture carries exactly the index state production would — not a
+        // hand-reset that leaves `static_source_index` unbuilt. For this board
+        // shape the rebuild leaves the index PRECISELY empty:
+        // `StaticSourceIndex::rebuild_from_state` keys on generators only
+        // (static_source_index.rs), the lone battlefield object carries no
+        // static, and the graveyard watcher sits outside both indexed buckets.
+        // At the post-entry check the index is then stale-EMPTY, not
+        // legitimately empty: the watcher has arrived and IS a generator, but
+        // nothing rebuilds the index mid-move, so `use_fallback` in
+        // `for_each_static_effect_source` fires and the direct scan sees the
+        // newcomer. That is exactly the production shape of "the first
+        // generator enters a generator-free board" — reached in any real game
+        // — so the `Full` mark pinned here is live behavior, not a recovery
+        // path for hand-built state. The populated-bucket shape, where the
+        // after arm provably cannot see the newcomer, is pinned by
+        // `populated_index_entry_defers_zone_reading_static_to_flush_escalation`.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Clean),
+            "priming flush must leave the dirty lattice clean, got {:?}",
+            state.layers_dirty
+        );
+        assert!(
+            state.static_source_index.battlefield_sources.is_empty()
+                && state.static_source_index.command_sources.is_empty(),
+            "fixture premise: a generator-free board rebuilds to a precisely empty index"
+        );
+
+        // Precondition for discrimination: with the watcher still in the
+        // Graveyard, no battlefield/command object reads zone membership, so
+        // the pre-transition check must come up empty and the post-entry arm
+        // is the only guard under test.
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: a pre-transition static dependency would let the before arm mask the after arm"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "an entering object that itself carries a zone-membership-reading static must force a full re-evaluation via static_dependency_after (the before check is provably false here), got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Round-3 companion (maintainer, PR #6777): the POPULATED-index shape.
+    /// With an unrelated generator on the battlefield the indexed buckets are
+    /// non-empty, and the mid-mutation dependency checks read a stale-by-design
+    /// index (rebuilt only at the top of a flush pass — see the "Authority"
+    /// note in static_source_index.rs): the just-entered watcher is not yet a
+    /// bucket member, so BOTH the before and after arms are false and
+    /// `move_object` proposes the cheap `EnteredObjects` mark. Safety for this
+    /// shape is delivered at flush time, not at the mutation site:
+    /// `prepare_incremental_flush` escalates to a full pass (arm (1) of
+    /// `entered_object_blocks_incremental` fires first on the entering
+    /// object's live continuous effect; the recipient-sourced active-effect
+    /// check just after the index rebuild is a redundant backstop). This
+    /// test pins that handoff end-to-end — cheap mark at the seam, escalation
+    /// plus full evaluation at the flush — so neither half of the contract can
+    /// silently regress.
+    #[test]
+    fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
+        let mut state = GameState::new_two_player(42);
+        let generator = create_object(
+            &mut state,
+            CardId(80046),
+            PlayerId(0),
+            "Benign Generator".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&generator).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // Plain typed filter: no InZone/InAnyZone prop, so per
+            // `target_filter_reads_zone` it reads membership of NEITHER
+            // transition zone — it exists only to populate the index bucket.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80047),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80048),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // A real modification (not just a zone-reading affected filter) so
+            // the entered object sources a live continuous effect once on the
+            // battlefield — the exact condition `entered_object_blocks_incremental`
+            // arm (1) escalates on.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: exactly the benign generator is indexed after the priming flush"
+        );
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: the generator must not read either transition zone"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::EnteredObjects(_)),
+            "with populated (stale-by-design) buckets the mutation-site arms cannot see the entering object's own static; the cheap mark is the designed outcome here, got {:?}",
+            state.layers_dirty
+        );
+
+        crate::game::perf_counters::reset();
+        crate::game::layers::flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_escalated, 1,
+            "flush must escalate: the entered object sources a live continuous effect"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 1,
+            "the escalation must land in a full evaluation"
+        );
+    }
+}
+
+/// CR 712.14a building-block tests for the effect-driven transformed battlefield
+/// entry (Esper Origins class). Both drive `execute_zone_move_with_terminal`
+/// directly (not the raw `zones::move_to_zone`), so the full
+/// `deliver_replaced_zone_change` plain-fallback wiring — including the
+/// `move_to_zone_with_entry_flags(..., enter_transformed)` thread — is exercised.
+#[cfg(test)]
+mod effect_driven_transformed_entry_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::identifiers::CardId;
+
+    /// CR 712.14a (2nd sentence) regression guard: a SINGLE-FACED object
+    /// instructed to enter transformed cannot enter the battlefield — it remains
+    /// in its origin zone (Exile).
+    ///
+    /// This guards the PRE-EXISTING belt-and-suspenders early-return inside
+    /// `execute_zone_move_with_applied_terminal` (before the `zones.rs` SF1 guard
+    /// is reached). It passes both before and after the fix; its role is to pin
+    /// the CR 712.14a-2nd-sentence path against the SF1 guard rewrite ever being
+    /// regressed to a front-face fallback on the full-pipeline route.
+    #[test]
+    fn single_faced_object_instructed_enter_transformed_remains() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Single Faced".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // back_face intentionally left None (single-faced).
+        }
+
+        let mut events = Vec::new();
+        let result = execute_zone_move_with_terminal(
+            &mut state,
+            object_id,
+            Zone::Exile,
+            Zone::Battlefield,
+            object_id,
+            None,
+            true, // enter_transformed
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+
+        assert!(
+            matches!(
+                result,
+                ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+            ),
+            "CR 712.14a 2nd sentence: a single-faced object instructed to enter \
+             transformed must remain"
+        );
+        assert_eq!(
+            state.objects[&object_id].zone,
+            Zone::Exile,
+            "the single-faced object must stay in Exile"
+        );
+    }
+
+    /// CR 712.14a CONTROL: a DFC with a PERMANENT front face (Creature) and a
+    /// PERMANENT back face (Land) instructed to enter transformed still lands in
+    /// Battlefield and ends up transformed. Passes before and after the fix — the
+    /// entry-face rewrite must not be front-regressive, and `transform_permanent`
+    /// must still fire after the guarded entry.
+    #[test]
+    fn mdfc_permanent_front_transformed_entry_still_lands() {
+        use crate::game::game_object::BackFaceData;
+
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MDFC Front".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: "MDFC Back".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                printed_loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+                parse_warnings: vec![],
+            });
+        }
+
+        let mut events = Vec::new();
+        let result = execute_zone_move_with_terminal(
+            &mut state,
+            object_id,
+            Zone::Exile,
+            Zone::Battlefield,
+            object_id,
+            None,
+            true, // enter_transformed
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+
+        assert!(
+            matches!(result, ZoneMoveTerminalResult::Completed(_)),
+            "the DFC entered the battlefield and completed the move"
+        );
+        let obj = state.objects.get(&object_id).unwrap();
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "a permanent-front DFC entering transformed must land on the battlefield"
+        );
+        assert!(
+            obj.transformed,
+            "CR 712.14a: the DFC must be transformed (back face) after this entry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod face_down_entry_referent_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::FaceDownProfile;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 608.2c: the shared CR 708.3 helper installs characteristics and
+    /// NOTHING else. It is reached by every face-down path, including the
+    /// face-down CAST in `casting.rs` (where the object is on the stack and has
+    /// produced no permanent to name) and that module's two cast SIMULATIONS,
+    /// so a publish here would be a write no instruction asked for.
+    ///
+    /// The referent is published at the delivery instead, from the intent the
+    /// REQUEST carried — see `ChainReferentIntent`. What this row nails down is
+    /// the negative: no caller of this helper can publish by reaching it.
+    ///
+    /// It does NOT prove the positive. That is the integration suite's job
+    /// (`manifest_dread_that_creature_anaphor`), which drives the synchronous
+    /// manifest, the two-card continuation and the accept/decline resume through
+    /// the production pipeline.
+    #[test]
+    fn the_shared_face_down_helper_publishes_no_referent_from_any_zone() {
+        for zone in [Zone::Battlefield, Zone::Stack] {
+            let mut state = GameState::new_two_player(7);
+            let player = PlayerId(0);
+            let id = create_object(&mut state, CardId(1), player, "Entrant".to_string(), zone);
+            let before = vec![ObjectId(999)];
+            state.last_created_token_ids = before.clone();
+
+            apply_face_down_entry_profile(&mut state, id, &FaceDownProfile::vanilla_2_2());
+
+            assert_eq!(
+                state.last_created_token_ids, before,
+                "the characteristics helper must not touch the referent slot (zone {zone:?})"
+            );
+        }
     }
 }

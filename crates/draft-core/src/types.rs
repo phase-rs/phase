@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
+use engine::types::card::DraftEffect;
 use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
-
-use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
 
 /// Tournament pairing format for the draft event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,8 @@ pub enum DraftKind {
     Premier,
     /// Traditional Draft: 8 humans, Bo3 matches.
     Traditional,
+    /// Sealed: each player receives six unopened packs directly, Bo1 matches.
+    Sealed,
 }
 
 impl DraftKind {
@@ -72,14 +74,14 @@ impl DraftKind {
     pub fn human_seats(self) -> u8 {
         match self {
             DraftKind::Quick => 1,
-            DraftKind::Premier | DraftKind::Traditional => 8,
+            DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => 8,
         }
     }
 
     /// Match configuration for this draft kind.
     pub fn match_config(self) -> MatchConfig {
         match self {
-            DraftKind::Quick | DraftKind::Premier => MatchConfig {
+            DraftKind::Quick | DraftKind::Premier | DraftKind::Sealed => MatchConfig {
                 match_type: MatchType::Bo1,
                 ..MatchConfig::default()
             },
@@ -153,13 +155,16 @@ impl DeckAddableCards {
 
     pub fn display_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if matches!(
-            self.policy,
-            DeckAddableCardPolicy::StandardBasics | DeckAddableCardPolicy::StandardBasicsPlusCustom
-        ) {
-            names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+        match self.policy {
+            DeckAddableCardPolicy::StandardBasics => {
+                names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+            }
+            DeckAddableCardPolicy::CustomOnly => names.extend(self.custom.iter().cloned()),
+            DeckAddableCardPolicy::StandardBasicsPlusCustom => {
+                names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+                names.extend(self.custom.iter().cloned());
+            }
         }
-        names.extend(self.custom.iter().cloned());
         names.sort();
         names.dedup();
         names
@@ -226,6 +231,9 @@ pub struct DraftCardInstance {
     /// Full type line, e.g. "Creature — Human Wizard". Populated at pack generation from set pool data.
     #[serde(default)]
     pub type_line: String,
+    /// Draft-time effect parsed from the card's Oracle text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_effect: Option<DraftEffect>,
 }
 
 /// A pack of cards, newtype wrapper over Vec<DraftCardInstance>.
@@ -339,13 +347,18 @@ pub enum DraftAction {
         seat: u8,
         card_instance_id: String,
     },
+    PickWithDraftEffect {
+        seat: u8,
+        effect_card_instance_id: String,
+        card_instance_ids: Vec<String>,
+    },
     SubmitDeck {
         seat: u8,
         main_deck: Vec<String>,
     },
-    GeneratePairings {
-        round: u8,
-    },
+    /// Generate the next round's pairings. Carries no round: the reducer is the
+    /// single authority for which round that is (`DraftSession::next_pairing_round`).
+    GeneratePairings,
     ReportMatchResult {
         match_id: String,
         /// None = draw.
@@ -413,6 +426,13 @@ pub enum DraftError {
     SeatOutOfRange { seat: u8, pod_size: u8 },
     #[error("card '{card_instance_id}' not found in pack")]
     CardNotInPack { card_instance_id: String },
+    #[error("draft effect card '{card_instance_id}' is not in the player's pool")]
+    DraftEffectCardNotInPool { card_instance_id: String },
+    #[error("draft effect requires {expected_cards} cards, got {actual_cards}")]
+    InvalidDraftEffectSelection {
+        expected_cards: usize,
+        actual_cards: usize,
+    },
     #[error("seat {seat} has no pending pack")]
     NoPendingPack { seat: u8 },
     #[error("deck validation failed")]
@@ -437,6 +457,12 @@ pub enum DraftError {
     SeatAlreadyPickedThisRound { seat: u8 },
     #[error("seat {seat} is a bot — operation not applicable")]
     SeatIsBot { seat: u8 },
+    #[error("sealed events require a set source")]
+    SealedRequiresSetSource,
+    #[error("invalid sealed configuration: {reason}")]
+    InvalidSealedConfiguration { reason: String },
+    #[error("invalid sealed snapshot: {reason}")]
+    InvalidSealedSnapshot { reason: String },
 }
 
 /// Configuration for a draft session.
@@ -577,6 +603,7 @@ mod tests {
         assert_eq!(DraftKind::Quick.default_pod_size(), 8);
         assert_eq!(DraftKind::Premier.default_pod_size(), 8);
         assert_eq!(DraftKind::Traditional.default_pod_size(), 8);
+        assert_eq!(DraftKind::Sealed.default_pod_size(), 8);
     }
 
     #[test]
@@ -584,6 +611,7 @@ mod tests {
         assert_eq!(DraftKind::Quick.human_seats(), 1);
         assert_eq!(DraftKind::Premier.human_seats(), 8);
         assert_eq!(DraftKind::Traditional.human_seats(), 8);
+        assert_eq!(DraftKind::Sealed.human_seats(), 8);
     }
 
     #[test]
@@ -594,6 +622,7 @@ mod tests {
             DraftKind::Traditional.match_config().match_type,
             MatchType::Bo3
         );
+        assert_eq!(DraftKind::Sealed.match_config().match_type, MatchType::Bo1);
     }
 
     #[test]
@@ -620,7 +649,12 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_draft_kind() {
-        for kind in [DraftKind::Quick, DraftKind::Premier, DraftKind::Traditional] {
+        for kind in [
+            DraftKind::Quick,
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
             let json = serde_json::to_string(&kind).unwrap();
             let back: DraftKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, back);
@@ -700,6 +734,30 @@ mod tests {
     #[test]
     fn spectator_visibility_default_is_public() {
         assert_eq!(SpectatorVisibility::default(), SpectatorVisibility::Public);
+    }
+
+    #[test]
+    fn displayed_addable_cards_match_the_selected_policy() {
+        let custom = "Watery Grave";
+        for (policy, should_display_custom) in [
+            (DeckAddableCardPolicy::StandardBasics, false),
+            (DeckAddableCardPolicy::CustomOnly, true),
+            (DeckAddableCardPolicy::StandardBasicsPlusCustom, true),
+        ] {
+            let addable_cards = DeckAddableCards {
+                policy,
+                custom: vec![custom.to_string()],
+            };
+
+            assert_eq!(
+                addable_cards
+                    .display_names()
+                    .iter()
+                    .any(|name| name == custom),
+                should_display_custom,
+            );
+            assert_eq!(addable_cards.is_addable(custom), should_display_custom);
+        }
     }
 
     #[test]

@@ -1,20 +1,21 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
-import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { ManualManaToggle } from "../board/ManualManaToggle.tsx";
 import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
@@ -44,30 +45,16 @@ export function PlayerHud() {
   const isCompactHeight = useIsCompactHeight();
   const compact = isMobile || isCompactHeight;
 
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
-  const copyRetargetCurrentSlotHasMe = isCopyRetargetForMe && (() => {
-    const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
-    return (slot?.legal_alternatives ?? []).some((t) => "Player" in t && t.Player === playerId);
-  })();
-  // CR 115.7: A single-target retarget (Bolt Bend on a spell aimed at a player)
-  // can redirect to this player — same board-click path as normal targeting.
-  const retargetChoiceHasMe = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single"
-    && waitingFor.data.legal_new_targets.some((t) => "Player" in t && t.Player === playerId);
-  // CR 303.4g + CR 115.1: a returned / non-spell Aura that can enchant a player
-  // (a Curse) is hosted by a board pick — the picker's controller may attach it
-  // to this player when they appear in `legal_targets`. Click dispatches the
-  // same `ChooseTarget { Player }` the engine accepts (engine.rs ~2984).
-  const returnAsAuraHasMe = waitingFor?.type === "ReturnAsAuraTarget"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.legal_targets.some((t) => "Player" in t && t.Player === playerId);
-  const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
-    (target) => "Player" in target && target.Player === playerId,
-  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe || returnAsAuraHasMe;
+  const canActForWaitingState = useCanActForWaitingState();
+  // CR 115.1: the engine's legal set can name this seat. `getWaitingForPlayerChoiceIds`
+  // is the single WaitingFor -> choosable-PlayerId authority every seat-rendering
+  // surface reads, so a new player-targetable prompt lights this HUD up without a
+  // per-variant branch here. The hook resolves the REAL seat (may this client
+  // answer?); `playerId` is the RENDERED seat (did the engine name it?). CR 723:
+  // under a turn-control effect these are different players, and both questions
+  // still have to be answered.
+  const isValidTarget =
+    canActForWaitingState && getWaitingForPlayerChoiceIds(waitingFor).includes(playerId);
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {
@@ -106,8 +93,9 @@ export function PlayerHud() {
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
-            {designations.activeDungeon ? (
-              <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+            {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+            {designations.dungeonRoom ? (
+              <DungeonBadge room={designations.dungeonRoom} />
             ) : null}
             {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
             {designations.ringLevel > 0 ? (
@@ -134,9 +122,9 @@ export function PlayerHud() {
                 condition={condition}
               />
             ))}
-            {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map(
-              (family) => (
-                <UnboundedBadge key={family} family={family} />
+            {designations.unboundedFamilies.map(
+              (u) => (
+                <UnboundedBadge key={u.family} family={u.family} state={u.state} />
               ),
             )}
           </>

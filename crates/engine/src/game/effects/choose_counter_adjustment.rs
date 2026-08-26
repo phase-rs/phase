@@ -52,6 +52,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseCounterAdjustment,
             source_id: ability.source_id,
+            subject: None,
         });
     };
 
@@ -125,6 +126,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseCounterAdjustment,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Delegate to the existing ChooseOneOf machinery. The parent target is

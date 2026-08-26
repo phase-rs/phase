@@ -59,7 +59,8 @@
     "passingLeft": "→ Przekazywanie w lewo →",
     "passingRight": "← Przekazywanie w prawo ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Odkryte: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
@@ -77,17 +78,60 @@
   },
   "pack": {
     "confirmPick": "Potwierdź wybór",
+    "draftEffects": "Efekty draftu:",
     "waitingNext": "Oczekiwanie na następny booster...",
     "cardsInPack": "{{count}} kart w boosterze",
     "picking": "Wybieranie…",
     "autoPick": "Wybór automatyczny"
+  },
+  "sealedOpening": {
+    "title": "Otwórz swoją pulę Sealed",
+    "subtitle": "Otwórz sześć boosterów, po jednym na raz.",
+    "packProgress": "Booster {{current}} z {{total}}",
+    "openPack": "Otwórz booster",
+    "openPackArt": "Otwórz grafikę boostera",
+    "pulls": "Twoje karty",
+    "nextPack": "Następny booster",
+    "viewPool": "Zobacz swoją pulę",
+    "poolTitle": "Twoja pula Sealed",
+    "poolSubtitle": "Wszystkie {{count}} karty, pogrupowane według typu.",
+    "buildDeck": "Zbuduj talię"
   },
   "pool": {
     "cardsDrafted": "{{count}} wybranych kart",
     "empty": "Nie wybrano jeszcze żadnych kart",
     "sortColor": "Kolor",
     "sortType": "Typ",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Biały",
+      "blue": "Niebieski",
+      "black": "Czarny",
+      "red": "Czerwony",
+      "green": "Zielony",
+      "multicolor": "Wielokolorowy",
+      "colorless": "Bezkolorowy",
+      "creature": "Stworzenie",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artefakt",
+      "planeswalker": "Planeswalker",
+      "land": "Ląd",
+      "other": "Inne",
+      "mythic": "Mityczna",
+      "rare": "Rzadka",
+      "uncommon": "Niezbyt częsta",
+      "common": "Zwykła",
+      "rarityOther": "Inne rzadkości",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Klasyfikacja — Runda {{round}}",
@@ -100,13 +144,19 @@
   },
   "limitedDeck": {
     "poolHeading": "Pula ({{count}})",
+    "searchPool": "Szukaj w puli...",
     "allAdded": "Wszystkie karty dodane do talii.",
+    "noFilterMatches": "Żadna karta nie pasuje do filtrów",
+    "filterUnavailable": "Filtry są teraz niedostępne — wyświetlane są wszystkie karty.",
     "mainDeck": "Talia główna",
     "emptyDeckHint": "Klikaj karty z puli, aby dodać je do talii.",
     "addableCards": "Karty do dodania",
+    "searchAddableCards": "Szukaj kart do dodania...",
     "autoLands": "Automatyczne ziemie",
     "suggestDeck": "Zaproponuj talię",
     "submitDeck": "Zatwierdź talię",
+    "validationTitle": "Talia wymaga uwagi",
+    "submitFailed": "Nie można zatwierdzić talii",
     "removeCard": "Usuń {{name}}",
     "addCard": "Dodaj {{name}}",
     "cardCount": "/ {{min}} kart",
@@ -126,6 +176,10 @@
       "title": "Szybki draft",
       "description": "Zdraftuj 3 boostery z 7 botami, zbuduj talię z 40 kart, a potem rozegraj mecz Bo1 przeciwko jednemu z nich."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Otwórz sześć boosterów, przejrzyj całą pulę, a potem zbuduj talię z 40 kart na mecz Bo1."
+    },
     "cubeDraft": {
       "title": "Draft kostki",
       "description": "Wklej lub wczytaj listę kostki, dostosuj zasady boosterów i talii, a potem zdraftuj szybko przeciwko botom."
@@ -135,11 +189,20 @@
       "description": "Załóż lub dołącz do grupy liczącej do 8 graczy, draftujcie razem na żywo, a potem rozegrajcie turniej szwajcarski lub na wylot."
     },
     "podInProgress": "Trwa draft w grupie",
+    "guestPodInProgress": "Dołączony pod gotowy do ponownego połączenia",
     "podLabel": "Grupa {{kind}}",
-    "seatCount": "{{count}} miejsc",
+    "guestPodLabel": "Pod draftowy",
+    "seatCount_one": "{{count}} miejsce",
+    "seatCount_few": "{{count}} miejsca",
+    "seatCount_many": "{{count}} miejsc",
+    "seatCount_other": "{{count}} miejsc",
     "roomLabel": "Pokój {{code}}",
-    "cardsPicked": "{{count}} wybranych kart",
+    "cardsPicked_one": "{{count}} wybrana karta",
+    "cardsPicked_few": "{{count}} wybrane karty",
+    "cardsPicked_many": "{{count}} wybranych kart",
+    "cardsPicked_other": "{{count}} wybranych kart",
     "resume": "Wznów",
+    "reconnect": "Połącz ponownie",
     "draftInProgress": "Trwa draft",
     "draftComplete": "Draft zakończony",
     "resumeMatch": "Wznów mecz",
@@ -156,6 +219,7 @@
   },
   "quickPhase": {
     "drafting": "Draftowanie",
+    "opening": "Otwieranie boosterów",
     "deckbuilding": "Budowanie talii",
     "matchRecord": "Mecz {{number}} — {{wins}}W-{{losses}}P",
     "record": "{{wins}}W-{{losses}}P",
@@ -236,6 +300,7 @@
   "page": {
     "cubeDraftTitle": "Draft kostki",
     "quickDraftTitle": "Szybki draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Draft dodatku",
     "cubeTab": "Kostka"
   },
@@ -261,6 +326,8 @@
     "kindPremierDesc": "Mecze turniejowe do jednej wygranej po budowaniu talii. Szybsze rundy, bez wymiany kart bocznych między grami.",
     "kindTraditional": "Tradycyjny",
     "kindTraditionalDesc": "Mecze turniejowe do dwóch wygranych po budowaniu talii, z wymianą kart bocznych między grami.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Otwórz sześć boosterów bezpośrednio do puli każdego gracza, a następnie zbuduj talię turniejową do jednej wygranej.",
     "tournamentFormat": "Format turnieju",
     "tournamentSwiss": "Szwajcarski",
     "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",
@@ -315,7 +382,11 @@
     "sideboardGame": "Karty boczne — Gra {{number}}",
     "sideboardHint": "Wprowadź zmiany w kartach bocznych, a potem zatwierdź. Twoja pula jest dostępna poniżej.",
     "submitSideboard": "Zatwierdź karty boczne",
-    "preparingNext": "Przygotowywanie następnej gry..."
+    "preparingNext": "Przygotowywanie następnej gry...",
+    "hideOverlay": "Ukryj ten ekran",
+    "showOverlay": "Pokaż ten ekran",
+    "hiddenNotice": "Wymiana kart bocznych jest wciąż otwarta w tej grze.",
+    "hiddenNoticePlayDraw": "W tej grze wciąż trzeba wybrać: zagrywasz czy dobierasz."
   },
   "podComplete": {
     "title": "Draft zakończony",
@@ -324,7 +395,8 @@
   "podError": {
     "kicked": "Zostałeś wyrzucony z grupy",
     "hostLeft": "Gospodarz opuścił draft",
-    "connection": "Błąd połączenia"
+    "connection": "Błąd połączenia",
+    "retry": "Spróbuj połączyć ponownie"
   },
   "lobby": {
     "title": "Poczekalnia grupy draftu",

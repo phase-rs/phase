@@ -121,10 +121,15 @@ else
   ./scripts/gen-scryfall-images.sh         & PID_IMAGES=$!
   ./scripts/gen-scryfall-token-images.sh   & PID_TOKEN_IMAGES=$!
   ./scripts/gen-scryfall-printings.sh      & PID_PRINTINGS=$!
+  # Locale card-art maps. Sourced from MTGJSON rather than Scryfall bulk, but
+  # the same category of artifact: runtime-only frontend image data, needed
+  # only when a non-English UI language is selected.
+  ./scripts/gen-scryfall-locale-images.sh  & PID_LOCALE_IMAGES=$!
 
   wait $PID_IMAGES        || FAIL=1
   wait $PID_TOKEN_IMAGES  || FAIL=1
   wait $PID_PRINTINGS     || FAIL=1
+  wait $PID_LOCALE_IMAGES || FAIL=1
   if [ $FAIL -ne 0 ]; then
     echo "ERROR: Scryfall sidecar fetch failed." >&2
     exit 1
@@ -144,6 +149,18 @@ echo "Step 2: Installing frontend dependencies..."
 (cd client && pnpm install) &
 PID_PNPM=$!
 
+# The lobby worker is a separate npm project (its own package-lock.json), and
+# Tilt's 'lobby-worker' resource runs `npm run dev` from it. Without this the
+# resource comes up red on a fresh clone and deck URL import stays broken.
+# Guarded on presence for the same reason release.yml guards its deploy job:
+# commits older than the Worker have no lobby-worker/, and setup must not hard
+# fail there.
+PID_WORKER=""
+if [ -d lobby-worker ]; then
+  (cd lobby-worker && npm install) &
+  PID_WORKER=$!
+fi
+
 # --- Card-data + WASM ---
 if [ "$USE_TILT" = 1 ]; then
   echo ""
@@ -161,6 +178,9 @@ else
 fi
 
 wait $PID_PNPM || FAIL=1
+if [ -n "$PID_WORKER" ]; then
+  wait $PID_WORKER || FAIL=1
+fi
 if [ $FAIL -ne 0 ]; then
   echo "ERROR: setup step failed (see logs above)." >&2
   exit 1

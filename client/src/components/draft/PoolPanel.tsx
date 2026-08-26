@@ -1,131 +1,26 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type { DraftPoolColorCounts, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
+import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 
-// ── Sorting helpers ─────────────────────────────────────────────────────
-// These are display-layer grouping of engine-provided enriched fields
-// (DraftCardInstance.colors, cmc, type_line) — not game logic computation.
-
-function colorGroupKey(card: DraftCardInstance): string {
-  if (card.colors.length === 0) return "Colorless";
-  if (card.colors.length > 1) return "Multicolor";
-  return card.colors[0];
-}
-
-const COLOR_GROUP_ORDER: Record<string, number> = {
-  W: 0, U: 1, B: 2, R: 3, G: 4, Multicolor: 5, Colorless: 6,
+const EMPTY_COLOR_COUNTS: DraftPoolColorCounts = {
+  white: 0,
+  blue: 0,
+  black: 0,
+  red: 0,
+  green: 0,
 };
 
-const COLOR_GROUP_LABELS: Record<string, string> = {
-  W: "White", U: "Blue", B: "Black", R: "Red", G: "Green",
-  Multicolor: "Multicolor", Colorless: "Colorless",
-};
-
-function primaryType(typeLine: string): string {
-  const lower = typeLine.toLowerCase();
-  if (lower.includes("creature")) return "Creature";
-  if (lower.includes("instant")) return "Instant";
-  if (lower.includes("sorcery")) return "Sorcery";
-  if (lower.includes("enchantment")) return "Enchantment";
-  if (lower.includes("artifact")) return "Artifact";
-  if (lower.includes("planeswalker")) return "Planeswalker";
-  if (lower.includes("land")) return "Land";
-  return "Other";
-}
-
-const TYPE_ORDER: Record<string, number> = {
-  Creature: 0, Instant: 1, Sorcery: 2, Enchantment: 3,
-  Artifact: 4, Planeswalker: 5, Land: 6, Other: 7,
-};
-
-interface PoolEntry {
-  card: DraftCardInstance;
-  count: number;
-}
-
-interface CardGroup {
-  label: string;
-  cards: PoolEntry[];
-}
-
-function dedup(cards: DraftCardInstance[]): PoolEntry[] {
-  const map = new Map<string, PoolEntry>();
-  for (const card of cards) {
-    const existing = map.get(card.name);
-    if (existing) {
-      existing.count++;
-    } else {
-      map.set(card.name, { card, count: 1 });
-    }
-  }
-  return [...map.values()];
-}
-
-function sortWithinGroup(cards: DraftCardInstance[]): PoolEntry[] {
-  const sorted = [...cards].sort((a, b) => a.cmc - b.cmc || a.name.localeCompare(b.name));
-  return dedup(sorted);
-}
-
-function groupByColor(pool: DraftCardInstance[]): CardGroup[] {
-  const groups = new Map<string, DraftCardInstance[]>();
-  for (const card of pool) {
-    const key = colorGroupKey(card);
-    const list = groups.get(key) ?? [];
-    list.push(card);
-    groups.set(key, list);
-  }
-  return [...groups.entries()]
-    .sort(([a], [b]) => (COLOR_GROUP_ORDER[a] ?? 99) - (COLOR_GROUP_ORDER[b] ?? 99))
-    .map(([key, cards]) => ({
-      label: COLOR_GROUP_LABELS[key] ?? key,
-      cards: sortWithinGroup(cards),
-    }));
-}
-
-function groupByType(pool: DraftCardInstance[]): CardGroup[] {
-  const groups = new Map<string, DraftCardInstance[]>();
-  for (const card of pool) {
-    const key = primaryType(card.type_line);
-    const list = groups.get(key) ?? [];
-    list.push(card);
-    groups.set(key, list);
-  }
-  return [...groups.entries()]
-    .sort(([a], [b]) => (TYPE_ORDER[a] ?? 99) - (TYPE_ORDER[b] ?? 99))
-    .map(([key, cards]) => ({
-      label: key,
-      cards: sortWithinGroup(cards),
-    }));
-}
-
-function groupByCmc(pool: DraftCardInstance[]): CardGroup[] {
-  const groups = new Map<string, DraftCardInstance[]>();
-  for (const card of pool) {
-    const key = card.cmc >= 6 ? "6+" : String(card.cmc);
-    const list = groups.get(key) ?? [];
-    list.push(card);
-    groups.set(key, list);
-  }
-  const cmcOrder = ["0", "1", "2", "3", "4", "5", "6+"];
-  return cmcOrder
-    .filter((k) => groups.has(k))
-    .map((key) => ({
-      label: `${key} CMC`,
-      cards: dedup([...groups.get(key)!].sort((a, b) => a.name.localeCompare(b.name))),
-    }));
-}
-
-function groupPool(pool: DraftCardInstance[], mode: PoolSortMode): CardGroup[] {
-  switch (mode) {
-    case "color": return groupByColor(pool);
-    case "type": return groupByType(pool);
-    case "cmc": return groupByCmc(pool);
-  }
-}
+const COLOR_COUNT_KEYS = {
+  W: "white",
+  U: "blue",
+  B: "black",
+  R: "red",
+  G: "green",
+} as const;
 
 // ── Rarity badge ────────────────────────────────────────────────────────
 
@@ -190,25 +85,15 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
   const togglePoolPanel = useDraftStore((s) => s.togglePoolPanel);
   const view = viewOverride !== undefined ? viewOverride : quickView;
 
-  const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
-
-  const groups = useMemo(
-    () => groupPool(pool, poolSortMode),
-    [pool, poolSortMode],
-  );
-
-  // WUBRG pool tally — a multicolor card counts toward each of its colors
-  // (standard draft-tracker convention), so the strip reads as "how deep am I
-  // in each color" rather than a mono-only count.
-  const colorCounts = useMemo(() => {
-    const counts: Record<string, number> = { W: 0, U: 0, B: 0, R: 0, G: 0 };
-    for (const card of pool) {
-      for (const color of card.colors) {
-        if (color in counts) counts[color]++;
-      }
-    }
-    return counts;
-  }, [pool]);
+  const pool = view?.pool ?? [];
+  const groups = view
+    ? poolSortMode === "color"
+      ? view.pool_groups.color_groups
+      : poolSortMode === "type"
+        ? view.pool_groups.type_groups
+        : view.pool_groups.cmc_groups
+    : [];
+  const colorCounts = view?.pool_groups.color_counts ?? EMPTY_COLOR_COUNTS;
 
   return (
     <div className="flex h-full flex-col">
@@ -235,8 +120,8 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
             {(["W", "U", "B", "R", "G"] as const).map((c) => (
               <div key={c} className="flex flex-col items-center gap-1 rounded-[8px] bg-black/24 py-1.5">
                 <span className={`h-3 w-3 rounded-full ${COLOR_PIP[c]} shadow-[inset_0_0_0_1px_rgba(0,0,0,0.3)]`} />
-                <span className={`font-mono text-[11px] tabular-nums ${colorCounts[c] ? "text-slate-300" : "text-slate-600"}`}>
-                  {colorCounts[c]}
+                <span className={`font-mono text-[11px] tabular-nums ${colorCounts[COLOR_COUNT_KEYS[c]] ? "text-slate-300" : "text-slate-600"}`}>
+                  {colorCounts[COLOR_COUNT_KEYS[c]]}
                 </span>
               </div>
             ))}
@@ -262,9 +147,9 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
           {/* Card groups */}
           <div className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
             {groups.map((group) => (
-              <div key={group.label}>
+              <div key={group.kind}>
                 <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {group.label} ({group.cards.length})
+                  {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.total})
                 </div>
                 <div className="space-y-0.5">
                   {group.cards.map(({ card, count }) => (

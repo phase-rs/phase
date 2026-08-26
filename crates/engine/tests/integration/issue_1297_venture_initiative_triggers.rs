@@ -138,7 +138,10 @@ fn branch_room_trigger_and_venture_observer_both_resolve_after_room_choice() {
             dungeon, options, ..
         } => {
             assert_eq!(*dungeon, DungeonId::Undercity);
-            assert_eq!(options.as_slice(), &[1, 2]);
+            assert_eq!(
+                options.iter().map(|o| o.index).collect::<Vec<_>>(),
+                vec![1, 2]
+            );
         }
         other => panic!("expected Undercity branch choice, got {other:?}"),
     }
@@ -196,6 +199,7 @@ fn initiative_attack_trigger_skips_without_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();
@@ -232,6 +236,7 @@ fn initiative_attack_trigger_draws_with_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();

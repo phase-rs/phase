@@ -360,7 +360,7 @@ fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
         pool_total, 2,
         "KCI activation must add {{C}}{{C}} to the mana pool — got {pool_total} total mana"
     );
-    // CR 117.1 + CR 701.16a: Retriever should now be in the graveyard
+    // CR 117.1 + CR 701.21a: Retriever should now be in the graveyard
     // (sacrificed as the activation cost).
     assert!(
         state.players[P0.0 as usize].graveyard.contains(&retriever),

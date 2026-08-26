@@ -48,6 +48,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptions,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -64,6 +65,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptionsFromRollDifference,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -83,6 +85,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptionOnSprocket,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -91,6 +94,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CrankContraptions,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -102,6 +106,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ReassembleContraption,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -114,6 +119,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ReassembleContraptionOnSprocket,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -160,10 +166,12 @@ pub fn perform_contraption_upkeep_turn_based_action(
         ObjectId(0),
         player,
     );
-    state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+    state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
     state.waiting_for = WaitingFor::ChooseObjectsSelection {
         player,
         eligible,
+        min: 0,
+        max: None,
         trigger_event: None,
     };
     let _ = events;
@@ -239,6 +247,7 @@ pub(crate) fn continue_assemble_batch(
             parent_targets: Vec::new(),
             context: crate::types::ability::SpellContext::default(),
             replacement_applied: Default::default(),
+            continuation: None,
             players: vec![player],
         },
     );
@@ -415,6 +424,7 @@ fn prompt_reassemble_sprocket_choice(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![ability.controller],
         },
     );

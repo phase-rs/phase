@@ -124,22 +124,29 @@ pub fn resolve(
                 .iter()
                 .rposition(|e| e.id == obj_id || e.source_id == obj_id);
             if let Some(idx) = stack_idx {
-                let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+                // CR 701.6a: the removal IS the counter, so it goes through the
+                // single CR 405.2 removal authority, which journals it and drops
+                // both per-entry side tables.
+                let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+                )
+                .expect("rposition yielded a live stack index")
+                .entry;
+                let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let casting_variant = match &state.stack[idx].kind {
+                let casting_variant = match &removed.kind {
                     StackEntryKind::Spell {
                         casting_variant, ..
                     } => *casting_variant,
                     _ => CastingVariant::Normal,
                 };
                 let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-                let source_permanent_id = state.stack[idx].source_id;
-                let removed_entry_id = state.stack[idx].id;
-                state.stack.remove(idx);
-                state.stack_paid_facts.remove(&removed_entry_id);
+                let source_permanent_id = removed.source_id;
 
                 // CR 701.6a: removal from the stack IS the counter; emit the
                 // event now (before the consequent zone move) so a pause on a
@@ -193,7 +200,11 @@ pub fn resolve(
                         }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                        super::super::stack::restore_alternative_spell_normal_face(
+                            state,
+                            obj_id,
+                            casting_variant,
+                        );
                     }
                     // CR 701.6a + CR 614.6: route the stack -> graveyard/exile
                     // move through the zone-change pipeline so `Moved` redirects
@@ -233,6 +244,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 608.2c: The rider is a follow-up instruction conditional on the prior
@@ -243,8 +255,17 @@ pub fn resolve(
         match source_rider {
             // CR 611.2: Apply the "loses all abilities ..." static to the
             // countered ability's source permanent (Tishana's Tidebinder).
-            Some(CounterSourceRider::LosesAbilities { static_def }) => {
-                apply_source_static(state, ability.source_id, source_permanent_id, &static_def);
+            Some(CounterSourceRider::LosesAbilities {
+                static_def,
+                duration,
+            }) => {
+                apply_source_static(
+                    state,
+                    ability.source_id,
+                    source_permanent_id,
+                    &static_def,
+                    *duration,
+                );
             }
             // CR 701.8: Destroy the countered ability's source permanent
             // (Teferi's Response, Green Slime) through the shared guarded path
@@ -348,20 +369,27 @@ pub fn resolve_all(
         let stack_idx = state.stack.iter().position(|e| e.id == obj_id);
         let Some(idx) = stack_idx else { continue };
 
-        let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+        // CR 701.6a: the removal IS the counter, so it goes through the single
+        // CR 405.2 removal authority, which journals it and drops both
+        // per-entry side tables.
+        let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("position yielded a live stack index")
+        .entry;
+        let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let casting_variant = match &state.stack[idx].kind {
+        let casting_variant = match &removed.kind {
             StackEntryKind::Spell {
                 casting_variant, ..
             } => *casting_variant,
             _ => CastingVariant::Normal,
         };
         let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-        let removed_entry_id = state.stack[idx].id;
-        state.stack.remove(idx);
-        state.stack_paid_facts.remove(&removed_entry_id);
 
         // CR 701.6a: removal from the stack IS the counter; emit the event
         // before any consequent zone move.
@@ -380,7 +408,11 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             if casting_variant.restores_front_face_after_stack_exit() {
-                super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                super::super::stack::restore_alternative_spell_normal_face(
+                    state,
+                    obj_id,
+                    casting_variant,
+                );
             }
             // CR 701.6a + CR 614.6: route through the pipeline so graveyard
             // redirects (Rest in Peace / Leyline of the Void) fire — same
@@ -410,6 +442,7 @@ pub fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -419,12 +452,14 @@ pub fn resolve_all(
 /// `CounterSourceRider::LosesAbilities` static.
 ///
 /// The effect targets the countered ability's source permanent and persists
-/// as long as the counter source (e.g., Tidebinder) remains on the battlefield.
+/// for the rider's `duration` (Tishana: `Duration::UntilHostLeavesPlay`, i.e.
+/// as long as the counter source remains on the battlefield — CR 611.2a).
 fn apply_source_static(
     state: &mut GameState,
     counter_source_id: ObjectId,
     source_permanent_id: ObjectId,
     static_def: &StaticDefinition,
+    duration: Duration,
 ) {
     // Only apply if the source permanent is still on the battlefield
     if !state.battlefield.contains(&source_permanent_id) {
@@ -440,7 +475,7 @@ fn apply_source_static(
     state.add_transient_continuous_effect(
         counter_source_id,
         controller,
-        Duration::UntilHostLeavesPlay,
+        duration,
         TargetFilter::SpecificObject {
             id: source_permanent_id,
         },
@@ -815,6 +850,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -830,6 +866,7 @@ mod tests {
                 },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
+                    duration: Box::new(Duration::UntilHostLeavesPlay),
                 }),
                 countered_spell_zone: None,
             },
@@ -868,6 +905,99 @@ mod tests {
             tce.modifications,
             vec![ContinuousModification::RemoveAllAbilities],
             "should remove all abilities"
+        );
+    }
+
+    /// Discriminating guard for the `CounterSourceRider::LosesAbilities.duration`
+    /// field-threading: the registered TCE's duration must come from the RIDER'S
+    /// field, not a hard-coded `Duration::UntilHostLeavesPlay` in
+    /// `apply_source_static`. Uses a deliberately non-default duration
+    /// (`UntilEndOfTurn`) so a reverted resolver (literal constant) FAILS this
+    /// assertion. Non-vacuity: the two SBA-adjacent asserts prove the counter
+    /// actually fired (stack emptied) and a TCE was registered before we read
+    /// its duration.
+    #[test]
+    fn counter_ability_source_static_duration_comes_from_rider_field() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_permanent = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let tidebinder = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Tidebinder".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability_on_stack = ObjectId(999);
+        state.stack.push_back(StackEntry {
+            id: ability_on_stack,
+            source_id: source_permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source_permanent,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "Dummy".to_string(),
+                        description: None,
+                    },
+                    vec![],
+                    source_permanent,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+
+        let source_static = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: None,
+                },
+                source_rider: Some(CounterSourceRider::LosesAbilities {
+                    static_def: Box::new(source_static),
+                    // Non-default sentinel: the resolver must thread THIS value.
+                    duration: Box::new(Duration::UntilEndOfTurn),
+                }),
+                countered_spell_zone: None,
+            },
+            vec![TargetRef::Object(ability_on_stack)],
+            tidebinder,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // Reach-guards: the counter must have fired and installed a TCE, so the
+        // duration read below is not vacuously against an absent effect.
+        assert!(state.stack.is_empty(), "ability should be countered");
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the loses-abilities TCE must be registered"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].duration,
+            Duration::UntilEndOfTurn,
+            "TCE duration must be threaded from the rider field, not hard-coded"
         );
     }
 
@@ -911,6 +1041,7 @@ mod tests {
                 target: TargetFilter::Any,
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
+                    duration: Box::new(Duration::UntilHostLeavesPlay),
                 }),
                 countered_spell_zone: None,
             },
@@ -976,6 +1107,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1322,6 +1454,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1506,6 +1639,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -1515,7 +1649,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: perm,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Act".to_string(),
                         description: None,
@@ -1523,7 +1657,7 @@ mod tests {
                     vec![],
                     perm,
                     PlayerId(1),
-                ),
+                )),
             },
         });
         state.stack.push_back(StackEntry {
@@ -1624,6 +1758,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }

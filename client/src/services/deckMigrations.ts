@@ -18,6 +18,7 @@
 import { repairParsedDeck, type ParsedDeck } from "./deckParser";
 import { STORAGE_KEY_PREFIX } from "../constants/storage";
 import { withStorageWatchSuppressed } from "./cloudSync/storageWatcher";
+import { projectSavedDeckSpecialSlots } from "./savedDeckProjection";
 
 /**
  * Walk every saved deck, repair its JSON, and persist the repaired form when
@@ -42,13 +43,7 @@ export function migrateSavedDecks(): void {
     } catch {
       continue;
     }
-    const repaired = repairParsedDeck(parsed);
-    if (
-      parsed.companion &&
-      !repaired.sideboard.some((e) => e.name === parsed.companion)
-    ) {
-      repaired.sideboard.push({ count: 1, name: parsed.companion });
-    }
+    const repaired = projectSavedDeckSpecialSlots(parsed, repairParsedDeck(parsed));
     const repairedRaw = JSON.stringify({ ...parsed, ...repaired });
     if (repairedRaw !== raw) repairs.push([key, repairedRaw]);
   }

@@ -87,9 +87,7 @@ fn to_dtos(outs: Vec<Outbound>) -> Vec<OutboundDto> {
 /// `Broker::handle`, so this boundary crate is the only place that can answer
 /// them.
 fn reject_reply(message: &str) -> Vec<Outbound> {
-    vec![Outbound::ToSelf(LobbyServerMessage::Error {
-        message: message.to_string(),
-    })]
+    vec![Outbound::ToSelf(LobbyServerMessage::error(message))]
 }
 
 /// Whether a client frame can mutate the shared `LobbyManager` (and therefore
@@ -253,6 +251,22 @@ impl Default for WasmBroker {
 #[wasm_bindgen]
 pub fn protocol_version() -> u32 {
     PROTOCOL_VERSION
+}
+
+/// The **lobby** message-set version, independent of [`protocol_version`].
+/// The Worker advertises this on `ServerHello` and gates incoming
+/// `ClientHello` frames on it, so a full-game bump the broker never parses no
+/// longer slides the lobby's compatibility window.
+#[wasm_bindgen]
+pub fn lobby_protocol_version() -> u32 {
+    lobby_broker::LOBBY_PROTOCOL_VERSION
+}
+
+/// Lowest client lobby protocol this broker accepts. No ceiling — see
+/// `lobby_broker::protocol::MIN_SUPPORTED_LOBBY_PROTOCOL`.
+#[wasm_bindgen]
+pub fn min_supported_lobby_protocol() -> u32 {
+    lobby_broker::MIN_SUPPORTED_LOBBY_PROTOCOL
 }
 
 fn result_json(r: CallResult) -> String {

@@ -5,7 +5,7 @@
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
     "quick": {
-      "step1": "You'll open 3 packs of 14 cards each",
+      "step1": "You'll open {{packCount}} packs of {{cardsPerPack}} cards each",
       "step2": "Pick one card per pack, then pass the rest to AI drafters",
       "step3": "Packs alternate direction each round — left, right, left",
       "step4": "After all picks, build a 40-card deck and play a match"
@@ -59,7 +59,8 @@
     "passingLeft": "→ Passing Left →",
     "passingRight": "← Passing Right ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Face-up: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
@@ -77,17 +78,60 @@
   },
   "pack": {
     "confirmPick": "Confirm Pick",
+    "draftEffects": "Draft effects:",
     "waitingNext": "Waiting for next pack...",
     "cardsInPack": "{{count}} cards in pack",
     "picking": "Picking…",
     "autoPick": "Auto-pick"
+  },
+  "sealedOpening": {
+    "title": "Open your sealed pool",
+    "subtitle": "Open six packs, one at a time.",
+    "packProgress": "Pack {{current}} of {{total}}",
+    "openPack": "Open pack",
+    "openPackArt": "Open pack artwork",
+    "pulls": "Your pulls",
+    "nextPack": "Next pack",
+    "viewPool": "View your pool",
+    "poolTitle": "Your sealed pool",
+    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "buildDeck": "Build deck"
   },
   "pool": {
     "cardsDrafted": "{{count}} cards drafted",
     "empty": "No cards drafted yet",
     "sortColor": "Color",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "White",
+      "blue": "Blue",
+      "black": "Black",
+      "red": "Red",
+      "green": "Green",
+      "multicolor": "Multicolor",
+      "colorless": "Colorless",
+      "creature": "Creature",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artifact",
+      "planeswalker": "Planeswalker",
+      "land": "Land",
+      "other": "Other",
+      "mythic": "Mythic",
+      "rare": "Rare",
+      "uncommon": "Uncommon",
+      "common": "Common",
+      "rarityOther": "Other rarities",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Standings — Round {{round}}",
@@ -100,13 +144,19 @@
   },
   "limitedDeck": {
     "poolHeading": "Pool ({{count}})",
+    "searchPool": "Search your pool...",
     "allAdded": "All cards added to deck.",
+    "noFilterMatches": "No cards match the filters",
+    "filterUnavailable": "Filters are unavailable right now — showing all cards.",
     "mainDeck": "Main Deck",
     "emptyDeckHint": "Click cards from the pool to add them to your deck.",
     "addableCards": "Addable Cards",
+    "searchAddableCards": "Search addable cards...",
     "autoLands": "Auto Lands",
     "suggestDeck": "Suggest Deck",
     "submitDeck": "Submit Deck",
+    "validationTitle": "Deck needs attention",
+    "submitFailed": "Unable to submit deck",
     "removeCard": "Remove {{name}}",
     "addCard": "Add {{name}}",
     "cardCount": "/ {{min}} cards",
@@ -126,6 +176,10 @@
       "title": "Quick Draft",
       "description": "Draft 3 packs with 7 AI drafters, build a 40-card deck, then play a Bo1 match against one of them."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Paste or load a cube list, tune pack and deck rules, then quick draft against AI bots."
@@ -135,11 +189,20 @@
       "description": "Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
     },
     "podInProgress": "Pod Draft in Progress",
+    "guestPodInProgress": "Joined Pod Ready to Reconnect",
     "podLabel": "{{kind}} Pod",
-    "seatCount": "{{count}} seats",
+    "guestPodLabel": "Draft Pod",
+    "seatCount_one": "{{count}} seat",
+    "seatCount_few": "{{count}} seats",
+    "seatCount_many": "{{count}} seats",
+    "seatCount_other": "{{count}} seats",
     "roomLabel": "Room {{code}}",
-    "cardsPicked": "{{count}} cards picked",
+    "cardsPicked_one": "{{count}} card picked",
+    "cardsPicked_few": "{{count}} cards picked",
+    "cardsPicked_many": "{{count}} cards picked",
+    "cardsPicked_other": "{{count}} cards picked",
     "resume": "Resume",
+    "reconnect": "Reconnect",
     "draftInProgress": "Draft in Progress",
     "draftComplete": "Draft Complete",
     "resumeMatch": "Resume Match",
@@ -156,6 +219,7 @@
   },
   "quickPhase": {
     "drafting": "Drafting",
+    "opening": "Opening Packs",
     "deckbuilding": "Deck Building",
     "matchRecord": "Match {{number}} — {{wins}}W-{{losses}}L",
     "record": "{{wins}}W-{{losses}}L",
@@ -236,6 +300,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -261,6 +326,8 @@
     "kindPremierDesc": "Best-of-one tournament matches after deckbuilding. Faster rounds, no sideboarding between games.",
     "kindTraditional": "Traditional",
     "kindTraditionalDesc": "Best-of-three tournament matches after deckbuilding, with sideboarding between games.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Open six packs directly into each player's pool, then build a best-of-one tournament deck.",
     "tournamentFormat": "Tournament Format",
     "tournamentSwiss": "Swiss",
     "tournamentSwissDesc": "Everyone keeps playing through three rounds, even after a loss.",
@@ -315,7 +382,11 @@
     "sideboardGame": "Sideboard — Game {{number}}",
     "sideboardHint": "Make sideboard changes, then submit. Your pool is available below.",
     "submitSideboard": "Submit Sideboard",
-    "preparingNext": "Preparing next game..."
+    "preparingNext": "Preparing next game...",
+    "hideOverlay": "Hide this screen",
+    "showOverlay": "Show this screen",
+    "hiddenNotice": "Sideboarding is still open for this game.",
+    "hiddenNoticePlayDraw": "A play or draw choice is still open for this game."
   },
   "podComplete": {
     "title": "Draft Complete",
@@ -324,7 +395,8 @@
   "podError": {
     "kicked": "You were kicked from the pod",
     "hostLeft": "Host left the draft",
-    "connection": "Connection Error"
+    "connection": "Connection Error",
+    "retry": "Try Reconnecting"
   },
   "spectator": {
     "eyebrow": "Draft spectator",

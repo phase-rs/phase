@@ -24,6 +24,7 @@ import { menuButtonClass } from "../menu/buttonStyles";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../../stores/draftPodStore";
 import { BotIndicator } from "./BotIndicator";
+import { copyText } from "../../services/copyText";
 
 // ── Seat Card ─────────────────────────────────────────────────────────
 
@@ -177,9 +178,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
   const handleCopyCode = useCallback(() => {
     if (roomCode) {
-      navigator.clipboard.writeText(roomCode).catch(() => {
-        // Clipboard API may not be available
-      });
+      void copyText(roomCode);
     }
   }, [roomCode]);
 

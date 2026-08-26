@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState, TargetRef } from "../../../adapter/types.ts";
+import type { GameState, TargetRef, WaitingFor } from "../../../adapter/types.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -11,6 +11,8 @@ import {
   buildGameState,
   buildPlayer,
 } from "../../../test/factories/gameStateFactory.ts";
+
+type ChooseObjectsWaitingFor = Extract<WaitingFor, { type: "ChooseObjectsSelection" }>;
 
 const dispatchMock = vi.fn();
 
@@ -41,14 +43,25 @@ function makeState(eligible: TargetRef[]): GameState {
     objects: buildObjectMap(
       makeObject(42, "Walking Ballista"),
       makeObject(43, "Hangarback Walker"),
+      makeObject(44, "Triskelion"),
     ),
     next_object_id: 100,
-    battlefield: [42, 43],
+    battlefield: [42, 43, 44],
     waiting_for: {
       type: "ProliferateChoice",
       data: { player: 0, eligible },
     },
     next_timestamp: 2,
+  });
+}
+
+function setUpWaitingFor(waitingFor: ChooseObjectsWaitingFor) {
+  const state = makeState(waitingFor.data.eligible);
+  state.waiting_for = waitingFor;
+  useGameStore.setState({
+    gameMode: "online",
+    gameState: state,
+    waitingFor,
   });
 }
 
@@ -125,5 +138,67 @@ describe("ProliferateModal (via CardChoiceModal)", () => {
     setUp([{ Object: 42 }]);
     const { container } = render(<CardChoiceModal />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("caps ChooseObjects default, toggles, and Select All at max", () => {
+    const eligible: TargetRef[] = [{ Object: 42 }, { Object: 43 }, { Object: 44 }];
+    setUpWaitingFor({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible, min: 0, max: 2 },
+    });
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Triskelion" }));
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectTargets",
+      data: { targets: eligible.slice(0, 2) },
+    });
+  });
+
+  it("disables confirmation below a required minimum without locking reselection", () => {
+    const eligible: TargetRef[] = [{ Object: 42 }, { Object: 43 }, { Object: 44 }];
+    setUpWaitingFor({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible, min: 2, max: 3 },
+    });
+    render(<CardChoiceModal />);
+
+    expect(screen.queryByRole("button", { name: "None" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Triskelion" }));
+    fireEvent.click(screen.getByRole("button", { name: "Walking Ballista" }));
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Triskelion" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectTargets",
+      data: { targets: eligible.slice(1) },
+    });
+  });
+
+  it("can replace a default target when the exact minimum equals the maximum", () => {
+    const eligible: TargetRef[] = [{ Object: 42 }, { Object: 43 }, { Object: 44 }];
+    setUpWaitingFor({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible, min: 2, max: 2 },
+    });
+    render(<CardChoiceModal />);
+
+    expect(screen.getByRole("button", { name: "Triskelion" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Walking Ballista" }));
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Triskelion" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Triskelion" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectTargets",
+      data: { targets: eligible.slice(1) },
+    });
   });
 });

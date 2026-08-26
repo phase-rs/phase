@@ -50,7 +50,7 @@ fn fact_or_fiction_full_flow() {
     // PileSource::RevealedFromLibraryTop { count: 5 }.
     let oracle_text = "Reveal the top five cards of your library. \
                        An opponent separates those cards into two piles. \
-                       Put one pile into your hand and the rest into your graveyard.";
+                       Put one pile into your hand and the other into your graveyard.";
     let fof_builder =
         scenario.add_spell_to_hand_from_oracle(P0, "Fact or Fiction", true, oracle_text);
     let fof_id = fof_builder.id();
@@ -124,4 +124,9 @@ fn fact_or_fiction_full_flow() {
             "unchosen pile card {card_id:?} should be in graveyard"
         );
     }
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
 }

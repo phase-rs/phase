@@ -1,24 +1,32 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
-import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
+import type {
+  ObjectId,
+  StackEntry as StackEntryType,
+  StackEntryDisplay,
+  StackPaidFactView,
+} from "../../adapter/types.ts";
 
 interface StackEntryProps {
   entry: StackEntryType;
@@ -41,15 +49,21 @@ interface StackEntryProps {
    * that don't proxy group data keep the prior per-entry rendering.
    */
   groupCount?: number;
+  /**
+   * The engine-selected object identity for a compact coalesced group. The
+   * visible card remains `entry`; choice membership and dispatch use this id.
+   */
+  choiceObjectId?: ObjectId;
   details?: StackEntryDisplay;
 }
 
-export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+export function StackEntry({ entry, choiceObjectId = entry.id, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const canActForWaitingState = useCanActForWaitingState();
   const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
@@ -63,17 +77,28 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(entry.source_id);
     setPreviewSticky(true);
+    onHoverChange?.(true);
   });
 
   const sourceObj = objects?.[entry.source_id];
   // Prefer the engine-pre-resolved source name on triggered abilities (so the
   // display layer doesn't dereference ObjectId -> GameObject -> name itself).
   // Fall back to the objects map for spells/activated entries that don't carry
-  // a captured name, and to "Unknown" for synthetic game-rule triggers whose
-  // source_id is ObjectId(0).
+  // a captured name.
+  //
+  // There is deliberately NO last-resort literal here. This line used to end in
+  // `|| "Unknown"` for the rule-defined sourceless abilities this engine
+  // constructs (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad counters,
+  // and CR 702.179d speed). CR 113.7 defines an ability's source; CR 113.8
+  // instead defines its controller. (CR 901.8 separately gives Planechase's
+  // planeswalking ability no source.) "Unknown" is game-facing text no rule
+  // ever produced, invented by the display layer because the wire carried
+  // nothing. The engine names those abilities now, so the invention has nothing
+  // left to cover; if a name is ever missing again, an empty label is the honest
+  // answer and the engine-side guard is what should fail.
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
-  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "Unknown";
+  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
@@ -90,6 +115,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -138,6 +165,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
+  const selectedModeLabels = isSpell ? details?.selected_mode_labels ?? [] : [];
   // The chosen {X} is a resolved value (like a chosen color), not just a cost —
   // pull it out for a dedicated, always-visible badge and drop it from the
   // capped paid-chip row so it isn't shown twice.
@@ -147,28 +175,24 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     details?.paid?.filter((fact) => fact.type !== "XValue").map((fact) => formatPaidFact(fact, t)) ??
     [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
+  const stormCopyCount = details?.provenance?.type === "Storm"
+    ? details.provenance.data.copy_count
+    : undefined;
   const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
   const seatColor = useSeatColor(entry.controller);
   const controllerInitial =
     entry.controller === playerId ? t("stack.controllerInitialYou") : t("stack.controllerInitialOpp", { seat: entry.controller });
 
-  // Targeting: check if this stack entry is a valid target for the current selection
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  // CR 115.7: A single-target retarget can redirect to another spell/ability on
-  // the stack (Bolt Bend on a counterspell), so stack entries are click targets.
-  const isRetargetChoice = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single";
-  const currentTargetRefs = isHumanTargetSelection
-    ? (waitingFor.data.selection?.current_legal_targets ?? [])
-    : isRetargetChoice
-      ? waitingFor.data.legal_new_targets
-      : [];
-  const isValidTarget = (isHumanTargetSelection || isRetargetChoice) && currentTargetRefs.some(
-    (target) => "Object" in target && target.Object === entry.id,
-  );
+  // Targeting: whether the engine is currently asking THIS seat to choose an
+  // object and this stack entry is one of the choices. `getWaitingForObjectChoiceIds`
+  // is the single WaitingFor -> choosable-ObjectId authority the battlefield,
+  // zones, and attachment dialogs already read; the stack reads it too, so every
+  // variant whose engine-authored legal set can name a stack object lights up
+  // here without a per-variant branch — CR 115.7 retargets (Bolt Bend onto a
+  // counterspell), CR 707.10c "may choose new targets for the copy", and plain
+  // CR 601.2c target announcement alike.
+  const isValidTarget =
+    canActForWaitingState && getWaitingForObjectChoiceIds(waitingFor).includes(choiceObjectId);
 
   // Ring style: targeting glow overrides default ring
   const ringClass = isValidTarget
@@ -178,7 +202,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const handleClick = () => {
     if (longPressFired.current) { longPressFired.current = false; return; }
     if (isValidTarget) {
-      dispatchAction({ type: "ChooseTarget", data: { target: { Object: entry.id } } });
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: choiceObjectId } } });
     } else {
       inspectObject(entry.source_id);
     }
@@ -219,10 +243,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         style={{ width: cardSize.width, height: cardSize.height }}
         className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
-        {isLoading || !src ? (
+        {isLoading ? (
           <div
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
+          />
+        ) : !src || artError ? (
+          // Issue #6156 on the stack: this path is explicitly token-aware
+          // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
+          // token's triggered or activated ability landed here and pulsed
+          // forever — worse than a blank square, since it implies the art is
+          // still coming. Name the source instead.
+          <CardArtFallback
+            name={sourceName}
+            className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
@@ -230,12 +264,26 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => setArtError(true)}
           />
         )}
-        {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
-        )}
       </div>
+      {/* @container overlay sized to the card (sibling of the overflow-hidden
+          image wrapper, so the pip backdrop isn't clipped at the card edge).
+          absolute inset-0 takes its width from the relative outer wrapper, so
+          container-type can't collapse it; pips scale in cqi with the stack
+          card's width instead of a fixed px size. */}
+      {isSpell && displayManaCost && (
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips cost={displayManaCost} size="fluid" />
+        </div>
+      )}
+
+      {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
+          battlefield cards already surface this through CardImage; a spell is
+          most consequential while it is on the stack about to resolve, so the
+          same badge is shown here from the same engine-provided projection. */}
+      <UnimplementedMechanicsBadge mechanics={sourceObj?.unimplemented_mechanics} variant="corner" />
 
       {/* Badge: ×N coalesce count for engine-grouped mass triggers. */}
       {groupCount > 1 && (
@@ -288,8 +336,32 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
-      {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+      {selectedModeLabels.length > 0 && (
+        <section
+          aria-label={t("stack.selectedModes")}
+          className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
+        >
+          <span className="block text-[9px] font-semibold uppercase tracking-wide text-purple-300">
+            {t("stack.selectedModes")}
+          </span>
+          <ul className="mt-0.5 list-inside list-disc text-[8px] leading-tight text-gray-300">
+            {selectedModeLabels.map((label, index) => (
+              <li key={`${index}-${label}`}>{renderDescription(label, sourceName)}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {(stormCopyCount !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
+          {stormCopyCount !== undefined && (
+            <span
+              className="max-w-full rounded bg-violet-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-violet-100 shadow"
+              title={t("storm.copies", { count: stormCopyCount })}
+            >
+              {t("storm.copies", { count: stormCopyCount })}
+            </span>
+          )}
           {targetLabels.slice(0, 2).map((label) => (
             <span
               key={`target-${label}`}

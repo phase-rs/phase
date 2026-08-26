@@ -512,4 +512,4 @@ compile error, so there is no silent gap).
 
 No engine files (`casting_costs.rs` untouched); no `can_afford_x_at_least_one` primitive (deferred,
 justified); no changes to `x_reference.rs` / `x_value.rs` semantics; no display-derive revival in sim
-mode; no other policy's behavior; `mtgish` untouched.
+mode; no other policy's behavior.

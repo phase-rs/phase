@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesAggregate, TargetFilter,
+    AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesSelectionMode, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -19,9 +19,14 @@ pub(super) fn cancel_pending_cast(
     player: PlayerId,
     pending_cast: &PendingCast,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
+    if pending_cast.activation_cost_committed {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel an activation after a cost is paid".to_string(),
+        ));
+    }
     casting::handle_cancel_cast(state, pending_cast, events);
-    WaitingFor::Priority { player }
+    Ok(WaitingFor::Priority { player })
 }
 
 pub(super) fn handle_target_selection_select_targets(
@@ -93,6 +98,26 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+pub(super) fn handle_reveal_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_reveal_for_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_activation_cost_one_of_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -140,8 +165,9 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
+    min_count: usize,
     count: usize,
-    aggregate: Option<TapCreaturesAggregate>,
+    mode: TapCreaturesSelectionMode,
     creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
@@ -150,8 +176,9 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
         state,
         player,
         pending_cast,
+        min_count,
         count,
-        aggregate,
+        mode,
         creatures,
         chosen,
         events,
@@ -181,9 +208,12 @@ pub(super) fn handle_behold_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_tap_creatures_for_mana_ability(
     state: &mut GameState,
+    min_count: usize,
     count: usize,
+    mode: TapCreaturesSelectionMode,
     creatures: &[ObjectId],
     pending_mana_ability: &PendingManaAbility,
     chosen: &[ObjectId],
@@ -191,7 +221,9 @@ pub(super) fn handle_tap_creatures_for_mana_ability(
 ) -> Result<WaitingFor, EngineError> {
     mana_abilities::handle_tap_creatures_for_mana_ability(
         state,
+        min_count,
         count,
+        mode,
         creatures,
         pending_mana_ability,
         chosen,
@@ -415,10 +447,11 @@ pub(super) fn handle_harmonize_tap_choice(
         player,
         pending.object_id,
         pending.card_id,
-        pending.ability,
+        *pending.ability,
         &pending.cost,
         base_cost,
         pending.casting_variant,
+        pending.casting_permission_index,
         pending.cast_timing_permission,
         pending.distribute,
         pending.origin_zone,

@@ -34,6 +34,10 @@ impl DownsideAwarenessPolicy {
                     GiftKind::Treasure => ctx.penalties().gift_treasure_penalty,
                     GiftKind::Food => ctx.penalties().gift_food_penalty,
                     GiftKind::TappedFish => ctx.penalties().gift_fish_penalty,
+                    // CR 702.174g: "The chosen player takes an extra turn after
+                    // this one." The only promised gift that hands the opponent
+                    // a whole turn rather than an object.
+                    GiftKind::ExtraTurn => ctx.penalties().gift_extra_turn_penalty,
                 };
             }
         }
@@ -74,10 +78,22 @@ impl TacticalPolicy for DownsideAwarenessPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("downside_awareness_score"),
-        }
+        // Range check (issue #5473, re-derived for #7286): the largest gift
+        // penalty is `gift_extra_turn` (-7.0), doubled to -14.0 for pure-downside
+        // removal — so `score()` never leaves [-14.0, 0.0], still inside the
+        // critical band (`CRITICAL_MAX` = 15.0). No rescale is needed;
+        // `PolicyVerdict::score` is identity here and simply upholds the band
+        // contract uniformly (no raw Score literal).
+        //
+        // The bound is load-bearing, not decorative: a seed past 7.5 makes the
+        // DOUBLED value saturate at the clamp, and the pure-downside branch then
+        // scores identically to the ordinary one — erasing the distinction the
+        // doubling exists to draw. A future gift penalty either respects it or
+        // this policy starts rescaling (`registry::rescale_into_critical_band`).
+        PolicyVerdict::score(
+            self.score(ctx),
+            PolicyReason::new("downside_awareness_score"),
+        )
     }
 }
 
@@ -167,10 +183,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Spell),
         };
         (decision, candidate)
     }
@@ -302,6 +315,80 @@ mod tests {
         );
     }
 
+    /// The verdict-level assertions the raw-score rows above cannot make: the
+    /// clamp in `PolicyVerdict::score` sits between `score()` and what the
+    /// registry actually uses, and a penalty seeded past the band saturates
+    /// there. These two rows are what keep `gift_extra_turn_penalty` inside it.
+    fn verdict_delta(
+        state: &GameState,
+        decision: &AiDecisionContext,
+        candidate: &CandidateAction,
+    ) -> f64 {
+        let config = AiConfig::default();
+        let ctx = PolicyContext {
+            state,
+            decision,
+            candidate,
+            ai_player: PlayerId(1),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        match DownsideAwarenessPolicy.verdict(&ctx) {
+            crate::policies::registry::PolicyVerdict::Score { delta, .. } => delta,
+            other => panic!("downside awareness must return a score, got {other:?}"),
+        }
+    }
+
+    fn gift_verdict(kind: GiftKind, worthy_target: bool) -> f64 {
+        let mut state = make_state();
+        if worthy_target {
+            add_creature(&mut state, PlayerId(0), 5, 5);
+        }
+        let (decision, candidate) = make_cast_ctx(
+            &mut state,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            Some(Effect::GiftDelivery { kind }),
+        );
+        verdict_delta(&state, &decision, &candidate)
+    }
+
+    /// CR 702.174g: an extra turn is the worst promise in the family, and it has
+    /// to still READ as worse after the band clamp.
+    #[test]
+    fn gift_extra_turn_outweighs_a_card_gift_after_the_band_clamp() {
+        let extra_turn = gift_verdict(GiftKind::ExtraTurn, true);
+        let card = gift_verdict(GiftKind::Card, true);
+        assert!(
+            extra_turn < card,
+            "extra turn must outweigh a card gift: extra_turn={extra_turn}, card={card}"
+        );
+    }
+
+    /// The pure-downside doubling must survive the clamp too. A seed past 7.5
+    /// saturates both branches at `-CRITICAL_MAX` and this row goes flat — which
+    /// is exactly the failure a larger, better-sounding penalty would cause.
+    #[test]
+    fn the_extra_turn_pure_downside_branch_stays_distinguishable() {
+        let no_target = gift_verdict(GiftKind::ExtraTurn, false);
+        let with_target = gift_verdict(GiftKind::ExtraTurn, true);
+        assert!(
+            no_target < with_target,
+            "the no-worthy-target branch must stay worse, not saturate: \
+             no_target={no_target}, with_target={with_target}"
+        );
+        assert!(
+            no_target > -crate::policies::registry::CRITICAL_MAX,
+            "and it must not sit ON the clamp, or the next seed bump goes unnoticed: \
+             no_target={no_target}"
+        );
+    }
+
     #[test]
     fn gift_not_applied_during_targeting() {
         let state = make_state();
@@ -316,10 +403,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(engine::types::ability::TargetRef::Object(ObjectId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,

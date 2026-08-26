@@ -1,5 +1,5 @@
 use crate::parser::oracle_nom::quantity::parse_quantity_ref;
-use crate::types::ability::AbilityCondition;
+use crate::types::ability::{AbilityCondition, Duration};
 use crate::types::events::ClashResult;
 
 use super::*;
@@ -597,6 +597,36 @@ fn trigger_becomes_attached_to_a_permanent() {
         "Expected valid_target = permanent, got {:?}",
         def.valid_target
     );
+}
+
+#[test]
+fn assimilation_aegis_attached_trigger_copies_the_host_only_while_attached() {
+    let def = parse_trigger_line(
+        "Whenever ~ becomes attached to a creature, for as long as ~ remains attached to it, that creature becomes a copy of a creature card exiled with ~.",
+        "Assimilation Aegis",
+    );
+    let execute = def.execute.as_ref().expect("attached trigger must execute");
+    let expected_duration = Some(Duration::ForAsLongAs {
+        condition: StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::AttachedTo,
+        },
+    });
+    match &*execute.effect {
+        Effect::BecomeCopy {
+            target,
+            recipient,
+            duration,
+            ..
+        } => {
+            assert_eq!(*recipient, TargetFilter::AttachedTo);
+            assert_eq!(*duration, expected_duration);
+            assert!(
+                matches!(target, TargetFilter::And { filters } if filters.iter().any(|f| matches!(f, TargetFilter::ExiledBySource)))
+            );
+        }
+        other => panic!("expected BecomeCopy, got {other:?}"),
+    }
+    assert_eq!(execute.duration, expected_duration);
 }
 
 // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.
@@ -1289,5 +1319,49 @@ fn source_led_recipient_smoke() {
     assert_eq!(
         owner_recipient.condition,
         Some(TriggerCondition::DamagedPlayerIsEventSourceOwner)
+    );
+}
+
+/// CR 205.2a + CR 205.2b + CR 608.2c (issue #518): "If it's an instant or
+/// sorcery card, you may cast it without paying its mana cost" is a card-type
+/// DISJUNCTION, and `RevealedHasCardType` matches `card_types` with `any`.
+///
+/// The gate body used to reduce the type phrase to its LAST word
+/// (`"instant or sorcery".rsplit(' ').next()` → `"sorcery"`), silently dropping
+/// the instant leg — so an exiled instant never offered the free cast. Asserts
+/// both printed legs survive on Hidetsugu and Kairi's dies trigger.
+#[test]
+fn hidetsugu_and_kairi_instant_or_sorcery_gate_keeps_both_legs() {
+    let def = parse_trigger_line(
+        "When Hidetsugu and Kairi dies, exile the top card of your library. Target opponent loses life equal to its mana value. If it's an instant or sorcery card, you may cast it without paying its mana cost.",
+        "Hidetsugu and Kairi",
+    );
+
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("dies trigger keeps an effect");
+    let lose_life = execute
+        .sub_ability
+        .as_deref()
+        .expect("exile chains into the life-loss clause");
+    let free_cast = lose_life
+        .sub_ability
+        .as_deref()
+        .expect("life loss chains into the free-cast clause");
+
+    assert!(
+        matches!(&*free_cast.effect, Effect::CastFromZone { .. }),
+        "third clause should be the free cast, got {:?}",
+        free_cast.effect
+    );
+    assert_eq!(
+        free_cast.condition,
+        Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![CoreType::Instant, CoreType::Sorcery],
+            additional_filter: None,
+            subtype_filter: None,
+        }),
+        "both printed card-type legs must gate the free cast"
     );
 }

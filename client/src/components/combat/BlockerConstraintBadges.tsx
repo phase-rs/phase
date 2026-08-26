@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { useBlockerConstraints, type BlockerConstraint } from "./useBlockerConstraints.ts";
 
 interface Anchor {
@@ -58,8 +59,6 @@ function useObjectAnchors(objectIds: ObjectId[]): Map<ObjectId, Anchor> {
 
 function badgeTone(status: BlockerConstraint["status"]): string {
   switch (status) {
-    case "satisfied":
-      return "border-emerald-300/60 bg-emerald-950/85 text-emerald-100";
     case "pending":
       return "border-rose-300/50 bg-rose-950/85 text-rose-100 animate-pulse";
     case "info":
@@ -77,6 +76,7 @@ function badgeTone(status: BlockerConstraint["status"]): string {
 export function BlockerConstraintBadges() {
   const { t } = useTranslation("game");
   const { byObject } = useBlockerConstraints();
+  const objects = useGameStore((s) => s.gameState?.objects);
   const objectIds = Array.from(byObject.keys());
   const anchors = useObjectAnchors(objectIds);
 
@@ -87,12 +87,25 @@ export function BlockerConstraintBadges() {
       {Array.from(byObject.values()).map((req) => {
         const anchor = anchors.get(req.objectId);
         if (!anchor) return null;
+        const exactNames = req.attackers
+          .map((id) => objects?.[String(id)]?.name)
+          .filter((name): name is string => !!name);
         const label =
           req.kind === "CantBlock"
             ? t("combat.cantBlockBadge")
-            : req.status === "satisfied"
-              ? t("combat.mustBlockSatisfiedBadge")
+            : exactNames.length > 0
+              ? t("combat.mustBlockExactBadge", { attacker: exactNames.join(", ") })
               : t("combat.mustBlockBadge");
+        // Display-only source attribution: suppress a self-source (intrinsic
+        // requirement shows a bare badge) and skip ids that no longer resolve
+        // (departed-source guard), mirroring PermanentCard.
+        const names = req.sources
+          .filter((id) => id !== req.objectId)
+          .map((id) => objects?.[String(id)]?.name)
+          .filter((n): n is string => !!n);
+        const title = names.length
+          ? `${label} ${t("preview.fromSource", { source: names.join(", ") })}`
+          : label;
         return (
           <div
             key={req.objectId}
@@ -100,7 +113,7 @@ export function BlockerConstraintBadges() {
             style={{ left: anchor.x, top: anchor.top }}
           >
             <span
-              title={label}
+              title={title}
               className={`flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-bold shadow-[0_4px_12px_rgba(0,0,0,0.5)] backdrop-blur-sm ${badgeTone(req.status)}`}
             >
               {/* Shield glyph — a creature that must / can't block. */}

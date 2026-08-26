@@ -1,7 +1,14 @@
 mod candidates;
+mod combat_withdrawal;
 mod context;
 mod copy;
+mod evoke;
 pub mod filter;
+mod payment_continuation;
+mod prospective_mana;
+mod shortcut_efficacy;
+mod swarm;
+mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,12 +21,15 @@ use crate::game::mana_abilities;
 use crate::game::mana_payment;
 use crate::game::mana_sources;
 use crate::game::triggers;
-use crate::types::ability::{AbilityKind, CounterCostSelection, TriggerDefinition};
+use crate::types::ability::{
+    AbilityKind, CounterCostSelection, TapCreaturesSelectionMode, TargetRef, TriggerDefinition,
+};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, PriorityPassingMode, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -27,18 +37,49 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
-    candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
+    candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
 };
-pub use context::{build_decision_context, AiDecisionContext};
+pub use combat_withdrawal::{
+    combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
+};
+pub use context::{
+    build_decision_context, build_decision_context_for_semantic_owner, AiDecisionContext,
+    AiDecisionContract,
+};
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
 };
+pub use evoke::{
+    evoke_prompt_facts, EvokeImmediateOutcome, EvokePromptDescriptor, EvokePromptFacts,
+};
 pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
+pub use payment_continuation::{
+    classify_payment_continuation, witness_payment_continuation, AcceptedPaymentSuccessor,
+    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
+    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+};
+pub use prospective_mana::{
+    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
+    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+};
+pub use swarm::{
+    adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
+    SWARM_WITNESS_MAX_DECLARATIONS,
+};
+#[cfg(feature = "test-support")]
+pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
+pub use targeted_exchange::{
+    is_targeted_exchange_root, root_may_yield_adverse_exchange, targeted_exchange_verdict,
+    TargetedExchangeVerdict,
+};
+#[cfg(feature = "test-support")]
+pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///
@@ -51,12 +92,104 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     validated_candidate_actions_with_probe(state, None)
 }
 
+/// Return legal candidates owned by one semantic decision-maker. Candidates
+/// without an actor remain shared; actor-bearing candidates are validated as
+/// that owner's authorized submitter before this filter is applied.
+pub fn validated_candidate_actions_for_semantic_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+) -> Vec<CandidateAction> {
+    let pipeline = FilterPipeline::default_pipeline();
+    let mut actions = pipeline.apply(
+        state,
+        candidates::candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None),
+    );
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
+}
+
 pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe)
+    let candidates = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::Generation,
+        );
+        candidate_actions_with_probe(state, probe)
+    };
+    let mut actions = pipeline.apply_with_probe(state, candidates, probe);
+    // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
+    // iteration order leaking into AI tie-breaking downstream. Ordered via the
+    // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
+}
+
+/// CR 701.23a + CR 608.2c: A `SelectCards` answering a library search is legal
+/// exactly when it meets the three conditions the submission guard checks —
+/// cardinality, membership in the searched pool, and the printed-text selection
+/// constraint (`engine_resolution_choices.rs`, the `SearchChoice` arm). All
+/// three are decidable from the prompt without mutating the game, so
+/// `SimulationFilter` can skip its clone-and-apply probe. Mirrors
+/// [`structurally_valid_tap_for_convoke_payment`].
+///
+/// This is load-bearing for a single-card search, where the enumerator issues
+/// one candidate per card: against an 88-card library the simulated probe
+/// measured ~2.5 ms per candidate — ~217 ms to validate a list whose every
+/// entry is legal by construction.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_search_selection(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::SearchChoice {
+            cards,
+            count,
+            up_to,
+            allows_partial_find,
+            constraint,
+            ..
+        },
+        GameAction::SelectCards { cards: chosen },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // A scoped search (Wheel-of-Fate-class "each player searches") routes through
+    // `scoped_library_search::submit_selection`, which additionally requires the
+    // pick to be in that player's prepared exact-candidate set AND still live.
+    // Neither is modeled here, so defer to the simulation.
+    if state.pending_scoped_library_search.is_some() {
+        return false;
+    }
+
+    // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, and explicit
+    // stated-quality constraints accept a short or empty pick; a pure quantity
+    // search needs exactly `count`.
+    let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
+    let cardinality_ok = if lower_bounded {
+        chosen.len() <= *count
+    } else {
+        chosen.len() == *count
+    };
+    if !cardinality_ok {
+        return false;
+    }
+
+    // Membership plus distinctness: a repeated id would select one card twice,
+    // which pool membership alone would not catch.
+    let mut seen = std::collections::HashSet::with_capacity(chosen.len());
+    if !chosen
+        .iter()
+        .all(|id| cards.contains(id) && seen.insert(*id))
+    {
+        return false;
+    }
+
+    crate::game::effects::search_library::selection_satisfies_constraint(state, chosen, constraint)
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -68,7 +201,6 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 ) -> bool {
     use crate::types::game_state::ConvokeMode;
     use crate::types::mana::ManaType;
-    use crate::types::zones::Zone;
 
     let (
         WaitingFor::ManaPayment {
@@ -89,9 +221,7 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
     };
 
     match mode {
-        ConvokeMode::Delve => {
-            obj.zone == Zone::Graveyard && obj.owner == *player && *mana_type == ManaType::Colorless
-        }
+        ConvokeMode::Delve => obj.is_delve_eligible(*player) && *mana_type == ManaType::Colorless,
         ConvokeMode::Convoke => {
             if !obj.is_convoke_eligible(*player) {
                 return false;
@@ -121,6 +251,20 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
+    // Ready intentionally has no current acting player, but an active consent
+    // grantor may still revoke. The candidate pipeline retains the frozen actor
+    // and its SimulationFilter checks that authority before admitting it.
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        if crate::game::turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            .is_some()
+        {
+            return false;
+        }
+    }
     // CR 103.5 / TL:R 906.6a: For simultaneous-decision states
     // `acting_player()` is None when multiple players are pending. The
     // Priority-branch check below only fires for the Priority variant, so we
@@ -145,9 +289,28 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::PlayLand { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::UnlockRoomDoor { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
-        | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id })
+        | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
-        | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::TapLandForMana {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::ActivateManaSource {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
         | (
             WaitingFor::Priority { .. },
@@ -252,7 +415,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 *player,
                 pending_cast.object_id,
                 cost,
-                pending_cast.ability.context.ability_tag,
+                pending_cast.activation_ability_index,
             )
         }),
         (
@@ -349,6 +512,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
+        | (
+            WaitingFor::ChooseFromZoneOpponentChooser { .. },
+            GameAction::ChooseZoneOpponentChooser { .. },
+        )
         | (WaitingFor::ClashCardPlacement { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::SpliceOffer { .. }, GameAction::RespondToSpliceOffer { .. })
@@ -416,8 +583,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ScryChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, None),
+        (
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                player: _,
+                cards,
+                keep_on_top,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(*keep_on_top)),
+        (
             WaitingFor::SurveilChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, None),
@@ -523,10 +698,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { .. },
         ) => true,
-        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        // CR 118.3: Sacrifice and optional zone-exile costs honor the
+        // [min_count, count] range.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::Sacrifice,
+                kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
                 choices,
                 count,
                 min_count,
@@ -543,12 +719,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         // whose summed CURRENT positive power satisfies the advertised comparator
         // — not a fixed cardinality. Evaluates through the same `satisfied_by`
         // the payment validator (`handle_tap_creatures_for_spell_cost`) uses, so
-        // both seams agree on which subsets are legal.
+        // both seams agree on which subsets are legal. The `Fixed`/`VariableX`
+        // forms are handled by the range arm immediately below.
         (
             WaitingFor::PayCost {
                 kind:
                     PayCostKind::TapCreatures {
-                        aggregate: Some(aggregate),
+                        mode: TapCreaturesSelectionMode::Aggregate(aggregate),
                     },
                 choices,
                 ..
@@ -557,6 +734,28 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         ) => {
             let total = crate::game::casting_costs::tap_creatures_total_power(state, chosen);
             selection_mismatch(chosen, choices, None) || !aggregate.satisfied_by(total)
+        }
+        // CR 107.3a + CR 118.3: the Fixed/VariableX tap-creatures forms honor the
+        // [min_count, count] range exactly like the Sacrifice/ExileFromZone arm
+        // above — a fixed (non-X) requirement has min_count == count, so this
+        // subsumes the exact-match case unchanged; the X-sentinel form additionally
+        // permits any count in between, letting the AI consider a non-maximal X.
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::TapCreatures {
+                        mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
+                    },
+                choices,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, choices, None)
+                || chosen.len() < *min_count
+                || chosen.len() > *count
         }
         // CR 118.3 + CR 605.3b: every other PayCost kind selects exactly `count`.
         (WaitingFor::PayCost { choices, count, .. }, GameAction::SelectCards { cards: chosen }) => {
@@ -631,15 +830,33 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _, cards, ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, Some(1)),
+        (
             WaitingFor::WardSacrificeChoice {
                 player: _,
                 permanents: cards,
+                min_total_power,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
+        ) => {
+            selection_mismatch(
+                chosen,
+                cards,
+                if min_total_power.is_some() {
+                    None
+                } else {
+                    Some(1)
+                },
+            ) || min_total_power.is_some_and(|threshold| {
+                chosen
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .map(|object| object.power.unwrap_or(0))
+                    .sum::<i32>()
+                    < threshold
+            })
+        }
         (
             WaitingFor::ManifestDreadChoice {
                 player: _, cards, ..
@@ -753,7 +970,8 @@ fn activate_ability_is_meaningful_priority(
     state.objects.get(&source_id).is_some_and(|obj| {
         obj.abilities.get(ability_index).is_some_and(|ability| {
             !mana_abilities::is_mana_ability(ability)
-                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+                || mana_sources::object_mana_ability_penalty(state, source_id, ability)
+                    .is_meaningful_priority_activation()
         })
     })
 }
@@ -782,10 +1000,10 @@ fn resolve_mana_option_for_trigger_probe(
     let mut probe = state.clone();
     let mut events = Vec::new();
 
-    for (aura_id, override_value) in &option.taps_for_mana_overrides {
+    for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
         probe
             .pending_taps_for_mana_overrides
-            .insert(*aura_id, override_value.clone());
+            .insert(trigger_ref.clone(), override_value.clone());
     }
 
     if let Some(ability_index) = option.ability_index {
@@ -833,6 +1051,12 @@ fn resolve_mana_option_for_trigger_probe(
             source_id: option.object_id,
             produced: vec![option.mana_type],
             tap_state: ManaTapState::FromTap,
+        });
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id: option.object_id,
+            produced: vec![option.mana_type],
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
     }
 
@@ -915,14 +1139,14 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
 
-    activatable_object_mana_actions_for_player(state, player)
+    mana_sources::activatable_mana_actions_for_player(state, player)
         .iter()
         .any(|action| match action {
-            GameAction::TapLandForMana { object_id } => {
+            GameAction::TapLandForMana { selection } => {
                 tap_land_action_would_queue_non_mana_trigger(
                     state,
                     player,
-                    *object_id,
+                    selection.source.object_id,
                     &aura_sources,
                     &mana_activation_gates,
                 )
@@ -938,6 +1162,18 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
                 &aura_sources,
                 &mana_activation_gates,
             ),
+            GameAction::ActivateManaSource { selection } => {
+                selection.ability_index.is_some_and(|ability_index| {
+                    activate_mana_action_would_queue_non_mana_trigger(
+                        state,
+                        player,
+                        selection.source.object_id,
+                        ability_index,
+                        &aura_sources,
+                        &mana_activation_gates,
+                    )
+                })
+            }
             _ => false,
         })
 }
@@ -948,14 +1184,182 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
 /// Extracted so the auto-pass gate and the CR 732.5 loop-shortcut firewall
 /// classifier consume the SAME primitive and cannot drift.
 fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameAction]) -> bool {
-    actions.iter().any(|action| match action {
-        GameAction::PassPriority => false,
+    actions
+        .iter()
+        .any(|action| match classify_flat_priority_action(action) {
+            FlatPriorityActionClass::Pass => false,
+            FlatPriorityActionClass::ActivateAbility {
+                source_id,
+                ability_index,
+            } => activate_ability_is_meaningful_priority(state, source_id, ability_index),
+            FlatPriorityActionClass::CastSpell
+            | FlatPriorityActionClass::EndContinuousEffect
+            | FlatPriorityActionClass::Other => true,
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlatPriorityActionClass {
+    Pass,
+    CastSpell,
+    ActivateAbility {
+        source_id: ObjectId,
+        ability_index: usize,
+    },
+    EndContinuousEffect,
+    Other,
+}
+
+/// Exhaustive classifier shared by both flat priority predicates.
+///
+/// Keeping the full [`GameAction`] census here makes a newly added action fail
+/// compilation until its loop-firewall and auto-pass semantics are reviewed.
+fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass {
+    match action {
+        GameAction::PassPriority => FlatPriorityActionClass::Pass,
+        GameAction::CastSpell { .. } => FlatPriorityActionClass::CastSpell,
         GameAction::ActivateAbility {
             source_id,
             ability_index,
-        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
-        _ => true,
-    })
+        } => FlatPriorityActionClass::ActivateAbility {
+            source_id: *source_id,
+            ability_index: *ability_index,
+        },
+        // CR 116.2c + CR 732.4 + CR 104.4b: paying to end an effect is
+        // optional, so it is meaningful to the loop firewall even though the
+        // own-upkeep/draw classifier below deliberately auto-passes it.
+        GameAction::EndContinuousEffect { .. } => FlatPriorityActionClass::EndContinuousEffect,
+        GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
+        | GameAction::PlayLand { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::DeclareAttackers { .. }
+        | GameAction::DeclareBlockers { .. }
+        | GameAction::ChooseUntap { .. }
+        | GameAction::ChooseExert { .. }
+        | GameAction::ChooseEnlist { .. }
+        | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
+        | GameAction::ChooseGiftRecipient { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
+        | GameAction::MulliganDecision { .. }
+        | GameAction::ReorderHand { .. }
+        | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::BackToManaPayment
+        | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
+        | GameAction::SelectCards { .. }
+        | GameAction::ChooseRemoveCounterCostDistribution { .. }
+        | GameAction::SelectCoinFlips { .. }
+        | GameAction::ChooseOutsideGameCards { .. }
+        | GameAction::SelectTargets { .. }
+        | GameAction::ChooseTarget { .. }
+        | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
+        | GameAction::OrderTriggers { .. }
+        | GameAction::CancelCast
+        | GameAction::Equip { .. }
+        | GameAction::CrewVehicle { .. }
+        | GameAction::ActivateStation { .. }
+        | GameAction::SaddleMount { .. }
+        | GameAction::Transform { .. }
+        | GameAction::PlayFaceDown { .. }
+        | GameAction::TurnFaceUp { .. }
+        | GameAction::SubmitSideboard { .. }
+        | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseOption { .. }
+        | GameAction::SubmitVoteCandidate { .. }
+        | GameAction::SubmitSpellbookDraft { .. }
+        | GameAction::SubmitPilePartition { .. }
+        | GameAction::ChoosePile { .. }
+        | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::SelectModes { .. }
+        | GameAction::DecideOptionalCost { .. }
+        | GameAction::ChooseAdventureFace { .. }
+        | GameAction::ChooseModalFace { .. }
+        | GameAction::ChooseAlternativeCast { .. }
+        | GameAction::ChooseCastingVariant { .. }
+        | GameAction::KeepAllCopyTargets
+        | GameAction::ChoosePermanentTypeSlot { .. }
+        | GameAction::ActivateNinjutsu { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CastSpellAsMadness { .. }
+        | GameAction::DecideOptionalEffect { .. }
+        | GameAction::RespondToSpliceOffer { .. }
+        | GameAction::DecideOptionalEffectAndRemember { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::ChooseUnlessCostBranch { .. }
+        | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::PayCombatTax { .. }
+        | GameAction::ChooseRingBearer { .. }
+        | GameAction::ChoosePair { .. }
+        | GameAction::ChooseDungeon { .. }
+        | GameAction::ChooseDungeonRoom { .. }
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
+        | GameAction::ChooseRoomDoor { .. }
+        | GameAction::TapForConvoke { .. }
+        | GameAction::HarmonizeTap { .. }
+        | GameAction::DeclareCompanion { .. }
+        | GameAction::CompanionToHand
+        | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
+        | GameAction::CascadeChoice { .. }
+        | GameAction::RippleChoice { .. }
+        | GameAction::FreeCastWindowChoice { .. }
+        | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMutateMergeSide { .. }
+        | GameAction::CipherEncode { .. }
+        | GameAction::ChooseLegend { .. }
+        | GameAction::ChooseBattleProtector { .. }
+        | GameAction::SetAutoPass { .. }
+        | GameAction::CancelAutoPass
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        | GameAction::AssignCombatDamage { .. }
+        | GameAction::AssignBlockerDamage { .. }
+        | GameAction::DistributeAmong { .. }
+        | GameAction::ChooseCounterMoveDistribution { .. }
+        | GameAction::ChooseCountersToRemove { .. }
+        | GameAction::SubmitPayAmount { .. }
+        | GameAction::RetargetSpell { .. }
+        | GameAction::LearnDecision { .. }
+        | GameAction::SelectCategoryPermanents { .. }
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. }
+        | GameAction::ChooseX { .. }
+        | GameAction::SubmitPhyrexianChoices { .. }
+        | GameAction::ChooseManaColor { .. }
+        | GameAction::PayManaAbilityMana { .. }
+        | GameAction::CastPreparedCopy { .. }
+        | GameAction::ChooseSpecializeColor { .. }
+        | GameAction::CastParadigmCopy { .. }
+        | GameAction::PassParadigmOffer
+        | GameAction::Debug(_)
+        | GameAction::GrantDebugPermission { .. }
+        | GameAction::RevokeDebugPermission { .. }
+        | GameAction::Concede { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => FlatPriorityActionClass::Other,
+    }
 }
 
 /// G2 upkeep/draw gate: like [`flat_actions_have_meaningful_priority`] but a
@@ -975,15 +1379,18 @@ fn flat_actions_have_meaningful_noncast_priority(
     state: &GameState,
     actions: &[GameAction],
 ) -> bool {
-    actions.iter().any(|action| match action {
-        GameAction::PassPriority => false,
-        GameAction::CastSpell { .. } => false,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index,
-        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
-        _ => true,
-    })
+    actions
+        .iter()
+        .any(|action| match classify_flat_priority_action(action) {
+            FlatPriorityActionClass::Pass
+            | FlatPriorityActionClass::CastSpell
+            | FlatPriorityActionClass::EndContinuousEffect => false,
+            FlatPriorityActionClass::ActivateAbility {
+                source_id,
+                ability_index,
+            } => activate_ability_is_meaningful_priority(state, source_id, ability_index),
+            FlatPriorityActionClass::Other => true,
+        })
 }
 
 /// Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
@@ -995,17 +1402,21 @@ fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
         && mana_actions_include_meaningful_sacrifice(state, &activatable_object_mana_actions(state))
 }
 
-/// Slice-taking core of [`has_activatable_sacrifice_for_mana`]: given a
-/// precomputed activatable mana-action sweep, true iff any action is a
-/// meaningful (sacrifice-for-mana) mana activation. Extracted so
-/// `auto_pass_recommended` can compute the sweep ONCE and share it between the
-/// G1 beneficial-mana-tap hold (rung 5) and this rung-9 sac check, avoiding the
-/// PR #5229 double-evaluation of the mana-action sweep.
-fn mana_actions_include_meaningful_sacrifice(
-    state: &GameState,
-    object_mana_actions: &[GameAction],
-) -> bool {
-    object_mana_actions.iter().any(|action| {
+/// The mana activations [`has_activatable_sacrifice_for_mana`] counts, as
+/// items rather than as a yes/no.
+///
+/// SINGLE AUTHORITY for the predicate. `smart_shortcut_response`'s stage 2 has
+/// to classify exactly the actions stage 1 counted, and stage 1 counts these —
+/// which the flat `legal_actions` list structurally cannot contain (they live
+/// in `legal_actions_by_object` only). Re-testing the same shape at that call
+/// site would be a parallel copy free to drift, so the call site consumes this
+/// iterator and `mana_actions_include_meaningful_sacrifice` is defined as its
+/// emptiness.
+fn meaningful_sacrifice_mana_actions<'a>(
+    state: &'a GameState,
+    object_mana_actions: &'a [GameAction],
+) -> impl Iterator<Item = &'a GameAction> {
+    object_mana_actions.iter().filter(move |action| {
         matches!(
             action,
             GameAction::ActivateAbility {
@@ -1014,6 +1425,25 @@ fn mana_actions_include_meaningful_sacrifice(
             } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
         )
     })
+}
+
+/// Slice-taking core of [`has_activatable_sacrifice_for_mana`]: given a
+/// precomputed activatable mana-action sweep, true iff any action is a
+/// meaningful (sacrifice-for-mana) mana activation. Extracted so
+/// `auto_pass_recommended` can compute the sweep ONCE and share it between the
+/// G1 beneficial-mana-tap hold (rung 5) and this rung-9 sac check, avoiding the
+/// PR #5229 double-evaluation of the mana-action sweep.
+///
+/// `Iterator::any(p)` and `.filter(p).next().is_some()` agree on every input
+/// (both are the first-match short-circuit over the same predicate), so this
+/// re-expression leaves the loop-firewall and auto-pass answers unchanged.
+fn mana_actions_include_meaningful_sacrifice(
+    state: &GameState,
+    object_mana_actions: &[GameAction],
+) -> bool {
+    meaningful_sacrifice_mana_actions(state, object_mana_actions)
+        .next()
+        .is_some()
 }
 
 /// True when `actions` contains a priority action that materially changes the
@@ -1028,6 +1458,196 @@ fn mana_actions_include_meaningful_sacrifice(
 pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
     flat_actions_have_meaningful_priority(state, actions)
         || has_activatable_sacrifice_for_mana(state)
+}
+
+/// The probe [`smart_shortcut_response`] folds over: `state` re-parked at
+/// `polled_player`'s priority with auto-pass cleared and layers flushed, plus
+/// that state's flat priority actions. Mirrors
+/// `game::engine`'s `no_living_player_has_meaningful_priority_action` recipe,
+/// scoped to the single polled player.
+///
+/// Public because the shortcut tests' reach-guards must assert on THIS list and
+/// THIS state. A private copy of the recipe in a test silently starts measuring
+/// a different action set — and a different `has_meaningful_priority_action`
+/// answer, since that predicate's sacrifice-for-mana rung only fires while
+/// `waiting_for` is `Priority`, which is true of the probe state and false of
+/// the `RespondToShortcut` state the caller holds.
+pub fn shortcut_probe(
+    state: &GameState,
+    polled_player: PlayerId,
+) -> (casting::PriorityCastProbe, Vec<GameAction>) {
+    let mut probe_state = state.clone();
+    probe_state.auto_pass.clear();
+    probe_state.priority_player = polled_player;
+    probe_state.waiting_for = WaitingFor::Priority {
+        player: polled_player,
+    };
+    layers::flush_layers(&mut probe_state);
+    let probe = casting::PriorityCastProbe::from_flushed_state(probe_state, polled_player);
+    let actions = flat_priority_actions_with_probe(probe.state(), Some(&probe));
+    (probe, actions)
+}
+
+/// The actions [`smart_shortcut_response`]'s stage 2 classifies, given a probe
+/// state and the flat priority list stage 1 read.
+///
+/// COVERAGE INVARIANT — stage 2 must classify every action stage 1 counted as
+/// meaningful. The flat list does not satisfy that on its own:
+/// [`has_meaningful_priority_action`] is a disjunction, and its second rung
+/// ([`has_activatable_sacrifice_for_mana`]) reads `state`, not `actions`, so it
+/// counts sacrifice-for-mana activations that `legal_actions` structurally omits
+/// (they live in `legal_actions_by_object` only — see issue #544). Folding stage
+/// 2 over the flat list alone therefore lets a seat whose ONLY meaningful action
+/// is such an activation Accept BY OMISSION: an action stage 2 never sees
+/// reaches no arm, so `shortcut_efficacy`'s fail-closed `_ => MayInterfere`
+/// default cannot protect it, and a false Accept is the direction the module doc
+/// says can lose a game.
+///
+/// `activatable_object_mana_actions` is gated on `waiting_for` — the probe state
+/// is re-parked at `Priority`, which is the same gate
+/// `has_activatable_sacrifice_for_mana` passes there, so the two stages read the
+/// SAME sweep. The added items come from
+/// [`meaningful_sacrifice_mana_actions`], the single authority stage 1's rung is
+/// also defined in terms of; re-testing the shape here would be a parallel copy
+/// free to drift.
+///
+/// Deliberately does NOT add the whole mana sweep, only the subset stage 1
+/// counts: a plain land tap is not a meaningful priority action to stage 1, and
+/// widening past that would buy `Shorten`s stage 1 never asked for.
+///
+/// Public for the same reason [`shortcut_probe`] is: the shortcut tests'
+/// coverage row must assert on THIS set, and a private copy of the recipe would
+/// silently start measuring a different one.
+pub fn stage_two_action_set(
+    probe_state: &GameState,
+    flat_actions: &[GameAction],
+) -> Vec<GameAction> {
+    let mana_actions = activatable_object_mana_actions(probe_state);
+    flat_actions
+        .iter()
+        .chain(meaningful_sacrifice_mana_actions(
+            probe_state,
+            &mana_actions,
+        ))
+        .cloned()
+        .collect()
+}
+
+/// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
+/// OPTIONAL or bounded loop shortcut. The win is a loss condition for every
+/// polled opponent (single-faller: see `interactive_loop_bridge`'s Path A gate,
+/// CR 104.2a).
+///
+/// SINGLE AUTHORITY, and what it does NOT cover. MEASURED — production (i.e.
+/// non-`#[cfg(test)]`) code under `crates/*/src/` builds a
+/// `GameAction::RespondToShortcut` value at exactly four places:
+///   * `ai_support::candidates::candidate_actions_broad_with_probe`,
+///   * `phase_ai::projection::resolve_choice`,
+///   * `phase_ai::search::fallback_action` — these three are AI seats and all
+///     route here, so the heuristic cannot drift between them; and
+///   * `game::interaction::materialize_shortcut_reply_response`, which turns a
+///     HUMAN player's submitted `InteractionShortcutReply` into the action. That
+///     one is deliberately NOT covered: running a stated human choice through an
+///     AI heuristic would overwrite it. It is also the only site that can emit a
+///     non-zero `at_iteration` — every AI site emits `Shorten { at_iteration: 0 }`.
+///
+/// `candidate_actions_broad_with_probe` additionally routes
+/// `WaitingFor::RespondToPrecastCopyShortcut` here and maps the answer onto
+/// `PrecastCopyShortcutResponse`, so this function answers BOTH accept-or-shorten
+/// windows. That is intended: both windows ask the identical question — is a real
+/// priority window worth taking here — so a seat whose only action cannot touch
+/// the loop should decline both. `shorten_efficacy.rs`'s
+/// `v8_precast_window_takes_the_same_efficacy_answer` measures that window rather
+/// than assuming it.
+///
+/// TWO STAGES.
+///
+/// **Stage 1 — POSSIBILITY, byte-identical to the shipped predicate.** Reuses
+/// the exact `no_living_player_has_meaningful_priority_action` probe recipe
+/// (`game::engine`), scoped to the single polled player. No meaningful priority
+/// action ⇒ Accept, exactly as before. `has_meaningful_priority_action` is
+/// wired into the CR 732.5 NON-COMPULSION rule —
+/// "No player can be forced to perform an action that would end a loop other
+/// than actions called for by objects involved in the loop" — and is untouched
+/// here.
+///
+/// **Stage 2 — EFFICACY (AI POLICY, no CR licence claimed).** CR 732.2b grants
+/// an unconditioned accept-or-shorten option and CR 732.2c requires only that a
+/// shortening player's next choice be
+/// *different*, which a fetchland activation already satisfies; nothing in the
+/// Comprehensive Rules states an efficacy criterion. This stage is therefore
+/// policy, and it declines to burn a real priority window on a response that
+/// cannot change the outcome:
+///   - arm (A): the offer's own predicted result already crowns this seat, so
+///     shortening moves the game away from a win it already holds;
+///   - arm (B): every action stage 1 counted as meaningful is confined to this
+///     seat's own resources (`shortcut_efficacy::any_action_may_interfere`), so
+///     no available choice touches the loop. Scoped to what stage 1 counted, not
+///     to "every action this seat could take": the stage-2 set is a SUPERSET of,
+///     and never smaller than, what stage 1 counted — the flat list enters
+///     whole, so it also carries actions the stage-1 fold
+///     (`flat_actions_have_meaningful_priority`) does not count as meaningful,
+///     `PassPriority` and mana-ability activations among them, and extra items
+///     can only push toward `MayInterfere`. See the coverage invariant at the
+///     call below; the wider phrasing would claim coverage of shapes neither
+///     stage enumerates.
+///
+/// Otherwise the seat still Shortens and gets its window
+/// (`game::engine::apply_action`'s `RespondToShortcut(Shorten)` arm).
+///
+/// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
+/// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
+/// no offer at all, so reading the crown from it would make arm (A) dead code.
+pub fn smart_shortcut_response(
+    state: &GameState,
+    polled_player: PlayerId,
+) -> crate::analysis::loop_check::ShortcutResponse {
+    // Both accept-or-shorten windows are named, so neither is answered by
+    // accident. The wildcard is not removable — `WaitingFor` has 128 variants and
+    // enumerating 126 `=> None` arms here would be noise, not a guard — and this
+    // two-named-arms + `_` shape is the module's existing idiom for the same
+    // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
+    // `::rekey_after_trusted_restore`).
+    let crowned_winner = match &state.waiting_for {
+        WaitingFor::RespondToShortcut { proposal, .. } => proposal.predicted_winner,
+        // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
+        // proposal summary and therefore no `predicted_winner` field, so the
+        // pre-cast route has no crown to read and arm (A) is inapplicable rather
+        // than skipped. Stage 1 and arm (B) do apply, and both run below.
+        WaitingFor::RespondToPrecastCopyShortcut { .. } => None,
+        _ => None,
+    };
+
+    let (probe, actions) = shortcut_probe(state, polled_player);
+    if !has_meaningful_priority_action(probe.state(), &actions) {
+        // CR 732.2c: nothing to do — agree to take the shortcut.
+        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    }
+
+    // Arm (A). Keyed on `predicted_winner`, never `proposer`: CR 732.2a lets a
+    // player propose a shortcut whose outcome crowns someone else, and the
+    // proposer is excluded from the APNAP response queue anyway.
+    if crowned_winner == Some(polled_player) {
+        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    }
+
+    // Arm (B). No bounded/unbounded exemption: an `IterationCount::Fixed(n)`
+    // offer ends the game just as surely as an `UntilLethal` one, so both
+    // classes take the identical rule.
+    //
+    // The fold reads [`stage_two_action_set`], never the bare flat `actions` —
+    // see that function for the coverage invariant and what folding over the
+    // flat list alone would silently Accept.
+    if shortcut_efficacy::any_action_may_interfere(
+        probe.state(),
+        polled_player,
+        &stage_two_action_set(probe.state(), &actions),
+    ) {
+        // CR 732.2b: name an earlier stopping point — take my window instead of losing.
+        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }
+    } else {
+        crate::analysis::loop_check::ShortcutResponse::Accept
+    }
 }
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
@@ -1086,7 +1706,7 @@ fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> b
         let case3 = obj
             .trigger_definitions
             .iter_all()
-            .any(trigger_fires_on_leaving_battlefield);
+            .any(|entry| trigger_fires_on_leaving_battlefield(entry.definition()));
         case2 || case3
     })
 }
@@ -1148,7 +1768,7 @@ fn beneficial_mana_tap_trigger_hold(
         // component is trivially satisfied); an `ActivateAbility` may be a
         // non-tap mana ability, so consult the ability's cost.
         let mana_source = match action {
-            GameAction::TapLandForMana { object_id } => *object_id,
+            GameAction::TapLandForMana { selection } => selection.source.object_id,
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -1163,6 +1783,21 @@ fn beneficial_mana_tap_trigger_hold(
                 }
                 *source_id
             }
+            GameAction::ActivateManaSource { selection } => {
+                let Some(ability_index) = selection.ability_index else {
+                    return false;
+                };
+                let object_id = selection.source.object_id;
+                let has_tap = state
+                    .objects
+                    .get(&object_id)
+                    .and_then(|obj| obj.abilities.get(ability_index))
+                    .is_some_and(|ability| mana_sources::has_tap_component(&ability.cost));
+                if !has_tap {
+                    return false;
+                }
+                object_id
+            }
             _ => return false,
         };
 
@@ -1170,7 +1805,9 @@ fn beneficial_mana_tap_trigger_hold(
             let Some(obj) = state.objects.get(&trigger_source) else {
                 return false;
             };
+            let source_context = triggers::trigger_source_context_for_latch(state, obj);
             obj.trigger_definitions.iter_all().any(|trigger| {
+                let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
                     || !mana_sources::trigger_chain_benefits_controller(trigger)
                 {
@@ -1182,17 +1819,18 @@ fn beneficial_mana_tap_trigger_hold(
                     // same predicates the trigger resolver uses. `taps_for_mana_card_matches`
                     // ignores `taps_for_mana_produced`, so a produced-mana filter is
                     // treated as matching (over-approx, err-to-hold).
-                    crate::types::triggers::TriggerMode::TapsForMana => {
+                    crate::types::triggers::TriggerMode::TapsForMana
+                    | crate::types::triggers::TriggerMode::ManaAbilityProduced => {
                         crate::game::trigger_matchers::taps_for_mana_card_matches(
                             trigger,
                             state,
                             mana_source,
-                            trigger_source,
+                            &source_context,
                         ) && crate::game::trigger_matchers::valid_player_matches(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     // CR 605.1b: a `ManaAdded` trigger has no card filter
@@ -1204,7 +1842,7 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     _ => false,
@@ -1241,6 +1879,10 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+    // CR 723.5: a player controlling another player makes that player's
+    // decisions. Preferences belong to the authenticated decision maker, while
+    // rules-facing priority checks continue to use the semantic priority seat.
+    let mode_owner = crate::game::turn_control::authorized_submitter_for_player(state, player);
 
     // Lazy, compute-once locals shared across rungs (§C):
     //  - `cast_probe`: one `PriorityCastProbe` built when the first castability
@@ -1255,19 +1897,18 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     let mut grouped_mana_priority: Option<bool> = None;
 
     // A phase stop on the current phase (empty stack = initial priority window)
-    // means the player asked to pause here — never recommend auto-pass. Moved
+    // means the authorized decision maker asked to pause here — never recommend
+    // auto-pass. Moved
     // from the frontend so the engine is the single authority. Disjoint from the
     // CR 117.3d yield short-circuit below, which requires a NON-empty stack
     // (`stack.back()` is `Some`); this branch requires an EMPTY stack.
     //
-    // Seat note: this gate keys on the `WaitingFor::Priority` player bound
-    // above; the frontend gate it replaced keyed on `state.priority_player`.
-    // CR 723.5: while controlling another player, one player makes all of that
-    // player's choices — so the priority holder and `priority_player` can be
-    // different seats. With an empty stack those two seats diverge only in that
-    // turn-control case, and this divergence is accepted (the checked seat is
-    // the one actually being asked to act).
-    if state.stack.is_empty() && state.phase_stop_hit(player) {
+    // CR 723.5: while controlling another player, the controller makes the
+    // controlled player's choices. Preference ownership therefore follows the
+    // same authorized submitter as `PriorityPassingMode`; consulting the
+    // controlled seat here would both honor the wrong user's preference and
+    // reveal it through the viewer-scoped recommendation bit.
+    if state.stack.is_empty() && state.phase_stop_hit(mode_owner) {
         return false;
     }
 
@@ -1282,6 +1923,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         .is_some_and(|top| state.is_priority_yielded(player, top))
     {
         return true;
+    }
+
+    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::SkipLowUseWindows {
+        // CR 117.3a + CR 503.1 + CR 504.2 + CR 513.1: the active player gets
+        // the ordinary priority window in these steps after turn-based actions
+        // and beginning-of-step triggers have been handled. This opt-in mode is
+        // opt-in pre-commitment to pass these empty-stack windows even when a
+        // meaningful instant-speed action exists. CR 117.3d/117.4 remain
+        // authoritative because the frontend still submits PassPriority.
+        if state.stack.is_empty()
+            && player == state.active_player
+            && matches!(state.phase, Phase::Upkeep | Phase::Draw | Phase::End)
+        {
+            return true;
+        }
     }
 
     // Rung 4 — MTGA-style: auto-pass when the player's own spell/ability is on
@@ -1339,9 +1995,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // `activatable_object_mana_actions` proxy while dropping the false HOLD.
     // Meaningful non-mana activated abilities, grouped mana that would queue
     // non-mana triggers, and issue #544 sac-for-mana on an opponent's turn are
-    // still held below by the meaningful-action/sac gates; a dedicated
-    // `has_feasibly_activatable_ability` opponent-turn seam (the ability
-    // analogue of this predicate) is deferred as future work.
+    // held below by the same engine-authoritative legality predicates.
     if state.active_player != player {
         let probe: &_ = cast_probe.get_or_insert_with(|| {
             crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
@@ -1421,6 +2075,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     false
 }
 
+/// Viewer-scoped auto-pass recommendation for transport adapters.
+///
+/// CR 117.1 + CR 723.5: only a viewer authorized to submit the current
+/// semantic player's decision may receive a positive recommendation. The
+/// authoritative helper still resolves which player's standing preference
+/// applies, including turn-control redirection.
+pub fn auto_pass_recommended_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    actions: &[GameAction],
+) -> bool {
+    crate::game::turn_control::is_authorized_submitter(state, viewer)
+        && auto_pass_recommended(state, actions)
+}
+
 /// Returns the legal actions for the current game state.
 ///
 /// Mana actions are omitted from the flat list returned by [`legal_actions`].
@@ -1430,6 +2099,19 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
 /// priority decisions.
 pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
     legal_actions_with_costs(state).0
+}
+
+/// Engine-authored, stable-order projection of the live CR 116.2c
+/// pay-to-end offers in a legal-action snapshot.
+///
+/// Presentation layers render this list unchanged instead of reclassifying
+/// [`GameAction`] variants client-side.
+pub fn end_continuous_effect_offers(actions: &[GameAction]) -> Vec<GameAction> {
+    actions
+        .iter()
+        .filter(|action| matches!(action, GameAction::EndContinuousEffect { .. }))
+        .cloned()
+        .collect()
 }
 
 /// Returns legal actions plus effective mana costs for castable spells.
@@ -1453,8 +2135,23 @@ pub type LegalActionsFull = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// Return only the engine-computed targets for the current target-selection slot.
+///
+/// Unlike broad candidate enumeration, this accessor never falls back to a
+/// slot-wide target list or a fresh legality scan. Tactical policies that need
+/// to compare sibling targets must use this exact prompt-local authority.
+pub fn current_target_selection_targets(state: &GameState) -> Option<&[TargetRef]> {
+    match &state.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+            Some(selection.current_legal_targets.as_slice())
+        }
+        _ => None,
+    }
+}
+
 fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<GameAction>> {
-    let (target_slots, current_slot, current_legal_targets) = match &state.waiting_for {
+    let (target_slots, current_slot) = match &state.waiting_for {
         WaitingFor::TargetSelection {
             target_slots,
             selection,
@@ -1464,13 +2161,11 @@ fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<
             target_slots,
             selection,
             ..
-        } => (
-            target_slots,
-            selection.current_slot,
-            selection.current_legal_targets.as_slice(),
-        ),
+        } => (target_slots, selection.current_slot),
         _ => return None,
     };
+
+    let current_legal_targets = current_target_selection_targets(state)?;
 
     let mut actions: Vec<GameAction> = current_legal_targets
         .iter()
@@ -1524,6 +2219,7 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     let (state, priority_probe) = match &state.waiting_for {
         WaitingFor::Priority { player } => {
             priority_probe_storage = if state.layers_dirty.is_dirty() {
+                crate::game::perf_counters::record_priority_cast_probe_state_clone();
                 let mut flushed = state.clone();
                 layers::flush_layers(&mut flushed);
                 crate::game::casting::PriorityCastProbe::from_flushed_state(flushed, *player)
@@ -1546,8 +2242,57 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
-        .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+    let mut actions: Vec<GameAction> =
+        if context::target_selection_requires_reducer_validation(state) {
+            validated_candidate_actions(state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        } else {
+            target_selection_actions_without_simulation(state)
+                .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe))
+        };
+
+    // This preference-setting action is intentionally excluded from AI candidate
+    // generation: it changes future prompt behavior rather than making a tactical
+    // game decision. It remains a legal player action, however, and must be present
+    // in the engine snapshot so a queued UI choice is not discarded as stale.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            may_trigger_key: Some(_),
+            ..
+        }
+    ) {
+        actions.extend([
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Accept,
+                scope: crate::types::game_state::MayTriggerAutoChoiceScope::ExactInstance,
+            },
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Decline,
+                scope: crate::types::game_state::MayTriggerAutoChoiceScope::ExactInstance,
+            },
+        ]);
+        if matches!(
+            &state.waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                same_card_may_trigger_choice_available: true,
+                ..
+            }
+        ) {
+            actions.extend([
+                GameAction::DecideOptionalEffectAndRemember {
+                    choice: AutoMayChoice::Accept,
+                    scope: crate::types::game_state::MayTriggerAutoChoiceScope::SameCard,
+                },
+                GameAction::DecideOptionalEffectAndRemember {
+                    choice: AutoMayChoice::Decline,
+                    scope: crate::types::game_state::MayTriggerAutoChoiceScope::SameCard,
+                },
+            ]);
+        }
+    }
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -1588,7 +2333,13 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 
     // Group by source object using the engine-authoritative classifier.
     let mut grouped_actions = actions.clone();
-    grouped_actions.extend(activatable_object_mana_actions(state));
+    let object_mana_actions = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::GroupedManaReadiness,
+        );
+        activatable_object_mana_actions(state)
+    };
+    grouped_actions.extend(object_mana_actions);
     let mut grouped: HashMap<ObjectId, Vec<GameAction>> = HashMap::new();
     for action in &grouped_actions {
         if let Some(id) = action.source_object() {
@@ -1611,8 +2362,36 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     (actions, spell_costs, grouped)
 }
 
+/// Engine-authored action sequence for the "tap all lands" mana-payment shortcut.
+///
+/// This is presentation policy, not a new game action: preserve battlefield order
+/// and include a source only when it has exactly one legal land-mana action. A
+/// source with multiple legal mana rows is deliberately omitted because choosing
+/// among them is a player decision, not a deterministic shortcut.
+pub fn mana_payment_shortcut_actions(
+    state: &GameState,
+    legal_actions_by_object: &HashMap<ObjectId, Vec<GameAction>>,
+) -> Vec<GameAction> {
+    if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+        return Vec::new();
+    }
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|object_id| {
+            let mut options = legal_actions_by_object
+                .get(object_id)?
+                .iter()
+                .filter(|action| matches!(action, GameAction::TapLandForMana { .. }));
+            let action = options.next()?;
+            options.next().is_none().then(|| action.clone())
+        })
+        .collect()
+}
+
 /// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
-/// `viewer` is not the player currently expected to act.
+/// `viewer` has no current action authority.
 ///
 /// CR 117.1 — "which player can take actions at any given time is determined by
 /// a system of priority. The player with priority may cast spells, activate
@@ -1623,8 +2402,12 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 /// This is the single engine-side authority for "what does player X need to
 /// know" and exists to keep game-logic gating out of transport adapters. The
 /// P2P multiplayer host broadcasts a filtered state + legal-actions payload
-/// per guest; only the acting guest needs a populated legal-actions map.
+/// per guest; the Resolve All consent protocol additionally exposes each
+/// frozen grantor's own revocation while a different representative is queued.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
+    if let Some(actions) = resolve_all_actions_for_viewer(state, viewer) {
+        return (actions, HashMap::new(), HashMap::new());
+    }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), every pending player has a
     // legal action set, so guests in a multiplayer mulligan can see and submit
@@ -1645,6 +2428,47 @@ pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalAct
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())
     }
+}
+
+fn resolve_all_actions_for_viewer(state: &GameState, viewer: PlayerId) -> Option<Vec<GameAction>> {
+    let epoch = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            *epoch
+        }
+        _ => return None,
+    };
+    let run = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == epoch)?;
+    let mut actions = Vec::new();
+    if let WaitingFor::ResolveAllConsent { representative, .. } = &state.waiting_for {
+        if run.authorized_submitter_for(*representative) == Some(viewer) {
+            actions.extend([
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: crate::types::actions::ResolveAllConsentDecision::Grant,
+                },
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: crate::types::actions::ResolveAllConsentDecision::Decline,
+                },
+            ]);
+        }
+    }
+    actions.extend(run.participants.iter().filter_map(|participant| {
+        (participant.granted
+            && crate::game::turn_control::resolve_all_granted_submitter(
+                state,
+                epoch,
+                participant.representative,
+            ) == Some(viewer))
+        .then_some(GameAction::RevokeResolveAllConsent {
+            epoch,
+            representative: participant.representative,
+        })
+    }));
+    Some(actions)
 }
 
 /// Non-fatal diagnostic describing a wedged decision point.
@@ -1710,144 +2534,42 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    activatable_object_mana_actions_for_player(state, player)
-}
-
-fn can_use_tap_land_shortcut(
-    state: &GameState,
-    object_id: ObjectId,
-    option: &mana_sources::ManaSourceOption,
-) -> bool {
-    if option.atomic_combination.is_some() {
-        return false;
-    }
-    let Some(ability_index) = option.ability_index else {
-        return true;
-    };
-    state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
-        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
-}
-
-pub(super) fn activatable_object_mana_actions_for_player(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<GameAction> {
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
-    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
-        if obj.controller != player {
-            continue;
-        }
-
-        let mut handled_indices = HashSet::new();
-        if obj.card_types.core_types.contains(&CoreType::Land) {
-            let options = mana_sources::activatable_land_mana_options_indexed_gated(
-                state,
-                obj_id,
-                player,
-                &aura_sources,
-                &mana_activation_gates,
-            );
-            if options.len() == 1
-                && options
-                    .first()
-                    .is_some_and(|option| can_use_tap_land_shortcut(state, obj_id, option))
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-                if let Some(ability_index) = options[0].ability_index {
-                    handled_indices.insert(ability_index);
-                }
-            } else {
-                for option in options {
-                    if let Some(ability_index) = option.ability_index {
-                        if handled_indices.insert(ability_index) {
-                            actions.push(GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        for (idx, ability) in obj.abilities.iter().enumerate() {
-            if handled_indices.contains(&idx) {
-                continue;
-            }
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                continue;
-            }
-            // CR 302.6 + CR 602.5a: Only tap-cost abilities are gated by tapped state and
-            // summoning sickness. Free or mana-cost-only mana abilities are always
-            // activatable. The summoning-sickness check honors the
-            // CanActivateAbilitiesAsThoughHaste static (Tyvar) via the shared predicate.
-            if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped
-                    || crate::game::restrictions::summoning_sick_for_tap_ability(state, obj))
-            {
-                continue;
-            }
-            // CR 605.3b: Activation restrictions still apply to mana abilities.
-            if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now_gated(
-                    state,
-                    player,
-                    obj_id,
-                    idx,
-                    ability,
-                    &mana_activation_gates,
-                )
-            {
-                actions.push(GameAction::ActivateAbility {
-                    source_id: obj_id,
-                    ability_index: idx,
-                });
-            }
-        }
-    }
-    actions
+    mana_sources::activatable_mana_actions_for_player(state, player)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::types::game_state::TargetEffectDetail;
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::{
-        candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
-        legal_actions_full, stuck_decision_diagnostic, validated_candidate_actions,
+        candidate_actions, cheap_reject_candidate, end_continuous_effect_offers, legal_actions,
+        legal_actions_for_viewer, legal_actions_full, stuck_decision_diagnostic,
+        validated_candidate_actions,
     };
     use crate::game::engine::apply_as_current;
     use crate::game::mana_sources;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
         ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
-        ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-        TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+        ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
+        TapCreaturesSelectionMode, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
-        MulliganDecisionPhase, PendingCast, PendingMulliganAction, StackEntry, StackEntryKind,
-        WaitingFor,
+        CastingVariant, ConvokeMode, CostResume, DistributionUnit, EndEffectGroupId, GameState,
+        MulliganDecisionEntry, MulliganDecisionPhase, PayCostKind, PendingCast,
+        PendingMulliganAction, PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
-    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
@@ -1863,6 +2585,39 @@ mod tests {
         state
     }
 
+    #[test]
+    fn end_continuous_effect_offer_projection_preserves_engine_order_and_payload() {
+        let first = GameAction::EndContinuousEffect {
+            group: EndEffectGroupId(8),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let second = GameAction::EndContinuousEffect {
+            group: EndEffectGroupId(13),
+            source_name: "Convulsing Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+        };
+        let actions = vec![
+            GameAction::PassPriority,
+            first.clone(),
+            GameAction::CancelCast,
+            second.clone(),
+        ];
+
+        assert_eq!(
+            end_continuous_effect_offers(&actions),
+            vec![first, second],
+            "the engine projection must preserve the legal-action order and exact \
+             dispatch/display payload"
+        );
+    }
+
     fn setup_opponent_priority(phase: Phase) -> GameState {
         let mut state = setup_priority();
         state.phase = phase;
@@ -1872,6 +2627,129 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn meaningful_priority_actions() -> Vec<GameAction> {
+        vec![
+            GameAction::PassPriority,
+            GameAction::TurnFaceUp {
+                object_id: ObjectId(999),
+                x: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn low_use_window_mode_fast_passes_only_own_empty_upkeep_draw_and_end() {
+        for phase in [Phase::Upkeep, Phase::Draw, Phase::End] {
+            let mut state = setup_priority();
+            state.phase = phase;
+            let actions = meaningful_priority_actions();
+
+            assert!(
+                !super::auto_pass_recommended(&state, &actions),
+                "Standard must preserve the meaningful-action hold in {phase:?}"
+            );
+            state
+                .priority_passing_modes
+                .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+            assert!(
+                super::auto_pass_recommended(&state, &actions),
+                "the low-use-window mode should pass the active player's empty {phase:?} window"
+            );
+        }
+
+        let mut precombat = setup_priority();
+        precombat.phase = Phase::PreCombatMain;
+        precombat
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &precombat,
+            &meaningful_priority_actions()
+        ));
+
+        let mut opponent_turn = setup_opponent_priority(Phase::End);
+        opponent_turn
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &opponent_turn,
+            &meaningful_priority_actions()
+        ));
+
+        let mut non_priority = setup_priority();
+        non_priority.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        non_priority
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &non_priority,
+            &meaningful_priority_actions()
+        ));
+    }
+
+    #[test]
+    fn low_use_window_mode_uses_only_the_authorized_submitters_phase_stops() {
+        let stop = PhaseStop {
+            phase: Phase::End,
+            scope: PhaseStopScope::AllTurns,
+        };
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        state.phase_stops.insert(PlayerId(0), vec![stop]);
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "the controlled seat's private stop must not affect its controller"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(1), vec![stop]);
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "the authorized controller's stop must suppress the recommendation"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(2), vec![stop]);
+        assert!(super::auto_pass_recommended(&state, &actions));
+    }
+
+    #[test]
+    fn viewer_wrapper_reaches_low_use_window_mode_only_for_authorized_submitter() {
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        assert!(super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(1),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(0),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(2),
+            &actions
+        ));
     }
 
     fn create_land(state: &mut GameState, name: &str, subtypes: &[&str]) -> ObjectId {
@@ -1888,6 +2766,18 @@ mod tests {
             .subtypes
             .extend(subtypes.iter().map(|subtype| (*subtype).to_string()));
         id
+    }
+
+    fn bucket_has_tap_land(
+        grouped: &HashMap<ObjectId, Vec<GameAction>>,
+        object_id: ObjectId,
+    ) -> bool {
+        grouped.get(&object_id).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == object_id)
+            })
+        })
     }
 
     fn add_fixed_mana_ability(
@@ -2179,6 +3069,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
@@ -2523,41 +3414,27 @@ mod tests {
         let (flat, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            !bucket_has(
-                &grouped,
-                fetch,
-                &GameAction::TapLandForMana { object_id: fetch },
-            ),
+            !bucket_has_tap_land(&grouped, fetch),
             "fetch land with no mana-producing subtype or explicit mana ability must not be tappable"
         );
         assert!(
-            bucket_has(
-                &grouped,
-                forest,
-                &GameAction::TapLandForMana { object_id: forest },
-            ),
+            bucket_has_tap_land(&grouped, forest),
             "subtype-only basic land fallback must remain tappable"
         );
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: blue_idx,
-            },
-        ));
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: black_idx,
-            },
-        ));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(blue_idx))
+        )));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(black_idx))
+        )));
         assert!(
             !flat
                 .iter()
-                .any(|action| matches!(action, GameAction::TapLandForMana { object_id } if *object_id == forest)),
+                .any(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == forest)),
             "flat legal actions stay free of land mana actions"
         );
         assert!(
@@ -2566,6 +3443,33 @@ mod tests {
                 .any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == dual)),
             "flat legal actions stay free of explicit mana abilities"
         );
+    }
+
+    #[test]
+    fn mana_payment_shortcut_preserves_battlefield_order_and_omits_ambiguous_sources() {
+        let mut state = setup_priority();
+        let forest = create_land(&mut state, "Forest", &["Forest"]);
+        let dual = create_land(&mut state, "Underground Sea", &[]);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Blue);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Black);
+        let mountain = create_land(&mut state, "Mountain", &["Mountain"]);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let shortcut = super::mana_payment_shortcut_actions(&state, &grouped);
+        let sources: Vec<_> = shortcut
+            .iter()
+            .map(|action| match action {
+                GameAction::TapLandForMana { selection } => selection.source.object_id,
+                other => panic!("unexpected shortcut action: {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(sources, vec![forest, mountain]);
     }
 
     #[test]
@@ -2681,14 +3585,11 @@ mod tests {
         let (_, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            bucket_has(
-                &grouped,
-                skycloud,
-                &GameAction::ActivateAbility {
-                    source_id: skycloud,
-                    ability_index: 0,
-                },
-            ),
+            grouped.get(&skycloud).is_some_and(|actions| actions.iter().any(
+                |action| matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == skycloud
+                        && selection.ability_index == Some(0))
+            )),
             "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
         );
     }
@@ -2805,11 +3706,7 @@ mod tests {
             let (_, _, grouped) = legal_actions_full(&state);
 
             assert!(
-                bucket_has(
-                    &grouped,
-                    forest,
-                    &GameAction::TapLandForMana { object_id: forest },
-                ),
+                bucket_has_tap_land(&grouped, forest),
                 "mana actions must be exposed during {:?}",
                 state.waiting_for
             );
@@ -2880,12 +3777,14 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
             up_to: true,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -2919,12 +3818,14 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -2940,6 +3841,98 @@ mod tests {
         ));
     }
 
+    /// CR 107.3a: X=0 through X=count are all legal announcements for an
+    /// X-sentinel tap-creatures cost, so the AI's cheap rejection filter must
+    /// admit every count in `[min_count, count]`. Without the Fixed/VariableX
+    /// range arm this falls through to the generic exact-`count` PayCost arm,
+    /// which rejects every non-maximal X — the AI can never even consider
+    /// announcing a smaller X.
+    #[test]
+    fn cheap_reject_candidate_honors_variable_x_tap_creatures_range() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::VariableX,
+            },
+            choices: choices.clone(),
+            count: 2,
+            min_count: 0,
+            resume: CostResume::Resolution,
+        };
+
+        // X = 0, 1, 2 are all inside the advertised [0, 2] window.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards { cards: vec![] }
+        ));
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[1]]
+            }
+        ));
+        // A third id exceeds the ceiling even though every id is eligible.
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: choices.clone()
+            }
+        ));
+        // The shared `selection_mismatch` dedup still rejects a repeated id.
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[0]]
+            }
+        ));
+    }
+
+    /// Non-regression pin: a FIXED tap-creatures requirement has
+    /// `min_count == count`, so routing it through the new range arm must stay
+    /// behaviorally identical to the old exact-`count` fallback.
+    #[test]
+    fn cheap_reject_candidate_preserves_exact_fixed_tap_creatures_count() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
+            choices: choices.clone(),
+            count: 2,
+            min_count: 2,
+            resume: CostResume::Resolution,
+        };
+
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[1]]
+            }
+        ));
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: choices.clone()
+            }
+        ));
+    }
+
     #[test]
     fn cheap_reject_candidate_permits_partial_constrained_search() {
         // CR 701.23b: a stated-quality (MatchEachFilter) search may legally find
@@ -2949,6 +3942,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2957,6 +3951,7 @@ mod tests {
             constraint: SearchSelectionConstraint::MatchEachFilter {
                 filters: vec![TargetFilter::Any, TargetFilter::Any],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3041,6 +4036,7 @@ mod tests {
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::BecomeCopy {
+                    recipient: TargetFilter::SelfRef,
                     target: TargetFilter::Any,
                     duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
                     mana_value_limit: None,
@@ -3303,6 +4299,104 @@ mod tests {
         );
     }
 
+    /// Issue #4387: The Unbeatable Squirrel Girl's controller-owned,
+    /// mana-costed non-mana activated ability is a meaningful opponent-turn
+    /// priority action. The production action surfaces must expose it, auto-pass
+    /// must hold from that exposed action, and the submitted activation must
+    /// resolve through the public pipeline.
+    #[test]
+    fn squirrel_girl_activation_submits_and_resolves_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        const SQUIRREL_GIRL_ORACLE: &str = "Do You Like Squirrels? — Whenever The Unbeatable Squirrel Girl enters or attacks, create a 1/1 green Squirrel creature token.\nI LOVE Squirrels! — {1}{G}{G}{G}: Create X 1/1 green Squirrel creature tokens, where X is the number of Squirrels you control.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let source = scenario
+            .add_creature(P0, "The Unbeatable Squirrel Girl", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Squirrel", "Human", "Hero"])
+            .from_oracle_text(SQUIRREL_GIRL_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Squirrel Girl must parse its activated ability");
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        let action = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        };
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&action),
+            "controller-owned Squirrel Girl activation must appear in the flat action list"
+        );
+        assert!(
+            bucket_has(&legal_actions_full(runner.state()).2, source, &action),
+            "controller-owned Squirrel Girl activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "mana-costed non-mana activation on opponent's turn -> hold"
+        );
+
+        let before = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        let outcome = runner.activate(source, ability_index).resolve();
+        let after = outcome
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "submitted opponent-turn activation must resolve and create one Squirrel token"
+        );
+    }
+
     #[test]
     fn auto_pass_holds_when_tapping_land_for_mana_would_queue_non_mana_trigger() {
         let mut state = setup_opponent_priority(Phase::PreCombatMain);
@@ -3475,6 +4569,20 @@ mod tests {
     /// satisfiable, so a lone source classifies as `ManaSourcePenalty::Sacrifices`
     /// and is activatable. Colorless mana models the Eldrazi-Spawn/altar class.
     fn add_sac_for_mana_source(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        add_sac_for_mana_source_producing(
+            state,
+            controller,
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+    }
+
+    fn add_sac_for_mana_source_producing(
+        state: &mut GameState,
+        controller: PlayerId,
+        produced: ManaProduction,
+    ) -> ObjectId {
         use crate::types::ability::{TypeFilter, TypedFilter};
         let id = create_object(
             state,
@@ -3485,25 +4593,340 @@ mod tests {
         );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut obj.abilities).push(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            )
-            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                1,
-            ))),
-        );
+        obj.base_card_types = obj.card_types.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            1,
+        )));
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
         id
+    }
+
+    #[test]
+    fn sacrificial_mana_selection_auto_cast_remains_offered_and_reaches_source_selection() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let spell = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Sacrificial Mana Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(1);
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut object.abilities).push(definition.clone());
+            Arc::make_mut(&mut object.base_abilities).push(definition);
+        }
+        let raw = candidate_actions(&state);
+        let action = raw
+            .iter()
+            .find_map(|candidate| match &candidate.action {
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if *object_id == spell => Some(candidate.action.clone()),
+                _ => None,
+            })
+            .expect("the production candidate must select AutoExceptSacrificialMana");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("sacrificial-mana cast must start");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("AutoExceptSacrificialMana must reach source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+        assert_eq!(
+            state
+                .pending_cast
+                .as_ref()
+                .expect("external prompt must preserve the pending cast")
+                .object_id,
+            spell
+        );
+    }
+
+    #[test]
+    fn sacrificial_colored_requirement_preserves_source_choice_despite_generic_mana() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source_producing(
+            &mut state,
+            PlayerId(0),
+            ManaProduction::Fixed {
+                colors: vec![ManaColor::Red],
+                contribution: ManaContribution::Base,
+            },
+        );
+        let forest = create_land(&mut state, "Forest", &[]);
+        add_fixed_mana_ability(&mut state, forest, ManaColor::Green);
+        let spell = create_object(
+            &mut state,
+            CardId(7_011),
+            PlayerId(0),
+            "Sacrificial Red Requirement".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            };
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut object.abilities).push(definition.clone());
+            Arc::make_mut(&mut object.base_abilities).push(definition);
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpell {
+                    object_id,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if object_id == spell => Some(action),
+                _ => None,
+            })
+            .expect("a mandatory sacrificial color source must preserve source choice");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("the generic-only Forest must not make the sacrificial red source automatic")
+        };
+        assert!(state.objects[&forest].tapped);
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+    }
+
+    #[test]
+    fn pool_payable_and_no_cost_spells_keep_auto_mode_with_sacrificial_source_available() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(702),
+            false,
+            Vec::new(),
+        ));
+        let spell = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(0),
+            "Pool-Payable Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(1);
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let action = GameAction::CastSpell {
+            object_id: spell,
+            card_id: state.objects[&spell].card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        };
+        let no_cost_spell = create_object(
+            &mut state,
+            CardId(708),
+            PlayerId(0),
+            "No-Cost Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&no_cost_spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::zero();
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let no_cost_action = GameAction::CastSpell {
+            object_id: no_cost_spell,
+            card_id: state.objects[&no_cost_spell].card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        };
+
+        let candidates = candidate_actions(&state);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.action == action));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.action == no_cost_action));
+        let legal = legal_actions_full(&state).0;
+        assert!(legal.contains(&action));
+        assert!(legal.contains(&no_cost_action));
+        apply_as_current(&mut state, action).expect("pool-payable cast must complete payment");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    #[test]
+    fn sneak_with_only_sacrificial_mana_preserves_source_choice() {
+        let mut state = setup_priority();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareBlockers;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let attacker = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(0),
+            "Sneak Return Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.tapped = true;
+            object.entered_battlefield_turn = Some(1);
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        let spell = create_object(
+            &mut state,
+            CardId(705),
+            PlayerId(0),
+            "Sacrificial-Mana Sneak Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(7);
+            object.base_mana_cost = object.mana_cost.clone();
+            object.keywords.push(Keyword::Sneak(ManaCost::generic(1)));
+            object.base_keywords = object.keywords.clone();
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpellAsSneak {
+                    hand_object,
+                    creature_to_return,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if hand_object == spell && creature_to_return == attacker => Some(action),
+                _ => None,
+            })
+            .expect("Sneak must retain a manual sacrificial-mana cast candidate");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("Sneak cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("Sneak with only sacrificial mana must stop at source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+    }
+
+    #[test]
+    fn web_slinging_with_only_sacrificial_mana_preserves_source_choice() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let returned = create_object(
+            &mut state,
+            CardId(706),
+            PlayerId(0),
+            "Web-Slinging Return Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&returned).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.tapped = true;
+        }
+        let spell = create_object(
+            &mut state,
+            CardId(707),
+            PlayerId(0),
+            "Sacrificial-Mana Web-Slinging Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(7);
+            object.base_mana_cost = object.mana_cost.clone();
+            object
+                .keywords
+                .push(Keyword::WebSlinging(ManaCost::generic(1)));
+            object.base_keywords = object.keywords.clone();
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpellAsWebSlinging {
+                    hand_object,
+                    creature_to_return,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if hand_object == spell && creature_to_return == returned => Some(action),
+                _ => None,
+            })
+            .expect("Web-slinging must retain a manual sacrificial-mana cast candidate");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action)
+            .expect("Web-slinging cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("Web-slinging with only sacrificial mana must stop at source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
     }
 
     /// V1 (repro fix): on an OPPONENT's turn, a lone sacrifice-for-mana source
@@ -4489,7 +5912,10 @@ mod tests {
                 ),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -4563,6 +5989,136 @@ mod tests {
         );
     }
 
+    /// CR 118.9a + decision D1: the frontend's `spellCosts` map (from
+    /// `legal_actions_full`) must report a hand spell as `NoCost` while Omniscience
+    /// is on the battlefield, so the UI can overlay a {0} pip. The cost overlay is
+    /// the CHEAPEST-legal-cast floor (Display mode), independent of whether the
+    /// printed cost is affordable — the free-vs-printed election lives in the
+    /// `CastingVariantChoice` menu at cast time, not in the overlay. This test pins
+    /// both the zero-mana case and (as the discriminating extension) the ample-mana
+    /// case, so the Display-mode floor cannot silently regress to the printed cost
+    /// once a real cast becomes affordable.
+    #[test]
+    fn spell_costs_report_nocost_for_hand_spell_under_omniscience() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
+        use crate::types::StaticDefinition;
+
+        let mut state = setup_priority();
+
+        let omniscience_id = create_object(
+            &mut state,
+            CardId(4200),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&omniscience_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition {
+                mode: StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                },
+                affected: Some(TargetFilter::Any),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "You may cast spells from your hand without paying their mana costs."
+                        .to_string(),
+                ),
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // A 7UUU spell in hand — the exact class the display overlay should zero.
+        let spell_id = create_object(
+            &mut state,
+            CardId(4201),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+                generic: 7,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("Test Spell", "test spell"),
+            ));
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience must display the hand spell as NoCost, got {displayed:?}"
+        );
+
+        // Discriminating extension (decision D1): give the caster ample mana to
+        // afford the printed {7}{U}{U}{U}. The Display-mode overlay must STILL floor
+        // to NoCost — the affordable printed cost is only surfaced as a menu option
+        // at cast time, never in the overlay. Under the Actual-mode election logic
+        // this same board would offer {Normal(printed), HandPermission({0})}; the
+        // overlay deliberately does not.
+        for _ in 0..7 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience overlay must stay NoCost even when the printed cost is \
+             affordable (Display-mode floor), got {displayed:?}"
+        );
+    }
+
     /// Issue #1542: Emergence Zone must expose TapLandForMana alongside its
     /// sacrifice-for-flash activated ability.
     #[test]
@@ -4616,7 +6172,8 @@ mod tests {
         assert!(
             land_actions.iter().any(|action| matches!(
                 action,
-                GameAction::TapLandForMana { object_id } if *object_id == land_id
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == land_id
             )),
             "expected TapLandForMana in grouped actions, got {land_actions:?}"
         );
@@ -4638,11 +6195,16 @@ mod tests {
         );
         assert_eq!(state.objects[&land_id].abilities.len(), 2);
 
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .expect("TapLandForMana must succeed when flash ability is also legal");
+        let tap_action = land_actions
+            .iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == land_id)
+            })
+            .cloned()
+            .expect("land must expose semantic mana action");
+        apply_as_current(&mut state, tap_action)
+            .expect("TapLandForMana must succeed when flash ability is also legal");
         assert!(
             state.objects[&land_id].tapped,
             "Emergence Zone should be tapped after TapLandForMana"
@@ -4666,10 +6228,11 @@ mod tests {
         // A "choose a player" prompt (CR 601.2b) with NO offered options — the
         // engine can produce no legal `ChooseOption`, so no submitter can act.
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
-            source_id: None,
+            source: None,
             persist_player: None,
         };
 
@@ -4799,6 +6362,9 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target.clone()],
                 optional: false,
+                chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4819,7 +6385,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_do_not_simulate_each_target() {
+    fn target_selection_legal_actions_use_current_targets_with_reducer_validation() {
         let mut state = setup_priority();
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
@@ -4846,10 +6412,22 @@ mod tests {
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast,
-            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: targets.clone(),
-                optional: true,
-            }],
+            target_slots: vec![
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: targets.clone(),
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![targets[0].clone()],
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+            ],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -4858,13 +6436,18 @@ mod tests {
             },
         };
 
-        crate::game::perf_counters::reset();
         let (actions, spell_costs, grouped) = legal_actions_full(&state);
-        let counters = crate::game::perf_counters::snapshot();
 
-        assert_eq!(counters.state_clone_for_legality, 0);
-        assert_eq!(counters.priority_cast_probe_builds, 0);
-        assert_eq!(actions.len(), 26);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) }))
+                .count(),
+            25
+        );
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
+        assert_eq!(actions.len(), 27);
+        assert!(actions.contains(&GameAction::CancelCast));
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
         assert!(actions
@@ -4933,6 +6516,296 @@ mod tests {
     }
 
     #[test]
+    fn offer_side_auto_payment_phase_accounting_has_exact_clone_ownership() {
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::mana::ManaCostShard;
+
+        const N: u64 = 6;
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+
+        let victim = create_object(
+            &mut state,
+            CardId(80_000),
+            PlayerId(1),
+            "Offer Probe Victim".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&victim).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(80_001),
+            PlayerId(0),
+            "Choice-Bearing Offer Probe Source".to_string(),
+            Zone::Battlefield,
+        );
+        let interactive_mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Black],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            )),
+        });
+        {
+            let object = state.objects.get_mut(&source).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            Arc::make_mut(&mut object.abilities).push(interactive_mana.clone());
+            Arc::make_mut(&mut object.base_abilities).push(interactive_mana);
+            object.summoning_sick = false;
+        }
+        create_object(
+            &mut state,
+            CardId(80_002),
+            PlayerId(0),
+            "Offer Probe Fodder".to_string(),
+            Zone::Graveyard,
+        );
+
+        let mut spell_ids = Vec::new();
+        for index in 0..N {
+            let spell = create_object(
+                &mut state,
+                CardId(80_100 + index),
+                PlayerId(0),
+                format!("Offer Probe Spell {index}"),
+                Zone::Hand,
+            );
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            );
+            {
+                let object = state.objects.get_mut(&spell).unwrap();
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+                object.mana_cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 0,
+                };
+                Arc::make_mut(&mut object.abilities).push(definition.clone());
+                Arc::make_mut(&mut object.base_abilities).push(definition);
+            }
+            spell_ids.push(spell);
+        }
+
+        let probe = crate::game::casting::PriorityCastProbe::new(&state, PlayerId(0));
+        crate::game::perf_counters::reset();
+        let generated = {
+            let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+                crate::game::perf_counters::LegalityClonePhase::Generation,
+            );
+            super::candidate_actions_with_probe(&state, Some(&probe))
+        };
+        let generation = crate::game::perf_counters::snapshot();
+        let g = generation.generation_state_clones;
+        let g_w = generation.generation_auto_payment_wrapper_calls;
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|candidate| matches!(candidate.action, GameAction::CastSpell { .. }))
+                .count(),
+            N as usize
+        );
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|candidate| candidate.action == GameAction::PassPriority)
+                .count(),
+            1
+        );
+        assert!(!generated
+            .iter()
+            .any(|candidate| candidate.action.is_mana_ability()));
+
+        let strict_candidate = generated
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::CastSpell { object_id, .. } if object_id == spell_ids[0]
+                )
+            })
+            .expect("generation baseline must contain the first cast")
+            .clone();
+        crate::game::perf_counters::reset();
+        assert!(
+            !super::FilterPipeline::default_pipeline().accepts_with_probe(
+                &state,
+                &strict_candidate,
+                Some(&probe),
+            ),
+            "the isolated strict candidate must still fail at the post-origin Auto payer"
+        );
+        let strict_baseline = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            strict_baseline.strict_fast_path_auto_payment_wrapper_calls,
+            2
+        );
+        let strict_mana_readiness_clones =
+            strict_baseline.strict_fast_path_mana_readiness_state_clones;
+        assert_eq!(strict_mana_readiness_clones, 5);
+        assert_eq!(strict_baseline.strict_fast_path_state_clones, 7);
+        assert_eq!(
+            strict_baseline.strict_fast_path_state_clones,
+            strict_baseline.strict_fast_path_auto_payment_wrapper_calls
+                + strict_baseline.strict_fast_path_mana_readiness_state_clones,
+            "strict clones must have exactly one of the two named owners"
+        );
+        let strict_clones_per_cast = strict_baseline.strict_fast_path_state_clones;
+
+        crate::game::perf_counters::reset();
+        let grouped_baseline = {
+            let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+                crate::game::perf_counters::LegalityClonePhase::GroupedManaReadiness,
+            );
+            super::activatable_object_mana_actions(&state)
+        };
+        let grouped = crate::game::perf_counters::snapshot();
+        let r = grouped.grouped_mana_readiness_state_clones;
+        assert_eq!(r, 1);
+        assert!(grouped_baseline.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility { source_id, .. } if *source_id == source
+        )));
+
+        let first_action = GameAction::CastSpell {
+            object_id: spell_ids[0],
+            card_id: state.objects[&spell_ids[0]].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        let mut scratch = state.clone();
+        apply_as_current(&mut scratch, first_action)
+            .expect("the broad cast must reach target selection in scratch");
+        let pending = scratch
+            .waiting_for
+            .pending_cast_ref()
+            .expect("target selection carries the pending cast")
+            .clone();
+        crate::game::perf_counters::reset();
+        assert!(
+            !crate::game::casting::can_pay_pending_cast_after_auto_tap_in_scratch(
+                &mut scratch,
+                &pending
+            )
+        );
+        let core = crate::game::perf_counters::snapshot();
+        assert_eq!(core.post_apply_auto_payment_core_calls, 1);
+        assert_eq!(core.post_apply_uncached_source_collections, 1);
+        assert_eq!(core.post_apply_auto_payment_core_state_clones, 0);
+
+        let mut zero_residual_scratch = state.clone();
+        let mut zero_residual_pending = pending.clone();
+        zero_residual_pending.cost = ManaCost::zero();
+        crate::game::perf_counters::reset();
+        assert!(
+            crate::game::casting::can_pay_pending_cast_after_auto_tap_in_scratch(
+                &mut zero_residual_scratch,
+                &zero_residual_pending,
+            )
+        );
+        let zero_residual = crate::game::perf_counters::snapshot();
+        assert_eq!(zero_residual.post_apply_auto_payment_core_calls, 1);
+        assert_eq!(zero_residual.post_apply_uncached_source_collections, 0);
+        assert_eq!(zero_residual.post_apply_auto_payment_core_state_clones, 0);
+
+        let before = serde_json::to_value(&state).expect("fixture must serialize");
+        crate::game::perf_counters::reset();
+        let (actions, _, grouped_actions) = legal_actions_full(&state);
+        let counters = crate::game::perf_counters::snapshot();
+        let s_w = counters.strict_fast_path_auto_payment_wrapper_calls;
+        let s = N * strict_clones_per_cast;
+
+        assert_eq!(counters.generation_state_clones, g);
+        assert_eq!(counters.generation_auto_payment_wrapper_calls, g_w);
+        assert_eq!(counters.strict_fast_path_state_clones, s);
+        assert_eq!(s_w, 2 * N);
+        assert_eq!(
+            counters.strict_fast_path_mana_readiness_state_clones,
+            N * strict_mana_readiness_clones
+        );
+        assert_eq!(
+            counters.strict_fast_path_state_clones,
+            counters.strict_fast_path_auto_payment_wrapper_calls
+                + counters.strict_fast_path_mana_readiness_state_clones,
+            "the full strict path must preserve the fixed owner composition"
+        );
+        assert_eq!(
+            counters.raw_validation_state_clones, N,
+            "each cast reaches the fallback simulation; the mana activation uses its \
+             structural fast path"
+        );
+        assert_eq!(counters.grouped_mana_readiness_state_clones, r);
+        assert!(grouped_actions.get(&source).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, .. } if *source_id == source
+                )
+            })
+        }));
+        assert_eq!(counters.priority_cast_probe_state_clones, 1);
+        assert_eq!(counters.priority_cast_probe_builds, 1);
+        assert_eq!(counters.auto_tap_source_cache_builds, 1);
+        assert_eq!(
+            counters.auto_payment_borrowed_wrapper_calls,
+            counters.auto_payment_owned_state_clones
+        );
+        assert_eq!(counters.auto_payment_borrowed_wrapper_calls, g_w + s_w);
+        assert_eq!(counters.post_apply_auto_payment_core_calls, N);
+        assert_eq!(counters.post_apply_auto_payment_core_state_clones, 0);
+        assert_eq!(counters.post_apply_uncached_source_collections, N);
+        // The mana activation is accepted by its structural fast path, so only
+        // the N spell candidates reach fallback simulation.
+        let expected_raw_validation_clones = N;
+        let expected_priority_probe_state_clones = 1;
+        let total = counters.generation_state_clones
+            + counters.strict_fast_path_state_clones
+            + counters.raw_validation_state_clones
+            + counters.grouped_mana_readiness_state_clones
+            + counters.priority_cast_probe_state_clones
+            + counters.post_apply_auto_payment_core_state_clones;
+        assert_eq!(
+            total,
+            g + s + expected_raw_validation_clones + r + expected_priority_probe_state_clones
+        );
+        assert!(spell_ids.iter().all(|spell| !actions.iter().any(|action| {
+            matches!(action, GameAction::CastSpell { object_id, .. } if object_id == spell)
+        })));
+        assert!(actions.contains(&GameAction::PassPriority));
+        assert_eq!(
+            serde_json::to_value(&state).expect("live fixture must serialize"),
+            before
+        );
+    }
+
+    #[test]
     fn target_selection_legal_actions_do_not_fall_back_to_stale_slot_targets() {
         let mut state = setup_priority();
         let target = TargetRef::Object(create_object(
@@ -4948,10 +6821,22 @@ mod tests {
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast,
-            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: vec![target],
-                optional: true,
-            }],
+            target_slots: vec![
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![target.clone()],
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![target.clone()],
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+            ],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -4960,14 +6845,16 @@ mod tests {
             },
         };
 
-        crate::game::perf_counters::reset();
         let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
 
-        assert_eq!(
-            crate::game::perf_counters::snapshot().state_clone_for_legality,
-            0
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
+        assert!(actions.contains(&GameAction::CancelCast));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) })),
+            "stale slot targets must not be reissued"
         );
-        assert_eq!(actions, vec![GameAction::ChooseTarget { target: None }]);
     }
 
     /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous
@@ -5040,6 +6927,17 @@ mod tests {
             );
         }
         set_dummy_pending_cast(&mut state);
+        let pending_spell = state
+            .pending_cast
+            .as_ref()
+            .expect("dummy pending cast exists")
+            .object_id;
+        state
+            .objects
+            .get_mut(&pending_spell)
+            .expect("dummy spell exists")
+            .keywords
+            .push(Keyword::Delve);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: Some(ConvokeMode::Delve),
@@ -5062,6 +6960,66 @@ mod tests {
         );
     }
 
+    /// Issue #4878: `validated_candidate_actions` must return candidates in the
+    /// canonical `GameAction::cmp_stable` order, independent of the upstream
+    /// enumeration order (which walks `state.objects`, an `im::HashMap`, in
+    /// hash order — not sorted for this id set). Reverting the
+    /// `sort_by(cmp_stable)` guard returns the candidates in that hash order,
+    /// which differs from the canonical order below, flipping this assertion.
+    #[test]
+    fn validated_candidates_are_cmp_stable_sorted() {
+        let mut state = setup_priority();
+        // CR 305.2 + CR 505: land drop available in the precombat main phase so
+        // each land in hand survives the simulation filter as a `PlayLand`.
+        state.phase = Phase::PreCombatMain;
+        state.lands_played_this_turn = 0;
+        for _ in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let actions: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+
+        // Reach guard: the scenario must actually offer several distinct actions
+        // (multiple `PlayLand` + `PassPriority`), otherwise a single-element list
+        // would be trivially "sorted" and the assertion vacuous.
+        assert!(
+            actions.len() >= 3,
+            "expected several candidate actions to canonicalize, got {}",
+            actions.len()
+        );
+
+        // Canonical order: identical to an independent `cmp_stable` sort.
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "validated_candidate_actions must emit cmp_stable-canonical order"
+        );
+
+        // Determinism: a second call over the same state yields the same order.
+        let again: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+        assert_eq!(actions, again, "candidate order must be deterministic");
+    }
+
     /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes
     /// `auto_pass_recommended` return `true`, overriding the meaningful-action
     /// hold that would otherwise keep the window open. Reverting the yield short-
@@ -5080,8 +7038,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        ability.source_incarnation = Some(2);
-        ability.source_card_id = Some(CardId(77));
+        ability.set_test_trigger_source_recursive(2, CardId(77));
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
             source_id: source,
@@ -5095,6 +7052,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:

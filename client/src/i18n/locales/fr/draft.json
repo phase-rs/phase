@@ -59,7 +59,8 @@
     "passingLeft": "→ Passage à gauche →",
     "passingRight": "← Passage à droite ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Face visible : {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
@@ -77,17 +78,60 @@
   },
   "pack": {
     "confirmPick": "Confirmer le choix",
+    "draftEffects": "Effets de draft :",
     "waitingNext": "En attente du booster suivant...",
     "cardsInPack": "{{count}} cartes dans le booster",
     "picking": "Sélection…",
     "autoPick": "Sélection auto"
+  },
+  "sealedOpening": {
+    "title": "Ouvrez votre pool scellé",
+    "subtitle": "Ouvrez six boosters, un à la fois.",
+    "packProgress": "Booster {{current}} sur {{total}}",
+    "openPack": "Ouvrir le booster",
+    "openPackArt": "Ouvrir l’illustration du booster",
+    "pulls": "Vos cartes",
+    "nextPack": "Booster suivant",
+    "viewPool": "Voir votre pool",
+    "poolTitle": "Votre pool scellé",
+    "poolSubtitle": "Les {{count}} cartes, regroupées par type.",
+    "buildDeck": "Construire le deck"
   },
   "pool": {
     "cardsDrafted": "{{count}} cartes draftées",
     "empty": "Aucune carte draftée pour l'instant",
     "sortColor": "Couleur",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Blanc",
+      "blue": "Bleu",
+      "black": "Noir",
+      "red": "Rouge",
+      "green": "Vert",
+      "multicolor": "Multicolore",
+      "colorless": "Incolore",
+      "creature": "Créature",
+      "instant": "Éphémère",
+      "sorcery": "Rituel",
+      "enchantment": "Enchantement",
+      "artifact": "Artefact",
+      "planeswalker": "Planeswalker",
+      "land": "Terrain",
+      "other": "Autre",
+      "mythic": "Rare mythique",
+      "rare": "Rare",
+      "uncommon": "Inhabituelle",
+      "common": "Commune",
+      "rarityOther": "Autres raretés",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Classement — Manche {{round}}",
@@ -100,13 +144,19 @@
   },
   "limitedDeck": {
     "poolHeading": "Pool ({{count}})",
+    "searchPool": "Rechercher dans votre pool...",
     "allAdded": "Toutes les cartes ajoutées au deck.",
+    "noFilterMatches": "Aucune carte ne correspond aux filtres",
+    "filterUnavailable": "Les filtres sont indisponibles pour le moment — toutes les cartes sont affichées.",
     "mainDeck": "Deck principal",
     "emptyDeckHint": "Cliquez sur des cartes du pool pour les ajouter à votre deck.",
     "addableCards": "Cartes ajoutables",
+    "searchAddableCards": "Rechercher des cartes ajoutables...",
     "autoLands": "Terrains auto",
     "suggestDeck": "Suggérer un deck",
     "submitDeck": "Soumettre le deck",
+    "validationTitle": "Le deck nécessite votre attention",
+    "submitFailed": "Impossible de soumettre le deck",
     "removeCard": "Retirer {{name}}",
     "addCard": "Ajouter {{name}}",
     "cardCount": "/ {{min}} cartes",
@@ -126,6 +176,10 @@
       "title": "Quick Draft",
       "description": "Draftez 3 boosters avec 7 drafteurs IA, construisez un deck de 40 cartes, puis jouez un match Bo1 contre l'un d'eux."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Ouvrez six boosters, consultez le pool complet, puis construisez un deck de 40 cartes pour un match en une partie."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Collez ou chargez une liste de cube, ajustez les règles de booster et de deck, puis faites un quick draft contre des bots IA."
@@ -135,11 +189,20 @@
       "description": "Hébergez ou rejoignez un pod jusqu'à 8 joueurs, draftez ensemble en direct, puis jouez un tournoi suisse ou à élimination."
     },
     "podInProgress": "Pod Draft en cours",
+    "guestPodInProgress": "Pod rejoint prêt à se reconnecter",
     "podLabel": "Pod {{kind}}",
-    "seatCount": "{{count}} sièges",
+    "guestPodLabel": "Pod de draft",
+    "seatCount_one": "{{count}} siège",
+    "seatCount_few": "{{count}} sièges",
+    "seatCount_many": "{{count}} sièges",
+    "seatCount_other": "{{count}} sièges",
     "roomLabel": "Salle {{code}}",
-    "cardsPicked": "{{count}} cartes choisies",
+    "cardsPicked_one": "{{count}} carte choisie",
+    "cardsPicked_few": "{{count}} cartes choisies",
+    "cardsPicked_many": "{{count}} cartes choisies",
+    "cardsPicked_other": "{{count}} cartes choisies",
     "resume": "Reprendre",
+    "reconnect": "Se reconnecter",
     "draftInProgress": "Draft en cours",
     "draftComplete": "Draft terminé",
     "resumeMatch": "Reprendre le match",
@@ -156,6 +219,7 @@
   },
   "quickPhase": {
     "drafting": "Draft",
+    "opening": "Ouverture des boosters",
     "deckbuilding": "Construction de deck",
     "matchRecord": "Match {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",
@@ -236,6 +300,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Scellé",
     "setDraftTab": "Draft d'extension",
     "cubeTab": "Cube"
   },
@@ -261,6 +326,8 @@
     "kindPremierDesc": "Matchs de tournoi en meilleur des un après la construction. Manches plus rapides, pas de réserve entre les parties.",
     "kindTraditional": "Traditionnel",
     "kindTraditionalDesc": "Matchs de tournoi en meilleur des trois après la construction, avec réserve entre les parties.",
+    "kindSealed": "Scellé",
+    "kindSealedDesc": "Ouvrez six boosters directement dans la réserve de chaque joueur, puis construisez un deck de tournoi en meilleur des un.",
     "tournamentFormat": "Format du tournoi",
     "tournamentSwiss": "Suisse",
     "tournamentSwissDesc": "Tout le monde continue de jouer sur trois manches, même après une défaite.",
@@ -315,7 +382,11 @@
     "sideboardGame": "Réserve — Partie {{number}}",
     "sideboardHint": "Effectuez vos changements de réserve, puis soumettez. Votre pool est disponible ci-dessous.",
     "submitSideboard": "Soumettre la réserve",
-    "preparingNext": "Préparation de la partie suivante..."
+    "preparingNext": "Préparation de la partie suivante...",
+    "hideOverlay": "Masquer cet écran",
+    "showOverlay": "Afficher cet écran",
+    "hiddenNotice": "La réserve est encore ouverte pour cette partie.",
+    "hiddenNoticePlayDraw": "Un choix « jouer ou piocher » est encore en attente pour cette partie."
   },
   "podComplete": {
     "title": "Draft terminé",
@@ -324,7 +395,8 @@
   "podError": {
     "kicked": "Vous avez été exclu du pod",
     "hostLeft": "L'hôte a quitté le draft",
-    "connection": "Erreur de connexion"
+    "connection": "Erreur de connexion",
+    "retry": "Réessayer la connexion"
   },
   "lobby": {
     "title": "Salon du Draft Pod",

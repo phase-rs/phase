@@ -106,15 +106,18 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
         {
             if let Some(where_expression) = extract_token_where_x_expression(&text) {
-                count = super::parse_where_x_quantity_expression(&where_expression)
-                    .or_else(|| {
+                // CR 107.3c: the clause DEFINES X. If the definition is not
+                // representable, this copy-token clause does not lower — fail the
+                // parse instead of fabricating a raw-text placeholder. The
+                // fabricated `QuantityRef::Variable { name: "<oracle text>" }` is
+                // well-typed but DEAD (game/quantity.rs resolves a non-`X` variable
+                // name to 0), so the effect copied ZERO tokens while the raw text
+                // still rendered as a supported dynamic quantity. This mirrors the
+                // sibling non-copy token path below.
+                count =
+                    super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
                         crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                    })
-                    .unwrap_or(QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: where_expression,
-                        },
-                    });
+                    })?;
             }
         }
         return Some(Effect::CopyTokenOf {
@@ -450,6 +453,29 @@ fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
         .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
 }
 
+/// CR 303.4: The printed surfaces that bind a created token to a host inside the
+/// same create-token instruction — "an Aura enters the battlefield attached to
+/// an object or player". `" attached to "` states the relation and
+/// `" and attach it to "` states the action; the resulting permanent is
+/// identical, so both feed one `attach_to` field rather than two code paths.
+///
+/// Scanned at word boundaries with a single `alt`, so the connector that occurs
+/// FIRST in the text wins regardless of which spelling it is — testing each
+/// spelling over the whole string separately would let a later "attached to"
+/// beat an earlier "and attach it to".
+fn first_token_attachment_connector(lower: &str) -> Option<&'static str> {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
+            value(
+                " and attach it to ",
+                tag::<_, _, OracleError<'_>>("and attach it to "),
+            ),
+            value(" attached to ", tag("attached to ")),
+        ))
+        .parse(input)
+    })
+}
+
 fn parse_token_description_with_context(
     text: &str,
     ctx: &ParseContext,
@@ -457,14 +483,21 @@ fn parse_token_description_with_context(
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
-    // CR 303.7: Strip "attached to [target]" suffix and capture the attachment target.
+    // CR 303.4: Strip the attachment clause and capture its target. Oracle
+    // prints the same relation two ways in a create-token instruction — as a
+    // STATE ("create a Cursed Role token attached to target creature") and as an
+    // ACTION ("create a Questing Role token and attach it to target creature").
+    // Both mean the token enters attached, in the same instruction, so both bind
+    // the same `attach_to` field; only the printed surface differs. Keying on the
+    // state form alone dropped the attachment entirely for the action form, and
+    // CR 303.4i then says a hostless Aura token is not created at all (#7302).
     let tp = TextPair::new(text, &lower);
-    let (text, attach_to) = if let Some((before, after)) = tp.split_around(" attached to ") {
-        let (target, _) = parse_target(after.original);
-        (before.original, Some(target))
-    } else {
-        (text, None)
-    };
+    let (text, attach_to) = first_token_attachment_connector(&lower)
+        .and_then(|connector| tp.split_around(connector))
+        .map_or((text, None), |(before, after)| {
+            let (target, _) = parse_target(after.original);
+            (before.original, Some(target))
+        });
 
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
@@ -662,31 +695,34 @@ fn parse_token_description_with_context(
         // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
         // loop's accumulated total flows through. Falls back to the CDA path
         // (and then the raw variable name) for phrases neither layer recognizes.
-        let resolve_count = || {
-            super::parse_where_x_quantity_expression(&where_expression)
-                .or_else(|| crate::parser::oracle_quantity::parse_cda_quantity(&where_expression))
-        };
-        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
-        {
-            count = resolve_count().unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: where_expression.clone(),
-                },
-            });
-        }
-        if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
-            power = Some(
-                resolve_count()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(where_expression.clone())),
-            );
-        }
-        if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
-            toughness = Some(
-                resolve_count()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(where_expression)),
-            );
+        let binds_x = matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+            || matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
+            || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
+        if binds_x {
+            // CR 107.3c: the clause DEFINES X. If the definition is not
+            // representable, this token clause does not lower — fail the parse
+            // instead of fabricating a raw-text placeholder.
+            //
+            // The fabricated forms (`PtValue::Variable("<oracle text>")` and
+            // `QuantityRef::Variable { name: "<oracle text>" }`) are well-typed
+            // but DEAD: nothing resolves a non-`X` variable name, so the token
+            // entered as a 0/0 (or with a count of 0) while the raw text still
+            // rendered as a supported dynamic quantity in the coverage report —
+            // a fabricated green. Honest failure is the only correct answer.
+            let bound =
+                super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
+                    crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                })?;
+            if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+            {
+                count = bound.clone();
+            }
+            if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
+                power = Some(PtValue::Quantity(bound.clone()));
+            }
+            if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
+                toughness = Some(PtValue::Quantity(bound));
+            }
         }
     }
     bind_bare_token_x_pt_to_cost_x(&mut power);
@@ -700,19 +736,65 @@ fn parse_token_description_with_context(
             // `parse_event_context_quantity` only fires when `parse_cda_quantity`
             // returns None and itself returns None for unrecognized phrases, so
             // it strictly widens coverage without disturbing existing matches.
+            // CR 122.1 + CR 608.2c: bind the deferred "a number of" count to the
+            // quantity its "equal to <expr>" clause names. An unrepresentable
+            // expression FAILS the token clause — the raw-text placeholder it used
+            // to fabricate is dead at runtime (game/quantity.rs resolves a non-`X`
+            // variable name to 0), so the card created ZERO tokens while still
+            // reading as supported.
+            // CR 107.3i + CR 601.2h: "equal to the amount of mana [they] paid
+            // this way" (Liege of the Hollows) is the same paid-mana binding as
+            // the "where X is …" token path above — reuse the shared recognizer
+            // so the count collapses to `Variable("X")` and reads the upstream
+            // PayCost loop's accumulated `chosen_x` total. Tried only after the
+            // CDA / event-context recognizers so no existing match changes; it
+            // strictly rescues phrases that previously fell to the dead
+            // raw-string `Variable` node this clause used to fabricate.
             count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
                 })
-                .unwrap_or(QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: count_expression,
-                    },
-                });
+                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))
+                .or_else(|| {
+                    // CR 608.2c: bare anaphoric "the difference" — the two operands
+                    // live on the enclosing ability's condition, not this clause
+                    // ("create a number of tapped Treasure tokens equal to the
+                    // difference" — Hit the Mother Lode). Emit the deferred
+                    // placeholder that the difference binding resolves against the
+                    // condition's `QuantityCheck` operands, mirroring the
+                    // put-counter parser. Distinct from the `parse_cda_quantity`
+                    // "the difference between A and B" form, which carries operands.
+                    all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+                        .parse(count_expression.trim())
+                        .is_ok()
+                        .then(crate::parser::oracle_effect::difference_anaphor_placeholder)
+                })?;
         }
     }
 
-    // CR 609.3: "for each [thing] this way" -- count from preceding zone moves.
+    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style trigger-context player
+    // counts do not always carry the literal "this way" ("for each opponent
+    // dealt damage"). Recognize that phrase before the tracked-set block below,
+    // whose object-set fallback would be the wrong anaphor class.
+    {
+        let suffix_lower = suffix.to_lowercase();
+        if let Ok((clause, _)) = take_until::<_, _, OracleError<'_>>("for each ")
+            .parse(suffix_lower.as_str())
+            .and_then(|(rest, _)| tag("for each ").parse(rest))
+        {
+            let clause = clause.trim_end_matches('.').trim();
+            if let Ok(("", qty)) =
+                crate::parser::oracle_nom::quantity::parse_event_context_opponent_dealt_damage(
+                    clause,
+                )
+            {
+                count = QuantityExpr::Ref { qty };
+            }
+        };
+    }
+
+    // CR 608.2c: "for each [thing] this way" -- the "this way" anaphor counts from
+    // the preceding zone moves in the same effect.
     // Matches "for each card put into a graveyard this way", "for each creature
     // exiled this way", etc.
     {
@@ -737,7 +819,17 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
-                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style token
+                    // counts named players in the current trigger event batch,
+                    // not the previous chain tracked object set.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(|qty| {
+                                matches!(qty, QuantityRef::EventContextPlayerCount { .. })
+                            })
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
+                    // CR 608.2c + CR 205.2a: a TYPE-restricted "for each <type> card
                     // <verb> this way" (Dread Summons: "for each creature card put
                     // into a graveyard this way") counts only the matching cards
                     // moved this way — `FilteredTrackedSetSize` — not every card
@@ -758,18 +850,14 @@ fn parse_token_description_with_context(
 
     if power.is_none() || toughness.is_none() {
         if let Some(pt_expression) = extract_token_pt_expression(suffix) {
-            let parsed = crate::parser::oracle_quantity::parse_cda_quantity(&pt_expression);
-            power = Some(
-                parsed
-                    .clone()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(pt_expression.clone())),
-            );
-            toughness = Some(
-                parsed
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(pt_expression)),
-            );
+            // CR 107.3c + CR 208.2: a token whose P/T is defined by an
+            // expression ("an X/X token, where X is …") must bind that
+            // expression to a typed quantity. If it is not representable the
+            // token clause does not lower — a raw-text `PtValue::Variable` is a
+            // dead node that silently produces a 0/0 token.
+            let parsed = crate::parser::oracle_quantity::parse_cda_quantity(&pt_expression)?;
+            power = Some(PtValue::Quantity(parsed.clone()));
+            toughness = Some(PtValue::Quantity(parsed));
         }
     }
 
@@ -1088,7 +1176,77 @@ fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDef
         }
     }
 
+    // Pass 3: unquoted Equip grants in the token "with …" suffix (CR 702.6a).
+    // U.S.Agent, John Walker's Sturdy Shield: `with "Equipped creature gets
+    // +1/+2" and equip {2}` — the equip clause is a sibling of the quoted
+    // static, not inside it. Nahiri's "It has … and equip {0}" path folds a
+    // GenericEffect sibling instead; inline token descriptions need this pass.
+    append_unquoted_equip_grants(text, &mut statics);
+
     statics
+}
+
+/// CR 702.6a: Scan the token "with …" suffix for standalone Equip activated
+/// abilities (`equip {cost}`) that sit *outside* double-quoted granted text,
+/// and append `GrantAbility(Attach SelfRef → creature)` statics.
+///
+/// Quote-aware masking reuses [`nom_primitives::strip_double_quoted_spans`];
+/// keyword location is a word-boundary scan over `tag("equip")` plus the shared
+/// [`super::super::oracle::try_parse_equip`] semantic parser (same authority as
+/// Priority-3 / quoted keyword-grant paths). No hand-rolled byte-index scanner.
+fn append_unquoted_equip_grants(text: &str, out: &mut Vec<StaticDefinition>) {
+    let unquoted = nom_primitives::strip_double_quoted_spans(text);
+    // ASCII fold keeps byte lengths aligned with `unquoted` for clause remapping.
+    let lower = unquoted.to_ascii_lowercase();
+    let mut remaining_lower = lower.as_str();
+    let mut remaining_orig = unquoted.as_ref();
+
+    while let Some((before, clause_lower, rest_lower)) =
+        nom_primitives::scan_preceded(remaining_lower, recognize_equip_clause)
+    {
+        let start = before.len();
+        let clause_orig = remaining_orig
+            .get(start..start + clause_lower.len())
+            .unwrap_or(clause_lower)
+            .trim();
+        if let Some(ability) = super::super::oracle::try_parse_equip_lowered(clause_orig) {
+            out.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::GrantAbility {
+                        definition: Box::new(ability),
+                    }]),
+            );
+        }
+        let consumed = remaining_lower.len() - rest_lower.len();
+        remaining_orig = remaining_orig.get(consumed..).unwrap_or("");
+        remaining_lower = rest_lower;
+    }
+}
+
+/// Recognize an `equip …` clause at the start of already-lowercased `input`.
+///
+/// Consumes through a terminating `.` when present. Validation (word-boundary
+/// vs "equipment"/"equipped", cost shape) is deferred to [`try_parse_equip`] —
+/// a failed semantic parse rejects this combinator so
+/// [`nom_primitives::scan_preceded`] advances to the next word boundary rather
+/// than swallowing a later real Equip.
+fn recognize_equip_clause(input: &str) -> OracleResult<'_, &str> {
+    let (_, _) = tag("equip").parse(input)?;
+    let (rest, clause) = match take_until::<_, _, OracleError<'_>>(".").parse(input) {
+        Ok((at_dot, clause)) => {
+            let (rest, _) = tag(".").parse(at_dot)?;
+            (rest, clause)
+        }
+        Err(_) => ("", input),
+    };
+    if super::super::oracle::try_parse_equip(clause.trim()).is_none() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((rest, clause))
 }
 
 fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<StaticDefinition>) {
@@ -1452,10 +1610,12 @@ pub(super) fn map_token_keyword(text: &str) -> Option<Keyword> {
     }
     match Keyword::from_str(trimmed) {
         Ok(Keyword::Unknown(_)) => {
-            super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase())
+            super::super::oracle_keyword::parse_granted_keyword_fragment(&trimmed.to_lowercase())
         }
         Ok(keyword) => Some(keyword),
-        Err(_) => super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase()),
+        Err(_) => {
+            super::super::oracle_keyword::parse_granted_keyword_fragment(&trimmed.to_lowercase())
+        }
     }
 }
 
@@ -1476,7 +1636,9 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
+    use crate::types::ability::{
+        ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, RoundingMode, TypeFilter,
+    };
     use crate::types::card_type::CoreType;
 
     #[test]
@@ -1669,7 +1831,10 @@ mod tests {
             (
                 "Create an X/X green Ooze creature token, where X is the number of +1/+1 counters removed this way.",
                 QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
+                    },
                 },
             ),
             (
@@ -1786,6 +1951,26 @@ mod tests {
                 qty: QuantityRef::TrackedSetSize,
             },
             "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn treasure_for_each_opponent_dealt_damage_counts_trigger_players() {
+        let txt = "Create a Treasure token for each opponent dealt damage.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Malcolm token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Treasure");
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextPlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+            "Malcolm must count damaged opponents, not damage amount or tracked objects"
         );
     }
 
@@ -2630,6 +2815,34 @@ mod tests {
     }
 
     #[test]
+    fn extract_unquoted_equip_grant_from_token_with_clause() {
+        use crate::types::ability::{ContinuousModification, Effect, TargetFilter};
+
+        let statics = extract_token_static_abilities(
+            r#"with "Equipped creature gets +1/+2" and equip {2}"#,
+            "Sturdy Shield",
+        );
+        assert!(
+            statics.iter().any(|static_def| {
+                static_def.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantAbility { definition }
+                            if matches!(
+                                *definition.effect,
+                                Effect::Attach {
+                                    attachment: TargetFilter::SelfRef,
+                                    ..
+                                }
+                            )
+                    )
+                })
+            }),
+            "expected unquoted equip cost to grant an Attach activated ability, got {statics:?}",
+        );
+    }
+
+    #[test]
     fn extract_static_empty_when_no_quoted_ability() {
         let statics = extract_token_static_abilities("with flying and haste", "");
         assert!(statics.is_empty());
@@ -3307,4 +3520,45 @@ fn copy_token_non_saga_token_you_control_issue_3294() {
     );
     assert!(tf.properties.contains(&FilterProp::Token));
     assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
+#[cfg(test)]
+mod token_attachment_connector_tests {
+    use super::*;
+
+    /// CR 303.4 + CR 303.4i: Oracle prints one relation two ways inside a
+    /// create-token instruction — as a STATE ("…token attached to target
+    /// creature") and as an ACTION ("…token and attach it to target creature").
+    /// Both must bind `attach_to`; the action surface used to drop it, leaving a
+    /// hostless Aura token that CR 303.4i says is not created at all
+    /// (Questing Cosplayer, #7302).
+    ///
+    /// Table-driven over both surfaces plus the counter-direction: a token line
+    /// with no attachment clause must keep `attach_to` at `None`.
+    #[test]
+    fn both_printed_attachment_surfaces_bind_the_host() {
+        let cases: &[(&str, bool)] = &[
+            (
+                "create a Questing Role token and attach it to target creature",
+                true,
+            ),
+            (
+                "create a Cursed Role token attached to target creature",
+                true,
+            ),
+            ("create a 1/1 white Soldier creature token", false),
+        ];
+        for (text, expects_host) in cases {
+            let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("{text:?} must parse as a token line"));
+            let Effect::Token { attach_to, .. } = effect else {
+                panic!("{text:?} must lower to Effect::Token");
+            };
+            assert_eq!(
+                attach_to.is_some(),
+                *expects_host,
+                "{text:?} host binding mismatch, got {attach_to:?}"
+            );
+        }
+    }
 }

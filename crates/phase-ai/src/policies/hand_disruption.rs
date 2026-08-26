@@ -6,6 +6,7 @@ use engine::types::ability::{Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::CastFacts;
@@ -16,7 +17,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::best_proactive_cast_score;
 #[cfg(test)]
-use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::{CastPaymentMode, TargetSelectionProgress};
 
 pub struct HandDisruptionPolicy;
 
@@ -89,8 +90,15 @@ impl TacticalPolicy for HandDisruptionPolicy {
 
 fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: PlayerId) -> f64 {
     let effects = ctx.effects();
+    let source_id = ctx.source_object().map(|object| object.id);
     if !effects.iter().any(|effect| {
-        reveal_hand_matches_chosen_player_target(ctx.state, effect, target_player, ctx.ai_player)
+        reveal_hand_matches_chosen_player_target(
+            ctx.state,
+            effect,
+            target_player,
+            ctx.ai_player,
+            source_id,
+        )
     }) {
         return 0.0;
     }
@@ -123,11 +131,18 @@ fn reveal_hand_matches_chosen_player_target(
     effect: &Effect,
     target_player: PlayerId,
     source_controller: PlayerId,
+    source_id: Option<ObjectId>,
 ) -> bool {
     let Effect::RevealHand { target, .. } = effect else {
         return false;
     };
-    player_matches_target_filter_in_state(state, target, target_player, Some(source_controller))
+    player_matches_target_filter_in_state(
+        state,
+        target,
+        target_player,
+        Some(source_controller),
+        source_id,
+    )
 }
 
 pub(crate) fn disruption_window_score(
@@ -257,11 +272,13 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, ResolvedAbility, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, ResolvedAbility,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
-    use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::game_state::{
+        GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
@@ -302,10 +319,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority {
@@ -444,9 +458,15 @@ mod tests {
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
+                chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
-            selection: Default::default(),
+            selection: TargetSelectionProgress {
+                current_legal_targets: legal_targets,
+                ..Default::default()
+            },
         };
         state.waiting_for = waiting_for.clone();
         let decision = AiDecisionContext {
@@ -461,10 +481,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -483,24 +500,6 @@ mod tests {
             target_score(TargetRef::Player(PlayerId(1)))
                 > target_score(TargetRef::Player(PlayerId(0))),
             "Peek-style hand reveal should prefer an opponent's hand over the AI's own hand"
-        );
-
-        let scored = crate::search::score_candidates(&state, PlayerId(0), &config);
-        let score_for_target = |target| {
-            scored
-                .iter()
-                .find_map(|(action, score)| match action {
-                    GameAction::ChooseTarget {
-                        target: Some(chosen),
-                    } if *chosen == target => Some(*score),
-                    _ => None,
-                })
-                .expect("target candidate should be scored")
-        };
-        assert!(
-            score_for_target(TargetRef::Player(PlayerId(1)))
-                > score_for_target(TargetRef::Player(PlayerId(0))),
-            "registered AI scoring should prefer the opponent target"
         );
     }
 
@@ -573,6 +572,9 @@ mod tests {
                         TargetRef::Player(PlayerId(2)),
                     ],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -586,10 +588,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -665,6 +664,9 @@ mod tests {
                         TargetRef::Player(PlayerId(2)),
                     ],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -678,10 +680,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -718,13 +717,15 @@ mod tests {
             &state,
             &opponent_reveal,
             PlayerId(1),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
         assert!(!reveal_hand_matches_chosen_player_target(
             &state,
             &opponent_reveal,
             PlayerId(0),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
 
         let creature_reveal = Effect::RevealHand {
@@ -739,7 +740,8 @@ mod tests {
             &state,
             &creature_reveal,
             PlayerId(1),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
     }
 }

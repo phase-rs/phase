@@ -10,6 +10,9 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 701.20a: Reveal cards from the top of the controller's library one at a
@@ -121,9 +124,6 @@ pub fn resolve(
     // nothing (CR 701.20a — the until-condition is already satisfied).
     if target_match_count > 0 {
         for &card_id in &library {
-            // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
-            state.revealed_cards.insert(card_id);
-
             if matches_target_filter(state, card_id, filter, &ctx) {
                 hit_cards.push(card_id);
                 if hit_cards.len() >= target_match_count {
@@ -138,6 +138,31 @@ pub fn resolve(
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
     all_revealed.extend(&hit_cards);
+
+    state
+        .resolve_and_apply_information(
+            &all_revealed,
+            ResolvedInformationAudience::Controller(ability.controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("resolved reveal-until occurrences must be live and distinct");
+
+    // CR 701.20a + CR 400.7: Only reveal-only and paused optional dispositions
+    // retain these exact library occurrences after the resolver returns. Publish
+    // those occurrences here, before any later zone change can create a new one.
+    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly)
+        || matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_]))
+    {
+        state
+            .resolve_and_apply_information(
+                &all_revealed,
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("published reveal-until occurrences must be live and distinct");
+    }
 
     // Emit CardsRevealed for all revealed cards.
     let card_names: Vec<String> = all_revealed
@@ -159,6 +184,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -172,6 +198,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
@@ -230,11 +257,14 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -279,11 +309,14 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -311,11 +344,14 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -350,25 +386,36 @@ pub fn resolve(
                 state,
                 BatchCompletion::RevealRestPile {
                     player: revealing_player,
+                    source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
+                    manifested_for_continuation: None,
                 },
             );
             return Ok(());
         }
     }
 
-    // Clear reveal markers — cards have moved zones.
-    for &card_id in &clear_markers {
-        state.revealed_cards.remove(&card_id);
-    }
+    // Zone delivery already clears the old occurrences through the shared
+    // information authority. This no-op-safe call covers a same-zone placement
+    // implementation that leaves a reveal lease behind.
+    state
+        .resolve_and_apply_information(
+            &clear_markers,
+            ResolvedInformationAudience::Controller(ability.controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Hide,
+        )
+        .expect("reveal-until cleanup must reference live card occurrences");
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -414,8 +461,6 @@ fn resolve_choose_any_number(
     // found (or the library runs out). `target_match_count == 0` reveals nothing.
     if target_match_count > 0 {
         for &card_id in library {
-            // CR 701.20b: the card stays in its library zone while revealed.
-            state.revealed_cards.insert(card_id);
             revealed.push(card_id);
             if matches_target_filter(state, card_id, filter, ctx) {
                 matched.push(card_id);
@@ -425,6 +470,23 @@ fn resolve_choose_any_number(
             }
         }
     }
+
+    state
+        .resolve_and_apply_information(
+            &revealed,
+            ResolvedInformationAudience::Controller(ability.controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("resolved reveal-until occurrences must be live and distinct");
+    state
+        .resolve_and_apply_information(
+            &revealed,
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilZoneChange,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("published reveal-until occurrences must be live and distinct");
 
     // CR 701.20a: emit a single CardsRevealed for the whole revealed pile.
     let card_names: Vec<String> = revealed
@@ -444,6 +506,7 @@ fn resolve_choose_any_number(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -462,13 +525,16 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
+        enters_attacking: false,
     };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

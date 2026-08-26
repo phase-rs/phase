@@ -13,6 +13,10 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let player = ability.controller;
+    // CR 608.2c: this instruction owns the chain's referent slot from here on,
+    // including the arm below where the library is empty and it produces
+    // nothing.
+    crate::game::morph::begin_face_down_referent_production(state);
 
     let player_state = state
         .players
@@ -26,6 +30,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -37,6 +42,10 @@ pub fn resolve(
         .take(count)
         .copied()
         .collect::<Vec<_>>();
+    state.remember_card_identities(
+        crate::game::turn_control::decision_audience_for_player(state, player),
+        &cards,
+    );
 
     if count == 1 {
         // Only one card — must manifest it (no choice needed)
@@ -68,6 +77,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -278,7 +288,7 @@ mod tests {
             "Expected ManifestDreadChoice, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
         // Submit selection
         use crate::game::engine::apply_as_current;

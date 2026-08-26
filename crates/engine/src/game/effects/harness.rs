@@ -48,6 +48,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Harness,
         source_id,
+        subject: None,
     });
 
     Ok(())

@@ -31,6 +31,11 @@ struct CardExportEntry {
     /// `LayoutKind` when loading from the export (where `CardRules` is not available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<String>,
+    /// Original zero-based position of this face within MTGJSON's multi-face
+    /// record. Used by runtime loaders to choose the card's front face
+    /// deterministically after flattening the JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    face_index: Option<usize>,
     /// Set codes the card has been printed in (from MTGJSON `printings`).
     /// Used by the coverage dashboard to group supported/gap cards by set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -442,6 +447,7 @@ fn build_card_work<'a>(
                     face,
                     legalities,
                     layout: None,
+                    face_index: None,
                     printings: source.printings.clone(),
                     rulings: source.rulings.clone(),
                     rarities,
@@ -507,6 +513,7 @@ fn build_card_work<'a>(
                     face,
                     legalities,
                     layout: layout_str,
+                    face_index: Some(face_idx),
                     printings: faces[0].printings.clone(),
                     rulings,
                     rarities,
@@ -543,6 +550,7 @@ fn build_card_work<'a>(
                 face,
                 legalities,
                 layout: None,
+                face_index: None,
                 printings: faces[0].printings.clone(),
                 rulings: faces[0].rulings.clone(),
                 rarities,
@@ -557,8 +565,11 @@ fn build_card_work<'a>(
 
 /// Write parser-authoritative creature subtypes: CardTypes.json ∪ corroborated
 /// AtomicCards harvest (token-only + newer card-printed types).
+///
+/// Runs only under `--write-subtypes` (see `main`), and takes `CardTypesFile` by
+/// reference rather than `Option` so a partial source set cannot reach it.
 fn write_oracle_subtypes(
-    card_types: Option<&engine::database::mtgjson::CardTypesFile>,
+    card_types: &engine::database::mtgjson::CardTypesFile,
     atomic: &engine::database::mtgjson::AtomicCardsFile,
 ) {
     use engine::database::subtype_vocab::build_creature_subtype_vocabulary;
@@ -888,6 +899,7 @@ fn main() {
     let mut output: Option<PathBuf> = None;
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
+    let mut write_subtypes = false;
     let mut filter_names: Vec<String> = Vec::new();
     #[cfg(feature = "forge")]
     let mut forge_path: Option<PathBuf> = None;
@@ -929,6 +941,9 @@ fn main() {
             }
             "--stats" => {
                 stats = true;
+            }
+            "--write-subtypes" => {
+                write_subtypes = true;
             }
             "--filter" => {
                 i += 1;
@@ -973,6 +988,12 @@ fn main() {
                 );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
+                eprintln!(
+                    "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
+                     \x20                 (crates/engine/data/oracle-subtypes.json). Requires\n\
+                     \x20                 CardTypes.json alongside AtomicCards.json. Without this\n\
+                     \x20                 flag the export never writes to the tracked tree."
+                );
                 process::exit(1);
             }
         },
@@ -999,18 +1020,42 @@ fn main() {
         }
     };
 
-    let card_types_path = mtgjson_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("CardTypes.json");
-    let card_types = load_card_types(&card_types_path).ok();
-    if card_types.is_none() {
-        eprintln!(
-            "warning: CardTypes.json not found at {} — using AtomicCards harvest only",
-            card_types_path.display()
-        );
+    // The creature-subtype vocabulary is a COMMITTED parser input: the engine
+    // pulls `crates/engine/data/oracle-subtypes.json` in with `include_str!`.
+    // Regenerating it is therefore a deliberate data-pipeline act, not a side
+    // effect of exporting cards, and it happens only under `--write-subtypes`
+    // (passed by `scripts/gen-card-data.sh`, the one caller that fetches the
+    // MTGJSON sidecars). A plain export is a pure read: it must not mutate the
+    // tracked tree it is measuring, and it must not bump the mtime of a file the
+    // engine compiles in — that rebuilds the parser underneath the very export
+    // whose output is being compared.
+    //
+    // When the refresh IS requested, CardTypes.json is REQUIRED. It is the sole
+    // source of the token-only creature subtypes (Army, Servo, Pentavite,
+    // Sculpture, Tentacle, …), which are printed on no card face and so cannot
+    // be recovered from the AtomicCards harvest. Regenerating without it silently
+    // deletes all 26 and degrades every later parse, so a missing sidecar is a
+    // hard failure rather than a quiet downgrade.
+    if write_subtypes {
+        let card_types_path = mtgjson_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("CardTypes.json");
+        match load_card_types(&card_types_path) {
+            Ok(card_types) => write_oracle_subtypes(&card_types, &atomic),
+            Err(e) => {
+                eprintln!(
+                    "Error: --write-subtypes requires {}: {e}",
+                    card_types_path.display()
+                );
+                eprintln!(
+                    "  Run scripts/gen-card-data.sh, which downloads the MTGJSON sidecars, \
+                     or drop --write-subtypes to export without refreshing the vocabulary."
+                );
+                process::exit(1);
+            }
+        }
     }
-    write_oracle_subtypes(card_types.as_ref(), &atomic);
 
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
@@ -1771,6 +1816,7 @@ mod tests {
     use engine::types::ability::TargetFilter;
     use engine::types::card::CardFace;
     use engine::types::keywords::Keyword;
+    use serde_json::json;
 
     use super::*;
 
@@ -1794,11 +1840,23 @@ mod tests {
                 .map(|(format, status)| (format.to_string(), status.to_string()))
                 .collect(),
             layout: layout.map(|s| s.to_string()),
+            face_index: None,
             printings: printings.iter().map(|s| s.to_string()).collect(),
             rulings: Vec::new(),
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
+    }
+
+    #[test]
+    fn card_export_entry_serializes_multiface_face_index() {
+        let mut entry = make_entry("ordered-oracle", &["TST"], Some("transform"));
+        entry.face.name = "Back Face".to_string();
+        entry.face_index = Some(1);
+
+        let value = serde_json::to_value(&entry).expect("entry should serialize");
+
+        assert_eq!(value["face_index"], json!(1));
     }
 
     fn atomic_single(name: &str, oracle_id: Option<&str>) -> AtomicCard {

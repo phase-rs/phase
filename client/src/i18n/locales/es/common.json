@@ -5,15 +5,44 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "el número más alto",
+    "lowestNumber": "el número más bajo",
+    "chosenNumber": "el número elegido"
+  },
+  "scryOutcome": {
+    "title": "Adivinación completada",
+    "you": "Tú",
+    "result": "{{player}} — {{top}} arriba · {{bottom}} abajo"
+  },
   "modal": {
     "defaultEyebrow": "Herramienta del espacio de trabajo"
   },
   "pausedBanner": {
-    "message": "Partida en pausa — {{reason}}"
+    "message": "Partida en pausa — {{reason}}",
+    "resume": "Reanudar"
   },
   "fullscreen": {
     "enter": "Activar pantalla completa",
     "exit": "Salir de pantalla completa"
+  },
+  "nativeEngineProgress": {
+    "title": "Actualizando el motor nativo",
+    "resolving": "Buscando el servidor local correcto…",
+    "downloadingBinary": "Descargando el servidor actualizado…",
+    "verifying": "Verificando el servidor…",
+    "downloadingData": "Descargando datos del juego…",
+    "spawning": "Iniciando el servidor local…",
+    "ready": "Motor nativo listo",
+    "failed": "No se pudo preparar el motor nativo"
+  },
+  "engineBadge": {
+    "native": "Motor nativo",
+    "nativeTooltip": "Esta partida usa el motor nativo de la aplicación de escritorio.",
+    "inBrowser": "Motor del navegador",
+    "inBrowserTooltip": "Motor nativo no disponible: esta partida se ejecuta en el navegador.",
+    "versionMismatchTooltip": "Versión del motor nativo incompatible: esta partida se ejecuta en el navegador.",
+    "notAttemptedTooltip": "Esta partida se ejecuta en el navegador: no se usó el motor nativo."
   },
   "buildBadge": {
     "downloading": "descargando… {{progress}}%",
@@ -22,6 +51,7 @@
     "updatePending": "actualización pendiente tras la partida",
     "cards": "cartas {{age}} ({{commit}})",
     "cardDataTitle": "Datos de cartas generados el {{date}} desde {{commit}}",
+    "desktopAppVersion": "Aplicación de escritorio v{{version}}",
     "checkForUpdates": "Buscar actualizaciones",
     "updaterDebugInfo": "Información de depuración del actualizador",
     "updaterIssue": "Problema del actualizador: {{error}}",
@@ -29,10 +59,11 @@
     "updated": "actualizado"
   },
   "comboDetector": {
-    "label": "Detector de combos",
+    "label": "Detector de combos (experimental)",
     "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
     "on": "Activado",
-    "off": "Desactivado"
+    "off": "Desactivado",
+    "interactive": "Interactivo"
   },
   "gameMenu": {
     "sections": {
@@ -54,10 +85,16 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Cambiar a vista de mesa dividida",
     "switchToLegacyView": "Cambiar a vista legacy enfocada",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Ve a todos los oponentes a la vez con la vista de mesa dividida.",
+      "trySplit": "Probar vista dividida",
+      "dismiss": "Ahora no"
+    },
     "helpShortcuts": "Ayuda y atajos",
     "showAiHand": "Mostrar la mano de la IA",
     "hideAiHand": "Ocultar la mano de la IA",
     "requestTakeback": "Solicitar repetición",
+    "undoLastAction": "Deshacer última acción",
     "concede": "Conceder",
     "backToDraft": "Volver al Draft",
     "mainMenu": "Menú principal",
@@ -65,6 +102,7 @@
     "cardDataTitle": "Datos de cartas: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio no disponible — el servidor de audio del sistema no responde. Reinicia la aplicación para reintentar.",
     "mute": "Silenciar",
     "unmute": "Activar sonido",
     "volume": "Volumen"
@@ -245,7 +283,13 @@
     "youPlayFirst": "Juegas primero",
     "playerPlaysFirst": "{{name}} juega primero",
     "heads": "Cara",
-    "tails": "Cruz"
+    "tails": "Cruz",
+    "coinFlip": "Lanzamiento de moneda",
+    "wonCoinFlip": "{{name}} ganó el lanzamiento",
+    "lostCoinFlip": "{{name}} perdió el lanzamiento",
+    "turnOrder": "Orden de turnos",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Juegas el turno {{turn}}"
   },
   "chrome": {
     "back": "Atrás",

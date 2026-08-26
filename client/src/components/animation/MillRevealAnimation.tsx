@@ -36,7 +36,11 @@ function MillCardElement({
   isLast: boolean;
   onComplete: () => void;
 }) {
-  const { src } = useCardImage(card.cardName, { size: "small" });
+  // `normal`, not `small`: this renders a bare image element with no ladder at
+  // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
+  // upscale. Requesting `normal` keeps this overlay byte-identical to before
+  // `small` became a distinct asset.
+  const { src } = useCardImage(card.cardName, { size: "normal" });
   const glowColor = card.colors.length > 0
     ? card.colors[0]
     : "#6366f1";

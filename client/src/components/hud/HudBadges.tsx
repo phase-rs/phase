@@ -5,7 +5,8 @@ import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import type {
-  DungeonId,
+  DungeonRoomView,
+  FamilyCollapseState,
   NextSpellModifier,
   PendingNextSpellModifier,
   PendingSpellCostReduction,
@@ -13,8 +14,11 @@ import type {
   PlayerStatusView,
   ResourceAxis,
   ResourceAxisTag,
+  UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
 
 interface StatusBadgeProps {
@@ -107,33 +111,58 @@ export function CityBlessingBadge() {
   );
 }
 
-interface DungeonBadgeProps {
-  dungeonName: DungeonId;
-  roomIndex: number;
-}
-
-const DUNGEON_DISPLAY_NAMES: Record<DungeonId, string> = {
-  LostMineOfPhandelver: "Lost Mine",
-  DungeonOfTheMadMage: "Mad Mage",
-  TombOfAnnihilation: "Tomb",
-  Undercity: "Undercity",
-  BaldursGateWilderness: "Baldur's Gate",
-};
-
-export function DungeonBadge({ dungeonName, roomIndex }: DungeonBadgeProps) {
+export function EnduringStoryBadge() {
   const { t } = useTranslation("game");
-  const display = DUNGEON_DISPLAY_NAMES[dungeonName];
-  const room = roomIndex + 1;
   return (
-    <BadgeTip text={t("badges.dungeonTooltip", { name: display, room })}>
+    <BadgeTip text={t("badges.enduringStoryTooltip")}>
       <span
         role="img"
-        aria-label={t("badges.dungeonAriaLabel", { name: display, room })}
+        aria-label={t("badges.enduringStory")}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-indigo-500 ring-indigo-200/80 shadow-[0_0_14px_rgba(99,102,241,0.55)]"
+      >
+        <span aria-hidden className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">📖</span>
+      </span>
+    </BadgeTip>
+  );
+}
+
+interface DungeonBadgeProps {
+  /** Engine projection of where the venture marker sits
+   *  (`DerivedViews.dungeon_rooms`). The room's name and printed effect are
+   *  engine-authored; this component only lays them out. */
+  room: DungeonRoomView;
+}
+
+export function DungeonBadge({ room }: DungeonBadgeProps) {
+  const { t } = useTranslation("game");
+  // CR 309.4a: the marker starts on room index 0; players count from 1.
+  const position = room.room.index + 1;
+  const labelArgs = {
+    name: room.dungeon_name,
+    roomName: room.room.name,
+    room: position,
+    total: room.room_count,
+  };
+  // CR 309.4b-c: name the room and say what its room ability did. The chip has
+  // no space for either, and most rooms are entered without a prompt, so the
+  // tooltip is where a player reads them back.
+  const tooltip = [
+    t("badges.dungeonTooltip", labelArgs),
+    t("badges.dungeonRoomTooltip", labelArgs),
+    room.room.text,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <BadgeTip text={tooltip}>
+      <span
+        role="img"
+        aria-label={t("badges.dungeonAriaLabel", labelArgs)}
         className="relative inline-flex h-6 shrink-0 items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)]"
       >
         <span aria-hidden className="text-[12px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🏰</span>
-        <span className="relative truncate">{display}</span>
-        <span className="relative tabular-nums text-white">{room}</span>
+        <span className="relative truncate">{room.dungeon_name}</span>
+        <span className="relative tabular-nums text-white">{position}/{room.room_count}</span>
       </span>
     </BadgeTip>
   );
@@ -373,30 +402,15 @@ export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
   );
 }
 
-// CR 732.2a: the display families an unbounded `ResourceAxis` maps to. Pure
-// presentation grouping — the engine owns axis identity and attribution; the FE
-// only collapses the per-axis rows into one badge per family.
-export type ResourceAxisFamily =
-  | "mana"
-  | "life"
-  | "damage"
-  | "mill"
-  | "counters"
-  | "tokens"
-  | "cards"
-  | "casts"
-  | "combats"
-  | "turns"
-  | "triggers";
-
 // Externally-tagged `ResourceAxis`: unit variants are bare strings, data/tuple
 // variants are single-key objects. The tag is the string itself or its only key.
 const axisTag = (axis: ResourceAxis): ResourceAxisTag =>
   typeof axis === "string" ? axis : (Object.keys(axis)[0] as ResourceAxisTag);
 
 // Exhaustive `Record<ResourceAxisTag, …>` so a new engine axis tag forces a
-// compile-time update here (the TS drift guard).
-const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
+// compile-time update here (the TS drift guard). Pinned VALUE-BY-VALUE against the engine's
+// `family_of` by `unbounded-family-tags.json`, which is why it is exported for that test.
+export const UNBOUNDED_FAMILY_FOR_TEST: Record<ResourceAxisTag, UnboundedFamily> = {
   Mana: "mana",
   Life: "life",
   DamageDealt: "damage",
@@ -413,14 +427,20 @@ const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
   EtbTriggers: "triggers",
   LtbTriggers: "triggers",
   SacTriggers: "triggers",
+  Poison: "counters",
 };
 
-/** Map an engine-provided `ResourceAxis` to its display family. Presentation
- *  formatting only — never decides attribution or which axes are unbounded. */
-export const familyOf = (axis: ResourceAxis): ResourceAxisFamily =>
-  UNBOUNDED_FAMILY[axisTag(axis)];
+/** Map an engine-provided `ResourceAxis` to its display family. No STATE surface uses this — the
+ *  engine publishes each seat's families on `unbounded_families`, and both the HUD badge and
+ *  `ManaPoolSummary`'s mana marker read that channel. It survives for the ONE caller holding a
+ *  bare axis list with no family channel to read: `LoopShortcutModal`'s PRE-accept offer badges,
+ *  where nothing is marked unbounded yet so the engine has published nothing. This table is pinned
+ *  tag-by-tag against the engine's `family_of` by the `unbounded-family-tags.json` golden, so the
+ *  mirror cannot drift from the authority. */
+export const familyOf = (axis: ResourceAxis): UnboundedFamily =>
+  UNBOUNDED_FAMILY_FOR_TEST[axisTag(axis)];
 
-const UNBOUNDED_FAMILY_GLYPH: Record<ResourceAxisFamily, string> = {
+const UNBOUNDED_FAMILY_GLYPH: Record<UnboundedFamily, string> = {
   mana: "💎",
   life: "❤",
   damage: "🔥",
@@ -434,7 +454,10 @@ const UNBOUNDED_FAMILY_GLYPH: Record<ResourceAxisFamily, string> = {
   triggers: "✴",
 };
 
-const UNBOUNDED_FAMILY_LABEL_KEY: Record<ResourceAxisFamily, string> = {
+/** Exported for `LoopShortcutModal`'s preview lines: the engine's
+ *  `InteractionShortcutPreviewFamily` is the same 11 literals as `UnboundedFamily`, so the preview
+ *  reuses these labels instead of minting a parallel 11-key catalog in 7 locales. */
+export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   mana: "badges.unboundedMana",
   life: "badges.unboundedLife",
   damage: "badges.unboundedDamage",
@@ -450,14 +473,75 @@ const UNBOUNDED_FAMILY_LABEL_KEY: Record<ResourceAxisFamily, string> = {
 
 /**
  * CR 732.2a: an `∞` badge for one unbounded-resource display family. Rendered
- * once per distinct family per player (the caller de-dups via a `Set`). The
- * engine decides which families are present and on which HUD; this badge only
+ * once per distinct family per player. The HUD callers pass the engine's
+ * `unbounded_families` rows straight through — the engine decides which families
+ * are present, on which HUD, and what each one may promise; `LoopShortcutModal`
+ * still de-dups a bare axis list with a `Set` and passes no state. This badge only
  * formats the family to a glyph + label.
  */
-export function UnboundedBadge({ family }: { family: ResourceAxisFamily }) {
+// `state` is OPTIONAL and defaults to `Unscheduled` so a caller with no family row in hand renders
+// today's bare-`∞` badge unchanged. `LoopShortcutModal`'s FamilyBadges is exactly that caller and
+// stays that way on purpose: it renders at OFFER time, before any player has accepted, so nothing
+// can be scheduled.
+export function UnboundedBadge({
+  family,
+  state = { type: "Unscheduled" },
+}: {
+  family: UnboundedFamily;
+  state?: FamilyCollapseState;
+}) {
   const { t } = useTranslation("game");
   const resource = t(UNBOUNDED_FAMILY_LABEL_KEY[family]);
-  const title = t("badges.unboundedTooltip", { resource });
+  // Both hooks are called UNCONDITIONALLY, before any branch — rules of hooks. No render site
+  // changed: the badge resolves the viewer itself rather than taking it as a prop.
+  const viewer = usePlayerId();
+  const spectating = useSpectatorMode();
+  // A `Committed` scheduled collapse is an accepted-but-unapplied bound, and N is named at the
+  // next step/phase end by the loop's CONTROLLER — who is NOT necessarily the seat this badge sits
+  // on: the row is keyed by the engine's attribution player, which for `Life`/`DamageDealt`/
+  // `LibraryDelta`/`Poison` axes is the victim, and the badge also renders on opponent HUDs. The
+  // engine now publishes that controller as `state.data.prompted`, so the copy can address the
+  // seat that will actually be asked, and falls back to the passive voice for everyone else.
+  // `Conditional` promises no bound at all, which is why it keeps its own copy in both voices.
+  // The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
+  // what the engine says is pending.
+  //
+  // `usePlayerId()` is the RAW seat, mirroring `useTurnStatus`'s documented rule — `prompted` is a
+  // seat, so it compares against seat identity and NOT against `usePerspectivePlayerId()`, which
+  // returns the seat whose turn is being controlled. TWO BOUNDS ARE DISCLOSED, not fixed here:
+  //  (i) under a turn-control effect where viewer V controls seat A's turn and A is prompted, V
+  //      personally answers the prompt but reads the third-person copy. Conservative by
+  //      construction — the same fallback the `prompted === undefined` case takes, and never a
+  //      false "you". Closing it needs the engine to publish "seat X may submit for seat Y",
+  //      which is a turn-control question, not a CR 732 one.
+  // (ii) `game::turns` raises ONE `PayAmountChoice` for the controller's WHOLE stash, so a
+  //      tokens+counters+life collapse shows the second-person badge on THREE families for ONE
+  //      joint count. The copy says "you'll name the count", which is true of every family that
+  //      count collapses, rather than "you'll choose how many of these", which would not be.
+  //
+  // The spectator gate is REQUIRED, not defensive: `usePlayerId()` returns `PLAYER_ID` (0) in
+  // spectate mode — never `SPECTATOR_PLAYER_ID` — so a loop prompted to seat 0 would otherwise
+  // read "you'll name the count" to every spectator. `useSpectatorMode()`'s predicate is exactly
+  // the union of `useCanActForWaitingState`'s two spectator gates, so this badge is never more
+  // permissive than the submit authority it is describing.
+  const you = !spectating && state.type === "Scheduled" && state.data.prompted === viewer;
+  const title = ((): string => {
+    switch (state.type) {
+      case "Unscheduled":
+        return t("badges.unboundedTooltip", { resource });
+      case "Mixed":
+        return t("badges.unboundedMixedTooltip", { resource });
+      case "Scheduled":
+        return state.data.certainty === "Committed"
+          ? t(you ? "badges.unboundedScheduledYouTooltip" : "badges.unboundedScheduledTooltip", {
+              resource,
+            })
+          : t(
+              you ? "badges.unboundedConditionalYouTooltip" : "badges.unboundedConditionalTooltip",
+              { resource },
+            );
+    }
+  })();
   return (
     <BadgeTip text={title}>
       <span
@@ -469,7 +553,26 @@ export function UnboundedBadge({ family }: { family: ResourceAxisFamily }) {
           aria-hidden
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.85)_0_9%,transparent_11%),linear-gradient(135deg,#fae8ff_0%,#d946ef_42%,#701a75_100%)]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">∞</span>
+        {/* `∞` alone is a universal symbol, but the bounded form is frontend-authored copy — the
+            "N" is a letter standing for "some number", which is language-dependent. Localized for
+            the same reason its tooltip is. */}
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
+          {((): string => {
+            switch (state.type) {
+              // `Mixed` renders a BARE `∞`: part of this family has a pending collapse and part
+              // does not, and one glyph cannot say two things, so it says the weaker true one.
+              case "Unscheduled":
+              case "Mixed":
+                return "∞";
+              // The GLYPH is not person-dependent: `∞→N` / `∞→?` says what will land, not who is
+              // asked. Only the tooltip changes voice.
+              case "Scheduled":
+                return state.data.certainty === "Committed"
+                  ? t("badges.unboundedScheduledGlyph")
+                  : t("badges.unboundedConditionalGlyph");
+            }
+          })()}
+        </span>
         <span aria-hidden className="relative text-[10px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
           {UNBOUNDED_FAMILY_GLYPH[family]}
         </span>

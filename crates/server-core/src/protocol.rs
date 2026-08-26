@@ -1,16 +1,21 @@
 use std::collections::HashMap;
 
+use engine::game::interaction::ObjectActionPayload;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::InteractionSubmission;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
+
+use crate::session::{AiDriverFault, FullSessionKey};
+use crate::takeback::{RewindOption, RewindTarget};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
@@ -20,8 +25,18 @@ pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
 /// game-state/action payload shape, so stale clients must not join full games.
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
 
-/// Minimum protocol version accepted by lobby-only brokers.
+/// Minimum protocol version accepted by lobby-only brokers from clients that
+/// predate the lobby-owned version. Derived from `PROTOCOL_VERSION`, so it
+/// slides on full-game churn — which is exactly why
+/// [`MIN_SUPPORTED_LOBBY_PROTOCOL`] exists. Legacy path only.
 pub const LOBBY_MIN_SUPPORTED_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_PROTOCOL;
+
+/// Wire version of the lobby message set, independent of [`PROTOCOL_VERSION`].
+pub const LOBBY_PROTOCOL_VERSION: u32 = lobby_broker::LOBBY_PROTOCOL_VERSION;
+
+/// Lowest [`LOBBY_PROTOCOL_VERSION`] a lobby broker accepts. No upper bound —
+/// see `lobby_broker::protocol::MIN_SUPPORTED_LOBBY_PROTOCOL`.
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_LOBBY_PROTOCOL;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -57,7 +72,7 @@ pub struct AiSeatRequest {
 // re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
 // and the broker reference the same struct. The serde shape is unchanged —
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
-pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
+pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode};
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
 
@@ -85,6 +100,48 @@ pub struct RankedPlayerResult {
     pub rating_delta: i32,
 }
 
+/// Recipient-safe presentation of an immutable Full terminal result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalMatchDisplay {
+    pub winner: Option<PlayerId>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranked_result: Option<Vec<RankedPlayerResult>>,
+}
+
+/// Opaque identifier for one recipient's terminal delivery ledger row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalDeliveryId(pub String);
+
+/// Opaque capability for reading and acknowledging a terminal result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalCredential(pub String);
+
+/// Immutable terminal access tuple issued only to the matching recipient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentTerminalDelivery {
+    pub key: FullSessionKey,
+    pub terminal_revision: u64,
+    pub delivery_id: TerminalDeliveryId,
+    pub credential: TerminalCredential,
+    pub display: TerminalMatchDisplay,
+}
+
+/// Bootstrap proof held by a reconnecting player before the regular Full
+/// session is attached. The request id makes retrying this terminal-only
+/// exchange idempotent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalBootstrapRequest {
+    pub key: FullSessionKey,
+    pub player_token: String,
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -95,6 +152,12 @@ pub enum ClientMessage {
         client_version: String,
         build_commit: String,
         protocol_version: u32,
+        /// The client's `lobby_broker::LOBBY_PROTOCOL_VERSION`. Only meaningful
+        /// against a `LobbyOnly` server; `None` from clients that predate the
+        /// lobby-owned version. See `lobby_broker::protocol` for why the lobby
+        /// versions its own message set separately from `PROTOCOL_VERSION`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     CreateGame {
         deck: DeckData,
@@ -106,10 +169,42 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
+    /// Server-authoritative fast-forward of repeated priority passes. The
+    /// authenticated session supplies both the requester and AI seats.
+    ResolveAll {
+        request_id: u64,
+        max_resolutions: u32,
+    },
+    /// Read-only simulation of an exact automatic spell-cast action. The
+    /// authenticated session, rather than the client, determines the actor.
+    PreviewManaPayment {
+        request_id: u64,
+        action: GameAction,
+    },
+    /// One opaque, engine-authored interaction response. The client echoes the
+    /// submission the engine published in `ViewerInteraction`; it never derives
+    /// a `GameAction` from the opportunity schema. Like `Action`, the
+    /// authenticated session — not the payload — determines the acting seat.
+    ///
+    /// Unlike `Action`, a bounds rejection on this variant is answered on
+    /// `ServerMessage::ActionRejected`, not `ServerMessage::Error`: a free-form
+    /// `Text` response can exceed `MAX_INTERACTION_STRING_LEN` by an ordinary
+    /// paste, and the native client tears the session down on any `Error`.
+    /// See `client_message_wire_guard::wire_rejection_message`.
+    Interaction {
+        submission: InteractionSubmission,
+    },
     Reconnect {
         game_code: String,
         player_token: String,
+        /// Server-issued Full session identity. Clients retain this exact key;
+        /// they must never reconstruct a generation from the game code.
+        full_key: FullSessionKey,
     },
+    /// Permanently removes a full-mode game. The server authorizes this from
+    /// the host's authenticated session; it is used to clean up a host-local
+    /// native engine session that can no longer serve its P2P transport.
+    AbandonGame,
     SubscribeLobby,
     UnsubscribeLobby,
     CreateGameWithSettings {
@@ -170,6 +265,24 @@ pub enum ClientMessage {
         release_reservation_token: Option<String>,
     },
     Concede,
+    /// Authenticated request to concede the entire current best-of-three
+    /// match. The requester, winner, and trusted cause are deliberately not
+    /// wire fields; the server binds them from the attached session.
+    ConcedeMatch,
+    /// Terminal-only recovery. This deliberately cannot attach a Full game
+    /// session or fall through to ordinary reconnect handling.
+    BootstrapTerminalDelivery {
+        request: TerminalBootstrapRequest,
+    },
+    /// Reads an already-issued recipient delivery using its opaque capability.
+    ReadTerminalResult {
+        credential: TerminalCredential,
+    },
+    /// Idempotently acknowledges an already-issued recipient delivery.
+    AckTerminalDelivery {
+        delivery_id: TerminalDeliveryId,
+        credential: TerminalCredential,
+    },
     Emote {
         emote: String,
     },
@@ -230,10 +343,19 @@ pub enum ClientMessage {
         draft_code: String,
     },
     /// GH #1507: ask every other human player at the table to approve
-    /// rolling the game back to the state immediately before the requester's
-    /// most recent action. Auto-approves when the requester is the only
+    /// rolling the game back. Auto-approves when the requester is the only
     /// human seat (e.g. solo vs. AI).
-    RequestTakeback,
+    ///
+    /// A **newtype** variant carrying `Option<RewindTarget>`, not a struct
+    /// variant, and that shape is load-bearing. `ClientMessage` is adjacently
+    /// tagged (`tag = "type"`, `content = "data"`); serde synthesizes a
+    /// missing-`data` arm only for unit and newtype variants, and only an
+    /// `Option<T>` payload recovers from it. The client omits `data` entirely
+    /// for a last-action undo, so a struct variant here would make this server
+    /// reject its own same-version client's frame with ``missing field
+    /// `data` ``. `None` normalizes to [`RewindTarget::LastAction`], which is
+    /// exactly what an omitted payload means.
+    RequestTakeback(Option<RewindTarget>),
     /// Approve or decline the table's pending takeback request. Any single
     /// decline withdraws the request — rollback requires unanimous approval.
     RespondTakeback {
@@ -263,6 +385,12 @@ pub enum ServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
+        /// This server's `lobby_broker::LOBBY_PROTOCOL_VERSION`, advertised
+        /// alongside — never instead of — `protocol_version`, which clients
+        /// predating the lobby-owned version still gate on. Additive and
+        /// optional in both directions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
         /// Public base URL clients should advertise when sharing a join code
         /// (e.g. `https://x.ngrok-free.app` from an embedded tunnel, or a
         /// `PUBLIC_URL` reverse proxy). Lets a host connected over `localhost`
@@ -275,8 +403,26 @@ pub enum ServerMessage {
     GameCreated {
         game_code: String,
         player_token: String,
+        /// Present only for Full authoritative sessions. Lobby-only brokers do
+        /// not create a Full runtime and therefore cannot issue this key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+    },
+    /// Confirms the authenticated server seat for one connection before a
+    /// pregame room has started. A host-side P2P bridge binds this identity to
+    /// its already-authenticated PeerJS seat; it must never infer it from join
+    /// order.
+    SessionAttached {
+        game_code: String,
+        player_id: PlayerId,
+        player_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
     },
     GameStarted {
+        /// Monotonic server-authored snapshot revision. Every viewer of this
+        /// authoritative state receives the same revision.
+        state_revision: u64,
         state: GameState,
         your_player: PlayerId,
         opponent_name: Option<String>,
@@ -286,23 +432,36 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Ordered CR 116.2c offers projected by the engine for direct rendering.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        end_continuous_effect_offers: Vec<GameAction>,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         spell_costs: HashMap<ObjectId, ManaCost>,
         /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
         /// Frontends use this map for "what can I do with this card?" lookups without
         /// introspecting `GameAction` variants client-side. Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
         /// Engine-authored presentation projections computed alongside
         /// `state`. See `engine::game::derived_views::DerivedViews`.
         /// Required for Commander-format games so the CommanderDamage HUD
         /// renders; empty in non-Commander formats (JIT short-circuit).
         #[serde(default)]
         derived: engine::game::derived_views::DerivedViews,
+        /// Viewer-scoped interactive opportunities derived from the same
+        /// authoritative state as this filtered snapshot.
+        viewer_interaction: engine::types::interaction::ViewerInteraction,
         /// Included for joiners so they can persist the token for reconnection.
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_token: Option<String>,
+        /// The exact Full identity associated with this state stream. It is
+        /// omitted only for wire-compatible non-Full producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         /// Engine events produced by `start_game` — currently the d20
         /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
         /// on the initial post-start broadcast; empty for late joiners and
@@ -311,14 +470,29 @@ pub enum ServerMessage {
         /// seat. `serde(default)` keeps this back-compat for older clients.
         #[serde(default)]
         events: Vec<GameEvent>,
+        /// Turn boundaries this session currently offers as rollback targets.
+        /// Populated here as well as on `StateUpdate` so a reconnect mid-game
+        /// sees the list immediately rather than waiting for the next action.
+        /// Empty for every deployment except a `SingleUser` sidecar.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rewind_targets: Vec<RewindOption>,
     },
     StateUpdate {
+        /// Monotonic server-authored snapshot revision. Reused for read-only
+        /// snapshots and advanced only by authoritative state transitions.
+        state_revision: u64,
         state: GameState,
         events: Vec<GameEvent>,
         #[serde(default)]
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Ordered CR 116.2c offers projected by the engine for direct rendering.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        end_continuous_effect_offers: Vec<GameAction>,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default)]
         eliminated_players: Vec<PlayerId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -328,7 +502,7 @@ pub enum ServerMessage {
         /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
         /// Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
         /// by server construction sites — the `#[serde(default)]` exists
@@ -336,8 +510,47 @@ pub enum ServerMessage {
         /// silent fallback (CLAUDE.md: engine owns all logic).
         #[serde(default)]
         derived: engine::game::derived_views::DerivedViews,
+        /// Viewer-scoped interactive opportunities derived from the same
+        /// authoritative state as this filtered snapshot.
+        viewer_interaction: engine::types::interaction::ViewerInteraction,
+        /// Turn boundaries this session currently offers as rollback targets,
+        /// published alongside the state they describe rather than out of band.
+        /// Empty for every deployment except a `SingleUser` sidecar.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        reason: String,
+    },
+    /// Confirms an authenticated action that intentionally produced no state
+    /// transition. The submitting adapter resolves its pending request without
+    /// caching or publishing a replacement snapshot.
+    ActionNoOp,
+    /// Requester-only rejection for a native Resolve All batch. The request
+    /// identifier prevents unrelated action failures from settling this promise.
+    ResolveAllRejected {
+        request_id: u64,
+        reason: String,
+    },
+    /// Requester-only acknowledgement for a native Resolve All batch. The
+    /// matching StateUpdate is sent first and carries the authoritative state.
+    ResolveAllResult {
+        request_id: u64,
+        items_resolved: u32,
+        total: u32,
+    },
+    /// Acknowledges a host-authorized permanent game cleanup.
+    GameAbandoned {
+        game_code: String,
+    },
+    /// Mana sources the engine's automatic payment path would use for one
+    /// `PreviewManaPayment` request. Sent only to the requesting player.
+    ManaPaymentPreview {
+        request_id: u64,
+        source_ids: Vec<ObjectId>,
+    },
+    ManaPaymentPreviewRejected {
+        request_id: u64,
         reason: String,
     },
     OpponentDisconnected {
@@ -357,8 +570,32 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ranked_result: Option<Vec<RankedPlayerResult>>,
     },
+    /// A durable native AI driver failure. The referenced revision is the
+    /// final authoritative state frame that must be delivered before clients
+    /// surface the fault.
+    AiDriverFault {
+        fault: AiDriverFault,
+    },
+    /// Terminal-only bootstrap response. `None` means the exact keyed Full
+    /// session has no prepared terminal artifact, so the caller may attempt
+    /// its ordinary reconnect path on a separate socket.
+    TerminalBootstrapResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<CurrentTerminalDelivery>,
+    },
+    /// Terminal-only capability read response.
+    TerminalResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<CurrentTerminalDelivery>,
+    },
+    /// Terminal-only acknowledgement receipt.
+    TerminalDeliveryAcknowledged {
+        delivery_id: TerminalDeliveryId,
+    },
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ServerErrorCode>,
     },
     LobbyUpdate {
         games: Vec<LobbyGame>,
@@ -487,10 +724,33 @@ pub enum ServerMessage {
     },
 }
 
+impl ServerMessage {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    pub fn deck_rejected(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: Some(ServerErrorCode::DeckRejected),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::AiDriverFailure;
+    use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::format::GameFormat;
+    use engine::types::game_state::ProductionOverride;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{
+        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+    };
     use serde_json::Value;
 
     fn load_fixture(path: &str) -> Value {
@@ -540,16 +800,115 @@ mod tests {
 
     #[test]
     fn client_message_action_roundtrips() {
+        let action = GameAction::TapLandForMana {
+            selection: ManaSourceSelection {
+                source: ObjectIncarnationRef::of(ObjectId(7), 3),
+                ability_index: None,
+                mana_type: ManaType::Green,
+                output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
+                atomic_combination: None,
+                restrictions: Vec::new(),
+                penalty: ManaSourcePenalty::None,
+                taps_for_mana: vec![TapsForManaSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(9), 2),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                    production_override: ProductionOverride::SingleColor(ManaType::Red),
+                }],
+            },
+        };
         let msg = ClientMessage::Action {
+            action: action.clone(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Action {
+                action: restored_action,
+            } => {
+                assert_eq!(restored_action, action);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let GameAction::TapLandForMana { selection } = action else {
+            unreachable!("fixture action is a land-mana selection");
+        };
+        let generic = GameAction::ActivateManaSource { selection };
+        let json = serde_json::to_string(&ClientMessage::Action {
+            action: generic.clone(),
+        })
+        .unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Action {
+                action: restored_action,
+            } => assert_eq!(restored_action, generic),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_mana_payment_preview_roundtrips() {
+        let msg = ClientMessage::PreviewManaPayment {
+            request_id: 7,
             action: GameAction::PassPriority,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::Action { action } => {
+            ClientMessage::PreviewManaPayment { request_id, action } => {
+                assert_eq!(request_id, 7);
                 assert_eq!(action, GameAction::PassPriority);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_mana_payment_preview_roundtrips() {
+        let msg = ServerMessage::ManaPaymentPreview {
+            request_id: 7,
+            source_ids: vec![ObjectId(12)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::ManaPaymentPreview {
+                request_id,
+                source_ids,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(source_ids, vec![ObjectId(12)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn meld_actions_roundtrip() {
+        use engine::game::combat::AttackTarget;
+        use engine::types::identifiers::ObjectId;
+
+        for action in [
+            GameAction::ChooseMeldPair {
+                source_id: ObjectId(10),
+                partner_id: ObjectId(11),
+            },
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Battle(ObjectId(12)),
+            },
+        ] {
+            let json = serde_json::to_string(&ClientMessage::Action {
+                action: action.clone(),
+            })
+            .unwrap();
+            let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(parsed, ClientMessage::Action { action: parsed_action } if parsed_action == action)
+            );
         }
     }
 
@@ -558,6 +917,7 @@ mod tests {
         let msg = ServerMessage::GameCreated {
             game_code: "XYZ789".to_string(),
             player_token: "abc123def456".to_string(),
+            full_key: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -565,9 +925,11 @@ mod tests {
             ServerMessage::GameCreated {
                 game_code,
                 player_token,
+                full_key,
             } => {
                 assert_eq!(game_code, "XYZ789");
                 assert_eq!(player_token, "abc123def456");
+                assert!(full_key.is_none());
             }
             _ => panic!("wrong variant"),
         }
@@ -591,6 +953,93 @@ mod tests {
                 assert_eq!(winner, Some(PlayerId(1)));
                 assert_eq!(reason, "opponent conceded");
                 assert!(ranked_result.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_ai_driver_fault_roundtrips_with_client_wire_keys() {
+        let msg = ServerMessage::AiDriverFault {
+            fault: AiDriverFault {
+                id: 7,
+                after_state_revision: 3,
+                cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+            },
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "AiDriverFault");
+        assert_eq!(json["data"]["fault"]["id"], 7);
+        assert_eq!(json["data"]["fault"]["after_state_revision"], 3);
+        assert_eq!(
+            json["data"]["fault"]["cause"]["ActionSafetyCapReached"]["limit"],
+            200
+        );
+
+        let parsed: ServerMessage = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::AiDriverFault {
+                fault: AiDriverFault {
+                    id: 7,
+                    after_state_revision: 3,
+                    cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn terminal_bootstrap_request_roundtrips_with_exact_full_key() {
+        let msg = ClientMessage::BootstrapTerminalDelivery {
+            request: TerminalBootstrapRequest {
+                key: FullSessionKey {
+                    game_code: "TERM01".to_string(),
+                    generation: 4,
+                },
+                player_token: "pre-terminal-token".to_string(),
+                request_id: "retry-1".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::BootstrapTerminalDelivery { request } => {
+                assert_eq!(request.key.game_code, "TERM01");
+                assert_eq!(request.key.generation, 4);
+                assert_eq!(request.request_id, "retry-1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_response_roundtrips() {
+        let msg = ServerMessage::TerminalBootstrapResult {
+            delivery: Some(CurrentTerminalDelivery {
+                key: FullSessionKey {
+                    game_code: "TERM01".to_string(),
+                    generation: 4,
+                },
+                terminal_revision: 9,
+                delivery_id: TerminalDeliveryId("delivery-0".to_string()),
+                credential: TerminalCredential("credential".to_string()),
+                display: TerminalMatchDisplay {
+                    winner: Some(PlayerId(1)),
+                    reason: "Match conceded".to_string(),
+                    ranked_result: None,
+                },
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::TerminalBootstrapResult {
+                delivery: Some(delivery),
+            } => {
+                assert_eq!(delivery.key.generation, 4);
+                assert_eq!(delivery.terminal_revision, 9);
+                assert_eq!(delivery.delivery_id.0, "delivery-0");
             }
             _ => panic!("wrong variant"),
         }
@@ -758,6 +1207,47 @@ mod tests {
     }
 
     #[test]
+    fn client_message_concede_match_roundtrips_without_authority_payload() {
+        let json = serde_json::to_string(&ClientMessage::ConcedeMatch).unwrap();
+        assert_eq!(json, r#"{"type":"ConcedeMatch"}"#);
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::ConcedeMatch));
+    }
+
+    #[test]
+    fn client_message_abandon_game_roundtrips() {
+        let json = serde_json::to_string(&ClientMessage::AbandonGame).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::AbandonGame));
+    }
+
+    #[test]
+    fn session_attached_roundtrips_with_only_its_own_token() {
+        let msg = ServerMessage::SessionAttached {
+            game_code: "ABC123".to_string(),
+            player_id: PlayerId(1),
+            player_token: "token".to_string(),
+            full_key: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::SessionAttached {
+                game_code,
+                player_id,
+                player_token,
+                full_key,
+            } => {
+                assert_eq!(game_code, "ABC123");
+                assert_eq!(player_id, PlayerId(1));
+                assert_eq!(player_token, "token");
+                assert!(full_key.is_none());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn client_message_emote_roundtrips() {
         let msg = ClientMessage::Emote {
             emote: "GG".to_string(),
@@ -788,18 +1278,42 @@ mod tests {
     #[test]
     fn server_message_game_started_with_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
+        let action = GameAction::PassPriority;
+        let end_offer = GameAction::EndContinuousEffect {
+            group: engine::types::game_state::EndEffectGroupId(8),
+            source_name: "Calming Licid".to_string(),
+            cost: ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let interaction_action_id = engine::game::interaction::interaction_action_id(&action);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
         let msg = ServerMessage::GameStarted {
+            state_revision: 0,
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
-            legal_actions: vec![GameAction::PassPriority],
+            legal_actions: vec![action.clone()],
             auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![end_offer.clone()],
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
-            legal_actions_by_object: HashMap::new(),
+            legal_actions_by_object: HashMap::from([(
+                engine::types::identifiers::ObjectId(7),
+                vec![engine::game::interaction::ObjectActionPayload {
+                    action,
+                    interaction_action_id: interaction_action_id.clone(),
+                }],
+            )]),
             derived: Default::default(),
+            viewer_interaction: viewer_interaction.clone(),
             player_token: None,
+            full_key: None,
             events: vec![],
+            rewind_targets: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -809,12 +1323,22 @@ mod tests {
                 opponent_name,
                 player_names,
                 legal_actions,
+                end_continuous_effect_offers,
+                legal_actions_by_object,
+                viewer_interaction: decoded_viewer_interaction,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
                 assert_eq!(player_names.len(), 2);
                 assert_eq!(legal_actions.len(), 1);
+                assert_eq!(end_continuous_effect_offers, vec![end_offer]);
+                assert_eq!(decoded_viewer_interaction, viewer_interaction);
+                assert_eq!(
+                    legal_actions_by_object[&engine::types::identifiers::ObjectId(7)][0]
+                        .interaction_action_id,
+                    interaction_action_id
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -824,17 +1348,27 @@ mod tests {
     fn server_message_game_started_without_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
         let msg = ServerMessage::GameStarted {
-            state,
+            state_revision: 0,
+            state: state.clone(),
             your_player: PlayerId(1),
             opponent_name: None,
             player_names: vec![],
             legal_actions: vec![],
             auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![],
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),
+            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+                &state,
+                &state,
+                PlayerId(1),
+            ),
             player_token: None,
+            full_key: None,
             events: vec![],
+            rewind_targets: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1203,6 +1737,7 @@ mod tests {
             client_version: "0.1.11".to_string(),
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1211,10 +1746,12 @@ mod tests {
                 client_version,
                 build_commit,
                 protocol_version,
+                lobby_protocol_version,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
             }
             _ => panic!("wrong variant"),
         }
@@ -1227,6 +1764,7 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             mode: ServerMode::Full,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1237,12 +1775,14 @@ mod tests {
                 build_commit,
                 protocol_version,
                 mode,
+                lobby_protocol_version,
                 public_url,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(mode, ServerMode::Full);
+                assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
             }
             _ => panic!("wrong variant"),
@@ -1259,10 +1799,17 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             mode: ServerMode::LobbyOnly,
+            lobby_protocol_version: None,
             public_url: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
+        // Same `skip_serializing_if` contract: a build that advertises no
+        // lobby version must be byte-identical to one that never had the field.
+        assert!(
+            !json.contains("lobby_protocol_version"),
+            "None must be omitted: {json}"
+        );
     }
 
     #[test]
@@ -1498,11 +2045,11 @@ mod tests {
     }
 
     #[test]
-    fn client_message_create_draft_with_settings_roundtrips() {
+    fn client_message_create_sealed_draft_with_settings_roundtrips() {
         let msg = ClientMessage::CreateDraftWithSettings {
             display_name: "Alice".to_string(),
             set_code: "MKM".to_string(),
-            kind: draft_core::types::DraftKind::Premier,
+            kind: draft_core::types::DraftKind::Sealed,
             public: true,
             password: Some("secret".to_string()),
             timer_seconds: Some(75),
@@ -1525,7 +2072,7 @@ mod tests {
             } => {
                 assert_eq!(display_name, "Alice");
                 assert_eq!(set_code, "MKM");
-                assert_eq!(kind, draft_core::types::DraftKind::Premier);
+                assert_eq!(kind, draft_core::types::DraftKind::Sealed);
                 assert!(public);
                 assert_eq!(password, Some("secret".to_string()));
                 assert_eq!(timer_seconds, Some(75));
@@ -1630,16 +2177,43 @@ mod tests {
     #[test]
     fn server_message_draft_state_update_roundtrips() {
         use draft_core::types::*;
-        use draft_core::view::DraftPlayerView;
+        use draft_core::view::{DraftPlayerView, DraftPoolGroups};
 
+        let first_pull = DraftCardInstance {
+            instance_id: "pack-1-card-1".to_string(),
+            name: "First Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec!["W".to_string()],
+            cmc: 1,
+            type_line: "Creature — Test".to_string(),
+            draft_effect: None,
+        };
+        let second_pull = DraftCardInstance {
+            instance_id: "pack-2-card-1".to_string(),
+            name: "Second Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "2".to_string(),
+            rarity: "uncommon".to_string(),
+            colors: vec!["U".to_string()],
+            cmc: 2,
+            type_line: "Instant".to_string(),
+            draft_effect: None,
+        };
+        let pool = vec![first_pull.clone(), second_pull.clone()];
+        let pool_groups = DraftPoolGroups::from_pool(&pool);
         let view = DraftPlayerView {
-            status: DraftStatus::Drafting,
-            kind: DraftKind::Premier,
+            status: DraftStatus::Deckbuilding,
+            kind: DraftKind::Sealed,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
-            pool: Vec::new(),
+            pool,
+            draft_effects: vec![first_pull.clone()],
+            pool_groups,
+            sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
             pack_count: 3,
@@ -1648,18 +2222,35 @@ mod tests {
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
+            next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
+            match_config: DraftKind::Sealed.match_config(),
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
-                assert_eq!(v.status, DraftStatus::Drafting);
+                assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
+                assert_eq!(v.pool_groups, view.pool_groups);
+                assert_eq!(v.draft_effects, view.draft_effects);
+                assert_eq!(
+                    v.sealed_packs
+                        .as_ref()
+                        .expect("sealed packs survive JSON transport")
+                        .iter()
+                        .map(|pack| {
+                            pack.iter()
+                                .map(|card| card.instance_id.as_str())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>(),
+                    vec![vec!["pack-1-card-1"], vec!["pack-2-card-1"]]
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1789,6 +2380,7 @@ mod tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
+            match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
         };
@@ -1806,16 +2398,181 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_13() {
-        assert_eq!(PROTOCOL_VERSION, 13);
+    fn protocol_version_is_39() {
+        assert_eq!(PROTOCOL_VERSION, 39);
+    }
+
+    /// The bump alone is inert — a version number nobody enforces prevents no
+    /// pairing. This is the assertion with teeth: full-game servers accept ONLY
+    /// the current protocol, so an older peer cannot complete a handshake with
+    /// a server that may answer an accepted action on a variant it does not
+    /// understand.
+    ///
+    /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
+    /// this guards — and this test reds while `protocol_version_is_39` stays
+    /// green, which is why the two are separate assertions.
+    #[test]
+    fn full_game_floor_is_current_only_not_a_rollout_window() {
+        assert_eq!(
+            MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+            "full-game servers must refuse every stale client; a rollout window here \
+             re-admits the v23 pairing that drops the engine-owned family channel"
+        );
+        // The lobby floor is deliberately looser, and must NOT be tightened to
+        // match: lobby traffic carries matchmaking metadata only.
+        assert_eq!(LOBBY_MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION - 1);
     }
 
     #[test]
     fn client_message_request_takeback_roundtrips() {
-        let msg = ClientMessage::RequestTakeback;
+        let msg = ClientMessage::RequestTakeback(None);
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, ClientMessage::RequestTakeback));
+        assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+    }
+
+    #[test]
+    fn resolve_all_wire_frames_carry_only_server_safe_metadata() {
+        let request = ClientMessage::ResolveAll {
+            request_id: 7,
+            max_resolutions: 5_000,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"type":"ResolveAll","data":{"request_id":7,"max_resolutions":5000}}"#
+        );
+
+        let result = ServerMessage::ResolveAllResult {
+            request_id: 7,
+            items_resolved: 3,
+            total: 52,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ResolveAllResult","data":{"request_id":7,"items_resolved":3,"total":52}}"#
+        );
+        assert!(!json.contains("waiting_for"));
+
+        let rejected = ServerMessage::ResolveAllRejected {
+            request_id: 7,
+            reason: "Resolve All requires your priority".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&rejected).unwrap(),
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+        );
+    }
+
+    /// R15. The last-action frame the client actually sends carries **no**
+    /// `data` key at all, which is byte-identical to the frame every deployed
+    /// client already sends. `ClientMessage` is adjacently tagged, and serde
+    /// synthesizes a missing-content arm only for unit and newtype variants —
+    /// and only an `Option<T>` payload recovers from it. A struct variant here
+    /// would reject this frame with ``missing field `data` ``, so this
+    /// assertion is what fails if the variant shape regresses.
+    #[test]
+    fn request_takeback_without_data_decodes_as_last_action() {
+        let parsed: ClientMessage =
+            serde_json::from_str(r#"{"type":"RequestTakeback"}"#).expect("absent data must decode");
+        assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+
+        let null_data: ClientMessage =
+            serde_json::from_str(r#"{"type":"RequestTakeback","data":null}"#)
+                .expect("explicit null data must decode");
+        assert!(matches!(null_data, ClientMessage::RequestTakeback(None)));
+
+        // `None` is the wire spelling of "this client predates turn rewind",
+        // and the transport normalizes it with `unwrap_or_default()`. Pin the
+        // default so that normalization cannot silently change meaning.
+        assert_eq!(RewindTarget::default(), RewindTarget::LastAction);
+    }
+
+    /// R15. The turn-rewind frame is the only `data`-bearing shape, and its
+    /// exact bytes are the contract `ws-adapter.ts` is written against.
+    #[test]
+    fn request_takeback_turn_start_roundtrips_with_exact_wire_bytes() {
+        let msg = ClientMessage::RequestTakeback(Some(RewindTarget::TurnStart { turn_number: 7 }));
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"RequestTakeback","data":{"kind":"turn_start","turn_number":7}}"#
+        );
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::RequestTakeback(Some(RewindTarget::TurnStart { turn_number: 7 }))
+        ));
+
+        let last_action = ClientMessage::RequestTakeback(Some(RewindTarget::LastAction));
+        let json = serde_json::to_string(&last_action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"RequestTakeback","data":{"kind":"last_action"}}"#
+        );
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::RequestTakeback(Some(RewindTarget::LastAction))
+        ));
+    }
+
+    /// R15. `rewind_targets` must survive a `StateUpdate` round-trip, must be
+    /// omitted from the wire entirely when empty (same shape as
+    /// `server_hello_omits_public_url_when_none`), and must decode to an empty
+    /// vec when a producer omits it.
+    #[test]
+    fn state_update_rewind_targets_roundtrip_and_omission() {
+        let state = GameState::new_two_player(42);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
+        let build = |rewind_targets: Vec<RewindOption>| ServerMessage::StateUpdate {
+            state_revision: 4,
+            state: state.clone(),
+            events: vec![],
+            legal_actions: vec![],
+            auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![],
+            mana_payment_shortcut_actions: vec![],
+            eliminated_players: vec![],
+            log_entries: vec![],
+            spell_costs: HashMap::new(),
+            legal_actions_by_object: HashMap::new(),
+            derived: Default::default(),
+            viewer_interaction: viewer_interaction.clone(),
+            rewind_targets,
+        };
+
+        let populated = build(vec![RewindOption {
+            turn_number: 3,
+            active_player: PlayerId(1),
+        }]);
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(json.contains(r#""rewind_targets":[{"turn_number":3,"active_player":1}]"#));
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::StateUpdate { rewind_targets, .. } => {
+                assert_eq!(
+                    rewind_targets,
+                    vec![RewindOption {
+                        turn_number: 3,
+                        active_player: PlayerId(1),
+                    }]
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let empty = serde_json::to_string(&build(vec![])).unwrap();
+        assert!(
+            !empty.contains("rewind_targets"),
+            "an empty list must not appear on the wire at all"
+        );
+        match serde_json::from_str::<ServerMessage>(&empty).unwrap() {
+            ServerMessage::StateUpdate { rewind_targets, .. } => {
+                assert!(rewind_targets.is_empty(), "absent field decodes to empty");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -1835,6 +2592,16 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::CancelTakeback));
+    }
+
+    #[test]
+    fn server_message_action_no_op_roundtrips() {
+        let json = serde_json::to_string(&ServerMessage::ActionNoOp).unwrap();
+        assert_eq!(json, r#"{"type":"ActionNoOp"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            ServerMessage::ActionNoOp
+        ));
     }
 
     #[test]

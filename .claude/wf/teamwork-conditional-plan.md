@@ -267,9 +267,8 @@ predicate (the existing honest-refusal path, oracle_casting.rs:244-255); the Swa
 `Condition_If` detector continues to flag it. We add a guard test asserting **no** unconditional
 flash grant leaks. We do **not** ship a green-but-wrong flash grant.
 
-**mtgish-safety statement.** Zero edits to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`.
 No new `Effect`, `AbilityCondition`, `AdditionalCostOrigin`, or `SpecialClause` variant (all
-already exist), so no mtgish mirroring is implicated. Changes are confined to parser files
+already exist). Changes are confined to parser files
 (`conditions.rs`, `lower.rs`, `oracle_modal.rs`, `oracle_nom/condition.rs`) plus tests.
 
 ### Blast-radius bounding (mandatory — EMH + We Say Thee Nay! fixes)

@@ -40,6 +40,10 @@ fn is_finish(d: &AutoPassDecision) -> bool {
     matches!(d, AutoPassDecision::Finish)
 }
 
+fn is_break(d: &AutoPassDecision) -> bool {
+    matches!(d, AutoPassDecision::Break)
+}
+
 fn priority_state() -> GameState {
     let mut state = GameState::new_two_player(42);
     state.turn_number = 1;
@@ -172,7 +176,7 @@ fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability
         controller,
         kind: StackEntryKind::Spell {
             card_id: CardId(id.0),
-            ability: Some(ability),
+            ability: Some(Box::new(ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -204,7 +208,7 @@ fn until_end_of_turn_passes_through_empty_stack_without_phase_stop() {
 }
 
 #[test]
-fn until_end_of_turn_finishes_on_opponent_stack_activity() {
+fn until_end_of_turn_breaks_on_unyielded_opponent_stack_activity() {
     // Opponent spell/trigger on top must interrupt auto-pass so the player
     // always gets a chance to respond.
     let mut state = GameState::default();
@@ -215,7 +219,75 @@ fn until_end_of_turn_finishes_on_opponent_stack_activity() {
             until: TurnBoundary::EndOfCurrentTurn,
         },
     );
-    assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
+    assert!(is_break(&priority_auto_pass_decision(&state, PlayerId(0))));
+    assert!(
+        state.auto_pass.contains_key(&PlayerId(0)),
+        "the decision itself must leave the turn-boundary session armed"
+    );
+}
+
+#[test]
+fn turn_boundary_session_resumes_after_opponent_stack_entry_resolves() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 7_000, PlayerId(1));
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+
+    let mut paused = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    let advanced_before_response = run_auto_pass_loop(&mut state, &mut paused);
+
+    assert!(
+        !advanced_before_response,
+        "reach guard: the unyielded opponent entry stops this run before priority passes"
+    );
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert_eq!(state.stack.len(), 1);
+    assert!(
+        state.auto_pass.contains_key(&PlayerId(0)),
+        "the interrupted turn-boundary session remains armed while the player responds"
+    );
+
+    let after_local_pass = apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        after_local_pass.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+
+    let after_resolution = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+    assert!(
+        after_resolution
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+        "reach guard: the opponent entry resolved through the production priority pipeline"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(
+        after_resolution.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+    assert!(
+        state.auto_pass.contains_key(&PlayerId(0)),
+        "the ordinary post-resolution action boundary re-enters auto-pass without clearing the session"
+    );
 }
 
 #[test]
@@ -253,10 +325,61 @@ fn until_end_of_turn_finishes_at_configured_phase_stop() {
     assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
+/// CR 507.2 + CR 117.3c: A beginning-of-combat phase stop interrupts an
+/// `UntilTurnBoundary` shortcut at a usable priority window. The non-mana
+/// activation proves this is a real priority window, not merely a rendered
+/// phase marker.
+#[test]
+fn begin_combat_phase_stop_interrupts_auto_pass_with_usable_priority() {
+    let mut state = priority_state();
+    let artifact = add_non_mana_activated_artifact(&mut state, PlayerId(0));
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::BeginCombat, PhaseStopScope::OwnTurn)],
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let at_begin_combat = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(matches!(
+        at_begin_combat.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "the explicit stop must interrupt the standing auto-pass session"
+    );
+
+    let activated = apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: artifact,
+            ability_index: 0,
+        },
+    )
+    .expect("a non-mana activated ability is legal in the stopped BeginCombat window");
+    assert_eq!(state.stack.len(), 1);
+    assert!(matches!(
+        activated.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
 /// V8: the per-window interrupt logic is boundary-agnostic. A
-/// `MyNextTurnStart` session must Pass/Finish in exactly the same windows as
+/// `MyNextTurnStart` session must Pass/Break/Finish in exactly the same windows as
 /// the `EndOfCurrentTurn` sessions above (empty stack → Pass, opponent stack →
-/// Finish, phase stop → Finish). This composes with CR 117.3d yield handling
+/// Break, phase stop → Finish). This composes with CR 117.3d yield handling
 /// (unchanged) and guards against the decision arm ever branching on `until`.
 #[test]
 fn my_next_turn_start_window_behavior_matches_end_of_current_turn() {
@@ -272,11 +395,11 @@ fn my_next_turn_start_window_behavior_matches_end_of_current_turn() {
     empty.auto_pass.insert(PlayerId(0), mode);
     assert!(is_pass(&priority_auto_pass_decision(&empty, PlayerId(0))));
 
-    // Opponent-controlled top-of-stack → Finish.
+    // Opponent-controlled top-of-stack → Break.
     let mut opp = GameState::default();
     opp.stack.push_back(stack_entry(PlayerId(1)));
     opp.auto_pass.insert(PlayerId(0), mode);
-    assert!(is_finish(&priority_auto_pass_decision(&opp, PlayerId(0))));
+    assert!(is_break(&priority_auto_pass_decision(&opp, PlayerId(0))));
 
     // User-flagged phase stop → Finish.
     let mut stopped = GameState {
@@ -575,6 +698,7 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let mut state = GameState {
@@ -628,6 +752,7 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let mut state = GameState {
@@ -1025,5 +1150,58 @@ fn loop_gate_probes_all_living_players_not_just_current_holder() {
         !priority_player_has_meaningful_action(&state),
         "the current-holder-only check sees nothing for P0 — its negation would \
              wrongly clear, proving the all-players probe is load-bearing"
+    );
+}
+
+/// CR 508.1a: "The active player chooses which creatures that they control, IF
+/// ANY, will attack." When the candidate set is empty there is no choice to
+/// make — the empty declaration is the only legal one — so the engine must
+/// submit it rather than park on the prompt.
+///
+/// Regression: this arm previously auto-submitted ONLY when the player was in
+/// `AutoPassMode::UntilTurnBoundary`. A player with no auto-pass configured and
+/// no creatures therefore sat on a Declare Attackers prompt whose entire legal
+/// action set was a single no-op `DeclareAttackers { attacks: [], bands: [] }`,
+/// which had to be clicked through every combat. The `DeclareBlockers` arm has
+/// always carried the equivalent "nothing to choose" escape; this pins the
+/// attacker side to the same rule.
+#[test]
+fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
+    let waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: Vec::new(),
+        valid_attack_targets: Vec::new(),
+        valid_attack_targets_by_attacker: Some(Default::default()),
+        attacker_constraints: Default::default(),
+    };
+    let mut state = GameState::new_two_player(42);
+    state.phase = Phase::DeclareAttackers;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    // Production sets combat before advancing into the declare step.
+    state.combat = Some(crate::game::combat::CombatState::default());
+    state.waiting_for = waiting_for.clone();
+
+    // The stalling configuration: no auto-pass mode for the declaring player.
+    assert!(
+        state.auto_pass.is_empty(),
+        "fixture must exercise the no-auto-pass case that stalled"
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    let advanced = run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        advanced,
+        "CR 508.1a: a forced empty attack declaration must not park the game"
+    );
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::DeclareAttackers { .. }),
+        "CR 508.1a: the forced empty declaration must be submitted, not re-offered; got {:?}",
+        result.waiting_for
     );
 }

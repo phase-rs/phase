@@ -1,15 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { ExileLinkKind, GameAction, GameObject, GameState, PlayerId, WaitingFor } from "../../adapter/types";
+import type {
+  GameAction,
+  GameObject,
+  GameState,
+  PlayerId,
+  TargetRef,
+  WaitingFor,
+} from "../../adapter/types";
 import {
   buildGameObject,
   buildGameObjectWithCoreTypes,
   buildObjectMap,
 } from "../../test/factories/gameObjectFactory";
 import {
+  buildCopyTargetSlot,
   buildGameState,
   buildGameStateWithoutSeatOrder,
+  buildPendingCast,
   buildPlayers,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  copyRetargetWaitingForFactory,
+  retargetChoiceWaitingForFactory,
+  returnAsAuraTargetWaitingForFactory,
+  targetSelectionWaitingForFactory,
+  triggerTargetSelectionWaitingForFactory,
 } from "../../test/factories/gameStateFactory";
 import {
   boardChoiceSelectedPower,
@@ -21,10 +37,13 @@ import {
   getOpponentIds,
   getSeatCount,
   getVisibleBoardPlayerIds,
+  getWaitingForClickTargetRefs,
   getWaitingForObjectChoiceIds,
+  getWaitingForPlayerChoiceIds,
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
   isSplitBoardActive,
+  resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
@@ -136,6 +155,14 @@ describe("getVisibleBoardPlayerIds", () => {
 });
 
 describe("split board ownership helpers", () => {
+  it("resolves auto by viewport while honoring explicit multiplayer choices", () => {
+    expect(resolveMultiplayerBoardLayout("auto", 3, true)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("auto", 3, false)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("focused", 3, false)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("split", 2, false)).toBe("focused");
+  });
+
   it("activates split layout only for 3+ player games", () => {
     expect(isSplitBoardActive("split", 4)).toBe(true);
     expect(isSplitBoardActive("split", 2)).toBe(false);
@@ -248,6 +275,31 @@ describe("getBattlefieldSacrificeChoice", () => {
 });
 
 describe("getBoardChoiceView", () => {
+  it("maps BlightChoice to one confirmed creature selection", () => {
+    const choice = getBoardChoiceView({
+      type: "BlightChoice",
+      data: {
+        player: 0,
+        counters: 3,
+        creatures: [10, 11],
+        pending_cast: buildPendingCast({ object_id: 99 }),
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [10, 11],
+      intent: "blight",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      sourceId: 99,
+      cancelAction: { type: "CancelCast" },
+    });
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(canConfirmBoardChoice(choice, [10], undefined)).toBe(true);
+  });
+
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
     const choice = getBoardChoiceView(
       {
@@ -284,6 +336,77 @@ describe("getBoardChoiceView", () => {
       sourceId: 99,
       cancelAction: { type: "CancelCast" },
     });
+  });
+
+  it("maps battlefield untap effects to board card selection", () => {
+    const choice = getBoardChoiceView({
+      type: "EffectZoneChoice",
+      data: {
+        player: 1,
+        cards: [10, 11],
+        count: 2,
+        min_count: 1,
+        up_to: true,
+        source_id: 9,
+        effect_kind: "Untap",
+        zone: "Battlefield",
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 1, max: 2 },
+      response: { type: "SelectCards" },
+    });
+  });
+
+  it("maps capped untap subsets to a zero-to-max board selection", () => {
+    const choice = getBoardChoiceView({
+      type: "ChooseUntapSubset",
+      data: { player: 1, group: [10, 11], max: 1 },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 0, max: 1 },
+      response: { type: "SelectCards" },
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("maps an untap decision to the first candidate and typed choose action", () => {
+    const choice = getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [10, 11] },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10],
+      intent: "untap",
+      selection: { type: "single", immediate: true },
+      response: { type: "ChooseUntap", objectId: 10 },
+      skipAction: { type: "ChooseUntap", data: { object_id: 10, untap: false } },
+      skipLabel: "keepTapped",
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "ChooseUntap",
+      data: { object_id: 10, untap: true },
+    });
+  });
+
+  it("does not surface an empty untap decision", () => {
+    expect(getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [] },
+    })).toBeNull();
   });
 
   it("builds CrewVehicle actions and gates by selected total power", () => {
@@ -391,6 +514,25 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
   });
 
+  it("renders the engine-provided exact keeper requirement without client-side capping", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        required_count: 5,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
+  });
+
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
     const station = getBoardChoiceView({
       type: "StationTarget",
@@ -438,6 +580,175 @@ describe("getBoardChoiceView", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("maps resolution TapCreatures PayCost to a non-cancellable board choice", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures", mode: "Fixed" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 2,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "tap",
+      selection: { type: "exactCount", count: 2 },
+      response: { type: "SelectCards" },
+      cancelAction: undefined,
+    });
+    expect(choice && buildBoardChoiceAction(choice, [4, 5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4, 5] },
+    });
+  });
+
+  it("maps an X-style TapCreatures PayCost to a range the player can under-fill", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures", mode: "VariableX" },
+        choices: [4, 5, 6],
+        count: 3,
+        min_count: 1,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+        buildGameObject({ id: 6, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5, 6],
+      intent: "tap",
+      selection: { type: "rangeCount", min: 1, max: 3 },
+    });
+    expect(choice && buildBoardChoiceAction(choice, [4])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4] },
+    });
+  });
+
+  it("gates an aggregate TapCreatures PayCost by total power, mirroring CrewVehicle", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: {
+          type: "TapCreatures",
+          mode: { Aggregate: { stat: "TotalPower", comparator: "GE", value: 2 } },
+        },
+        choices: [4, 5],
+        count: 2,
+        min_count: 0,
+        resume: { type: "Resolution" },
+      },
+    };
+    const objects = buildObjectMap(
+      buildGameObject({ id: 4, power: 1, zone: "Battlefield" }),
+      buildGameObject({ id: 5, power: 1, zone: "Battlefield" }),
+    );
+
+    const choice = getBoardChoiceView(waitingFor, objects);
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.selection).toEqual({ type: "totalPowerAtLeast", power: 2 });
+    // One 1-power creature (total power 1) does not satisfy "total power 2 or
+    // greater" — this is the exact scenario the reviewer flagged: the old
+    // `confirmedCountSelection(2, 0)` mapping would have rendered this as an
+    // enabled 0-to-2 range selection, letting Confirm activate for a payment
+    // the engine rejects.
+    expect(canConfirmBoardChoice(choice, [4], objects)).toBe(false);
+    expect(canConfirmBoardChoice(choice, [4, 5], objects)).toBe(true);
+    expect(buildBoardChoiceAction(choice, [4, 5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4, 5] },
+    });
+  });
+
+  // Reach guard for the engine's positive-power-only clamp over the CR 208.1
+  // power axis: a negative-power creature must not "cancel out" a positive one
+  // to help satisfy the threshold, and must not count negatively either —
+  // mirrors `tap_creature_power_contribution`'s `max(power, 0)`, NOT
+  // `totalPowerAtMost`'s signed-sum semantics.
+  it("clamps negative power to zero for an aggregate TapCreatures PayCost", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: {
+          type: "TapCreatures",
+          mode: { Aggregate: { stat: "TotalPower", comparator: "GE", value: 2 } },
+        },
+        choices: [4, 5],
+        count: 2,
+        min_count: 0,
+        resume: { type: "Resolution" },
+      },
+    };
+    const objects = buildObjectMap(
+      buildGameObject({ id: 4, power: 1, zone: "Battlefield" }),
+      buildGameObject({ id: 5, power: -1, zone: "Battlefield" }),
+    );
+
+    const choice = getBoardChoiceView(waitingFor, objects);
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    // 1 + max(-1, 0) = 1, not 0 — the negative creature contributes 0, it
+    // does not subtract.
+    expect(boardChoiceSelectedPower(choice, [4, 5], objects)).toBe(1);
+    expect(canConfirmBoardChoice(choice, [4, 5], objects)).toBe(false);
+  });
+
+  it("blocks confirmation for a TapCreatures aggregate comparator with no client representation", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: {
+          type: "TapCreatures",
+          mode: { Aggregate: { stat: "TotalPower", comparator: "LE", value: 2 } },
+        },
+        choices: [4],
+        count: 1,
+        min_count: 0,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(buildGameObject({ id: 4, power: 1, zone: "Battlefield" })),
+    );
+
+    expect(choice?.selection).toEqual({ type: "rangeCount", min: 0, max: 0 });
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("keeps PayCost choices modal-only unless every candidate is on the battlefield", () => {
@@ -574,11 +885,6 @@ describe("getOpponentIds", () => {
   });
 });
 
-// Issue #2889: single-player renders the raw, unredacted state, so a
-// Hideaway/Foretell face-down exile's real `name`/`printed_ref` sit on the
-// object regardless of viewer. This helper is the client-side half of the
-// engine's `hidden_facedown_exile_ids` look-permission gate
-// (crates/engine/src/game/visibility.rs, CR 406.3 + CR 702.75a + CR 702.143e).
 describe("isFaceDownExileCardVisibleToViewer", () => {
   function faceDownObject(overrides: Partial<GameObject> = {}): GameObject {
     return buildGameObjectWithCoreTypes(["Creature"], {
@@ -595,54 +901,506 @@ describe("isFaceDownExileCardVisibleToViewer", () => {
     });
   }
 
-  function stateWithSourceAndExiled(
-    source: GameObject,
-    exiled: GameObject,
-    kind: ExileLinkKind,
-  ): GameState {
-    return buildGameState({
-      objects: buildObjectMap(source, exiled),
-      exile_links: [{ exiled_id: exiled.id, source_id: source.id, kind }],
-    });
-  }
-
   it("is false for a card that isn't face down", () => {
-    const obj = faceDownObject({ face_down: false });
+    const obj = faceDownObject({ face_down: false, display_visible_to_viewer: true });
     expect(isFaceDownExileCardVisibleToViewer(buildGameState({ objects: {} }), obj, 1)).toBe(false);
   });
 
-  it("is true for the controller of the Hideaway permanent that exiled it", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(true);
+  it("uses only the engine-projected display bit", () => {
+    const visible = faceDownObject({ display_visible_to_viewer: true });
+    const hidden = faceDownObject({ display_visible_to_viewer: false, foretold: true });
+    const state = buildGameState({ objects: buildObjectMap(visible, hidden) });
+
+    expect(isFaceDownExileCardVisibleToViewer(state, visible, 1)).toBe(true);
+    expect(isFaceDownExileCardVisibleToViewer(state, hidden, 0)).toBe(false);
+  });
+});
+
+// ── The player axis of the click-target authority ────────────────────────────
+//
+// `getWaitingForClickTargetRefs` is the single WaitingFor -> engine-authored
+// `TargetRef[]` authority, and `getWaitingForPlayerChoiceIds` is its player-axis
+// projection. Every seat-rendering surface (PlayerHud, OpponentHud's 1v1 pill
+// and multiplayer tabs, OpponentSeatHeader) reads the projection instead of
+// hand-rolling a per-variant derivation.
+
+/** Every fixture below mixes an object ref and a player ref so a `flatMap` that
+ * forgot to narrow, or narrowed on the wrong key, cannot pass. */
+const MIXED_LEGAL: TargetRef[] = [{ Object: 7 }, { Player: 1 }];
+
+/**
+ * Every `WaitingFor` variant, mapped to the fixture that pins how the two
+ * click-target authorities treat it. This map is the drift gate the
+ * two-switch design owes: `Record<WaitingFor["type"], …>` is total, so the
+ * day `types.ts` gains a variant, `pnpm run type-check` fails here until
+ * someone records what the player axis does with it. A variant added to
+ * `getWaitingForObjectChoiceIds` alone can no longer land behind a green
+ * suite.
+ *
+ * `NO_TARGET_REF_LEGAL_SET` records a checked claim: the variant carries no
+ * `TargetRef[]` legal set at all, so neither authority can name a player for
+ * it. Before writing it, apply the two-criteria test in
+ * `getWaitingForClickTargetRefs`'s doc comment.
+ *
+ * The `NO_TARGET_REF_LEGAL_SET` entries are SKIPPED at runtime — they exist
+ * only for the compile-time gate. The map's size is not a runtime coverage
+ * number; the 11 `PartitionFixture` entries are.
+ */
+const NO_TARGET_REF_LEGAL_SET = "no-TargetRef-legal-set" as const;
+
+interface PartitionFixture {
+  waitingFor: WaitingFor;
+  /** The engine-authored legal list the two authorities must partition. */
+  legal: TargetRef[];
+}
+
+const PARTITION_FIXTURES: Record<
+  WaitingFor["type"],
+  PartitionFixture | typeof NO_TARGET_REF_LEGAL_SET
+> = {
+  // ── The 11 `TargetRef`-bearing variants ────────────────────────────────
+  TargetSelection: {
+    waitingFor: targetSelectionWaitingForFactory
+      .withData({
+        selection: buildTargetSelectionProgress({ current_legal_targets: MIXED_LEGAL }),
+        target_slots: [buildTargetSelectionSlot({ legal_targets: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  TriggerTargetSelection: {
+    waitingFor: triggerTargetSelectionWaitingForFactory
+      .withData({
+        selection: buildTargetSelectionProgress({ current_legal_targets: MIXED_LEGAL }),
+        target_slots: [buildTargetSelectionSlot({ legal_targets: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  CopyRetarget: {
+    waitingFor: copyRetargetWaitingForFactory
+      .withData({
+        current_slot: 0,
+        target_slots: [buildCopyTargetSlot({ legal_alternatives: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  // Only the `Single`-scope shape belongs here: a `Record` keyed on `type`
+  // cannot hold two entries for one variant, so the `All`-scope pair is
+  // asserted by its own `it` below.
+  RetargetChoice: {
+    waitingFor: retargetChoiceWaitingForFactory
+      .withData({ scope: { type: "Single" }, legal_new_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  ReturnAsAuraTarget: {
+    waitingFor: returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  // ── Dialog-only by design: answered by a DIFFERENT GameAction ──────────
+  // Answered by `DistributeAmong { distribution }` — a click carries no amount.
+  DistributeAmong: {
+    waitingFor: {
+      type: "DistributeAmong",
+      data: { player: 0, total: 3, targets: MIXED_LEGAL, unit: { type: "Damage" } },
+    },
+    legal: MIXED_LEGAL,
+  },
+  // Answered by `SelectTargets { targets }` — CR 701.34a chooses an any-size
+  // subset of permanents and/or players, which a single click cannot express.
+  ProliferateChoice: {
+    waitingFor: { type: "ProliferateChoice", data: { player: 0, eligible: MIXED_LEGAL } },
+    legal: MIXED_LEGAL,
+  },
+  // Shares ProliferateModal and the same `SelectTargets` subset dispatch.
+  TimeTravelChoice: {
+    waitingFor: {
+      type: "TimeTravelChoice",
+      data: { player: 0, eligible: MIXED_LEGAL, phase: "Remove" },
+    },
+    legal: MIXED_LEGAL,
+  },
+  // Shares ProliferateModal; `SelectTargets` subset.
+  ChooseObjectsSelection: {
+    waitingFor: {
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible: MIXED_LEGAL, min: 0 },
+    },
+    legal: MIXED_LEGAL,
+  },
+  // Answered by an ORDERED `SelectTargets` (first pick is copied, second
+  // scales) — a click carries no order.
+  EachPlayerCopyChosenSelection: {
+    waitingFor: {
+      type: "EachPlayerCopyChosenSelection",
+      data: {
+        player: 0,
+        eligible: MIXED_LEGAL,
+        min: 1,
+        max: 2,
+        choose_filter: {},
+        source_id: 1,
+        source_controller: 0,
+        remaining_players: [],
+        all_choices: [],
+        scoped_players: [0],
+      },
+    },
+    legal: MIXED_LEGAL,
+  },
+  // Answered by `ChooseBranch { index }`; `parent_targets` is continuation
+  // context the modal never reads.
+  ChooseOneOfBranch: {
+    waitingFor: {
+      type: "ChooseOneOfBranch",
+      data: { player: 0, controller: 0, source_id: 1, branches: [], parent_targets: MIXED_LEGAL },
+    },
+    legal: MIXED_LEGAL,
+  },
+  // ── Everything else carries no `TargetRef[]` legal set at all ──────────
+  DeclareAttackers: NO_TARGET_REF_LEGAL_SET,
+  DeclareBlockers: NO_TARGET_REF_LEGAL_SET,
+  Priority: NO_TARGET_REF_LEGAL_SET,
+  ResolveAllConsent: NO_TARGET_REF_LEGAL_SET,
+  ResolveAllReady: NO_TARGET_REF_LEGAL_SET,
+  MeldPairChoice: NO_TARGET_REF_LEGAL_SET,
+  MeldAttackTargetChoice: NO_TARGET_REF_LEGAL_SET,
+  EntryAttackTargetChoice: NO_TARGET_REF_LEGAL_SET,
+  ActivationCostOneOfChoice: NO_TARGET_REF_LEGAL_SET,
+  MulliganDecision: NO_TARGET_REF_LEGAL_SET,
+  OpeningHandBottomCards: NO_TARGET_REF_LEGAL_SET,
+  ManaPayment: NO_TARGET_REF_LEGAL_SET,
+  ManaSourceSelection: NO_TARGET_REF_LEGAL_SET,
+  ChooseXValue: NO_TARGET_REF_LEGAL_SET,
+  PayAmountChoice: NO_TARGET_REF_LEGAL_SET,
+  GameOver: NO_TARGET_REF_LEGAL_SET,
+  ReplacementChoice: NO_TARGET_REF_LEGAL_SET,
+  EntryControllerChoice: NO_TARGET_REF_LEGAL_SET,
+  OrderTriggers: NO_TARGET_REF_LEGAL_SET,
+  CopyTargetChoice: NO_TARGET_REF_LEGAL_SET,
+  ExploreChoice: NO_TARGET_REF_LEGAL_SET,
+  EquipTarget: NO_TARGET_REF_LEGAL_SET,
+  CrewVehicle: NO_TARGET_REF_LEGAL_SET,
+  StationTarget: NO_TARGET_REF_LEGAL_SET,
+  SaddleMount: NO_TARGET_REF_LEGAL_SET,
+  ScryChoice: NO_TARGET_REF_LEGAL_SET,
+  ArrangePlanarDeckTopChoice: NO_TARGET_REF_LEGAL_SET,
+  RedistributeLifeTotals: NO_TARGET_REF_LEGAL_SET,
+  CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,
+  DigChoice: NO_TARGET_REF_LEGAL_SET,
+  SurveilChoice: NO_TARGET_REF_LEGAL_SET,
+  RevealChoice: NO_TARGET_REF_LEGAL_SET,
+  SearchChoice: NO_TARGET_REF_LEGAL_SET,
+  SearchPartitionChoice: NO_TARGET_REF_LEGAL_SET,
+  OutsideGameChoice: NO_TARGET_REF_LEGAL_SET,
+  BetweenGamesSideboard: NO_TARGET_REF_LEGAL_SET,
+  BetweenGamesChoosePlayDraw: NO_TARGET_REF_LEGAL_SET,
+  NamedChoice: NO_TARGET_REF_LEGAL_SET,
+  OpponentGuess: NO_TARGET_REF_LEGAL_SET,
+  SpellbookDraft: NO_TARGET_REF_LEGAL_SET,
+  DamageSourceChoice: NO_TARGET_REF_LEGAL_SET,
+  ModeChoice: NO_TARGET_REF_LEGAL_SET,
+  AbilityModeChoice: NO_TARGET_REF_LEGAL_SET,
+  DiscardToHandSize: NO_TARGET_REF_LEGAL_SET,
+  OptionalCostChoice: NO_TARGET_REF_LEGAL_SET,
+  CostTypeChoice: NO_TARGET_REF_LEGAL_SET,
+  SpliceOffer: NO_TARGET_REF_LEGAL_SET,
+  DefilerPayment: NO_TARGET_REF_LEGAL_SET,
+  CastOffer: NO_TARGET_REF_LEGAL_SET,
+  ModalFaceChoice: NO_TARGET_REF_LEGAL_SET,
+  AlternativeCastChoice: NO_TARGET_REF_LEGAL_SET,
+  MutateMergeChoice: NO_TARGET_REF_LEGAL_SET,
+  CipherEncodeChoice: NO_TARGET_REF_LEGAL_SET,
+  CastingVariantChoice: NO_TARGET_REF_LEGAL_SET,
+  ChoosePermanentTypeSlot: NO_TARGET_REF_LEGAL_SET,
+  MultiTargetSelection: NO_TARGET_REF_LEGAL_SET,
+  MiracleReveal: NO_TARGET_REF_LEGAL_SET,
+  PayCost: NO_TARGET_REF_LEGAL_SET,
+  BlightChoice: NO_TARGET_REF_LEGAL_SET,
+  PayManaAbilityMana: NO_TARGET_REF_LEGAL_SET,
+  ChooseManaColor: NO_TARGET_REF_LEGAL_SET,
+  CollectEvidenceChoice: NO_TARGET_REF_LEGAL_SET,
+  HarmonizeTapChoice: NO_TARGET_REF_LEGAL_SET,
+  OptionalEffectChoice: NO_TARGET_REF_LEGAL_SET,
+  PairChoice: NO_TARGET_REF_LEGAL_SET,
+  OpponentMayChoice: NO_TARGET_REF_LEGAL_SET,
+  LoopShortcut: NO_TARGET_REF_LEGAL_SET,
+  RespondToShortcut: NO_TARGET_REF_LEGAL_SET,
+  PrecastCopyShortcutOffer: NO_TARGET_REF_LEGAL_SET,
+  RespondToPrecastCopyShortcut: NO_TARGET_REF_LEGAL_SET,
+  UnlessPayment: NO_TARGET_REF_LEGAL_SET,
+  UnlessPaymentChooseCost: NO_TARGET_REF_LEGAL_SET,
+  WardDiscardChoice: NO_TARGET_REF_LEGAL_SET,
+  WardSacrificeChoice: NO_TARGET_REF_LEGAL_SET,
+  UnlessBounceChoice: NO_TARGET_REF_LEGAL_SET,
+  ChooseRingBearer: NO_TARGET_REF_LEGAL_SET,
+  RevealUntilKeptChoice: NO_TARGET_REF_LEGAL_SET,
+  RepeatDecision: NO_TARGET_REF_LEGAL_SET,
+  TopOrBottomChoice: NO_TARGET_REF_LEGAL_SET,
+  PopulateChoice: NO_TARGET_REF_LEGAL_SET,
+  CompanionReveal: NO_TARGET_REF_LEGAL_SET,
+  ChooseLegend: NO_TARGET_REF_LEGAL_SET,
+  CommanderZoneChoice: NO_TARGET_REF_LEGAL_SET,
+  BattleProtectorChoice: NO_TARGET_REF_LEGAL_SET,
+  TributeChoice: NO_TARGET_REF_LEGAL_SET,
+  CombatTaxPayment: NO_TARGET_REF_LEGAL_SET,
+  UntapChoice: NO_TARGET_REF_LEGAL_SET,
+  ChooseUntapSubset: NO_TARGET_REF_LEGAL_SET,
+  ExertChoice: NO_TARGET_REF_LEGAL_SET,
+  EnlistChoice: NO_TARGET_REF_LEGAL_SET,
+  PhyrexianPayment: NO_TARGET_REF_LEGAL_SET,
+  AssignCombatDamage: NO_TARGET_REF_LEGAL_SET,
+  AssignBlockerDamage: NO_TARGET_REF_LEGAL_SET,
+  MoveCountersDistribution: NO_TARGET_REF_LEGAL_SET,
+  RemoveCountersChoice: NO_TARGET_REF_LEGAL_SET,
+  ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
+  BeholdChoice: NO_TARGET_REF_LEGAL_SET,
+  EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
+  DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
+  AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,
+  AssistPayment: NO_TARGET_REF_LEGAL_SET,
+  ConniveDiscard: NO_TARGET_REF_LEGAL_SET,
+  DiscardChoice: NO_TARGET_REF_LEGAL_SET,
+  ManifestDreadChoice: NO_TARGET_REF_LEGAL_SET,
+  LearnChoice: NO_TARGET_REF_LEGAL_SET,
+  ClashChooseOpponent: NO_TARGET_REF_LEGAL_SET,
+  ChooseFromZoneOpponentChooser: NO_TARGET_REF_LEGAL_SET,
+  ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
+  ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,
+  ClashCardPlacement: NO_TARGET_REF_LEGAL_SET,
+  VoteChoice: NO_TARGET_REF_LEGAL_SET,
+  ChooseDungeon: NO_TARGET_REF_LEGAL_SET,
+  ChooseDungeonRoom: NO_TARGET_REF_LEGAL_SET,
+  SpecializeColor: NO_TARGET_REF_LEGAL_SET,
+  ChooseRoomDoor: NO_TARGET_REF_LEGAL_SET,
+  CategoryChoice: NO_TARGET_REF_LEGAL_SET,
+  KeepWithinTotalPowerChoice: NO_TARGET_REF_LEGAL_SET,
+  KeepExactPermanentsChoice: NO_TARGET_REF_LEGAL_SET,
+  SeparatePilesChooseOpponent: NO_TARGET_REF_LEGAL_SET,
+  SeparatePilesPartition: NO_TARGET_REF_LEGAL_SET,
+  SeparatePilesChoice: NO_TARGET_REF_LEGAL_SET,
+};
+
+describe("getWaitingForPlayerChoiceIds", () => {
+  // V1 — one `it` per `case` body, each on a MIXED list so the object half is
+  // proven to be dropped rather than coincidentally absent.
+  it("projects TargetSelection player refs and leaves the object refs to the object axis", () => {
+    const wf = targetSelectionWaitingForFactory
+      .withData({
+        selection: buildTargetSelectionProgress({ current_legal_targets: MIXED_LEGAL }),
+        target_slots: [buildTargetSelectionSlot({ legal_targets: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
-  it("is false for an opponent of the Hideaway permanent's controller", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(false);
+  it("projects TriggerTargetSelection player refs", () => {
+    const wf = triggerTargetSelectionWaitingForFactory
+      .withData({
+        selection: buildTargetSelectionProgress({ current_legal_targets: MIXED_LEGAL }),
+        target_slots: [buildTargetSelectionSlot({ legal_targets: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
-  it("is false for a plain TrackedBySource link even for the source's controller", () => {
-    // Bomat Courier ("(You can't look at it.)") tracks its face-down exile by
-    // source for later retrieval but grants no look-permission.
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "TrackedBySource");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
+  // CR 707.10c: the copy's controller retargets one slot at a time.
+  it("projects CopyRetarget player refs", () => {
+    const wf = copyRetargetWaitingForFactory
+      .withData({
+        current_slot: 0,
+        target_slots: [buildCopyTargetSlot({ legal_alternatives: MIXED_LEGAL })],
+      })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
-  it("is true for the owner of a foretold card", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = buildGameState({ objects: buildObjectMap(exiled), exile_links: [] });
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(true);
+  // CR 115.7: Bolt Bend / Misdirection retarget a single-target spell by a click.
+  it("projects RetargetChoice(Single) player refs", () => {
+    const wf = retargetChoiceWaitingForFactory
+      .withData({ scope: { type: "Single" }, legal_new_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
-  it("is false for an opponent of a foretold card's owner", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = buildGameState({ objects: buildObjectMap(exiled), exile_links: [] });
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
+  // CR 303.4: an Aura enters attached to an object OR a player, so this legal
+  // list genuinely mixes both axes in production.
+  it("projects ReturnAsAuraTarget player refs", () => {
+    const wf = returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
+  });
+
+  it("returns [] for a null or absent waiting state", () => {
+    expect(getWaitingForPlayerChoiceIds(null)).toEqual([]);
+    expect(getWaitingForPlayerChoiceIds(undefined)).toEqual([]);
+    expect(getWaitingForClickTargetRefs(null)).toBeNull();
+  });
+
+  // V4 — the slot axis. The two slots offer DIFFERENT seats, so reading slot 0
+  // unconditionally is observable rather than coincidentally equal.
+  it("reads CopyRetarget's current slot, not slot 0", () => {
+    const wf = copyRetargetWaitingForFactory
+      .withData({
+        current_slot: 1,
+        target_slots: [
+          buildCopyTargetSlot({ legal_alternatives: [{ Player: 3 }] }),
+          buildCopyTargetSlot({ legal_alternatives: [{ Player: 1 }] }),
+        ],
+      })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+  });
+
+  it("falls back to CopyRetarget slot 0 when current_slot is omitted", () => {
+    const wf = copyRetargetWaitingForFactory
+      .withData({
+        target_slots: [
+          buildCopyTargetSlot({ legal_alternatives: [{ Player: 3 }] }),
+          buildCopyTargetSlot({ legal_alternatives: [{ Player: 1 }] }),
+        ],
+      })
+      .forPlayer(0)
+      .build();
+    delete wf.data.current_slot;
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([3]);
+  });
+
+  // V3 — an `All`-scope retarget is not a click prompt at all: the engine has no
+  // `ChooseTarget` apply arm for it, and RetargetChoiceModal keeps its pointer
+  // events for the confirm button. The paired `Single` positive on the IDENTICAL
+  // payload proves the exclusion keys on the scope, not on the whole variant.
+  it("excludes RetargetChoice(All) while accepting the identical Single payload", () => {
+    const allScope = retargetChoiceWaitingForFactory
+      .withData({ scope: { type: "All" }, legal_new_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+    const singleScope = retargetChoiceWaitingForFactory
+      .withData({ scope: { type: "Single" }, legal_new_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForClickTargetRefs(allScope)).toBeNull();
+    expect(getWaitingForPlayerChoiceIds(allScope)).toEqual([]);
+    expect(getWaitingForPlayerChoiceIds(singleScope)).toEqual([1]);
+  });
+});
+
+// V5 — the six dialog-only variants. Each carries `{Player: 1}` in its own
+// `TargetRef[]` field, and a `TargetSelection` built from the IDENTICAL list
+// returns `[1]`, so the exclusion is proven to key on the variant rather than on
+// the list contents.
+describe("getWaitingForPlayerChoiceIds — dialog-only variants", () => {
+  const DIALOG_ONLY = [
+    "DistributeAmong",
+    "ProliferateChoice",
+    "TimeTravelChoice",
+    "ChooseObjectsSelection",
+    "EachPlayerCopyChosenSelection",
+    "ChooseOneOfBranch",
+  ] as const;
+
+  it.each(DIALOG_ONLY)("excludes %s (answered by a different GameAction)", (variant) => {
+    const fixture = PARTITION_FIXTURES[variant];
+    if (fixture === NO_TARGET_REF_LEGAL_SET) throw new Error(`${variant} must have a fixture`);
+
+    expect(fixture.legal).toContainEqual({ Player: 1 });
+    expect(getWaitingForClickTargetRefs(fixture.waitingFor)).toBeNull();
+    expect(getWaitingForPlayerChoiceIds(fixture.waitingFor)).toEqual([]);
+  });
+
+  it("returns [1] for a TargetSelection built from the identical legal list", () => {
+    expect(
+      getWaitingForPlayerChoiceIds(
+        targetSelectionWaitingForFactory
+          .withData({
+            selection: buildTargetSelectionProgress({ current_legal_targets: MIXED_LEGAL }),
+            target_slots: [buildTargetSelectionSlot({ legal_targets: MIXED_LEGAL })],
+          })
+          .forPlayer(0)
+          .build(),
+      ),
+    ).toEqual([1]);
+  });
+});
+
+// V2 — the partition rule, total over every fixture in the map. The compile-time
+// half of this gate is the `Record<WaitingFor["type"], …>` key set itself.
+describe("the two click-target authorities partition the engine's legal list", () => {
+  const entries = Object.entries(PARTITION_FIXTURES).flatMap(([type, fixture]) =>
+    fixture === NO_TARGET_REF_LEGAL_SET ? [] : [[type, fixture] as const],
+  );
+
+  it("covers every TargetRef-bearing variant", () => {
+    expect(entries.map(([type]) => type).sort()).toEqual(
+      [
+        "ChooseObjectsSelection",
+        "ChooseOneOfBranch",
+        "CopyRetarget",
+        "DistributeAmong",
+        "EachPlayerCopyChosenSelection",
+        "ProliferateChoice",
+        "RetargetChoice",
+        "ReturnAsAuraTarget",
+        "TargetSelection",
+        "TimeTravelChoice",
+        "TriggerTargetSelection",
+      ].sort(),
+    );
+  });
+
+  it.each(entries)("partitions %s", (_type, fixture) => {
+    // Every fixture must be non-degenerate: a legal list with only one axis
+    // could not tell a correct partition from a broken one.
+    expect(fixture.legal.some((ref) => "Object" in ref)).toBe(true);
+    expect(fixture.legal.some((ref) => "Player" in ref)).toBe(true);
+
+    const refs = getWaitingForClickTargetRefs(fixture.waitingFor);
+    const objects = getWaitingForObjectChoiceIds(fixture.waitingFor);
+    const players = getWaitingForPlayerChoiceIds(fixture.waitingFor);
+
+    if (refs === null) {
+      // Not a click prompt: neither axis may offer anything, even though the
+      // engine's list is non-empty and names both an object and a player.
+      expect(objects).toEqual([]);
+      expect(players).toEqual([]);
+      return;
+    }
+
+    expect(refs).toEqual(fixture.legal);
+    expect(objects).toEqual(
+      fixture.legal.flatMap((ref) => ("Object" in ref ? [ref.Object] : [])),
+    );
+    expect(players).toEqual(
+      fixture.legal.flatMap((ref) => ("Player" in ref ? [ref.Player] : [])),
+    );
   });
 });

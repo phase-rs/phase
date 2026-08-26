@@ -1,0 +1,94 @@
+{{- if and .Values.scaleOut.enabled .Values.ingress.enabled }}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- $host := required "ingress.host is required when ingress.enabled is true (it is the entry hostname the router matches and the certificate is issued for)." .Values.ingress.host }}
+{{- $mw := include "phase-server.middlewareRefs" . }}
+{{- /* Every route below terminates TLS unconditionally, so an advertised
+     `http://` ordinal URL names an address this chart does not serve. `http`
+     stays legal with ingress.enabled=false, where the chart renders no route
+     and the operator owns the edge. */}}
+{{- $scheme := .Values.scaleOut.scheme | default "https" }}
+{{- if ne $scheme "https" }}
+{{- fail (printf "scaleOut.scheme is %q, but every IngressRoute this chart renders terminates TLS, so each ordinal would advertise a URL the chart's own route does not serve. Leave it https, or set ingress.enabled=false and route to the ordinal Services yourself." $scheme) }}
+{{- end }}
+{{- if .Values.traefik.middlewares.extra }}
+{{- fail "traefik.middlewares.extra uses Traefik's annotation syntax (\"<ns>-<name>@kubernetescrd\"), which the IngressRoute CRD provider rejects — Traefik would drop the whole route. With scaleOut.enabled, list extra middlewares under scaleOut.extraMiddlewareRefs as {name, namespace} instead." }}
+{{- end }}
+{{- /* Entry route. It deliberately targets the ordinary ClusterIP Service
+     rather than a Weighted TraefikService over the per-ordinal Services:
+     ordinals above the live replica count have no endpoints, and a weighted
+     service keeps sending its share of new connections to them. Traefik's
+     load balancer takes the Service's *ready endpoints* as its children
+     (nativeLB defaults to false), so membership follows scaling for free.
+
+     The sticky cookie is what keeps a browser on the pod that minted its game,
+     which matters because the host's own post-GameStarted socket redials the
+     entry address rather than the pod it was already talking to. */}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - {{ .Values.scaleOut.entryPoint | default "websecure" }}
+  routes:
+    - kind: Rule
+      match: Host(`{{ $host }}`)
+      {{- with $mw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ .Values.service.port }}
+          {{- if .Values.scaleOut.sticky.enabled }}
+          sticky:
+            cookie:
+              name: {{ .Values.scaleOut.sticky.name }}
+              secure: {{ .Values.scaleOut.sticky.secure }}
+              httpOnly: {{ .Values.scaleOut.sticky.httpOnly }}
+              sameSite: {{ .Values.scaleOut.sticky.sameSite }}
+              maxAge: {{ int64 .Values.scaleOut.sticky.maxAge }}
+          {{- end }}
+  tls:
+    secretName: {{ include "phase-server.tlsSecretName" . }}
+    {{- if .Values.cloudflare.authenticatedOriginPulls.enabled }}
+    options:
+      name: {{ $fullname }}-cf-origin-pull
+    {{- end }}
+{{- range $i := until (int .Values.scaleOut.replicaMax) }}
+---
+{{- /* Per-ordinal route. This is the routing key that actually works today:
+     the server advertises its own host in ServerHello, the client turns that
+     into a "CODE@host" share string, and a friend joining by code dials this
+     host — landing on the pod that holds the game. No stickiness here; the
+     hostname already names the pod. */}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $fullname }}-{{ $i }}
+  labels:
+    {{- include "phase-server.labels" $ | nindent 4 }}
+    phase-server/ordinal: {{ $i | quote }}
+spec:
+  entryPoints:
+    - {{ $.Values.scaleOut.entryPoint | default "websecure" }}
+  routes:
+    - kind: Rule
+      match: Host(`{{ include "phase-server.ordinalHost" (dict "ctx" $ "ordinal" $i) }}`)
+      {{- with $mw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}-{{ $i }}
+          port: {{ $.Values.service.port }}
+  tls:
+    secretName: {{ include "phase-server.tlsSecretName" $ }}
+    {{- if $.Values.cloudflare.authenticatedOriginPulls.enabled }}
+    options:
+      name: {{ $fullname }}-cf-origin-pull
+    {{- end }}
+{{- end }}
+{{- end }}

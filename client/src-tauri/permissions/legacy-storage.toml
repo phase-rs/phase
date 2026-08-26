@@ -1,0 +1,54 @@
+[[permission]]
+identifier = "allow-stash-legacy-storage"
+description = "Allows the bundled bootstrap page to stage legacy storage."
+commands.allow = ["stash_legacy_storage"]
+
+[[permission]]
+identifier = "allow-set-channel-preference"
+description = "Allows first-party remote content to persist its selected channel."
+commands.allow = ["set_channel_preference"]
+
+[[permission]]
+identifier = "allow-take-legacy-storage"
+description = "Allows first-party remote content to read staged legacy storage."
+commands.allow = ["take_legacy_storage"]
+
+[[permission]]
+identifier = "allow-confirm-legacy-import"
+description = "Allows first-party remote content to confirm legacy storage import."
+commands.allow = ["confirm_legacy_import"]
+
+[[permission]]
+identifier = "allow-mark-remote-load-ok"
+description = "Allows first-party remote content to mark a successful remote load."
+commands.allow = ["mark_remote_load_ok"]
+
+[[permission]]
+identifier = "allow-ensure-native-engine"
+description = "Allows first-party remote content to prepare a signed native engine for a typed channel key."
+commands.allow = ["ensure_native_engine"]
+
+[[permission]]
+identifier = "allow-native-engine-progress"
+description = "Allows first-party remote content to read the latest native-engine provisioning progress."
+commands.allow = ["native_engine_progress"]
+
+[[permission]]
+identifier = "allow-stop-native-engine"
+description = "Allows first-party remote content to stop the shell-owned native engine."
+commands.allow = ["stop_native_engine"]
+
+[[permission]]
+identifier = "allow-connect-native-engine"
+description = "Allows first-party remote content to open a shell-pinned native-engine bridge."
+commands.allow = ["connect_native_engine"]
+
+[[permission]]
+identifier = "allow-native-engine-bridge-send"
+description = "Allows first-party remote content to send JSON text through its native-engine bridge."
+commands.allow = ["native_engine_bridge_send"]
+
+[[permission]]
+identifier = "allow-native-engine-bridge-close"
+description = "Allows first-party remote content to close its native-engine bridge."
+commands.allow = ["native_engine_bridge_close"]

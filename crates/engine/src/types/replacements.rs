@@ -57,6 +57,9 @@ pub enum ReplacementEvent {
     LifeReduced,
     /// CR 614.1a: Replaces attaching an Aura, Equipment, or Fortification.
     Attached,
+    /// CR 701.23a + CR 614.1: Replaces what happens to one card found during
+    /// a search. Each found card is a separate event for CR 616.1 ordering.
+    SearchFound,
 
     // --- Placeholder variants (recognized, no active logic yet) ---
     /// CR 614.11: Replaces drawing multiple cards at once.
@@ -131,6 +134,7 @@ impl fmt::Display for ReplacementEvent {
             ReplacementEvent::PayLife => write!(f, "PayLife"),
             ReplacementEvent::LifeReduced => write!(f, "LifeReduced"),
             ReplacementEvent::Attached => write!(f, "Attached"),
+            ReplacementEvent::SearchFound => write!(f, "SearchFound"),
             ReplacementEvent::DrawCards => write!(f, "DrawCards"),
             ReplacementEvent::ProduceMana => write!(f, "ProduceMana"),
             ReplacementEvent::Scry => write!(f, "Scry"),
@@ -181,6 +185,7 @@ impl FromStr for ReplacementEvent {
             "PayLife" => ReplacementEvent::PayLife,
             "LifeReduced" => ReplacementEvent::LifeReduced,
             "Attached" => ReplacementEvent::Attached,
+            "SearchFound" => ReplacementEvent::SearchFound,
             "DrawCards" => ReplacementEvent::DrawCards,
             "ProduceMana" => ReplacementEvent::ProduceMana,
             "Scry" => ReplacementEvent::Scry,

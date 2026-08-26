@@ -7,7 +7,7 @@ use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_silent_drops, parse_warning_pattern,
     CardCoverageResult, CoverageSummary, GapDetail, ParsedItem,
 };
-use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use engine::parser::oracle_ir::diagnostic::{OracleDiagnostic, OracleItemId, OracleSourceSpan};
 use engine::types::card::CardFace;
 use serde::Serialize;
 
@@ -45,6 +45,15 @@ struct WarningDrilldownWarning {
     pattern: String,
     line_index: usize,
     text: String,
+    /// Unit provenance, present only on stamped swallow-audit findings. The span is the
+    /// card-absolute byte range of the audit unit's OWN lines — line-granular today, so
+    /// two clauses on one line share it (see `OracleDiagnostic::SwallowedClause`).
+    /// `items` is the unit's pooled evidence set, legitimately empty for a card that
+    /// lowered to no items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit_span: Option<OracleSourceSpan>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence_items: Vec<OracleItemId>,
 }
 
 fn build_warning_drilldown(
@@ -85,6 +94,8 @@ fn build_warning_drilldown(
                     pattern: warning_pattern,
                     line_index: warning.line_index(),
                     text: warning_text(warning),
+                    unit_span: warning.unit_span().cloned(),
+                    evidence_items: warning.evidence_items().to_vec(),
                 })
             })
             .collect();

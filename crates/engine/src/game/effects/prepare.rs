@@ -10,8 +10,51 @@ use crate::types::zones::Zone;
 
 use crate::game::ability_utils::build_target_slots;
 use crate::game::casting;
+use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::game_object::PreparedState;
 use crate::game::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored prepared-copy announcement for the Priority preflight.
+/// The source identity remains private to the Prepare authority until the
+/// Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPreparedCopyAnnouncement {
+    source_id: ObjectId,
+}
+
+impl PriorityPreparedCopyAnnouncement {
+    fn new(source_id: ObjectId) -> Self {
+        Self { source_id }
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+}
+
+/// Enumerates prepared copies that the current Priority holder can cast now.
+/// `can_cast_prepared_copy_now` remains the canonical legality authority; the
+/// ordinary reducer revalidates the fixed source when replaying on a clone.
+pub(in crate::game) fn priority_prepared_copy_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPreparedCopyAnnouncement> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&source_id| {
+            state.objects.get(&source_id).is_some_and(|object| {
+                object.controller == principal.semantic_holder()
+                    && object.prepared.is_some()
+                    && can_cast_prepared_copy_now(state, principal.semantic_holder(), source_id)
+            })
+        })
+        .map(PriorityPreparedCopyAnnouncement::new)
+        .collect()
+}
 
 // The prepare cast path now materializes a short-lived exile GameObject copy of
 // the prepare-spell face so the copy can reuse the normal casting pipeline
@@ -81,6 +124,7 @@ pub fn resolve_become_prepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomePrepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -110,6 +154,7 @@ pub fn resolve_become_unprepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomeUnprepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -211,8 +256,18 @@ pub(crate) fn open_copy_target_selection(
 
 fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     // Defensive cleanup for any failed cast attempt after synthesizing the
-    // ephemeral copy object.
-    state.stack.retain(|entry| entry.id != copy_id);
+    // ephemeral copy object. The predicate filters on a unique id, so this
+    // removes at most ONE entry — routed through the shared stack-removal
+    // authority rather than expressed as a `retain`, which would leave both
+    // per-entry side tables stranded and the removal unjournaled.
+    if let Some(idx) = state.stack.iter().position(|entry| entry.id == copy_id) {
+        crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("position yielded a live stack index");
+    }
     state.objects.remove(&copy_id);
 }
 
@@ -251,6 +306,7 @@ fn synthesize_prepared_copy_object(
 
     let mut copy_obj = src_clone;
     copy_obj.id = copy_id;
+    // allow-raw-zone: prepared-copy birth in exile has no from-zone event (CR 722.3c).
     copy_obj.zone = Zone::Exile;
     copy_obj.controller = controller;
     copy_obj.owner = controller;
@@ -335,7 +391,9 @@ fn mark_prepare_copy_cancel_rollback(
 
     if matches!(
         waiting,
-        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+        WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::PhyrexianPayment { .. }
     ) {
         if let Some(pending) = state.pending_cast.as_mut() {
             debug_assert_eq!(
@@ -590,6 +648,7 @@ mod tests {
             None,
             false,
             crate::types::zones::EtbTapState::Unspecified,
+            false,
             None,
             &[],
             None,
@@ -748,7 +807,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -808,7 +867,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(42),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -1179,6 +1238,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types,
                 mana_cost,
@@ -1201,6 +1261,7 @@ mod tests {
                 casting_restrictions: Vec::new(),
                 casting_options: Vec::new(),
                 layout_kind: Some(LayoutKind::Prepare),
+                parse_warnings: vec![],
             }
         }
     }

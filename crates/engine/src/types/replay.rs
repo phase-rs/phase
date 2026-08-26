@@ -6,6 +6,8 @@ use super::match_config::MatchConfig;
 use super::player::PlayerId;
 use crate::game::deck_loading::DeckList;
 
+pub const REPLAY_FORMAT_VERSION: u32 = 2;
+
 /// Everything needed to reconstruct a game's starting state, deterministically,
 /// from scratch. Mirrors the inputs `initialize_game` already accepts at the
 /// WASM boundary — a replay's header is just those inputs captured at game
@@ -43,6 +45,10 @@ pub struct RecordedAction {
 /// `crate::game::replay`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayLog {
+    /// Replay schema version. `None` represents a legacy recording that
+    /// predates explicit versioning and is rejected before reconstruction.
+    #[serde(default)]
+    pub format_version: Option<u32>,
     pub header: ReplayHeader,
     pub actions: Vec<RecordedAction>,
 }
@@ -50,6 +56,7 @@ pub struct ReplayLog {
 impl ReplayLog {
     pub fn new(header: ReplayHeader) -> Self {
         Self {
+            format_version: Some(REPLAY_FORMAT_VERSION),
             header,
             actions: Vec::new(),
         }

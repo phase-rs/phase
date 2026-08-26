@@ -46,7 +46,13 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   engine_panic: { blobs: ["reason", "panic", "game_mode"], doubles: ["fatal", "turn"] },
   stuck_decision: { blobs: ["waiting_for_kind", "game_mode", "phase"], doubles: [] },
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
-  chunk_reload: { blobs: ["reason", "chunk"], doubles: ["deferred"] },
+  // `probe_*` columns are appended (never inserted — AE columns are
+  // positional) and populated only on `reason: "loop-abort"` events: the
+  // client refetches the failing chunk and reports what it actually got.
+  chunk_reload: {
+    blobs: ["reason", "chunk", "probe_cache", "probe_ray"],
+    doubles: ["deferred", "probe_status", "probe_sw"],
+  },
   game_end: {
     blobs: [
       "result",
@@ -54,6 +60,11 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
       "game_mode",
       "unimplemented_oracle_ids",
       "pending_trigger_abandons",
+      // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+      // local AI engine and native-engine fallback code; "" from clients
+      // predating the fields.
+      "engine_mode",
+      "native_fallback_reason",
     ],
     doubles: ["turn_count"],
   },
@@ -62,7 +73,15 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     doubles: ["turn", "supported", "total"],
   },
   session_start: { blobs: ["route"], doubles: [] },
-  game_start: { blobs: ["game_mode"], doubles: ["player_count", "ai_count"] },
+  // `format` appended 2026-07: the engine `GameFormat` variant name (e.g.
+  // "Commander", "HistoricBrawl"); "" from clients predating the field.
+  // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+  // local AI engine and native-engine fallback code; "" from clients
+  // predating the fields.
+  game_start: {
+    blobs: ["game_mode", "format", "engine_mode", "native_fallback_reason"],
+    doubles: ["player_count", "ai_count"],
+  },
   route_view: { blobs: ["route"], doubles: [] },
 };
 

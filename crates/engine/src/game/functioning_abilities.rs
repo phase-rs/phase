@@ -67,9 +67,10 @@
 use crate::game::game_object::GameObject;
 use crate::game::layers::evaluate_condition;
 use crate::types::ability::{
-    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
+    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
 };
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
@@ -185,6 +186,12 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
 /// remains the documented exception because it applies its own inline
 /// `active_zones` gate.
 pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
+    // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
+    // have its rules text — a door-stamped static functions only while its
+    // half is unlocked (single authority: `room::door_text_functions`).
+    if !crate::game::room::door_text_functions(obj, def.room_door) {
+        return false;
+    }
     match obj.zone {
         Zone::Command => obj.is_emblem || non_emblem_command_zone_static_functions(obj, def),
         zone => {
@@ -380,32 +387,63 @@ pub fn battlefield_statics_matching<'a, T: 'a>(
         .filter_map(move |(obj, def)| extract(&def.mode).map(|payload| (obj, def, payload)))
 }
 
-/// Iterate `TriggerDefinition`s on `obj` with the CR 702.26b / CR 114.4
-/// gate applied. Yields `(index, def)` pairs; the index is stable against
-/// `obj.trigger_definitions` so callers that need to reference a specific
-/// trigger (e.g. `TriggerId { object, index }`) can recover it.
+/// A functioning live definition plus compatibility-only display metadata.
+#[derive(Debug, Clone)]
+pub struct ActiveTriggerDefinition<'a> {
+    pub live_index: usize,
+    pub definition_ref: TriggerDefinitionRef,
+    pub definition: &'a TriggerDefinition,
+}
+
+/// Iterate identity-bearing `TriggerDefinition`s on `obj` with the CR 702.26b
+/// / CR 114.4 gate applied. `live_index` is presentation metadata only; every
+/// runtime identity consumer must use `definition_ref`.
 ///
 /// CR 603.4 intervening-if is deliberately NOT filtered here — it is a
 /// two-point check (at placement and at resolution) handled by the trigger
 /// pipeline. Helper consumers still need that check at those checkpoints.
 pub fn active_trigger_definitions<'a>(
-    _state: &'a GameState,
+    state: &'a GameState,
     obj: &'a GameObject,
-) -> Box<dyn Iterator<Item = (usize, &'a TriggerDefinition)> + 'a> {
+) -> Box<dyn Iterator<Item = ActiveTriggerDefinition<'a>> + 'a> {
+    // CR 800.4a: objects owned by a player who left the game have left with
+    // that player. They remain serialized in the Exile zone for the terminal
+    // game snapshot, but cannot continue contributing trigger occurrences.
+    if !crate::game::players::is_alive(state, obj.owner) {
+        return Box::new(std::iter::empty());
+    }
     if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
     let zone = obj.zone;
     let is_emblem = obj.is_emblem;
+    let source = ObjectIncarnationRef::from_object(obj);
     Box::new(
         obj.trigger_definitions
             .iter_all()
             .enumerate()
-            .filter(move |(_, def)| {
+            .filter(move |(_, entry)| {
+                // CR 709.5: on the battlefield a locked half's rules text does
+                // not function — a door-stamped trigger contributes only while
+                // its Room half is unlocked. (CR 709.5h needs no exception:
+                // the designation is granted BEFORE the unlock event is
+                // matched, so the just-unlocked half already passes.) Shared
+                // authority with the statics gathers: `room::door_text_functions`.
+                if !crate::game::room::door_text_functions(obj, entry.definition().room_door) {
+                    return false;
+                }
                 if zone == Zone::Command && !is_emblem {
-                    return non_emblem_command_zone_trigger_functions(obj, def);
+                    return non_emblem_command_zone_trigger_functions(obj, entry.definition());
                 }
                 true
+            })
+            .map(move |(live_index, entry)| ActiveTriggerDefinition {
+                live_index,
+                definition_ref: TriggerDefinitionRef {
+                    source,
+                    occurrence: entry.occurrence.clone(),
+                },
+                definition: entry.definition(),
             }),
     )
 }
@@ -415,13 +453,13 @@ pub fn active_trigger_definitions<'a>(
 /// `trigger_definitions` so callers can round-trip to a `TriggerId`.
 pub fn battlefield_active_triggers(
     state: &GameState,
-) -> impl Iterator<Item = (usize, &GameObject, &TriggerDefinition)> {
+) -> impl Iterator<Item = (&GameObject, ActiveTriggerDefinition<'_>)> {
     state
         .battlefield
         .iter()
         .filter_map(move |id| state.objects.get(id))
         .flat_map(move |obj| {
-            active_trigger_definitions(state, obj).map(move |(idx, def)| (idx, obj, def))
+            active_trigger_definitions(state, obj).map(move |active| (obj, active))
         })
 }
 
@@ -462,7 +500,8 @@ pub fn active_replacements(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition, TypedFilter,
+        PlayerScope, ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition,
+        TypedFilter,
     };
     use crate::types::format::FormatConfig;
     use crate::types::game_state::GameState;
@@ -552,6 +591,18 @@ mod tests {
     }
 
     #[test]
+    fn eliminated_owner_returns_no_active_triggers() {
+        let mut state = new_state();
+        state.players[0].is_eliminated = true;
+        let mut obj = make_obj(1, Zone::Exile);
+        obj.trigger_definitions =
+            vec![TriggerDefinition::new(TriggerMode::SpellCast).trigger_zones(vec![Zone::Exile])]
+                .into();
+
+        assert_eq!(active_trigger_definitions(&state, &obj).count(), 0);
+    }
+
+    #[test]
     fn phased_out_object_returns_no_active_replacements() {
         let mut state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
@@ -616,8 +667,11 @@ mod tests {
 
         let triggers: Vec<_> = active_trigger_definitions(&state, &obj).collect();
         assert_eq!(triggers.len(), 1);
-        assert_eq!(triggers[0].0, 1);
-        assert!(triggers[0].1.trigger_zones.contains(&Zone::Command));
+        assert_eq!(triggers[0].live_index, 1);
+        assert!(triggers[0]
+            .definition
+            .trigger_zones
+            .contains(&Zone::Command));
     }
 
     /// Symmetric coverage for the cost-mod / "without condition filtering"
@@ -782,15 +836,58 @@ mod tests {
         assert_eq!(active_static_definitions(&state, &on_bf).count(), 0);
     }
 
+    /// CR 709.5 + CR 709.5c: a door-stamped static on a battlefield Room
+    /// functions only while its half is unlocked (uncast entry per CR 709.5d
+    /// leaves both halves locked); off the battlefield there are no lock
+    /// designations, so the stamp must not gate there. Exercised through
+    /// `active_static_definitions`; `game_functioning_statics` and
+    /// `battlefield_functioning_statics` share the same
+    /// `static_functions_in_zone` predicate.
+    #[test]
+    fn door_stamped_static_functions_only_while_its_half_is_unlocked() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+
+        let state = new_state();
+        let mut obj = make_obj(1, Zone::Battlefield);
+        obj.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).room_door(RoomDoor::Right)].into();
+        // Neither door unlocked (uncast entry, CR 709.5d): no rules text.
+        obj.room_unlocks = Some(RoomUnlockState::default());
+        assert_eq!(active_static_definitions(&state, &obj).count(), 0);
+        // The stamped half unlocked: its text functions.
+        obj.room_unlocks = Some(RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+        assert_eq!(active_static_definitions(&state, &obj).count(), 1);
+        // The OTHER half unlocked: the stamped half stays locked and silent.
+        obj.room_unlocks = Some(RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+        assert_eq!(active_static_definitions(&state, &obj).count(), 0);
+
+        // Off the battlefield the gate does not apply — both halves' text
+        // exists there (mirror of the trigger gate's zone scope).
+        let mut in_graveyard = make_obj(2, Zone::Graveyard);
+        in_graveyard.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)
+            .active_zones(vec![Zone::Graveyard])
+            .room_door(RoomDoor::Right)]
+        .into();
+        assert_eq!(active_static_definitions(&state, &in_graveyard).count(), 1);
+    }
+
     #[test]
     fn condition_false_static_is_filtered() {
         // IsMonarch evaluates false when state.monarch is None (default).
         let state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 0);
     }
@@ -800,9 +897,11 @@ mod tests {
         let mut state = new_state();
         state.monarch = Some(PlayerId(0));
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
@@ -815,7 +914,9 @@ mod tests {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
         let trig = TriggerDefinition {
-            condition: Some(crate::types::ability::TriggerCondition::IsMonarch),
+            condition: Some(crate::types::ability::TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
             ..TriggerDefinition::new(TriggerMode::ChangesZone)
         };
         obj.trigger_definitions = vec![trig].into();
@@ -928,9 +1029,11 @@ mod tests {
         let mut state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         put_on_battlefield(&mut state, obj);
 
@@ -1009,9 +1112,11 @@ mod tests {
         let state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(
             active_static_definitions(&state, &obj).count(),

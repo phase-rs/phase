@@ -6,10 +6,14 @@
 # perf gate its own build lock and fingerprint namespace so it never blocks on
 # (or thrashes against) Tilt's shared target/debug builds.
 #
-# NOTE: this wrapper builds --release; its WALL-CLOCK is NOT comparable to CI,
-# which runs the DEBUG profile via `cargo ai-perf-gate`. Counter VERDICTS are
-# profile-independent (logical event counts), so the wrapper's PASS/FAIL is
-# correct locally — only its timing must not be transferred to the CI budget.
+# This wrapper and CI (`cargo ai-perf-gate`) now build the SAME profile,
+# server-release, so wall-clock here is comparable to CI's. Counter VERDICTS were
+# already profile-independent (logical event counts); unifying the profile makes
+# the TIMING transferable too.
+#
+# Previously this built `--release` while CI built dev — two different profiles,
+# neither of them the native speed one, and `--release` in this workspace is the
+# WASM-size profile (opt-level 'z', panic = 'abort').
 #
 # Usage: scripts/ai-perf-gate.sh [ai-perf-gate args...]
 #   scripts/ai-perf-gate.sh                    # compare against the saved baseline
@@ -19,5 +23,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="$ROOT/target/ai"
 
-cargo build --release --bin ai-perf-gate
-exec "$CARGO_TARGET_DIR/release/ai-perf-gate" "$@"
+cargo build --profile server-release --bin ai-perf-gate
+exec "$CARGO_TARGET_DIR/server-release/ai-perf-gate" "$@"

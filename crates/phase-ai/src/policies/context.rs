@@ -1,5 +1,6 @@
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::game_object::GameObject;
+use engine::game::players::is_opponent;
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -9,7 +10,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{
-    cast_facts_for_action, effect_profile_for_action, CastFacts, EffectProfile,
+    cast_facts_for_action, effect_profile_for_action, effective_activated_ability, CastFacts,
+    EffectProfile,
 };
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
@@ -82,6 +84,22 @@ impl<'a> PolicyContext<'a> {
     /// policies that project should gate their work behind this helper so
     /// the tightest-budget path (Medium, 1500ms) doesn't pay the ~1.5s
     /// simulation cost and blow its own budget.
+    ///
+    /// The `remaining().is_none_or(..)` resolving to `true` on a
+    /// `Deadline::none()` deadline is deliberate and load-bearing: measurement
+    /// runs have no wall clock and MUST still take projections, so `cargo
+    /// ai-gate` measures the same policy production runs. Changing it to
+    /// `is_some_and` would pin `velocity_score` to 0.0 for every uncached
+    /// projection in the gate — a far larger baseline move than any wall-clock
+    /// fix, measuring a policy that never ships.
+    ///
+    /// One production path also reaches here with a never-overwritten
+    /// `Deadline::none()`: `search::emit_decision_trace` builds its `AiContext`
+    /// via `build_ai_context_with_session` (which initializes `deadline` to
+    /// `none()`) and never routes through `PlannerServices::with_deadline`. That
+    /// path is diagnostic (gated on `phase_ai::decision_trace` DEBUG) and feeds
+    /// the duel suite's attribution mode, so a flip would also silently change
+    /// trace output.
     pub fn can_afford_projection(&self) -> bool {
         if self.context.deadline.expired() {
             return false;
@@ -185,6 +203,12 @@ impl<'a> PolicyContext<'a> {
             })
     }
 
+    /// Exact activated ability represented by this candidate, including
+    /// runtime-granted abilities in the engine's production index space.
+    pub fn effective_activated_ability(&self) -> Option<AbilityDefinition> {
+        effective_activated_ability(self.state, &self.candidate.action)
+    }
+
     /// Effect-level profile for both spells and activated abilities.
     /// For spells, delegates to CastFacts (includes ETB/replacement effects).
     /// For activated abilities, scans the specific ability's effect chain.
@@ -207,12 +231,23 @@ impl<'a> PolicyContext<'a> {
             .into_iter()
             .any(|target| match target {
                 TargetRef::Object(id) => self.state.objects.get(&id).is_some_and(|object| {
-                    object.controller != self.ai_player
+                    is_opponent(self.state, self.ai_player, object.controller)
                         && object.card_types.core_types.contains(&CoreType::Creature)
                         && is_relevant(id)
                 }),
                 TargetRef::Player(_) => false,
             })
+    }
+
+    /// Does the pending spell carry an inherently-mass effect (`DestroyAll`,
+    /// CR 701.8) with a non-empty OPPONENT population under the resolver's
+    /// NON-targeted semantics (CR 115.10a; team-aware via `is_opponent`)? The
+    /// engine's tactical gate (redundant-removal suppression) and the
+    /// cast-commit anti-whiff scoring both consult this BEFORE any
+    /// target-legality gate: a wipe line that clears an un-targetable
+    /// (hexproof/protected) population is a real removal line, not a whiff.
+    pub(crate) fn has_opposing_mass_population(&self) -> bool {
+        super::removal_lethality::has_opposing_mass_population(self)
     }
 }
 
@@ -245,9 +280,11 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, EffectKind, PtValue, QuantityExpr, TargetFilter,
+        TypedFilter,
     };
-    use engine::types::game_state::{PendingCast, TargetSelectionSlot};
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::{PendingCast, TargetEffectDetail, TargetSelectionSlot};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
@@ -275,6 +312,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -285,10 +325,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(engine::types::ability::TargetRef::Object(ObjectId(2))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -340,6 +377,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -348,10 +388,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -417,10 +454,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -491,10 +525,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -511,6 +542,98 @@ mod tests {
         let facts = ctx.cast_facts().expect("cast facts");
         assert_eq!(facts.immediate_etb_triggers.len(), 1);
         assert!(facts.has_direct_removal_text());
+    }
+
+    #[test]
+    fn legal_opponent_creature_target_is_team_aware() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let source_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        let teammate_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Teammate Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&teammate_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: source_id,
+                card_id: CardId(10),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ai_context = crate::context::AiContext::empty(&config.weights);
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+
+        {
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &ai_context,
+                cast_facts: None,
+                search_depth: SearchDepth::Root,
+            };
+            assert!(
+                !ctx.has_legal_opponent_creature_target(&creature_filter, source_id, |_| true),
+                "P1's legal creature target is P0's teammate in 2HG, not an opponent"
+            );
+        }
+
+        let opponent_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(2),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        assert!(
+            ctx.has_legal_opponent_creature_target(&creature_filter, source_id, |_| true),
+            "P2's legal creature target is P0's opponent in 2HG"
+        );
     }
 
     fn deadline_test_ctx<'a>(
@@ -562,6 +685,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -570,10 +696,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
@@ -613,6 +736,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -621,10 +747,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
@@ -642,8 +765,10 @@ mod tests {
         config.search.projection_min_budget_ms = 0;
 
         let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
-        // Tight but not expired — 1ms remaining.
-        ai_ctx.deadline = engine::util::Deadline::after(1);
+        // Large budget keeps this deterministic under parallel test load —
+        // with floor=0 the remaining time is never read, so any non-expired
+        // deadline exercises the same branch.
+        ai_ctx.deadline = engine::util::Deadline::after(60_000);
 
         let ability = ResolvedAbility::new(
             Effect::Pump {
@@ -663,6 +788,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -671,15 +799,13 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
-        // With floor=0, even 1ms remaining allows projection. Only an
-        // already-expired deadline blocks.
+        // With floor=0, any non-expired deadline allows projection; only an
+        // already-expired one blocks (covered by
+        // `deadline_expired_gates_projection`).
         assert!(ctx.can_afford_projection());
     }
 }

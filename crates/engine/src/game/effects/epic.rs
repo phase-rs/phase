@@ -79,19 +79,20 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
             player: effect.controller,
             gate: crate::types::ability::TurnGate::None,
         },
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::EpicCopy {
                 spell: effect.spell.clone(),
             },
             Vec::new(),
             effect.prototype_id,
             effect.controller,
-        ),
+        )),
         controller: effect.controller,
         source_id: effect.prototype_id,
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }
 
@@ -115,6 +116,7 @@ pub(crate) fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -129,10 +131,15 @@ pub(crate) fn resolve(
     let mut copy_obj = source_obj.clone();
     copy_obj.id = copy_id;
     copy_obj.controller = controller;
+    // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
     copy_obj.zone = Zone::Stack;
     copy_obj.is_token = true;
     copy_obj.additional_cost_payment_count = 0;
     copy_obj.kickers_paid.clear();
+    // CR 707.10 (+ CR 702.50a context: the upkeep copy is put on the stack,
+    // not cast): no mana was spent on the copy — reset the cast-payment
+    // stamps inherited from the original Epic cast.
+    copy_obj.clear_cast_payment_stamps();
     copy_obj.keywords.retain(|k| !matches!(k, Keyword::Epic));
     let card_id = copy_obj.card_id;
     state.objects.insert(copy_id, copy_obj);
@@ -142,18 +149,23 @@ pub(crate) fn resolve(
     let mut copy_ability = (**spell).clone();
     set_resolved_source_recursive(&mut copy_ability, copy_id);
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(copy_ability.clone()),
-            casting_variant: CastingVariant::default(),
-            actual_mana_spent: 0,
+    // CR 707.10 + CR 702.50a: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(Box::new(copy_ability.clone())),
+                casting_variant: CastingVariant::default(),
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        None,
+        events,
+    );
 
     // CR 707.10: a copy is put on the stack but not cast — `SpellCopied` (not
     // `SpellCast`) so copy-sensitive triggers fire without cast-only triggers.
@@ -185,6 +197,95 @@ pub(crate) fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    /// CR 707.10 + CR 702.50a (issue #5943): the upkeep Epic copy is put on
+    /// the stack, not cast — it must carry NO cast-payment record even though
+    /// it clones the original Epic card's object. The prototype keeps its own
+    /// record (reach-guard).
+    #[test]
+    fn epic_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let prototype = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Epic Prototype".to_string(),
+            Zone::Graveyard,
+        );
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&prototype].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: prototype,
+                    lki,
+                },
+            );
+        }
+
+        let inner = ResolvedAbility::new(
+            Effect::unimplemented("epic test spell", "epic test spell body"),
+            vec![],
+            prototype,
+            owner,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::EpicCopy {
+                spell: Box::new(inner),
+            },
+            vec![],
+            prototype,
+            owner,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("EpicCopy resolves");
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, prototype, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the prototype keeps its payment record.
+        assert_eq!(
+            state.objects[&prototype].mana_spent_to_cast_amount, 2,
+            "prototype keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&prototype].phyrexian_life_paid, 1,
+            "prototype keeps its own Phyrexian life-payment record"
+        );
+    }
 }

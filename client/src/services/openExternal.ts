@@ -1,20 +1,25 @@
-import { open } from "@tauri-apps/plugin-shell";
+import { isTauri } from "./platform";
 
-import { isTauri } from "./sidecar";
+/** The single URL authority for document and direct external-link routing. */
+export function isOpenableExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
-/**
- * Open an external URL in the user's default browser.
- *
- * A plain `target="_blank"` is unreliable inside a Tauri webview across
- * platforms (tauri#4756, tauri#7285): the webview is the app's only surface, so
- * a stray navigation can replace the SPA with no way back. Under Tauri we route
- * through the shell plugin's `open()` — already permitted via `shell:allow-open`
- * — which hands the URL to the OS and opens the default browser. On the web
- * build there is no Tauri runtime, so we open a new tab as usual.
- */
+/** Open a validated HTTP(S) URL in the user's default browser. */
 export function openExternal(url: string): void {
+  if (!isOpenableExternalUrl(url)) return;
+
   if (isTauri()) {
-    void open(url);
+    void import("@tauri-apps/plugin-opener")
+      .then(({ openUrl }) => openUrl(url))
+      .catch((err: unknown) => {
+        console.warn("[phase.rs] Failed to open external URL via Tauri opener.", err);
+      });
   } else {
     window.open(url, "_blank", "noopener,noreferrer");
   }

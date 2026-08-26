@@ -27,7 +27,11 @@ export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       const engine = await loadEngineModule();
-      await engine.default();
+      if (__ENGINE_WASM_URL__) {
+        await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
+      } else {
+        await engine.default();
+      }
     })();
   }
   return wasmInitPromise;
@@ -232,6 +236,26 @@ export async function commanderPartnerCandidates(
   return engine.commanderPartnerCandidates(firstCommander, candidates) as string[];
 }
 
+export type SignatureSpellSelectionPolicy =
+  | { type: "None" }
+  | { type: "Required"; data: { candidates: string[] } };
+
+/** Returns the engine-authored Oathbreaker signature-spell selection policy. */
+export async function signatureSpellSelectionPolicy(
+  request: unknown,
+): Promise<SignatureSpellSelectionPolicy> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.signatureSpellSelectionPolicy(request) as SignatureSpellSelectionPolicy;
+}
+
+/** Returns the engine-approved Commander-family companion candidates. */
+export async function companionCandidates(request: unknown): Promise<string[]> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.companionCandidates(request) as string[];
+}
+
 /**
  * CR 100.2a / CR 903.5b: A card's per-card deck-construction copy-limit override
  * as a discriminated union, or `null` when the default four-of / singleton limit
@@ -252,6 +276,24 @@ export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null>
   await ensureCardDatabase();
   const engine = await loadEngineModule();
   return engine.deckCopyLimit(name) as DeckCopyLimit | null;
+}
+
+/**
+ * CR 100.2a / CR 903.5b: How many copies of a card a deck in `format` may hold
+ * across main deck, sideboard, and command zone combined (CR 100.4a).
+ *
+ * Unlike `deckCopyLimit` (which reports only a card's printed override), this
+ * is the resolved ceiling — the engine has already applied the basic-land
+ * exemption, the printed override, and the format default. Compare a combined
+ * count against it directly; never re-derive four-of / singleton client-side.
+ */
+export async function maxDeckCopies(
+  name: string,
+  format: GameFormat,
+): Promise<DeckCopyLimit> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.maxDeckCopies(name, format) as DeckCopyLimit;
 }
 
 /**
