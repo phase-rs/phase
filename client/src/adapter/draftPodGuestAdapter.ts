@@ -11,7 +11,12 @@
  */
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
-import { P2PDraftGuest, type DraftGuestConnection, type DraftGuestEvent } from "./p2p-draft-guest";
+import {
+  P2PDraftGuest,
+  type DraftGuestConnection,
+  type DraftGuestEvent,
+  type DraftGuestRecoveryFailure,
+} from "./p2p-draft-guest";
 import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
@@ -60,7 +65,7 @@ export type DraftPodGuestEvent =
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
   | { type: "reconnecting"; attempt: number }
-  | { type: "reconnectFailed"; reason: string };
+  | { type: "reconnectFailed"; failure: DraftGuestRecoveryFailure };
 
 type DraftPodGuestEventListener = (event: DraftPodGuestEvent) => void;
 
@@ -92,6 +97,7 @@ export class DraftPodGuestAdapter {
   private _seatIndex: number | null = null;
   private _draftCode: string | null = null;
   private _currentView: DraftPlayerView | null = null;
+  private recoveryFailure: DraftGuestRecoveryFailure | null = null;
 
   onEvent(listener: DraftPodGuestEventListener): () => void {
     this.listeners.push(listener);
@@ -180,6 +186,11 @@ export class DraftPodGuestAdapter {
     } catch (err) {
       this.setStatus("error");
       const message = err instanceof Error ? err.message : String(err);
+      if (config.kind === "reconnect" && !this.recoveryFailure) {
+        const failure: DraftGuestRecoveryFailure = { kind: "retryable", message };
+        this.recoveryFailure = failure;
+        this.emit({ type: "reconnectFailed", failure });
+      }
       this.emit({ type: "error", message });
       throw err;
     }
@@ -297,7 +308,8 @@ export class DraftPodGuestAdapter {
         break;
       case "reconnectFailed":
         this.setStatus("error");
-        this.emit({ type: "reconnectFailed", reason: event.reason });
+        this.recoveryFailure = event.failure;
+        this.emit({ type: "reconnectFailed", failure: event.failure });
         break;
       case "bo3SideboardPrompt":
         this.emit({

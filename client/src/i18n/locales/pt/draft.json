@@ -189,11 +189,14 @@
       "description": "Hospede ou entre em um pod com até 8 jogadores, drafte ao vivo juntos e depois jogue um torneio Suíço ou de eliminação."
     },
     "podInProgress": "Pod Draft em Andamento",
+    "guestPodInProgress": "Pod ingressado pronto para reconectar",
     "podLabel": "Pod {{kind}}",
+    "guestPodLabel": "Pod de draft",
     "seatCount": "{{count}} assentos",
     "roomLabel": "Sala {{code}}",
     "cardsPicked": "{{count}} cartas escolhidas",
     "resume": "Continuar",
+    "reconnect": "Reconectar",
     "draftInProgress": "Draft em Andamento",
     "draftComplete": "Draft Concluído",
     "resumeMatch": "Continuar Partida",
@@ -386,7 +389,8 @@
   "podError": {
     "kicked": "Você foi expulso do pod",
     "hostLeft": "O anfitrião saiu do draft",
-    "connection": "Erro de Conexão"
+    "connection": "Erro de Conexão",
+    "retry": "Tentar reconectar"
   },
   "lobby": {
     "title": "Lobby do Pod de Draft",

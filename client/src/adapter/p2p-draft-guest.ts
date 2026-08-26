@@ -17,7 +17,10 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
+import {
+  DRAFT_PROTOCOL_VERSION,
+  type DraftReconnectRejectionKind,
+} from "../network/draftProtocol";
 import type {
   DraftMatchLaunch,
   DraftMatchSettlement,
@@ -58,7 +61,17 @@ export type DraftGuestEvent =
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
   | { type: "reconnecting"; attempt: number }
-  | { type: "reconnectFailed"; reason: string };
+  | { type: "reconnectFailed"; failure: DraftGuestRecoveryFailure };
+
+/**
+ * The recovery layer, not a rendered string, owns whether another explicit
+ * reconnect attempt is meaningful.  This keeps terminal capability revocation
+ * and an offline host from sharing a misleading "Retry" affordance.
+ */
+export type DraftGuestRecoveryFailure =
+  | { kind: "retryable"; message: string }
+  | { kind: "incompatible"; message: string }
+  | { kind: "invalid"; message: string };
 
 /** First contact is intentionally an exclusive choice, never token fallback. */
 export type DraftGuestConnection =
@@ -79,6 +92,21 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
 const FIRST_CONTACT_TIMEOUT_MS = 10_000;
+
+function reconnectFailureForRejection(
+  kind: DraftReconnectRejectionKind,
+  message: string,
+): DraftGuestRecoveryFailure {
+  switch (kind) {
+    case "Kicked":
+    case "UnknownToken":
+      return { kind: "invalid", message };
+    case "ProtocolMismatch":
+      return { kind: "incompatible", message };
+    case "NoReconnectWindow":
+      return { kind: "retryable", message };
+  }
+}
 
 interface DraftHandshake {
   session: DraftPeerSession;
@@ -297,7 +325,11 @@ export class P2PDraftGuest {
         const reason = `Draft protocol mismatch: host v${msg.draftProtocolVersion}, client v${DRAFT_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PDraftGuest]", reason);
         this.terminated = true;
-        this.emit({ type: "reconnectFailed", reason });
+        this.rejectHandshake(session, new Error(reason));
+        this.emit({
+          type: "reconnectFailed",
+          failure: { kind: "incompatible", message: reason },
+        });
         return;
       }
     }
@@ -362,7 +394,10 @@ export class P2PDraftGuest {
           // version mismatch cannot be repaired by transport retries.
           this.terminated = true;
         }
-        this.emit({ type: "reconnectFailed", reason: msg.reason });
+        this.emit({
+          type: "reconnectFailed",
+          failure: reconnectFailureForRejection(msg.kind, msg.reason),
+        });
         break;
       }
 

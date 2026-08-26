@@ -39,6 +39,7 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
+import type { DraftGuestRecoveryFailure } from "../adapter/p2p-draft-guest";
 import {
   clearActiveDraftPod,
   clearActiveDraftGuest,
@@ -68,6 +69,8 @@ import { FORMAT_DEFAULTS } from "./multiplayerStore";
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type DraftRole = "host" | "guest";
+
+export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "superseded";
 
 /**
  * The pod SESSION's phase.
@@ -197,6 +200,8 @@ interface MultiplayerDraftState {
   pauseReason: DraftPauseReason | null;
   pairing: PairingInfo | null;
   error: string | null;
+  /** Recovery-only failure semantics, retained for an explicit retry CTA. */
+  guestRecoveryFailure: DraftGuestRecoveryFailure | null;
   selectedCard: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
@@ -235,7 +240,7 @@ interface MultiplayerDraftActions {
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
   /** Reconnect exclusively through the persisted capability, never `draft_join`. */
-  resumeDraft: () => Promise<"resumed" | "absent" | "invalid">;
+  resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
@@ -303,8 +308,14 @@ let activeGuestEventUnsub: (() => void) | null = null;
 let activeHostAbort: AbortController | null = null;
 let activeGuestAbort: AbortController | null = null;
 let activeHostRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
+let activeGuestRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
 let activeHostPersistenceId: string | null = null;
 let draftAdapterEpoch = 0;
+let resumeGuestDraftAttempt: {
+  routeToken: number;
+  signal: AbortSignal | undefined;
+  promise: Promise<GuestDraftResumeOutcome>;
+} | null = null;
 const disposedHostAdapters = new WeakSet<DraftPodHostAdapter>();
 const disposedGuestAdapters = new WeakSet<DraftPodGuestAdapter>();
 const retainedDraftSessionTeardowns = new Map<string, Promise<void>>();
@@ -330,9 +341,11 @@ function detachDraftAdapters(): DetachedDraftAdapters {
   activeHostAbort?.abort();
   activeGuestAbort?.abort();
   activeHostRouteAbortListener?.signal.removeEventListener("abort", activeHostRouteAbortListener.listener);
+  activeGuestRouteAbortListener?.signal.removeEventListener("abort", activeGuestRouteAbortListener.listener);
   activeHostAbort = null;
   activeGuestAbort = null;
   activeHostRouteAbortListener = null;
+  activeGuestRouteAbortListener = null;
   activeHostEventUnsub?.();
   activeGuestEventUnsub?.();
   activeHostEventUnsub = null;
@@ -686,6 +699,7 @@ const initialState: MultiplayerDraftState = {
   pauseReason: null,
   pairing: null,
   error: null,
+  guestRecoveryFailure: null,
   selectedCard: null,
   mainDeck: [],
   landCounts: {},
@@ -784,8 +798,8 @@ export const useMultiplayerDraftStore = create<
     const previous = detachDraftAdapters();
     const previousTeardown = disposeDetachedDraftAdapters(previous, true);
     retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
-    await previousTeardown;
-    await claimDraftSessionOwner(config.persistenceId);
+    if (previous.host || previous.guest) await previousTeardown;
+    if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
     if (epoch !== draftAdapterEpoch || config.signal?.aborted) return false;
 
     const adapter = new DraftPodHostAdapter();
@@ -868,8 +882,8 @@ export const useMultiplayerDraftStore = create<
     const previous = detachDraftAdapters();
     const previousTeardown = disposeDetachedDraftAdapters(previous, true);
     retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
-    await previousTeardown;
-    if (epoch !== draftAdapterEpoch) return;
+    if (previous.host || previous.guest) await previousTeardown;
+    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return;
 
     const adapter = new DraftPodGuestAdapter();
     const controller = new AbortController();
@@ -881,6 +895,19 @@ export const useMultiplayerDraftStore = create<
         handleGuestEvent(event, set);
       }
     });
+
+    const abortOwner = () => {
+      controller.abort();
+      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) return;
+      ++draftAdapterEpoch;
+      const detached = detachDraftAdapters();
+      const teardown = disposeDetachedDraftAdapters(detached, true);
+      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+      void teardown;
+      set(initialState);
+    };
+    config.signal?.addEventListener("abort", abortOwner, { once: true });
+    if (config.signal) activeGuestRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
     set({
       ...initialState,
@@ -896,34 +923,66 @@ export const useMultiplayerDraftStore = create<
       // See hostDraft: only the current owner is allowed to project errors.
     } finally {
       if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) {
+        config.signal?.removeEventListener("abort", abortOwner);
         await disposeGuestAdapter(adapter);
       } else if (!initialized || adapter.status === "error") {
         activeGuestAdapter = null;
         activeGuestAbort = null;
         activeGuestEventUnsub?.();
         activeGuestEventUnsub = null;
+        config.signal?.removeEventListener("abort", abortOwner);
+        activeGuestRouteAbortListener = null;
         await disposeGuestAdapter(adapter);
       }
     }
   },
 
-  resumeDraft: async () => {
-    const locator = loadActiveDraftGuest();
-    if (!locator) return "absent";
-    const session = await loadDraftGuestSession(locator.hostPeerId, locator);
-    if (!session) {
-      clearActiveDraftGuest();
-      return "invalid";
+  resumeDraft: async (options = {}) => {
+    const routeToken = options.routeToken ?? 0;
+    if (
+      resumeGuestDraftAttempt
+      && resumeGuestDraftAttempt.routeToken === routeToken
+      && resumeGuestDraftAttempt.signal === options.signal
+    ) {
+      return resumeGuestDraftAttempt.promise;
     }
 
-    await get().joinDraft({
-      kind: "reconnect",
-      roomCode: locator.roomCode,
-      displayName: locator.displayName,
-      hostPeerId: locator.hostPeerId,
-      draftToken: session.draftToken,
-    });
-    return activeGuestAdapter ? "resumed" : "invalid";
+    let attempt!: NonNullable<typeof resumeGuestDraftAttempt>;
+    const isCurrent = () => resumeGuestDraftAttempt === attempt && !options.signal?.aborted;
+    const promise = (async (): Promise<GuestDraftResumeOutcome> => {
+      if (options.signal?.aborted) return "superseded";
+      const locator = loadActiveDraftGuest();
+      if (!locator) return "absent";
+      const session = await loadDraftGuestSession(locator.hostPeerId, locator);
+      if (!isCurrent()) return "superseded";
+      if (!session) {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+
+      await get().joinDraft({
+        kind: "reconnect",
+        roomCode: locator.roomCode,
+        displayName: locator.displayName,
+        hostPeerId: locator.hostPeerId,
+        draftToken: session.draftToken,
+        signal: options.signal,
+      });
+      if (!isCurrent()) return "superseded";
+      if (activeGuestAdapter) return "resumed";
+      if (get().guestRecoveryFailure?.kind === "invalid") {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+      return "failed";
+    })();
+    attempt = { routeToken, signal: options.signal, promise };
+    resumeGuestDraftAttempt = attempt;
+    try {
+      return await promise;
+    } finally {
+      if (resumeGuestDraftAttempt === attempt) resumeGuestDraftAttempt = null;
+    }
   },
 
   startDraft: async (botFillEmptySeats = true) => {
@@ -1659,7 +1718,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ error: event.message });
       break;
     case "reconnecting":
+      break;
     case "reconnectFailed":
+      set({ error: event.failure.message, guestRecoveryFailure: event.failure });
       break;
     case "bo3SideboardPrompt":
       // No `phase` write — see `draftPodScreen`. The pod session is already

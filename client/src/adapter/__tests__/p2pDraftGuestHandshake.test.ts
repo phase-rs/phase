@@ -45,7 +45,7 @@ const reconnectAck = {
   seatIndex: 2,
   draftCode: "draft-xyz",
   view: { status: "Deckbuilding", draft_effects: [], seats: [] },
-} as never;
+};
 
 describe("P2P draft guest handshake attempts", () => {
   it("does not publish a reload locator until the guest token has committed", async () => {
@@ -159,6 +159,34 @@ describe("P2P draft guest handshake attempts", () => {
 
     await expect(handshake).rejects.toThrow("IDB unavailable");
     expect(persistenceState.saveActiveDraftGuest).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incompatible welcome immediately with typed non-retryable recovery", async () => {
+    sessionState.sessions.length = 0;
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+
+    const handshake = privateGuest.handshakeOn({} as never, undefined, true);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      ...reconnectAck,
+      draftProtocolVersion: DRAFT_PROTOCOL_VERSION - 1,
+    });
+
+    await expect(handshake).rejects.toThrow("Draft protocol mismatch");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "reconnectFailed",
+      failure: expect.objectContaining({ kind: "incompatible" }),
+    }));
   });
 
   it("treats a v14 rejection as terminal without revoking recovery credentials", async () => {

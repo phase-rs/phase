@@ -521,6 +521,30 @@ describe("multiplayerDraftStore", () => {
       expect(state.role).toBe("guest");
     });
 
+    it("releases an in-flight guest recovery when its route aborts", async () => {
+      let resolveGuest!: () => void;
+      mockGuestAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveGuest = resolve;
+      }));
+      const controller = new AbortController();
+      const joining = useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-ABCDE",
+        draftToken: "opaque-token",
+        signal: controller.signal,
+      });
+
+      await Promise.resolve();
+      controller.abort();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+
+      resolveGuest();
+      await joining;
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: true });
+    });
+
     it("sets seatIndex and draftCode on joined event", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
         kind: "new",
@@ -600,6 +624,26 @@ describe("multiplayerDraftStore", () => {
       const state = useMultiplayerDraftStore.getState();
       expect(state.phase).toBe("kicked");
       expect(state.error).toBe("AFK");
+    });
+
+    it("retains typed reconnect failure semantics for the recovery screen", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-ABCDE",
+        draftToken: "opaque-token",
+      });
+
+      capturedGuestEventHandler!({
+        type: "reconnectFailed",
+        failure: { kind: "retryable", message: "Host is restarting" },
+      });
+
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        error: "Host is restarting",
+        guestRecoveryFailure: { kind: "retryable", message: "Host is restarting" },
+      });
     });
 
     it("retires a guest error when the phase changes, and only then", async () => {

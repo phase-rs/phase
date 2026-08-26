@@ -816,6 +816,15 @@ describe("DraftPodGuestAdapter", () => {
     guestEventHandler({ type: "draftResumed" });
     expect(events).toContainEqual({ type: "draftResumed" });
 
+    guestEventHandler({
+      type: "reconnectFailed",
+      failure: { kind: "retryable", message: "Host is restarting" },
+    });
+    expect(events).toContainEqual({
+      type: "reconnectFailed",
+      failure: { kind: "retryable", message: "Host is restarting" },
+    });
+
     // Simulate kicked
     guestEventHandler({ type: "kicked", reason: "Host kicked you" });
     expect(adapter.status).toBe("kicked");

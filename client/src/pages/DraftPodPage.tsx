@@ -39,6 +39,7 @@ import {
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../stores/multiplayerDraftStore";
+import { inspectActiveDraftPod } from "../services/draftPersistence";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
@@ -757,20 +758,31 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
 function PodErrorView({
   phase,
   onLeave,
+  onRetry,
 }: {
   phase: "error" | "kicked" | "hostLeft";
   onLeave: () => void;
+  onRetry: () => void;
 }) {
   const { t } = useTranslation("draft");
+  const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : t("podError.connection");
+        : recoveryFailure?.message ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
+      {phase === "error" && recoveryFailure?.kind === "retryable" && (
+        <button
+          onClick={onRetry}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          {t("podError.retry")}
+        </button>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "neutral", size: "md" })}
@@ -787,6 +799,7 @@ function phaseContent(
   screen: DraftPodScreen,
   onLeave: () => void,
   onDismissOverlay: () => void,
+  onRetry: () => void,
 ): React.ReactNode {
   // No `default` arm: `tsc` is what makes a future `DraftPodScreen` member
   // impossible to forget here.
@@ -813,7 +826,7 @@ function phaseContent(
     case "error":
     case "kicked":
     case "hostLeft":
-      return <PodErrorView phase={screen} onLeave={onLeave} />;
+      return <PodErrorView phase={screen} onLeave={onLeave} onRetry={onRetry} />;
   }
 }
 
@@ -830,34 +843,65 @@ export function DraftPodPage() {
   const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
   const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const leave = useMultiplayerDraftStore((s) => s.leave);
+  const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const entryGeneration = useRef(0);
-  const explicitResume = searchParams.get("resume") === "1";
+  const retryController = useRef<AbortController | null>(null);
+  const entry = searchParams.get("entry");
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+    ? entry
+    : searchParams.get("resume") === "1" ? "host" : "auto";
 
   useEffect(() => {
     const routeToken = ++entryGeneration.current;
     const controller = new AbortController();
 
     void (async () => {
-      // A persisted host is the only authority that may claim this route
-      // before a fresh setup intent. The generation gate makes a stale route's
-      // late IndexedDB result inert after navigation or StrictMode re-entry.
-      await resumeHostedPod({
-        silent: !explicitResume,
-        routeToken,
-        signal: controller.signal,
-      });
-      if (entryGeneration.current !== routeToken) return;
+      let guestOutcome: "resumed" | "absent" | "invalid" | "failed" | "superseded" | null = null;
+      if (entryMode === "host" || entryMode === "auto") {
+        // A host locator gets first claim on automatic entry. A guest locator
+        // is considered only after a terminal/invalid host locator has actually
+        // been cleared, so a damaged host record cannot steal a guest's route.
+        const outcome = await resumeHostedPod({
+          silent: entryMode === "auto",
+          routeToken,
+          signal: controller.signal,
+        });
+        if (entryGeneration.current !== routeToken) return;
+        if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
+
+        if (inspectActiveDraftPod().type === "absent") {
+          guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
+          if (entryGeneration.current !== routeToken || guestOutcome === "superseded") return;
+          if (guestOutcome === "resumed" || guestOutcome === "failed") return;
+        }
+      } else {
+        guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
+        if (entryGeneration.current !== routeToken || guestOutcome === "superseded") return;
+        return;
+      }
     })();
     return () => {
       controller.abort();
+      retryController.current?.abort();
+      retryController.current = null;
       ++entryGeneration.current;
     };
-  }, [explicitResume, location.pathname, location.search, resumeHostedPod]);
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod]);
+
+  const retryGuestRecovery = useCallback(() => {
+    retryController.current?.abort();
+    const controller = new AbortController();
+    retryController.current = controller;
+    const routeToken = ++entryGeneration.current;
+    void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
+      if (retryController.current === controller) retryController.current = null;
+    });
+  }, [resumeDraft]);
   const handleLeave = useCallback(async () => {
     await leave(true);
     resetPod();
@@ -906,7 +950,7 @@ export function DraftPodPage() {
           </div>
         )}
         <div className="flex w-full flex-col">
-          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey))}
+          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey), retryGuestRecovery)}
         </div>
       </MenuShell>
 

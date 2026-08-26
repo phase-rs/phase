@@ -189,11 +189,14 @@
       "description": "Hoste einen Pod mit bis zu 8 Spielern oder tritt einem bei, draftet live gemeinsam und spielt dann ein Schweizer System- oder K.-o.-Turnier."
     },
     "podInProgress": "Pod Draft läuft",
+    "guestPodInProgress": "Beigetretener Pod bereit zum Wiederverbinden",
     "podLabel": "{{kind}}-Pod",
+    "guestPodLabel": "Draft-Pod",
     "seatCount": "{{count}} Plätze",
     "roomLabel": "Raum {{code}}",
     "cardsPicked": "{{count}} Karten ausgewählt",
     "resume": "Fortsetzen",
+    "reconnect": "Wiederverbinden",
     "draftInProgress": "Draft läuft",
     "draftComplete": "Draft abgeschlossen",
     "resumeMatch": "Partie fortsetzen",
@@ -386,7 +389,8 @@
   "podError": {
     "kicked": "Du wurdest aus dem Pod geworfen",
     "hostLeft": "Der Host hat den Draft verlassen",
-    "connection": "Verbindungsfehler"
+    "connection": "Verbindungsfehler",
+    "retry": "Erneut verbinden"
   },
   "lobby": {
     "title": "Draft-Pod-Lobby",
