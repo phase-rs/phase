@@ -154,6 +154,10 @@ describe("castable graveyard/exile wing hover", () => {
     // The wing rendered at all (engine surfaced a cast action for it).
     const inspectable = container.querySelectorAll("[data-card-hover]");
     expect(inspectable.length).toBe(2);
+    expect(within(container).getByAltText("Encore Card").closest("[data-zone-fan-card]")).toHaveAttribute(
+      "data-object-id",
+      String(301),
+    );
 
     // ...but only the hand card is part of the reorder index space. Queried
     // through the exported selector, so pointing it back at `[data-card-hover]`

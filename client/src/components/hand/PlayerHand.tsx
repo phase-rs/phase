@@ -1117,6 +1117,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
   return (
     <motion.div
       data-zone-fan-card
+      data-object-id={objectId}
       // Marks the card as inspectable, which is what usePreviewDismiss's 300ms
       // `[data-card-hover]:hover` poll (and uiStore's 50ms deferred clear) test
       // for. Without it the poll saw nothing hovered and tore the preview down

@@ -169,6 +169,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
         disabled={!canView && !canPlay && topCardName == null}
         aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
+        data-grouped-ids={isPeeking && topObjectId != null ? String(topObjectId) : undefined}
         {...topHoverProps}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay

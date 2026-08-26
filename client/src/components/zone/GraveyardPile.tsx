@@ -106,6 +106,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
       className={`group relative cursor-pointer ${hasTargetableCards || hasDelveableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.graveyardTitle", { count })}
       data-graveyard-pile={playerId}
+      data-grouped-ids={graveyard.join(" ")}
       style={{ width: w, height: h }}
     >
       {/* Shadow stack layers */}

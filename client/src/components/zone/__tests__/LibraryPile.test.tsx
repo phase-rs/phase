@@ -197,6 +197,7 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button).toBeInTheDocument();
+    expect(button).toHaveAttribute("data-grouped-ids", "77");
     // Peeked tops use the cyan border; card-back alt text is hidden.
     expect(button.className).toContain("border-cyan-600");
     expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
@@ -210,6 +211,7 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-gray-600");
+    expect(button).not.toHaveAttribute("data-grouped-ids");
     expect(screen.getByAltText("Library")).toBeInTheDocument();
   });
 
