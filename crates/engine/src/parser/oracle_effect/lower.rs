@@ -4514,11 +4514,6 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     }
 
-    let (scope, stripped) = strip_prepositional_player_scope_subject(text);
-    if scope.is_some() {
-        return (scope, stripped);
-    }
-
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
         alt((
@@ -4554,6 +4549,8 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 },
             ),
             value(PlayerFilter::All, tag("each player ")),
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
             // Fenric I). The more-specific "for each player, you choose"/"choose
