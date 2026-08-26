@@ -41,6 +41,7 @@ export type DraftPodGuestEvent =
   | { type: "reconnected"; seatIndex: number }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
+  | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -242,6 +243,14 @@ export class DraftPodGuestAdapter {
       case "pickAcknowledged":
         this._currentView = event.view;
         this.emit({ type: "pickAcknowledged", view: event.view });
+        break;
+      case "deckSubmissionAcknowledged":
+        this._currentView = event.view;
+        this.emit({
+          type: "deckSubmissionAcknowledged",
+          submissionId: event.submissionId,
+          view: event.view,
+        });
         break;
       case "lobbyUpdate":
         this.emit({

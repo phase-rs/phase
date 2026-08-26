@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 13", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(13);
+    it("is version 14", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(14);
     });
   });
 
@@ -99,6 +99,30 @@ describe("draftProtocol", () => {
       const msg = validateDraftMessage({ type: "draft_pick", cardInstanceId: "card-001" });
       expect(msg.type).toBe("draft_pick");
     });
+
+    it("requires a stable identifier on a deck submission", () => {
+      expect(validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Island"],
+      })).toMatchObject({ type: "draft_submit_deck", submissionId: "submission-1" });
+      expect(() => validateDraftMessage({
+        type: "draft_submit_deck",
+        mainDeck: ["Island"],
+      })).toThrow("Invalid deck submission");
+    });
+
+    it("rejects a malformed deck acknowledgement before it can clear an outbox", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        submissionId: "submission-1",
+      })).toThrow("Invalid draft deck acknowledgement");
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        view: {},
+      })).toThrow("Invalid deck acknowledgement");
+    });
+
 
     it("accepts a draft-effect pick message", () => {
       const msg = validateDraftMessage({
@@ -233,6 +257,7 @@ describe("draftProtocol", () => {
       "draft_reconnect_ack",
       "draft_reconnect_rejected",
       "draft_state_update",
+      "draft_deck_submit_ack",
       "draft_pick_ack",
       "draft_error",
       "draft_kicked",
@@ -269,6 +294,8 @@ describe("draftProtocol", () => {
           cardInstanceIds: ["card-001", "card-002"],
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
+        draft_submit_deck: { submissionId: "submission-1", mainDeck: [] },
+        draft_deck_submit_ack: { submissionId: "submission-1", view: {} },
       };
       const msg = validateDraftMessage({ type: msgType, ...BESPOKE_PAYLOADS[msgType] });
       expect(msg.type).toBe(msgType);

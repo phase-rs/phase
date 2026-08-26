@@ -46,8 +46,12 @@ import type {
  *  13 — first-contact `draft_join` and `draft_reconnect` messages carry an
  *       exact draft protocol version; reconnect rejection is typed so only an
  *       invalidated capability is cleared from durable guest recovery.
+ *  14 — deck submissions carry an immutable client-generated id and the
+ *       host returns an explicit durable receipt.  This makes a reloaded
+ *       participant's deck outbox idempotent instead of relying on a
+ *       best-effort state update.
  */
-export const DRAFT_PROTOCOL_VERSION = 13 as const;
+export const DRAFT_PROTOCOL_VERSION = 14 as const;
 
 /** The host's reason for declining a first-contact draft connection. */
 export type DraftReconnectRejectionKind =
@@ -185,6 +189,8 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_submit_deck";
+      /** Stable across reconnect/reload retries of this exact payload. */
+      submissionId: string;
       mainDeck: string[];
     }
   // ── Host → Guest ───────────────────────────────────────────────────
@@ -217,12 +223,22 @@ export type DraftP2PMessage =
       view: DraftPlayerView;
     }
   | {
+      /** The submission is in the host's durable receipt ledger. */
+      type: "draft_deck_submit_ack";
+      submissionId: string;
+      view: DraftPlayerView;
+    }
+  | {
       type: "draft_pick_ack";
       view: DraftPlayerView;
     }
   | {
       type: "draft_error";
       reason: string;
+      /** Present only when this rejects one durable deck-submission command. */
+      submissionId?: string;
+      /** A retryable failure retains the guest outbox; rejection frees it. */
+      submissionDisposition?: "Rejected" | "Retryable";
     }
   | {
       type: "draft_kicked";
@@ -381,6 +397,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_reconnect_ack",
   "draft_reconnect_rejected",
   "draft_state_update",
+  "draft_deck_submit_ack",
   "draft_pick_ack",
   "draft_error",
   "draft_kicked",
@@ -410,13 +427,17 @@ const VALID_DRAFT_TYPES = new Set([
 
 const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
 
-function requireDraftCardInstanceId(value: unknown, field: string): string {
+function requireDraftCardInstanceId(
+  value: unknown,
+  field: string,
+  context = "draft-effect pick",
+): string {
   if (
     typeof value !== "string"
     || value.length === 0
     || value.length > MAX_DRAFT_CARD_INSTANCE_ID_LENGTH
   ) {
-    throw new Error(`Invalid draft-effect pick: ${field} must be a bounded string`);
+    throw new Error(`Invalid ${context}: ${field} must be a bounded string`);
   }
   return value;
 }
@@ -539,6 +560,36 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   if (msg.type === "draft_pick_with_draft_effect") {
     return validateDraftEffectPick(raw as Record<string, unknown>);
   }
+  if (msg.type === "draft_submit_deck") {
+    const submission = raw as Record<string, unknown>;
+    if (!requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission")
+      || !Array.isArray(submission.mainDeck)
+      || !submission.mainDeck.every((card) => typeof card === "string")) {
+      throw new Error("Invalid draft deck submission");
+    }
+    return submission as DraftP2PMessage;
+  }
+  if (msg.type === "draft_deck_submit_ack") {
+    const acknowledgement = raw as Record<string, unknown>;
+    requireDraftCardInstanceId(acknowledgement.submissionId, "submissionId", "deck acknowledgement");
+    if (typeof acknowledgement.view !== "object" || acknowledgement.view === null) {
+      throw new Error("Invalid draft deck acknowledgement");
+    }
+    return {
+      ...acknowledgement,
+      view: normalizeDraftPlayerView(acknowledgement.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_error") {
+    const error = raw as Record<string, unknown>;
+    if (error.submissionDisposition !== undefined) {
+      if (error.submissionDisposition !== "Rejected" && error.submissionDisposition !== "Retryable") {
+        throw new Error("Invalid draft submission error disposition");
+      }
+      requireDraftCardInstanceId(error.submissionId, "submissionId", "deck submission error");
+    }
+    return error as DraftP2PMessage;
+  }
   if (msg.type === "draft_reconnect_rejected") {
     const rejection = raw as Record<string, unknown>;
     // v14 carried only a string reason. It is never a capability-revocation
@@ -563,7 +614,7 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
     return rejection as DraftP2PMessage;
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
-  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack", "draft_deck_submit_ack"].includes(msg.type)) {
     return {
       ...viewMessage,
       view: normalizeDraftPlayerView(viewMessage.view),

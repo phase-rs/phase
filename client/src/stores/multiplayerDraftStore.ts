@@ -1064,13 +1064,15 @@ export const useMultiplayerDraftStore = create<
     }
     const fullDeck = [...mainDeck, ...landCards];
 
-    set({ submittedDeck: fullDeck });
-
     if (role === "host" && activeHostAdapter) {
       const view = await activeHostAdapter.submitDeck(fullDeck);
-      set({ view });
+      set({ view, submittedDeck: fullDeck });
     } else if (role === "guest" && activeGuestAdapter) {
       await activeGuestAdapter.submitDeck(fullDeck);
+      // The guest adapter resolves only on `draft_deck_submit_ack`, not after
+      // a DataChannel write.  This keeps the deck builder honest across a
+      // reload between submit and host durability.
+      set({ submittedDeck: fullDeck });
     }
   },
 

@@ -42,8 +42,12 @@ export interface PersistedDraftHostSession {
   seatNames: Record<number, string>;
   /** Tokens that were kicked — refused on reconnect. */
   kickedTokens: string[];
+  /** Seats whose reconnect grace elapsed while this host owned the pod. */
+  expiredDisconnectedSeats?: number[];
   /** Whether StartDraft has been applied. */
   draftStarted: boolean;
+  /** Host intent is separate from effective disconnect-induced pausing. */
+  manualPause?: boolean;
   /** Draft code for display/identification. */
   draftCode: string;
   /** Serialized DraftSession JSON from draft-wasm. Null if draft hasn't started. */
@@ -78,6 +82,12 @@ export interface PersistedDraftHostSession {
   /** Full immutable launch records let a recovered host issue timeout commands
    * through the same launch-bound intergame ledger. */
   matchLaunches?: Array<{ matchId: string; seat: number; launch: DraftMatchLaunch }>;
+  /** Durable idempotency ledger for participant deck-submission retries. */
+  deckSubmissionReceipts?: Array<{
+    seat: number;
+    submissionId: string;
+    payloadFingerprint: string;
+  }>;
 }
 
 /**
@@ -94,6 +104,20 @@ export interface PersistedDraftGuestSession {
   /** Bound to the non-secret recovery pointer before reconnect is attempted. */
   roomCode: string;
   displayName: string;
+  timestamp: number;
+}
+
+/** A participant-owned deck submission retained until the host acknowledges it. */
+export interface PersistedDraftDeckSubmission {
+  hostPeerId: string;
+  /** Display identity captured at submit time; it can change from lobby pending. */
+  draftCode: string;
+  /** Stable pod route, unlike the draft code generated at draft start. */
+  roomCode: string;
+  /** Capability identity prevents reusing an outbox after a seat is reissued. */
+  draftToken: string;
+  submissionId: string;
+  mainDeck: string[];
   timestamp: number;
 }
 
@@ -146,6 +170,7 @@ const DRAFT_HOST_PREFIX = "phase-draft-host:";
 const DRAFT_GUEST_PREFIX = "phase-draft-guest:";
 const DRAFT_SETTLEMENT_PREFIX = "phase-draft-settlement:";
 const DRAFT_INTERGAME_PREFIX = "phase-draft-intergame:";
+const DRAFT_DECK_SUBMISSION_PREFIX = "phase-draft-deck-submission:";
 const HOST_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Guest token TTL — 4 hours matches the game session TTL. */
 const GUEST_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
@@ -373,7 +398,10 @@ function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHos
     isSeatStringRecord(value.seatTokens) &&
     isSeatStringRecord(value.seatNames) &&
     Array.isArray(value.kickedTokens) && value.kickedTokens.every((token) => typeof token === "string") &&
+    (value.expiredDisconnectedSeats === undefined ||
+      (Array.isArray(value.expiredDisconnectedSeats) && value.expiredDisconnectedSeats.every(isNonnegativeInteger))) &&
     typeof value.draftStarted === "boolean" &&
+    (value.manualPause === undefined || typeof value.manualPause === "boolean") &&
     // A live pre-draft lobby has no generated draft code yet; the host uses
     // the room code as its seed fallback until StartDraft assigns one.
     typeof value.draftCode === "string" &&
@@ -383,6 +411,7 @@ function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHos
     isOptionalRecordArray(value.settlementOutbox) &&
     isOptionalRecordArray(value.settlementReceipts) &&
     isOptionalRecordArray(value.intergameCommands) &&
+    isOptionalRecordArray(value.deckSubmissionReceipts) &&
     isOptionalRecordArray(value.bo3State) &&
     isOptionalRecordArray(value.launchDigests) &&
     isOptionalRecordArray(value.matchLaunches)
@@ -529,6 +558,63 @@ export async function clearDraftGuestSession(hostPeerId: string): Promise<void> 
 export async function clearDraftGuestRecovery(hostPeerId: string): Promise<void> {
   await clearDraftGuestSession(hostPeerId);
   clearActiveDraftGuestForHost(hostPeerId);
+}
+
+/**
+ * Writes the deck command before it enters the transport.  The key is owned by
+ * the participant (not the pod), so a host reload or a dropped DataChannel
+ * cannot turn an accepted deck into a lost UI submission.
+ */
+export async function saveDraftDeckSubmission(
+  hostPeerId: string,
+  submission: Omit<PersistedDraftDeckSubmission, "hostPeerId" | "timestamp">,
+): Promise<void> {
+  const value: PersistedDraftDeckSubmission = {
+    hostPeerId,
+    draftCode: submission.draftCode,
+    roomCode: submission.roomCode,
+    draftToken: submission.draftToken,
+    submissionId: submission.submissionId,
+    mainDeck: [...submission.mainDeck],
+    timestamp: Date.now(),
+  };
+  await set(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, value, getDraftStore());
+}
+
+export async function loadDraftDeckSubmission(
+  hostPeerId: string,
+  identity?: Pick<PersistedDraftDeckSubmission, "roomCode" | "draftToken">,
+): Promise<PersistedDraftDeckSubmission | null> {
+  try {
+    const value = await get<PersistedDraftDeckSubmission>(
+      `${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`,
+      getDraftStore(),
+    );
+    if (!value || value.hostPeerId !== hostPeerId || !isNonEmptyString(value.draftCode)
+      || !isCanonicalRoomCode(value.roomCode)
+      || !isNonEmptyString(value.draftToken) || !isNonEmptyString(value.submissionId)
+      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")) {
+      return null;
+    }
+    if (identity && (value.roomCode !== identity.roomCode || value.draftToken !== identity.draftToken)) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearDraftDeckSubmission(hostPeerId: string, submissionId?: string): Promise<void> {
+  try {
+    if (submissionId) {
+      const current = await loadDraftDeckSubmission(hostPeerId);
+      if (current?.submissionId !== submissionId) return;
+    }
+    await del(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, getDraftStore());
+  } catch {
+    /* Retain safely when IndexedDB is unavailable. */
+  }
 }
 
 function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGuestSession {

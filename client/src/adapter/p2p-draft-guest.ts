@@ -31,6 +31,9 @@ import {
   saveDraftGuestSession,
   clearDraftGuestRecovery,
   saveActiveDraftGuest,
+  clearDraftDeckSubmission,
+  loadDraftDeckSubmission,
+  saveDraftDeckSubmission,
 } from "../services/draftPersistence";
 import type {
   DraftIntergameCommand,
@@ -44,6 +47,7 @@ export type DraftGuestEvent =
   | { type: "reconnected"; seatIndex: number }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
+  | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -121,12 +125,19 @@ export class P2PDraftGuest {
   private listeners: DraftGuestEventListener[] = [];
   private session: DraftPeerSession | null = null;
   private draftToken: string | null = null;
+  private draftCode: string | null = null;
   private seatIndex: number | null = null;
   private terminated = false;
   private currentView: DraftPlayerView | null = null;
   private handshake: DraftHandshake | null = null;
   private reconnecting = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private deckSubmissionWaiters = new Map<
+    string,
+    { acknowledgement: Promise<void>; resolve: () => void; reject: (error: Error) => void }
+  >();
+  /** Set synchronously so two UI clicks share one outbox command. */
+  private pendingDeckSubmission: Promise<void> | null = null;
 
   constructor(
     private readonly guestPeer: Peer,
@@ -286,9 +297,84 @@ export class P2PDraftGuest {
     });
   }
 
-  async submitDeck(mainDeck: string[]): Promise<void> {
+  submitDeck(mainDeck: string[]): Promise<void> {
+    if (this.pendingDeckSubmission) return this.pendingDeckSubmission;
+    const submission = this.submitDeckInner(mainDeck);
+    this.pendingDeckSubmission = submission;
+    void submission.then(
+      () => {
+        if (this.pendingDeckSubmission === submission) this.pendingDeckSubmission = null;
+      },
+      () => {
+        if (this.pendingDeckSubmission === submission) this.pendingDeckSubmission = null;
+      },
+    );
+    return submission;
+  }
+
+  private async submitDeckInner(mainDeck: string[]): Promise<void> {
+    const identity = this.deckSubmissionIdentity();
+    if (!identity) throw new Error("Draft identity is unavailable");
+    const existing = await loadDraftDeckSubmission(this.hostPeerId, identity);
+    const samePayload = existing?.mainDeck.length === mainDeck.length
+      && existing.mainDeck.every((card, index) => card === mainDeck[index]);
+    if (existing && !samePayload) {
+      throw new Error("A deck submission is still awaiting host confirmation");
+    }
+    const submissionId = existing?.submissionId ?? crypto.randomUUID();
+    const payload = existing?.mainDeck ?? mainDeck;
+    if (!existing) {
+      await saveDraftDeckSubmission(this.hostPeerId, {
+        ...identity,
+        draftCode: this.draftCode!,
+        submissionId,
+        mainDeck: payload,
+      });
+    }
+    await this.sendDeckSubmission(submissionId, payload);
+  }
+
+  private async sendDeckSubmission(submissionId: string, mainDeck: string[]): Promise<void> {
     if (!this.session) throw new Error("Not connected to draft host");
-    await this.session.send({ type: "draft_submit_deck", mainDeck });
+    let waiter = this.deckSubmissionWaiters.get(submissionId);
+    if (!waiter) {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const acknowledgement = new Promise<void>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      waiter = { acknowledgement, resolve, reject };
+      this.deckSubmissionWaiters.set(submissionId, waiter);
+    }
+    try {
+      await this.session.send({ type: "draft_submit_deck", submissionId, mainDeck });
+      await waiter.acknowledgement;
+    } finally {
+      if (this.deckSubmissionWaiters.get(submissionId) === waiter) {
+        this.deckSubmissionWaiters.delete(submissionId);
+      }
+    }
+  }
+
+  /** A reconnect makes the participant-owned command eligible for replay. */
+  private async replayDeckSubmission(): Promise<void> {
+    const identity = this.deckSubmissionIdentity();
+    if (!identity) return;
+    const pending = await loadDraftDeckSubmission(this.hostPeerId, identity);
+    if (!pending || !this.session) return;
+    // Do not await here: the reconnect handshake must finish before normal
+    // state consumers run, while its durable submission can wait for its ack.
+    void this.sendDeckSubmission(pending.submissionId, pending.mainDeck)
+      .catch((error: unknown) => this.emit({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      }));
+  }
+
+  private deckSubmissionIdentity(): { roomCode: string; draftToken: string } | null {
+    if (!this.draftCode || !this.draftToken) return null;
+    return { roomCode: this.connection.roomCode, draftToken: this.draftToken };
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {
@@ -338,6 +424,7 @@ export class P2PDraftGuest {
       case "draft_welcome": {
         this.seatIndex = msg.seatIndex;
         this.draftToken = msg.draftToken;
+        this.draftCode = msg.draftCode;
         this.currentView = msg.view;
 
         try {
@@ -357,11 +444,13 @@ export class P2PDraftGuest {
         this.resolveHandshake(session);
         this.emit({ type: "joined", seatIndex: msg.seatIndex, draftCode: msg.draftCode });
         this.emit({ type: "viewUpdated", view: msg.view });
+        void this.replayDeckSubmission();
         break;
       }
 
       case "draft_reconnect_ack": {
         this.seatIndex = msg.seatIndex;
+        this.draftCode = msg.draftCode;
         this.currentView = msg.view;
 
         if (this.draftToken) {
@@ -381,6 +470,7 @@ export class P2PDraftGuest {
         this.resolveHandshake(session);
         this.emit({ type: "reconnected", seatIndex: msg.seatIndex });
         this.emit({ type: "viewUpdated", view: msg.view });
+        void this.replayDeckSubmission();
         break;
       }
 
@@ -389,6 +479,7 @@ export class P2PDraftGuest {
         if (msg.kind === "Kicked" || msg.kind === "UnknownToken") {
           this.terminated = true;
           void clearDraftGuestRecovery(this.hostPeerId);
+          void clearDraftDeckSubmission(this.hostPeerId);
         } else if (msg.kind === "ProtocolMismatch") {
           // Refresh can restore compatibility, so retain credentials, but a
           // version mismatch cannot be repaired by transport retries.
@@ -413,7 +504,25 @@ export class P2PDraftGuest {
         break;
       }
 
+      case "draft_deck_submit_ack": {
+        this.currentView = msg.view;
+        await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+        this.deckSubmissionWaiters.get(msg.submissionId)?.resolve();
+        this.emit({ type: "deckSubmissionAcknowledged", submissionId: msg.submissionId, view: msg.view });
+        this.emit({ type: "viewUpdated", view: msg.view });
+        break;
+      }
+
       case "draft_error": {
+        if (msg.submissionId) {
+          const waiter = this.deckSubmissionWaiters.get(msg.submissionId);
+          if (waiter) {
+            if (msg.submissionDisposition !== "Retryable") {
+              await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+            }
+            waiter.reject(new Error(msg.reason));
+          }
+        }
         this.emit({ type: "error", message: msg.reason });
         break;
       }
@@ -421,6 +530,7 @@ export class P2PDraftGuest {
       case "draft_kicked": {
         this.terminated = true;
         void clearDraftGuestRecovery(this.hostPeerId);
+        void clearDraftDeckSubmission(this.hostPeerId);
         this.emit({ type: "kicked", reason: msg.reason });
         break;
       }
@@ -596,6 +706,7 @@ export class P2PDraftGuest {
   async leave(): Promise<void> {
     this.terminated = true;
     await clearDraftGuestRecovery(this.hostPeerId);
+    await clearDraftDeckSubmission(this.hostPeerId);
     this.dispose();
     try {
       this.guestPeer.destroy();
