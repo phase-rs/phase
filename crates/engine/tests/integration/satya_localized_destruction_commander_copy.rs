@@ -78,21 +78,16 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         energy_optional.waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     ));
-    let energy_payment = destruction
+    let result = destruction
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accepting Localized Destruction's energy payment is valid");
-    assert!(matches!(
-        energy_payment.waiting_for,
-        WaitingFor::PayAmountChoice {
-            player: P0,
-            max: 1,
-            ..
-        }
-    ));
-    let result = destruction
-        .act(GameAction::SubmitPayAmount { amount: 1 })
-        .expect("paying the one energy granted by Localized Destruction is valid");
     drop(destruction);
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].energy,
+        0,
+        "the accepted one-or-more energy payment spends the one energy the spell granted"
+    );
 
     assert!(matches!(
         result.waiting_for,
