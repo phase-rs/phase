@@ -26720,6 +26720,12 @@ pub enum DetachedRemainder {
 /// the generic target vector would otherwise make the two roles ambiguous.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachTargetBindings {
+    #[serde(flatten)]
+    inner: Option<Box<AttachTargetBindingsInner>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct AttachTargetBindingsInner {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attachment_targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26728,23 +26734,32 @@ pub struct AttachTargetBindings {
 
 impl AttachTargetBindings {
     pub(crate) fn is_empty(&self) -> bool {
-        self.attachment_targets.is_empty() && self.host_target.is_none()
+        self.inner
+            .as_deref()
+            .is_none_or(|inner| inner.attachment_targets.is_empty() && inner.host_target.is_none())
     }
 
     pub(crate) fn attachment_targets(&self) -> &[TargetRef] {
-        &self.attachment_targets
+        self.inner
+            .as_deref()
+            .map_or(&[], |inner| inner.attachment_targets.as_slice())
     }
 
     pub(crate) fn host_target(&self) -> Option<&TargetRef> {
-        self.host_target.as_ref()
+        self.inner
+            .as_deref()
+            .and_then(|inner| inner.host_target.as_ref())
     }
 
     pub(crate) fn bind_attachment(&mut self, target: TargetRef) {
-        self.attachment_targets.push(target);
+        self.inner
+            .get_or_insert_default()
+            .attachment_targets
+            .push(target);
     }
 
     pub(crate) fn bind_host(&mut self, target: TargetRef) {
-        self.host_target = Some(target);
+        self.inner.get_or_insert_default().host_target = Some(target);
     }
 }
 
@@ -28309,6 +28324,46 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn attach_target_bindings_keep_spell_context_construction_and_wire_shape_stable() {
+        let external_style = SpellContext {
+            optional_effect_performed: true,
+            ..SpellContext::default()
+        };
+        assert!(external_style.attach_target_bindings.is_empty());
+
+        let absent: SpellContext =
+            serde_json::from_value(serde_json::json!({})).expect("legacy context deserializes");
+        assert!(absent.attach_target_bindings.is_empty());
+
+        let empty: SpellContext = serde_json::from_value(serde_json::json!({
+            "attach_target_bindings": {}
+        }))
+        .expect("empty attachment bindings deserialize");
+        assert!(empty.attach_target_bindings.is_empty());
+
+        let mut populated = SpellContext::default();
+        populated
+            .attach_target_bindings
+            .bind_attachment(TargetRef::Object(ObjectId(11)));
+        populated
+            .attach_target_bindings
+            .bind_host(TargetRef::Object(ObjectId(12)));
+        let wire = serde_json::to_value(&populated).expect("attachment bindings serialize");
+        assert_eq!(
+            wire["attach_target_bindings"]["attachment_targets"],
+            serde_json::json!([{ "Object": 11 }])
+        );
+        assert_eq!(
+            wire["attach_target_bindings"]["host_target"],
+            serde_json::json!({ "Object": 12 })
+        );
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),
+            populated
+        );
+    }
 
     /// CR 102.1 — `TargetFilter::PlayerMatching::is_player_scope()` is a DECIDED
     /// arm, not a wildcard default.

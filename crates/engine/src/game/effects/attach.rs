@@ -494,30 +494,73 @@ fn resolve_attach_target<'a>(
     filter: &TargetFilter,
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
-    if !matches!(filter, TargetFilter::ParentTarget) {
-        return resolve_object_filter(state, ability, filter, target_slots);
-    }
-    if let Some(TargetRef::Object(id)) = ability.attach_host_target() {
-        if ability.target_pin_is_current(*id, state) {
-            return Some(*id);
+    match filter {
+        TargetFilter::ParentTarget => {
+            if let Some(TargetRef::Object(id)) = ability.attach_host_target() {
+                if ability.target_pin_is_current(*id, state) {
+                    return Some(*id);
+                }
+            }
+            let attachment_ids = attachment_target_ids(ability);
+            ability
+                .live_object_targets(state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) if !attachment_ids.contains(&id) => Some(id),
+                    _ => None,
+                })
+                .or_else(|| resolve_parent_target_host_from_trigger(state))
         }
+        TargetFilter::LastCreated | TargetFilter::LastRevealed | TargetFilter::LastZoneChanged => {
+            resolve_dynamic_attach_host_target(state, ability, filter, target_slots)
+        }
+        _ => resolve_object_filter(state, ability, filter, target_slots),
     }
-    let attachment_ids: Vec<_> = ability
+}
+
+fn attachment_target_ids(ability: &ResolvedAbility) -> Vec<ObjectId> {
+    ability
         .attach_attachment_targets()
         .iter()
         .filter_map(|target| match target {
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         })
-        .collect();
-    ability
-        .live_object_targets(state)
-        .into_iter()
-        .find_map(|target| match target {
-            TargetRef::Object(id) if !attachment_ids.contains(&id) => Some(id),
-            _ => None,
-        })
-        .or_else(|| resolve_parent_target_host_from_trigger(state))
+        .collect()
+}
+
+/// Resolve a resolution-local host referent without allowing a just-selected
+/// attachment to fill both roles. Explicit `LastCreated` targets retain the
+/// established parent-chain precedence; the other two dynamic filters require
+/// that an explicit target still belongs to their respective ledgers.
+fn resolve_dynamic_attach_host_target<'a>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    target_slots: &mut impl Iterator<Item = &'a TargetRef>,
+) -> Option<ObjectId> {
+    let attachment_ids = attachment_target_ids(ability);
+    let dynamic_ids = match filter {
+        TargetFilter::LastCreated => &state.last_created_token_ids,
+        TargetFilter::LastRevealed => &state.last_revealed_ids,
+        TargetFilter::LastZoneChanged => &state.last_zone_changed_ids,
+        _ => unreachable!("dynamic attachment-host resolution only receives ledger filters"),
+    };
+    let explicit_host = target_slots.find_map(|target| match target {
+        TargetRef::Object(id)
+            if !attachment_ids.contains(id)
+                && (matches!(filter, TargetFilter::LastCreated) || dynamic_ids.contains(id)) =>
+        {
+            Some(*id)
+        }
+        TargetRef::Object(_) | TargetRef::Player(_) => None,
+    });
+    explicit_host.or_else(|| {
+        dynamic_ids
+            .iter()
+            .copied()
+            .find(|id| !attachment_ids.contains(id))
+    })
 }
 
 fn resolve_parent_target_host_from_trigger(state: &GameState) -> Option<ObjectId> {
@@ -2678,6 +2721,77 @@ mod tests {
         assert_eq!(
             state.objects.get(&equipment).unwrap().attached_to,
             Some(AttachTarget::Object(host))
+        );
+    }
+
+    #[test]
+    fn resolution_attachment_choice_excludes_equipment_from_dynamic_host_ledgers() {
+        let mut state = setup();
+        let created_host = spawn_creature(&mut state, "Created Kor");
+        let revealed_host = spawn_creature(&mut state, "Revealed Kor");
+        let changed_host = spawn_creature(&mut state, "Changed Kor");
+        state.last_created_token_ids = vec![created_host];
+        state.last_revealed_ids = vec![revealed_host];
+        state.last_zone_changed_ids = vec![changed_host];
+        let first_equipment = spawn_equipment(&mut state, "First Blade", 10);
+        let second_equipment = spawn_equipment(&mut state, "Second Blade", 11);
+        let revealed_equipment = spawn_equipment(&mut state, "Revealed Blade", 12);
+        let changed_equipment = spawn_equipment(&mut state, "Changed Blade", 13);
+
+        let attachment_filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Equipment".to_string())
+                .controller(ControllerRef::You),
+        );
+        let ability_for = |target| {
+            crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Attach {
+                    attachment: attachment_filter.clone(),
+                    target,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+        };
+        let mut events = vec![];
+
+        complete_resolution_attachment_choice(
+            &mut state,
+            ability_for(TargetFilter::LastCreated),
+            &[first_equipment, second_equipment],
+            &mut events,
+        )
+        .expect("multiple selected Equipment attach to LastCreated host");
+        complete_resolution_attachment_choice(
+            &mut state,
+            ability_for(TargetFilter::LastRevealed),
+            &[revealed_equipment],
+            &mut events,
+        )
+        .expect("selected Equipment attaches to LastRevealed host");
+        complete_resolution_attachment_choice(
+            &mut state,
+            ability_for(TargetFilter::LastZoneChanged),
+            &[changed_equipment],
+            &mut events,
+        )
+        .expect("selected Equipment attaches to LastZoneChanged host");
+
+        for equipment in [first_equipment, second_equipment] {
+            assert_eq!(
+                state.objects[&equipment].attached_to,
+                Some(AttachTarget::Object(created_host)),
+                "a selected Equipment cannot displace the LastCreated host"
+            );
+        }
+        assert_eq!(
+            state.objects[&revealed_equipment].attached_to,
+            Some(AttachTarget::Object(revealed_host))
+        );
+        assert_eq!(
+            state.objects[&changed_equipment].attached_to,
+            Some(AttachTarget::Object(changed_host))
         );
     }
 

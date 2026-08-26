@@ -1198,6 +1198,7 @@ pub(crate) fn move_objects_simultaneously_then(
             completion.map_or(BatchMoveResult::Done, |mut completion| {
                 crate::types::game_state::settle_dig_kept_delivery_outcome(
                     &mut completion,
+                    state,
                     &logical_zone_change_group,
                 );
                 run_batch_completion(state, completion, events)
@@ -1627,6 +1628,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     // test (miss batch redirect, then hit-delivery redirect).
                     crate::types::game_state::settle_dig_kept_delivery_outcome(
                         &mut completion,
+                        state,
                         &logical_zone_change_group,
                     );
                     let _ = run_batch_completion(state, completion, events);

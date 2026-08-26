@@ -7917,11 +7917,6 @@ pub(crate) fn run_batch_completion(
                 }
             }
             let completed = kept_delivery.completed_ids();
-            let publish_tracked_set = if publish_tracked_set == kept_delivery.selected_ids() {
-                completed.clone()
-            } else {
-                publish_tracked_set
-            };
             effects::publish_fresh_tracked_set(state, publish_tracked_set);
             state.last_zone_changed_ids = completed.clone();
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -8068,16 +8063,11 @@ pub(crate) fn run_batch_completion(
                 .expect("reveal-rest cleanup must reference live card occurrences");
             let completed = kept_delivery.completed_ids();
             if let Some(kept) = publish_tracked_set {
-                let published = if kept == kept_delivery.selected_ids() {
-                    completed.clone()
-                } else {
-                    kept
-                };
-                effects::publish_fresh_tracked_set(state, published.clone());
+                effects::publish_fresh_tracked_set(state, kept.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame.pending.chain.targets =
-                        published.iter().map(|&id| TargetRef::Object(id)).collect();
-                    frame.pending.chain.context.optional_effect_performed = !published.is_empty();
+                        kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                    frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
                 }
             }
             if kept_delivery.destination.is_some() {

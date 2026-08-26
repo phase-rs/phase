@@ -5315,7 +5315,7 @@ impl DigKeptDeliveryOutcome {
         }
     }
 
-    pub fn settle_from_logical_group(&mut self, group: &LogicalZoneChangeGroup) {
+    pub fn settle_from_logical_group(&mut self, state: &GameState, group: &LogicalZoneChangeGroup) {
         let Some(destination) = self.destination.filter(|_| !self.settled) else {
             return;
         };
@@ -5323,7 +5323,18 @@ impl DigKeptDeliveryOutcome {
             .all_origin_occurrences
             .iter()
             .filter_map(|occurrence| match &occurrence.event {
-                GameEvent::ZoneChanged { object_id, to, .. } if *to == destination => {
+                // A replacement can leave an intermediate `ZoneChanged` event
+                // behind while ultimately redirecting the card elsewhere. The
+                // settled object's current zone is therefore the authority for
+                // the requested-destination arrival, not that intermediate
+                // event alone.
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination
+                        && state
+                            .objects
+                            .get(object_id)
+                            .is_some_and(|object| object.zone == destination) =>
+                {
                     Some(*object_id)
                 }
                 _ => None,
@@ -5358,12 +5369,13 @@ impl DigKeptDeliveryOutcome {
 /// seam where a selected pile becomes an actual delivery outcome.
 pub(crate) fn settle_dig_kept_delivery_outcome(
     completion: &mut BatchCompletion,
+    state: &GameState,
     group: &LogicalZoneChangeGroup,
 ) {
     match completion {
         BatchCompletion::DigKeptDeliveryComplete { kept_delivery, .. }
         | BatchCompletion::RevealRestPile { kept_delivery, .. } => {
-            kept_delivery.settle_from_logical_group(group);
+            kept_delivery.settle_from_logical_group(state, group);
         }
         _ => {}
     }

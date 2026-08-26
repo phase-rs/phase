@@ -11798,6 +11798,10 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
         )
         .expect("Dig tracked set exists");
     assert_eq!(tracked, &vec![kept]);
+    assert!(
+        runner.state().last_zone_changed_ids.is_empty(),
+        "a redirected kept card must not satisfy a requested-destination reflexive gate"
+    );
     assert_eq!(
         initial_events
             .iter()
