@@ -10680,7 +10680,7 @@ fn resolve_chain_body(
                 })
                 .collect(),
         };
-        // CR 101.4 + CR 118.12a + CR 111.2: A scoped token instruction whose
+        // CR 101.4 + CR 118.12a: A scoped token instruction whose
         // each player may avert the result by sacrificing has one aggregate
         // outcome, not one token creation per iteration. Let its dedicated
         // APNAP payment coordinator own the existing UnlessPayment and

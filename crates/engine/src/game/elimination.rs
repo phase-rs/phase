@@ -230,13 +230,25 @@ pub fn eliminate_players_simultaneously(
             // controller. A previously-recorded decline cannot create tokens
             // for a player no longer in the game, and its per-payer prompt
             // must not outlive the abandoned aggregate.
-            let aggregate_prompt_is_live = matches!(
-                &state.waiting_for,
+            let aggregate_prompt_is_live = match &state.waiting_for {
                 WaitingFor::UnlessPayment { pending_effect, .. }
-                    | WaitingFor::WardSacrificeChoice { pending_effect, .. }
-                    if pending_effect.source_id == pending.pending_effect.source_id
-            );
+                | WaitingFor::WardSacrificeChoice { pending_effect, .. } => {
+                    pending_effect.source_id == pending.pending_effect.source_id
+                }
+                WaitingFor::ReplacementChoice { .. } => state
+                    .pending_replacement
+                    .as_ref()
+                    .and_then(|replacement| replacement.sacrifice_provenance.as_ref())
+                    .is_some_and(|provenance| provenance.player_id == pending.current_player),
+                _ => false,
+            };
             if aggregate_prompt_is_live {
+                // The only parked replacement at this point belongs to the
+                // aggregate's current payer. Once its controller leaves, the
+                // aggregate cannot resume through that payer's choice.
+                state.pending_replacement = None;
+                state.replacement_may_cost_paused = false;
+                super::replacement::abandon_post_replacement_continuation(state);
                 state.waiting_for = WaitingFor::Priority {
                     player: players::next_player(state, original_controller),
                 };
