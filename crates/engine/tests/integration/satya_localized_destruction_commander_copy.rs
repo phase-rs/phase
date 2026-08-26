@@ -3,8 +3,9 @@
 //! Localized Destruction board wipe.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -96,4 +97,91 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         ),
         "no second CommanderZoneChoice may strand the player"
     );
+}
+
+/// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a saved copy of a commander
+/// spell must not preserve an unreachable command-zone prompt after it leaves
+/// the battlefield. This models the reported capture's `CommanderZoneChoice`
+/// shape, then restores it through the production persistence chokepoint.
+#[test]
+fn restored_token_commander_choice_resumes_sba_cleanup() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let copied_commander = scenario
+        .add_creature(P0, "Copied Commander", 3, 4)
+        .commander()
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    let mut events = Vec::new();
+    move_to_zone(
+        runner.state_mut(),
+        copied_commander,
+        Zone::Graveyard,
+        &mut events,
+    );
+    let player = runner.state().objects[&copied_commander].owner;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&copied_commander)
+        .unwrap()
+        .is_token = true;
+    runner.state_mut().waiting_for = WaitingFor::CommanderZoneChoice {
+        player,
+        commander_id: copied_commander,
+        current_zone: Zone::Graveyard,
+    };
+
+    let serialized = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the captured command-zone choice serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&serialized)
+        .expect("the captured command-zone choice restores")
+        .into_game_state();
+
+    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        !restored.objects.contains_key(&copied_commander),
+        "CR 704.5d: the malformed token must cease to exist during restore cleanup"
+    );
+}
+
+/// CR 903.3 + CR 903.9a: restore must preserve a legitimate card-backed
+/// command-zone choice; only the impossible token-backed shape is normalized.
+#[test]
+fn restored_genuine_commander_choice_remains_actionable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Genuine Commander", 3, 4)
+        .commander()
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), commander, Zone::Graveyard, &mut events);
+    let player = runner.state().objects[&commander].owner;
+    runner.state_mut().waiting_for = WaitingFor::CommanderZoneChoice {
+        player,
+        commander_id: commander,
+        current_zone: Zone::Graveyard,
+    };
+
+    let serialized = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the genuine command-zone choice serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&serialized)
+        .expect("the genuine command-zone choice restores")
+        .into_game_state();
+
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Graveyard,
+            ..
+        } if commander_id == commander
+    ));
+    assert_eq!(restored.objects[&commander].zone, Zone::Graveyard);
 }
