@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-25T00:00:00Z",
+  "updated": "2026-08-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -127,6 +127,272 @@
         {
           "count": 1,
           "name": "Leatherhead, Swamp Stalker"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Midrange",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 4,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Spyglass Siren"
+        },
+        {
+          "count": 3,
+          "name": "Hidden Lair"
+        },
+        {
+          "count": 4,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 2,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 4,
+          "name": "Dream Beavers"
+        },
+        {
+          "count": 3,
+          "name": "Enduring Curiosity"
+        },
+        {
+          "count": 2,
+          "name": "The Wondrous Wasp"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "We Say Thee Nay!"
+        },
+        {
+          "count": 2,
+          "name": "Tishana's Tidebinder"
+        },
+        {
+          "count": 2,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 2,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
+          "count": 2,
+          "name": "Soulstone Sanctuary"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 3,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 4,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Raven Eagle"
+        },
+        {
+          "count": 1,
+          "name": "Qarsi Revenant"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Spellementals",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 3,
+          "name": "Traumatic Critique"
+        },
+        {
+          "count": 4,
+          "name": "Prismari Charm"
+        },
+        {
+          "count": 2,
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 4,
+          "name": "Sunderflock"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 2,
+          "name": "Get Out"
+        },
+        {
+          "count": 4,
+          "name": "Hearth Elemental"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 3,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 3,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 1,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Eddymurk Crab"
+        },
+        {
+          "count": 3,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Annul"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Sear"
+        },
+        {
+          "count": 2,
+          "name": "Shore Up"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 4,
+          "name": "Colorstorm Stallion"
+        },
+        {
+          "count": 2,
+          "name": "Hydro-Man, Fluid Felon"
         }
       ]
     },
@@ -304,272 +570,6 @@
         {
           "count": 2,
           "name": "Get Lost"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Spellementals",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 3,
-          "name": "Traumatic Critique"
-        },
-        {
-          "count": 4,
-          "name": "Prismari Charm"
-        },
-        {
-          "count": 2,
-          "name": "Impractical Joke"
-        },
-        {
-          "count": 4,
-          "name": "Sunderflock"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 2,
-          "name": "Get Out"
-        },
-        {
-          "count": 4,
-          "name": "Hearth Elemental"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 3,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 1,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 3,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 1,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Eddymurk Crab"
-        },
-        {
-          "count": 3,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 2,
-          "name": "Shore Up"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 2,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 4,
-          "name": "Colorstorm Stallion"
-        },
-        {
-          "count": 2,
-          "name": "Hydro-Man, Fluid Felon"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 4,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 4,
-          "name": "Spyglass Siren"
-        },
-        {
-          "count": 3,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 4,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 4,
-          "name": "Dream Beavers"
-        },
-        {
-          "count": 3,
-          "name": "Enduring Curiosity"
-        },
-        {
-          "count": 2,
-          "name": "The Wondrous Wasp"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "We Say Thee Nay!"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 2,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 2,
-          "name": "Soulstone Sanctuary"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 3,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 4,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Raven Eagle"
-        },
-        {
-          "count": 1,
-          "name": "Qarsi Revenant"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "Annul"
         }
       ]
     },
@@ -1207,10 +1207,11 @@
       ]
     },
     {
-      "name": "Mono-Red Aggro",
+      "name": "Azorius Momo",
       "author": "MTGGoldfish",
       "colors": [
-        "R"
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -1218,105 +1219,105 @@
       "main": [
         {
           "count": 4,
-          "name": "Sarkhan, Dragon Ascendant"
-        },
-        {
-          "count": 4,
-          "name": "Hired Claw"
-        },
-        {
-          "count": 4,
-          "name": "Smaug the Magnificent"
-        },
-        {
-          "count": 4,
-          "name": "Magda, the Hoardmaster"
+          "name": "Practiced Offense"
         },
         {
           "count": 2,
-          "name": "Magmatic Hellkite"
-        },
-        {
-          "count": 2,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 3,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 2,
-          "name": "Channeled Dragonfire"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
+          "name": "We Say Thee Nay!"
         },
         {
           "count": 1,
-          "name": "Taurean Mauler"
-        },
-        {
-          "count": 1,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
-          "name": "Lightning Strike"
+          "name": "Nurturing Pixie"
         },
         {
           "count": 4,
-          "name": "Nova Hellkite"
+          "name": "Quantum Riddler"
         },
         {
-          "count": 1,
-          "name": "Taurean Mauler"
+          "count": 5,
+          "name": "Plains"
         },
         {
-          "count": 20,
-          "name": "Mountain"
+          "count": 4,
+          "name": "Steamcore Scholar"
+        },
+        {
+          "count": 4,
+          "name": "Springleaf Drum"
+        },
+        {
+          "count": 4,
+          "name": "Daydream"
+        },
+        {
+          "count": 4,
+          "name": "Starfield Shepherd"
+        },
+        {
+          "count": 4,
+          "name": "Floodfarm Verge"
         },
         {
           "count": 2,
-          "name": "Shock"
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 2,
+          "name": "Monica Rambeau"
+        },
+        {
+          "count": 4,
+          "name": "Sage of the Skies"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Momo, Friendly Flier"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 1,
-          "name": "Scorching Shot"
+          "count": 2,
+          "name": "Morningtide's Light"
         },
         {
           "count": 2,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Slagstorm"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
+          "name": "Flashfreeze"
         },
         {
           "count": 2,
-          "name": "Ghost Vacuum"
+          "name": "Disdainful Stroke"
         },
         {
-          "count": 1,
-          "name": "Slagstorm"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
+          "count": 3,
+          "name": "Rest in Peace"
         },
         {
           "count": 2,
-          "name": "Sunspine Lynx"
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Authority of the Consuls"
         }
       ]
     }

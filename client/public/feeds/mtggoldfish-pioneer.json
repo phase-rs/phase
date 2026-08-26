@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-25T00:00:00Z",
+  "updated": "2026-08-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -823,27 +823,24 @@
       ]
     },
     {
-      "name": "Izzet Lessons",
+      "name": "Jeskai Lessons",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "R"
+        "R",
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
+          "count": 3,
           "name": "Abandon Attachments"
         },
         {
           "count": 3,
           "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 3,
-          "name": "Thor, God of Thunder"
         },
         {
           "count": 4,
@@ -854,20 +851,16 @@
           "name": "Gran-Gran"
         },
         {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
+          "count": 3,
+          "name": "Sacred Foundry"
         },
         {
           "count": 4,
           "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
         },
         {
           "count": 4,
@@ -878,20 +871,20 @@
           "name": "Riverpyre Verge"
         },
         {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
           "count": 1,
           "name": "Stock Up"
         },
         {
           "count": 4,
-          "name": "Combustion Technique"
+          "name": "Jeskai Revelation"
+        },
+        {
+          "count": 2,
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Riverglide Pathway"
+          "name": "Hallowed Fountain"
         },
         {
           "count": 4,
@@ -899,10 +892,62 @@
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 2,
+          "name": "Thor, God of Thunder"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 1,
+          "name": "Sundown Pass"
         }
       ],
       "sideboard": [
+        {
+          "count": 2,
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Anger of the Gods"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Soulless Jailer"
+        },
+        {
+          "count": 1,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
         {
           "count": 1,
           "name": "Accumulate Wisdom"
@@ -913,35 +958,7 @@
         },
         {
           "count": 1,
-          "name": "Anger of the Gods"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 2,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 2,
-          "name": "Avengers Disassembled"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 2,
-          "name": "Unable to Scream"
+          "name": "Airbender's Reversal"
         },
         {
           "count": 2,
@@ -1236,11 +1253,10 @@
       ]
     },
     {
-      "name": "Jeskai Lessons",
+      "name": "Izzet Lessons",
       "author": "MTGGoldfish",
       "colors": [
         "U",
-        "W",
         "R"
       ],
       "tags": [
@@ -1248,28 +1264,44 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Deserted Beach"
+          "count": 4,
+          "name": "Abandon Attachments"
         },
         {
-          "count": 2,
-          "name": "Island"
+          "count": 3,
+          "name": "Accumulate Wisdom"
         },
         {
-          "count": 1,
-          "name": "Teferi, Hero of Dominaria"
+          "count": 3,
+          "name": "Thor, God of Thunder"
         },
         {
           "count": 4,
-          "name": "Divide by Zero"
+          "name": "Firebending Lesson"
         },
         {
-          "count": 1,
-          "name": "Stormcarved Coast"
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
         },
         {
           "count": 2,
-          "name": "No More Lies"
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
         },
         {
           "count": 4,
@@ -1277,109 +1309,73 @@
         },
         {
           "count": 3,
-          "name": "Accumulate Wisdom"
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Stock Up"
         },
         {
           "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 3,
           "name": "Combustion Technique"
         },
         {
           "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Abandon Attachments"
+          "name": "Riverglide Pathway"
         },
         {
           "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 2,
-          "name": "Sacred Foundry"
+          "name": "Divide by Zero"
         },
         {
           "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Command"
-        },
-        {
-          "count": 2,
-          "name": "Seachrome Coast"
-        },
-        {
-          "count": 3,
-          "name": "Jeskai Revelation"
-        },
-        {
-          "count": 3,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 2,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 3,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Steam Vents"
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 1,
           "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
-          "name": "Dovin's Veto"
+          "name": "Sphinx of the Final Word"
         },
         {
           "count": 1,
+          "name": "Anger of the Gods"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 2,
           "name": "Improvisation Capstone"
         },
         {
-          "count": 3,
-          "name": "Mystical Dispute"
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 2,
+          "name": "Avengers Disassembled"
         },
         {
           "count": 1,
-          "name": "Redcap Melee"
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 2,
+          "name": "Unable to Scream"
         },
         {
           "count": 2,
           "name": "Ghost Vacuum"
-        },
-        {
-          "count": 2,
-          "name": "Kutzil's Flanker"
-        },
-        {
-          "count": 3,
-          "name": "Gran-Gran"
         }
       ]
     }
