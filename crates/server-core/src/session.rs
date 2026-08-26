@@ -2067,10 +2067,9 @@ impl SessionManager {
         max_resolutions: u32,
     ) -> Result<ResolveAllActionResult, SessionActionError> {
         if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
-            return Err(format!(
-                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
-            )
-            .into());
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::InvalidAction,
+            )));
         }
 
         let session = self

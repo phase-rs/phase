@@ -8481,6 +8481,63 @@ mod state_transport_derived_tests {
         }
     }
 
+    #[tokio::test]
+    async fn resolve_all_limit_rejection_keeps_request_correlation() {
+        let mut manager = SessionManager::new();
+        let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default());
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
+        let game_db = Arc::new(
+            persistence::GameDb::open(db_file.path(), persistence::SessionRetention::Multiplayer)
+                .expect("open temporary game database"),
+        );
+        let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
+        let identity = SocketIdentity {
+            game_code: Some(game_code),
+            player_id: Some(PlayerId(0)),
+            player_token: Some(player_token),
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        };
+
+        handle_resolve_all(
+            73,
+            5_001,
+            &state,
+            &draft_state,
+            &connections,
+            &requester_tx,
+            &game_db,
+            &game_spectators,
+            &identity,
+        )
+        .await;
+
+        assert!(matches!(
+            requester_rx
+                .recv()
+                .await
+                .expect("limit rejection keeps the requester channel open"),
+            ServerMessage::ResolveAllRejected {
+                request_id: 73,
+                rejection,
+            } if rejection.code == ActionRejectionCode::InvalidAction
+        ));
+    }
+
     #[test]
     fn turn_controller_receives_low_use_window_recommendation_instead_of_controlled_seat() {
         let controlled = PlayerId(0);
