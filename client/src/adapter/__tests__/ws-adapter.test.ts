@@ -263,6 +263,59 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+  it("settles operational failures only against their pending game operation", async () => {
+    const action = adapter.submitAction({ type: "PassPriority" }, 0);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ActionFailed", data: { message: "action persistence failed" } }),
+    );
+    await expect(action).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "action persistence failed",
+      recoverable: false,
+    });
+
+    const resolveAll = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+    const resolveAllSettled = vi.fn();
+    void resolveAll.then(resolveAllSettled, resolveAllSettled);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ResolveAllFailed", data: { request_id: 2, message: "other batch failed" } }),
+    );
+    await Promise.resolve();
+    expect(resolveAllSettled).not.toHaveBeenCalled();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ResolveAllFailed", data: { request_id: 1, message: "batch persistence failed" } }),
+    );
+    await expect(resolveAll).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "batch persistence failed",
+      recoverable: false,
+    });
+
+    const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+    const calls = ws.send.mock.calls;
+    const sent = JSON.parse(calls[calls.length - 1][0] as string);
+    const previewSettled = vi.fn();
+    void preview.then(previewSettled, previewSettled);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id + 1, message: "other preview failed" } }),
+    );
+    await Promise.resolve();
+    expect(previewSettled).not.toHaveBeenCalled();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id, message: "preview lookup failed" } }),
+    );
+    await expect(preview).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "preview lookup failed",
+      recoverable: false,
+    });
+  });
+
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
       expect(supportsServerRewind(adapter)).toBe(true);

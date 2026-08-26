@@ -594,5 +594,39 @@ describe("ServerDraftAdapter", () => {
         recoverable: true,
       });
     });
+
+    it("settles operational action and matching preview failures", async () => {
+      const action = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ActionFailed", data: { message: "action persistence failed" } }),
+      );
+      await expect(action).rejects.toMatchObject({
+        code: "WS_ERROR",
+        message: "action persistence failed",
+        recoverable: false,
+      });
+
+      const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      const settled = vi.fn();
+      void preview.then(settled, settled);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id + 1, message: "other preview failed" } }),
+      );
+      await Promise.resolve();
+      expect(settled).not.toHaveBeenCalled();
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id, message: "preview lookup failed" } }),
+      );
+      await expect(preview).rejects.toMatchObject({
+        code: "WS_ERROR",
+        message: "preview lookup failed",
+        recoverable: false,
+      });
+    });
   });
 });

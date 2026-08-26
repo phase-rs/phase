@@ -4149,14 +4149,64 @@ enum GameSubmission {
     Interaction(InteractionSubmission),
 }
 
-/// Maps the three-way session boundary onto the ordinary action-response
-/// channels. Resolve All has its own requester-correlated wrapper, but every
-/// other game submission uses this exact policy.
+/// Maps engine and lifecycle session refusals onto their ordinary response
+/// channels. Pending game operations route operational failures through their
+/// own `*Failed` frames at the call site.
 fn session_action_error_message(error: SessionActionError) -> ServerMessage {
     match error {
         SessionActionError::Rejected(rejection) => ServerMessage::ActionRejected { rejection },
         SessionActionError::RequestRejected(reason) => ServerMessage::RequestRejected { reason },
         SessionActionError::Operational(error) => ServerMessage::error(error),
+    }
+}
+
+/// Keep an operational failure attached to the operation whose client promise
+/// is waiting for it. Engine legality remains on the structured rejection
+/// frames above; this function is only for failures outside the engine action
+/// boundary.
+fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<ServerMessage> {
+    match msg {
+        ClientMessage::Action { .. }
+        | ClientMessage::Interaction { .. }
+        | ClientMessage::Concede => Some(ServerMessage::ActionFailed { message }),
+        ClientMessage::ResolveAll { request_id, .. } => Some(ServerMessage::ResolveAllFailed {
+            request_id: *request_id,
+            message,
+        }),
+        ClientMessage::PreviewManaPayment { request_id, .. } => {
+            Some(ServerMessage::ManaPaymentPreviewFailed {
+                request_id: *request_id,
+                message,
+            })
+        }
+        ClientMessage::ClientHello { .. }
+        | ClientMessage::CreateGame { .. }
+        | ClientMessage::JoinGame { .. }
+        | ClientMessage::Reconnect { .. }
+        | ClientMessage::AbandonGame
+        | ClientMessage::ConcedeMatch
+        | ClientMessage::SubscribeLobby
+        | ClientMessage::UnsubscribeLobby
+        | ClientMessage::RequestTakeback(_)
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback
+        | ClientMessage::BootstrapTerminalDelivery { .. }
+        | ClientMessage::ReadTerminalResult { .. }
+        | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::CreateGameWithSettings { .. }
+        | ClientMessage::JoinGameWithPassword { .. }
+        | ClientMessage::LookupJoinTarget { .. }
+        | ClientMessage::Emote { .. }
+        | ClientMessage::SpectatorJoin { .. }
+        | ClientMessage::Ping { .. }
+        | ClientMessage::UpdateLobbyMetadata { .. }
+        | ClientMessage::SeatMutate { .. }
+        | ClientMessage::UnregisterLobby { .. }
+        | ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. }
+        | ClientMessage::SpectateDraft { .. } => None,
     }
 }
 
@@ -4262,7 +4312,9 @@ async fn handle_full_game_submission(
         Some(c) => c.clone(),
         None => {
             warn!(kind, "game submission received but not in a game");
-            let msg = ServerMessage::error("Not in a game".to_string());
+            let msg = ServerMessage::ActionFailed {
+                message: "Not in a game".to_string(),
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -4272,7 +4324,9 @@ async fn handle_full_game_submission(
     let player_token = match &identity.player_token {
         Some(t) => t.clone(),
         None => {
-            let msg = ServerMessage::error("No player token".to_string());
+            let msg = ServerMessage::ActionFailed {
+                message: "No player token".to_string(),
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -4410,7 +4464,7 @@ async fn handle_full_game_submission(
                 spell_costs: &spell_costs,
             }) {
                 warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
-                let msg = ServerMessage::error(reason);
+                let msg = ServerMessage::ActionFailed { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
@@ -4422,7 +4476,7 @@ async fn handle_full_game_submission(
                     Ok(deliveries) => deliveries,
                     Err(error) => {
                         error!(game = %game_code, %error, "terminal preparation failed");
-                        let msg = ServerMessage::error(error);
+                        let msg = ServerMessage::ActionFailed { message: error };
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = socket.send(Message::text(json)).await;
                         }
@@ -4554,7 +4608,10 @@ async fn handle_full_game_submission(
             }
         }
         Err(error) => {
-            let msg = session_action_error_message(error);
+            let msg = match error {
+                SessionActionError::Operational(message) => ServerMessage::ActionFailed { message },
+                error => session_action_error_message(error),
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -4582,7 +4639,10 @@ async fn handle_resolve_all(
         identity.player_token.clone(),
         identity.player_id,
     ) else {
-        let msg = ServerMessage::error("Not in a game".to_string());
+        let msg = ServerMessage::ResolveAllFailed {
+            request_id,
+            message: "Not in a game".to_string(),
+        };
         let _ = tx.send(msg);
         return;
     };
@@ -4666,7 +4726,10 @@ async fn handle_resolve_all(
             return;
         }
         Err(SessionActionError::Operational(error)) => {
-            let _ = tx.send(ServerMessage::error(error));
+            let _ = tx.send(ServerMessage::ResolveAllFailed {
+                request_id,
+                message: error,
+            });
             return;
         }
     };
@@ -4915,7 +4978,9 @@ async fn handle_client_message(
     // need to second-guess whether the message should reach them.
     if let Some(reason) = reject_if_disabled(&client_msg, mode) {
         warn!(?mode, msg = ?std::mem::discriminant(&client_msg), %reason, "rejecting message disabled by server mode");
-        let msg = ServerMessage::error(reason.to_string());
+        let reason = reason.to_string();
+        let msg = operation_failed_message(&client_msg, reason.clone())
+            .unwrap_or_else(|| ServerMessage::error(reason));
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = socket.send(Message::text(json)).await;
         }
@@ -5205,12 +5270,18 @@ async fn handle_client_message(
                                 ServerMessage::RequestRejected { reason }
                             }
                             Err(SessionActionError::Operational(error)) => {
-                                ServerMessage::error(error)
+                                ServerMessage::ManaPaymentPreviewFailed {
+                                    request_id,
+                                    message: error,
+                                }
                             }
                         }
                     }
                 }
-                _ => ServerMessage::error("Not in a game".to_string()),
+                _ => ServerMessage::ManaPaymentPreviewFailed {
+                    request_id,
+                    message: "Not in a game".to_string(),
+                },
             };
 
             if let Ok(json) = serde_json::to_string(&response) {
@@ -6795,7 +6866,9 @@ async fn handle_client_message(
                     (game_code, player_token, player_id)
                 }
                 _ => {
-                    let msg = ServerMessage::error("Not in a game".to_string());
+                    let msg = ServerMessage::ActionFailed {
+                        message: "Not in a game".to_string(),
+                    };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -6850,7 +6923,13 @@ async fn handle_client_message(
 
             match outcome {
                 Err(error) => {
-                    if let Ok(json) = serde_json::to_string(&session_action_error_message(error)) {
+                    let msg = match error {
+                        SessionActionError::Operational(message) => {
+                            ServerMessage::ActionFailed { message }
+                        }
+                        error => session_action_error_message(error),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
@@ -6860,7 +6939,7 @@ async fn handle_client_message(
                             Ok(deliveries) => deliveries,
                             Err(error) => {
                                 error!(game = %game_code, %error, "terminal preparation failed");
-                                let _ = tx.send(ServerMessage::error(error));
+                                let _ = tx.send(ServerMessage::ActionFailed { message: error });
                                 return;
                             }
                         },
@@ -9485,8 +9564,8 @@ mod game_submission_tests {
         socket
     }
 
-    /// Read frames until one is an `ActionRejected` or an `Error`, ignoring the
-    /// unrelated broadcasts the session emits. The enclosing
+    /// Read frames until one is a submission answer, ignoring unrelated
+    /// broadcasts the session emits. The enclosing
     /// `tokio::time::timeout` is the failure mode, as in every sibling test.
     async fn recv_submission_answer<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
     where
@@ -9497,6 +9576,7 @@ mod game_submission_tests {
             if matches!(
                 msg,
                 ServerMessage::ActionRejected { .. }
+                    | ServerMessage::ActionFailed { .. }
                     | ServerMessage::RequestRejected { .. }
                     | ServerMessage::Error { .. }
             ) {
@@ -9771,7 +9851,7 @@ mod game_submission_tests {
     /// test's `ActionRejected` came from an engine verdict rather than being
     /// this handler's blanket answer.
     #[tokio::test]
-    async fn a_game_submission_without_a_session_is_answered_on_the_error_channel() {
+    async fn a_game_submission_without_a_session_is_answered_on_the_failed_channel() {
         let (url, server, _temp_dir) = spawn_full_mode_server().await;
         let answer = tokio::time::timeout(Duration::from_secs(5), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url)
@@ -9817,8 +9897,8 @@ mod game_submission_tests {
 
         let answer = answer.expect("sessionless interaction was never answered");
         match answer {
-            ServerMessage::Error { message, .. } => assert_eq!(message, "Not in a game"),
-            other => panic!("a pre-session condition is not an engine verdict: {other:?}"),
+            ServerMessage::ActionFailed { message } => assert_eq!(message, "Not in a game"),
+            other => panic!("a pre-session condition must settle the action promise: {other:?}"),
         }
     }
 }
@@ -9900,6 +9980,57 @@ mod mode_gate_tests {
                 "expected {msg:?} to be rejected in lobby-only mode"
             );
         }
+    }
+
+    #[test]
+    fn mode_gate_keeps_operational_failures_with_their_game_request() {
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::Action {
+                    action: GameAction::PassPriority,
+                },
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::ActionFailed { message }) if message == "disabled"
+        ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::Interaction {
+                    submission: InteractionSubmission {
+                        interaction_id: engine::types::interaction::InteractionId("i".to_string()),
+                        response: engine::types::interaction::InteractionResponse::Choose {
+                            choice_id: engine::types::interaction::InteractionChoiceId("c".to_string()),
+                        },
+                    },
+                },
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::ActionFailed { message }) if message == "disabled"
+        ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::ResolveAll {
+                    request_id: 4,
+                    max_resolutions: 1,
+                },
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::ResolveAllFailed { request_id: 4, message }) if message == "disabled"
+        ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::PreviewManaPayment {
+                    request_id: 5,
+                    action: GameAction::PassPriority,
+                },
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::ManaPaymentPreviewFailed { request_id: 5, message }) if message == "disabled"
+        ));
+        assert!(
+            operation_failed_message(&ClientMessage::ConcedeMatch, "disabled".to_string(),)
+                .is_none()
+        );
     }
 
     #[test]

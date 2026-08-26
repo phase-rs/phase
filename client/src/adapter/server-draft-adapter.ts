@@ -725,6 +725,19 @@ export class ServerDraftAdapter implements EngineAdapter {
         break;
       }
 
+      case "ActionFailed": {
+        const data = msg.data as { message: string };
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        } else {
+          this.emit({ type: "error", message: data.message });
+        }
+        break;
+      }
+
       case "ManaPaymentPreview": {
         const data = msg.data as { request_id: number; source_ids: ObjectId[] };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
@@ -751,6 +764,16 @@ export class ServerDraftAdapter implements EngineAdapter {
               ? actionRejectionError(data.rejection)
               : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
           );
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
         }
         break;
       }
