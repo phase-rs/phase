@@ -10,8 +10,8 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::turn::Phase;
 use engine::types::zones::Zone;
 
 const P2: PlayerId = PlayerId(2);
