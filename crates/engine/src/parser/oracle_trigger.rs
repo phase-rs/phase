@@ -18210,7 +18210,20 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
         value(Some(Zone::Library), tag("an opponent's library")),
         value(Some(Zone::Library), tag("a player's library")),
         value(Some(Zone::Library), tag("any library")),
+        // Hand — every possessive form maps to Zone::Hand. CR 109.5: "their"
+        // is an anaphor back to the graveyard's owner; possessive does not
+        // narrow the zone selection itself (the valid_card controller filter
+        // threads owner scope when present). Includes the negative-exclusion
+        // forms ("from anywhere other than their hand") so
+        // `parse_origin_constraint_tail` can fold them into
+        // `OriginConstraint::NotEquals(Zone::Hand)` instead of falling back to
+        // `OriginConstraint::Any` and silently dropping the restriction.
         value(Some(Zone::Hand), tag("your hand")),
+        value(Some(Zone::Hand), tag("their hand")),
+        value(Some(Zone::Hand), tag("an opponent's hand")),
+        value(Some(Zone::Hand), tag("a player's hand")),
+        value(Some(Zone::Hand), tag("any hand")),
+        value(Some(Zone::Hand), tag("a hand")),
     ))
     .parse(input)
 }

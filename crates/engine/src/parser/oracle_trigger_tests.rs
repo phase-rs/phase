@@ -15527,6 +15527,51 @@ fn trigger_put_into_graveyard_from_anywhere_other_than_battlefield() {
     );
 }
 
+/// Regression for the possessive-hand grammar gap surfaced by review
+/// (CodeRabbit line 18113 / Matthew Evans blocker -- "their hand"):
+/// `parse_graveyard_origin_zone` recognized `your hand` but not `their hand` /
+/// `an opponent's hand` / `a player's hand`, so "from anywhere other than
+/// their hand" fell through to `OriginConstraint::Any` and silently dropped
+/// the exclusion. Every possessive hand form now maps to `Zone::Hand`, so the
+/// negative tail routes through `parse_origin_constraint_tail` ->
+/// `OriginConstraint::NotEquals(Zone::Hand)`. Asserted on a class analog and
+/// on Disa's exact text with a "their hand" tail.
+#[test]
+fn trigger_put_into_graveyard_from_anywhere_other_than_their_hand() {
+    // Class analog: no subtype on the subject.
+    let def = parse_trigger_line(
+        "Whenever a permanent card is put into your graveyard from anywhere other than their hand, put it onto the battlefield.",
+        "Hand-Other Observer",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert!(
+        def.destination.is_none(),
+        "superseded scalar destination must be cleared"
+    );
+    assert!(def.origin.is_none());
+    assert!(def.valid_card.is_none());
+    assert_eq!(def.zone_change_clauses.len(), 1);
+    assert_eq!(
+        def.zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Hand),
+        "\"other than their hand\" must parse as NotEquals(Hand), not fall back to Any"
+    );
+    assert_eq!(def.zone_change_clauses[0].destination, Some(Zone::Graveyard));
+
+    // Same subject with Disa's exact type-restricted phrasing but a
+    // "their hand" exclusion -- exercises the updated possession grammar.
+    let def = parse_trigger_line(
+        "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than their hand, put it onto the battlefield.",
+        "Disa the Restless",
+    );
+    assert_eq!(def.zone_change_clauses.len(), 1);
+    assert_eq!(
+        def.zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Hand),
+        "the 'their hand' possessor must be recognized, not treated as Any"
+    );
+}
+
 #[test]
 fn trigger_you_discard_a_card() {
     let def = parse_trigger_line(
