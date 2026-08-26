@@ -66,6 +66,7 @@ fn pay_sacrifice(runner: &mut GameRunner, creature: ObjectId) {
 fn give_p0_sorcery_window(runner: &mut GameRunner) {
     let state = runner.state_mut();
     state.phase = Phase::PreCombatMain;
+    state.turn_number = 2;
     state.active_player = P0;
     state.priority_player = P0;
     state.waiting_for = WaitingFor::Priority { player: P0 };
