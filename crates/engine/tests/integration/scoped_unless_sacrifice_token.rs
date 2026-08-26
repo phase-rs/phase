@@ -107,6 +107,7 @@ fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p1_creature = all_decline.add_creature(P1, "P1 Sacrifice", 1, 1).id();
     let _p2_creature = all_decline.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut decline_runner = all_decline.build();
     give_p0_sorcery_window(&mut decline_runner);
@@ -142,6 +143,7 @@ fn scoped_unless_sacrifice_skips_an_eliminated_pending_payer() {
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p1_creature = scenario.add_creature(P1, "P1 Sacrifice", 1, 1).id();
     let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
