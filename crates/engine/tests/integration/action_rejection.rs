@@ -60,64 +60,94 @@ fn every_rejection_code_has_a_closed_disposition_and_safe_message() {
         (
             ActionRejectionCode::InvalidAction,
             ActionRejectionDisposition::Invalid,
+            "invalid_action",
         ),
         (
             ActionRejectionCode::WrongPlayer,
             ActionRejectionDisposition::Unauthorized,
+            "wrong_player",
         ),
         (
             ActionRejectionCode::NotYourPriority,
             ActionRejectionDisposition::Unavailable,
+            "not_your_priority",
         ),
         (
             ActionRejectionCode::ActionNotAllowed,
             ActionRejectionDisposition::Unavailable,
+            "action_not_allowed",
         ),
         (
             ActionRejectionCode::InteractionUnavailable,
             ActionRejectionDisposition::Unavailable,
+            "interaction_unavailable",
         ),
         (
             ActionRejectionCode::InteractionNotAuthorized,
             ActionRejectionDisposition::Unauthorized,
+            "interaction_not_authorized",
         ),
         (
             ActionRejectionCode::StaleInteraction,
             ActionRejectionDisposition::Stale,
+            "stale_interaction",
         ),
         (
             ActionRejectionCode::InvalidInteractionResponse,
             ActionRejectionDisposition::Invalid,
+            "invalid_interaction_response",
         ),
         (
             ActionRejectionCode::InteractionPayloadTooLarge,
             ActionRejectionDisposition::Invalid,
+            "interaction_payload_too_large",
         ),
         (
             ActionRejectionCode::InteractionConstraintUnsatisfied,
             ActionRejectionDisposition::Invalid,
+            "interaction_constraint_unsatisfied",
         ),
         (
             ActionRejectionCode::InteractionCancelOnly,
             ActionRejectionDisposition::Unavailable,
+            "interaction_cancel_only",
         ),
         (
             ActionRejectionCode::InteractionReducerRejected,
             ActionRejectionDisposition::Invalid,
+            "interaction_reducer_rejected",
         ),
         (
             ActionRejectionCode::UnsupportedInteractionResponse,
             ActionRejectionDisposition::Unsupported,
+            "unsupported_interaction_response",
         ),
         (
             ActionRejectionCode::ResolveAllNotReady,
             ActionRejectionDisposition::Unavailable,
+            "resolve_all_not_ready",
+        ),
+        (
+            ActionRejectionCode::DebugPermissionDenied,
+            ActionRejectionDisposition::Unauthorized,
+            "debug_permission_denied",
         ),
     ];
 
-    for (code, disposition) in cases {
+    for (code, disposition, serialized_code) in cases {
         assert_eq!(code.disposition(), disposition);
         assert!(!code.message().is_empty());
+
+        let rejection = ActionRejection::new(code);
+        assert_eq!(rejection.disposition, disposition);
+        assert_eq!(rejection.message, code.message());
+        assert!(rejection.related_object_ids.is_empty());
+        let serialized = serde_json::to_value(&rejection).expect("rejection serializes");
+        assert_eq!(serialized["code"], serde_json::json!(serialized_code));
+        assert_eq!(
+            serialized["disposition"],
+            serde_json::to_value(disposition).expect("rejection disposition serializes")
+        );
     }
 }
 

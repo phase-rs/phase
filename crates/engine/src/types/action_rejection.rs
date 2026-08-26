@@ -22,6 +22,7 @@ pub enum ActionRejectionCode {
     InteractionReducerRejected,
     UnsupportedInteractionResponse,
     ResolveAllNotReady,
+    DebugPermissionDenied,
 }
 
 /// Broad client-recovery category for an [`ActionRejectionCode`].
@@ -44,7 +45,7 @@ impl ActionRejectionCode {
             | Self::InteractionPayloadTooLarge
             | Self::InteractionConstraintUnsatisfied
             | Self::InteractionReducerRejected => ActionRejectionDisposition::Invalid,
-            Self::WrongPlayer | Self::InteractionNotAuthorized => {
+            Self::WrongPlayer | Self::InteractionNotAuthorized | Self::DebugPermissionDenied => {
                 ActionRejectionDisposition::Unauthorized
             }
             Self::NotYourPriority
@@ -77,6 +78,7 @@ impl ActionRejectionCode {
             Self::InteractionReducerRejected => "That interaction can no longer be applied.",
             Self::UnsupportedInteractionResponse => "That interaction response is not supported.",
             Self::ResolveAllNotReady => "Resolve All is not ready to run.",
+            Self::DebugPermissionDenied => "You are not authorized to use debug actions.",
         }
     }
 }
@@ -99,12 +101,19 @@ pub struct ActionRejection {
 }
 
 impl ActionRejection {
-    pub(crate) fn from_code(code: ActionRejectionCode, related_object_ids: Vec<ObjectId>) -> Self {
+    /// Builds a rejection with no object identities.
+    pub fn new(code: ActionRejectionCode) -> Self {
         Self {
             disposition: code.disposition(),
             message: code.message().to_string(),
             code,
-            related_object_ids,
+            related_object_ids: vec![],
         }
+    }
+
+    pub(crate) fn from_code(code: ActionRejectionCode, related_object_ids: Vec<ObjectId>) -> Self {
+        let mut rejection = Self::new(code);
+        rejection.related_object_ids = related_object_ids;
+        rejection
     }
 }
