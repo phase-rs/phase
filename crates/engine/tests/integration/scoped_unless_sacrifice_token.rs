@@ -63,16 +63,24 @@ fn pay_sacrifice(runner: &mut GameRunner, creature: ObjectId) {
         .expect("selected creature pays the unless cost");
 }
 
+fn give_p0_sorcery_window(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    state.phase = Phase::PreCombatMain;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+}
+
 #[test]
 fn scoped_unless_sacrifice_aggregates_mixed_three_player_answers() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
 
     expect_unless(&runner, P1);
@@ -94,12 +102,12 @@ fn scoped_unless_sacrifice_aggregates_mixed_three_player_answers() {
 #[test]
 fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for_all_pay() {
     let mut all_decline = GameScenario::new_n_player(3, 42);
-    all_decline.at_phase(Phase::PreCombatMain);
     let decline_spell = all_decline
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut decline_runner = all_decline.build();
+    give_p0_sorcery_window(&mut decline_runner);
     decline_runner.cast(decline_spell).resolve();
     decline_runner
         .act(GameAction::PayUnlessCost { pay: false })
@@ -111,7 +119,6 @@ fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for
     expect_aggregate_payment_finished(&decline_runner);
 
     let mut all_pay = GameScenario::new_n_player(3, 42);
-    all_pay.at_phase(Phase::PreCombatMain);
     let pay_spell = all_pay
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
@@ -119,6 +126,7 @@ fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for
     let p1_creature = all_pay.add_creature(P1, "P1 Sacrifice", 1, 1).id();
     let p2_creature = all_pay.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut pay_runner = all_pay.build();
+    give_p0_sorcery_window(&mut pay_runner);
     pay_runner.cast(pay_spell).resolve();
     pay_sacrifice(&mut pay_runner, p1_creature);
     pay_sacrifice(&mut pay_runner, p2_creature);
@@ -128,12 +136,12 @@ fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for
 #[test]
 fn scoped_unless_sacrifice_skips_an_eliminated_pending_payer() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
 
@@ -153,12 +161,12 @@ fn scoped_unless_sacrifice_skips_an_eliminated_pending_payer() {
 #[test]
 fn scoped_unless_sacrifice_settles_earlier_declines_when_final_payer_is_eliminated() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
     runner
@@ -179,13 +187,13 @@ fn scoped_unless_sacrifice_settles_earlier_declines_when_final_payer_is_eliminat
 #[test]
 fn scoped_unless_sacrifice_keeps_a_departed_decliners_tokens_owed() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
     runner
@@ -208,12 +216,12 @@ fn scoped_unless_sacrifice_keeps_a_departed_decliners_tokens_owed() {
 #[test]
 fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
 
@@ -230,7 +238,6 @@ fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
 #[test]
 fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
@@ -240,6 +247,7 @@ fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
         .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
         .id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
     pay_sacrifice(&mut runner, colossus);
@@ -262,7 +270,6 @@ fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
 #[test]
 fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_leaves() {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
@@ -272,6 +279,7 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
         .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
         .id();
     let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
     pay_sacrifice(&mut runner, colossus);
