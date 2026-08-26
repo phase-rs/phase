@@ -7948,6 +7948,33 @@ fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
     assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
+/// CR 101.4 + CR 118.12a: the prepositional player scope used by the
+/// aggregate token grammar must bind "they" to its iterated opponent just as
+/// the subject-form scope above does. The spell controller creates every token;
+/// the opponents only decide whether to pay the sacrifice cost.
+#[test]
+fn effect_for_each_opponent_token_unless_sacrifice_binds_scoped_player() {
+    let def = parse_effect_chain(
+        "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(
+        *def.effect,
+        Effect::Token {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    let unless_pay = def.unless_pay.expect("should attach unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    assert!(matches!(
+        unless_pay.cost,
+        AbilityCost::Sacrifice(ref cost) if cost.requirement.fixed_count() == Some(1)
+    ));
+}
+
 #[test]
 fn effect_draw_for_each_player_counter_uses_dynamic_count() {
     let e = parse_effect("Draw a card for each experience counter you have");
