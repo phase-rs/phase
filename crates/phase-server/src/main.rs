@@ -4417,19 +4417,21 @@ async fn handle_full_game_submission(
                     "game submission processed (lock held)"
                 );
 
-                terminal.map(|terminal| {
-                    (
-                        human_revision,
-                        human_result,
-                        ai_results,
-                        eliminated,
-                        player_count,
-                        game_over_winner,
-                        terminal,
-                        rewind_targets,
-                        ai_failure,
-                    )
-                })
+                terminal
+                    .map_err(SessionActionError::Operational)
+                    .map(|terminal| {
+                        (
+                            human_revision,
+                            human_result,
+                            ai_results,
+                            eliminated,
+                            player_count,
+                            game_over_winner,
+                            terminal,
+                            rewind_targets,
+                            ai_failure,
+                        )
+                    })
             }
             Err(e) => Err(e),
         }
@@ -4687,25 +4689,27 @@ async fn handle_resolve_all(
                         persist_full_session_async(game_db, session);
                         Ok(None)
                     };
-                    terminal.map(|terminal| {
-                        (
-                            summary,
-                            Some((
-                                revision,
-                                raw_state,
-                                legal_actions,
-                                log_entries,
-                                spell_costs,
-                                by_object,
-                                eliminated,
-                                rewind_targets,
-                                player_count,
-                                game_over_winner,
-                                terminal,
-                                ai_failure,
-                            )),
-                        )
-                    })
+                    terminal
+                        .map_err(SessionActionError::Operational)
+                        .map(|terminal| {
+                            (
+                                summary,
+                                Some((
+                                    revision,
+                                    raw_state,
+                                    legal_actions,
+                                    log_entries,
+                                    spell_costs,
+                                    by_object,
+                                    eliminated,
+                                    rewind_targets,
+                                    player_count,
+                                    game_over_winner,
+                                    terminal,
+                                    ai_failure,
+                                )),
+                            )
+                        })
                 }
             },
             Err(error) => Err(error),
@@ -6915,6 +6919,7 @@ async fn handle_client_message(
                         };
                         let rewind_targets = session.rewind_options();
                         terminal
+                            .map_err(SessionActionError::Operational)
                             .map(|terminal| (revision, result, winner, terminal, rewind_targets))
                     }
                     Err(error) => Err(error),

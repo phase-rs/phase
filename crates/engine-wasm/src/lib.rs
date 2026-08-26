@@ -13,6 +13,8 @@ use engine::ai_support::{
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
+#[cfg(test)]
+use engine::game::engine::apply;
 use engine::game::engine::{
     apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
     recover_orphaned_resolve_all, resolve_all_ready_prefix_with_rejection,
