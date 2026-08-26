@@ -35868,13 +35868,16 @@ fn extract_resolution_unless_pay_modifier(
                 // preceding word. The mask preserves byte length, so `.len()` indexes
                 // the original text exactly.
                 let cleaned = text[..before_unless.len()].trim().to_string();
-                return (
-                    cleaned,
-                    Some(UnlessPayModifier {
-                        cost,
-                        payer: TargetFilter::Controller,
-                    }),
-                );
+                let payer = if player_scope.is_some()
+                    && tag::<_, _, OracleError<'_>>("they ")
+                        .parse(after_unless_lower)
+                        .is_ok()
+                {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Controller
+                };
+                return (cleaned, Some(UnlessPayModifier { cost, payer }));
             }
         }
         if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {
