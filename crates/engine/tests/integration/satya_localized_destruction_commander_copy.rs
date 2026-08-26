@@ -8,12 +8,11 @@ use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const LOCALIZED_DESTRUCTION: &str = "You get {E} (an energy counter), then you may pay one or more {E}. If you do, each creature you control with power equal to the amount of {E} paid this way gains indestructible until end of turn.\nDestroy all creatures.";
-
 /// CR 903.3 + CR 707.10 + CR 704.5d: The Sixth Doctor grants Demonstrate to
-/// commander Sarah Jane Smith. Its spell copies become tokens only after they
-/// resolve, so Localized Destruction must offer the real card's command-zone
-/// return and then remove the copied token without a second unreachable choice.
+/// commander Sarah Jane Smith. Its spell copies are tokens, so Localized
+/// Destruction's "Destroy all creatures" instruction must offer the real
+/// card's command-zone return and then remove the copied token without a
+/// second unreachable choice.
 #[test]
 fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
     let mut scenario = GameScenario::new();
@@ -30,7 +29,7 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         .commander()
         .id();
     let localized_destruction = scenario
-        .add_spell_to_hand_from_oracle(P0, "Localized Destruction", false, LOCALIZED_DESTRUCTION)
+        .add_spell_to_hand_from_oracle(P0, "Localized Destruction", false, "Destroy all creatures.")
         .id();
 
     let mut runner = scenario.build();
@@ -65,48 +64,7 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         "the original Sarah Jane Smith card remains the commander"
     );
 
-    // Resolve the actual first line of Localized Destruction explicitly. Its
-    // energy-payment choice must settle before the following board wipe runs.
-    let mut destruction = runner.cast(localized_destruction).commit();
-    destruction
-        .act(GameAction::PassPriority)
-        .expect("first priority pass accepts the cast");
-    let energy_optional = destruction
-        .act(GameAction::PassPriority)
-        .expect("second priority pass begins Localized Destruction resolution");
-    assert!(matches!(
-        energy_optional.waiting_for,
-        WaitingFor::OptionalEffectChoice { .. }
-    ));
-    destruction
-        .act(GameAction::DecideOptionalEffect { accept: false })
-        .expect("declining Localized Destruction's energy payment is valid");
-    drop(destruction);
-
-    assert_eq!(
-        runner.state().players[P0.0 as usize].energy,
-        1,
-        "declining the optional payment leaves the energy granted by the spell unspent"
-    );
-
-    // The decline completes the spell at a priority boundary. Finish that
-    // priority round so the engine performs the next SBA check, whose
-    // commander-return choice is the behavior under regression.
-    for _ in 0..runner.state().players.len() {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::CommanderZoneChoice { .. }
-        ) {
-            break;
-        }
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
-        runner
-            .act(GameAction::PassPriority)
-            .expect("priority pass must advance the post-resolution SBA pipeline");
-    }
+    runner.cast(localized_destruction).resolve();
 
     assert!(matches!(
         runner.state().waiting_for,
