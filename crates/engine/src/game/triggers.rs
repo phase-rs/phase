@@ -45815,6 +45815,179 @@ pub mod tests {
             Some(&unchosen),
         ));
     }
+
+    /// CR 603.2 + CR 603.6a: a permanent spell's real Stack→Battlefield
+    /// transition must remain visible to both the trigger index and ordinary
+    /// post-action collection. This is a diagnostic reproduction for the
+    /// Gilgamesh / Sokka-and-Suki report; it deliberately asserts each seam
+    /// separately so a failure identifies candidate routing versus collection.
+    #[test]
+    fn permanent_spell_entry_keeps_gilgamesh_and_sokka_etb_sources_visible() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::CastPaymentMode;
+
+        const GILGAMESH: &str = "Whenever Gilgamesh enters or attacks, draw a card.";
+        const SOKKA_AND_SUKI: &str =
+            "Whenever Sokka and Suki or another Ally you control enters, draw a card.";
+
+        fn resolve_free_permanent_spell(
+            runner: &mut crate::game::scenario::GameRunner,
+            object_id: ObjectId,
+        ) -> Vec<GameEvent> {
+            let card_id = runner.state().objects[&object_id].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id,
+                    card_id,
+                    targets: Vec::new(),
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("free permanent spell cast must be accepted");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("first player must be able to pass priority");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("second player must resolve the permanent spell")
+                .events
+        }
+
+        fn assert_entry_seams(
+            state: &GameState,
+            resolution_events: &[GameEvent],
+            entering: ObjectId,
+            expected_sources: &[ObjectId],
+            unrelated: ObjectId,
+            label: &str,
+        ) {
+            let entry_event = resolution_events
+                .iter()
+                .find(|event| {
+                    matches!(
+                        event,
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Stack),
+                            to: Zone::Battlefield,
+                            ..
+                        } if *object_id == entering
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: resolving the permanent must emit its Stack→Battlefield \
+                         ZoneChanged event; events={resolution_events:?}"
+                    )
+                });
+
+            let candidates = crate::game::trigger_index::candidates_for_event(state, entry_event);
+            for source in expected_sources {
+                assert!(
+                    candidates.contains(source),
+                    "{label}: trigger source {source:?} must be returned by \
+                     candidates_for_event for the real Stack→Battlefield event; \
+                     candidates={candidates:?}, event={entry_event:?}"
+                );
+            }
+            assert!(
+                !candidates.contains(&unrelated),
+                "{label}: attacks-only source {unrelated:?} must not be a \
+                 Stack→Battlefield candidate; candidates={candidates:?}"
+            );
+
+            let mut collector_state = state.clone();
+            let pending =
+                collect_pending_triggers(&mut collector_state, std::slice::from_ref(entry_event));
+            for source in expected_sources {
+                assert!(
+                    pending
+                        .iter()
+                        .any(|context| context.pending.source_id == *source),
+                    "{label}: indexed source {source:?} must produce an ordinary pending \
+                     trigger context for the real entry event; pending_sources={:?}",
+                    pending
+                        .iter()
+                        .map(|context| context.pending.source_id)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        let mut gilgamesh_scenario = GameScenario::new();
+        gilgamesh_scenario.at_phase(Phase::PreCombatMain);
+        let gilgamesh = gilgamesh_scenario
+            .add_creature_to_hand_from_oracle(P0, "Gilgamesh", 3, 3, GILGAMESH)
+            .id();
+        let gilgamesh_unrelated = gilgamesh_scenario
+            .add_creature_from_oracle(
+                P0,
+                "Unrelated attacker",
+                2,
+                2,
+                "Whenever ~ attacks, draw a card.",
+            )
+            .id();
+        let mut gilgamesh_runner = gilgamesh_scenario.build();
+        let gilgamesh_events = resolve_free_permanent_spell(&mut gilgamesh_runner, gilgamesh);
+        assert_entry_seams(
+            gilgamesh_runner.state(),
+            &gilgamesh_events,
+            gilgamesh,
+            &[gilgamesh],
+            gilgamesh_unrelated,
+            "Gilgamesh",
+        );
+        assert!(
+            gilgamesh_runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == gilgamesh),
+            "Gilgamesh: the ordinary post-action pipeline must put its ETB trigger on \
+             the stack; stack={:?}",
+            gilgamesh_runner.state().stack
+        );
+
+        let mut sokka_scenario = GameScenario::new();
+        sokka_scenario.at_phase(Phase::PreCombatMain);
+        let sokka = sokka_scenario
+            .add_creature_from_oracle(P0, "Sokka and Suki", 3, 3, SOKKA_AND_SUKI)
+            .with_subtypes(vec!["Human", "Warrior", "Ally"])
+            .id();
+        let entering_ally = sokka_scenario
+            .add_creature_to_hand_from_oracle(P0, "Test Ally", 1, 1, "")
+            .with_subtypes(vec!["Ally"])
+            .id();
+        let sokka_unrelated = sokka_scenario
+            .add_creature_from_oracle(
+                P0,
+                "Unrelated attacker",
+                2,
+                2,
+                "Whenever ~ attacks, draw a card.",
+            )
+            .id();
+        let mut sokka_runner = sokka_scenario.build();
+        let sokka_events = resolve_free_permanent_spell(&mut sokka_runner, entering_ally);
+        assert_entry_seams(
+            sokka_runner.state(),
+            &sokka_events,
+            entering_ally,
+            &[sokka],
+            sokka_unrelated,
+            "Sokka and Suki",
+        );
+        assert!(
+            sokka_runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == sokka),
+            "Sokka and Suki: the ordinary post-action pipeline must put its Ally ETB \
+             trigger on the stack; stack={:?}",
+            sokka_runner.state().stack
+        );
+    }
 }
 
 /// Regression tests for the foundational trigger double-fire defect
