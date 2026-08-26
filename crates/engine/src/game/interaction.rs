@@ -10007,7 +10007,7 @@ pub fn submit_interaction_with_rejection(
             .map_err(action_rejection_for_interaction_reason)?
             .semantic_owner,
     );
-    let result = apply_interaction_with_rejection(state, actor, semantic_owner, action)?;
+    let result = apply_interaction_with_rejection(state, actor, semantic_owner, action.clone())?;
     Ok(AppliedInteraction { action, result })
 }
 
