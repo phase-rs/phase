@@ -1,5 +1,5 @@
 use rand::Rng;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
@@ -1042,6 +1042,76 @@ pub fn apply_interaction_with_rejection(
             &action_rejection_for_engine_error(&error, related_object_ids),
         )
     })
+}
+
+/// Applies an AI-selected priority pass after re-validating the exact current
+/// engine-issued decision contract. A verified pass is the only AI action that
+/// may start (or continue) a retained `RecheckNoMeaningfulPriorityAction`
+/// session; ordinary `PassPriority` remains an ordinary player pass.
+///
+/// The retained session is intentionally stack-local: it fences the stack as
+/// it exists now and pauses for a fresh AI decision whenever any future
+/// priority holder gains a meaningful action. This is not a historical-pass
+/// cache and it never authorizes a new stack entry.
+pub fn apply_verified_ai_priority_pass(
+    state: &mut GameState,
+    contract: &crate::ai_support::AiDecisionContract,
+) -> Result<ActionResult, EngineError> {
+    let action = GameAction::PassPriority;
+    let actor = contract.authorized_actor;
+    if !contract.permits(state, actor, &action) {
+        return Err(EngineError::ActionNotAllowed(
+            "AI priority pass no longer matches its issued decision contract".to_string(),
+        ));
+    }
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return Err(EngineError::ActionNotAllowed(
+            "AI stack continuation requires a live priority window".to_string(),
+        ));
+    };
+    if *player != contract.semantic_owner || state.stack.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "AI stack continuation requires the issued nonempty priority window".to_string(),
+        ));
+    }
+
+    let representative = super::topology::priority_pass_representative(state, *player);
+    if let Some(session) = state.stack_resolution_session.as_ref() {
+        let current_representatives = super::topology::canonical_priority_representatives(
+            state,
+            session.representatives.iter().copied(),
+        );
+        let current_entry_matches = session.entries.get(session.cursor).is_some_and(|fence| {
+            state
+                .stack
+                .back()
+                .is_some_and(|entry| fence.matches_captured_entry(entry))
+        });
+        if session.policy != StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+            || current_representatives != session.representatives
+            || !session.representatives.contains(&representative)
+            || !current_entry_matches
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "AI priority pass cannot replace the active stack-resolution session".to_string(),
+            ));
+        }
+    } else {
+        let baseline = state
+            .auto_pass
+            .iter()
+            .map(|(&player, &auto_pass)| (player, auto_pass))
+            .collect();
+        install_stack_resolution_session(
+            state,
+            [representative].into_iter().collect(),
+            StackResolutionBudget::Unlimited,
+            StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+            baseline,
+        );
+    }
+
+    apply_interaction(state, actor, contract.semantic_owner, action)
 }
 
 pub(crate) fn apply_interaction_for_simulation(
@@ -7433,15 +7503,31 @@ pub(crate) fn take_and_restore_stack_resolution_session(state: &mut GameState) -
     true
 }
 
+#[derive(Clone, Copy)]
+enum StackResolutionSessionPassKind {
+    /// The session runner is considering an implicit pass. A rechecking AI
+    /// session must stop here when a player has acquired a meaningful option.
+    Automatic,
+    /// A player explicitly submitted `PassPriority`. That choice is itself the
+    /// fresh decision, so it may consume the session's next authorized entry.
+    Explicit,
+}
+
 enum StackResolutionSessionPriorityDecision {
     NotActive,
     Pause,
-    Resolve { limit: u32 },
+    /// A rechecking AI session found a meaningful option. Keep the session
+    /// intact so the next verified AI pass can continue its fenced cohort.
+    PauseRetained,
+    Resolve {
+        limit: u32,
+    },
 }
 
 fn stack_resolution_session_priority_decision(
     state: &mut GameState,
     holder: PlayerId,
+    pass_kind: StackResolutionSessionPassKind,
 ) -> StackResolutionSessionPriorityDecision {
     let canonical_holder = super::topology::priority_pass_representative(state, holder);
     let decision = {
@@ -7483,11 +7569,19 @@ fn stack_resolution_session_priority_decision(
                 });
             if remaining_budget == 0 || !top_matches {
                 None
-            } else if !session.representatives.contains(&canonical_holder)
-                && priority_player_has_meaningful_action(state)
-            {
-                return StackResolutionSessionPriorityDecision::Pause;
             } else {
+                if priority_player_has_meaningful_action(state) {
+                    if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+                        && matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+                    {
+                        return StackResolutionSessionPriorityDecision::PauseRetained;
+                    }
+                    if !session.representatives.contains(&canonical_holder)
+                        && matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+                    {
+                        return StackResolutionSessionPriorityDecision::Pause;
+                    }
+                }
                 let matching_prefix = state
                     .stack
                     .iter()
@@ -7502,13 +7596,12 @@ fn stack_resolution_session_priority_decision(
                 // ordinary priority window.  It may use the session fence to
                 // authorize the next object, but it must never turn a prior
                 // pass decision into a multi-entry commitment.
-                let limit = if session.policy
-                    == crate::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
-                {
-                    limit.min(1)
-                } else {
-                    limit
-                };
+                let limit =
+                    if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction {
+                        limit.min(1)
+                    } else {
+                        limit
+                    };
                 (limit != 0).then_some(limit)
             }
         }
@@ -7633,40 +7726,43 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 if super::precast_copy_shortcut::blocks_pass(state, player) {
                     break;
                 }
-                let stack_resolution_limit =
-                    match stack_resolution_session_priority_decision(state, player) {
-                        StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
-                        StackResolutionSessionPriorityDecision::Pause => break,
-                        StackResolutionSessionPriorityDecision::NotActive => {
-                            let decision = priority_auto_pass_decision(state, player);
-                            match decision {
-                                AutoPassDecision::Exit => {
-                                    let Some(requester) = active_until_stack_empty_requester(state)
-                                    else {
-                                        break;
-                                    };
-                                    if requester == player {
-                                        break;
-                                    }
-                                    if finish_completed_or_interrupted_until_stack_empty_sessions(
-                                        state,
-                                    ) {
-                                        break;
-                                    }
-                                    if priority_player_has_meaningful_action(state) {
-                                        break;
-                                    }
-                                }
-                                AutoPassDecision::Finish => {
-                                    state.auto_pass.remove(&player);
+                let stack_resolution_limit = match stack_resolution_session_priority_decision(
+                    state,
+                    player,
+                    StackResolutionSessionPassKind::Automatic,
+                ) {
+                    StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
+                    StackResolutionSessionPriorityDecision::Pause => break,
+                    StackResolutionSessionPriorityDecision::PauseRetained => break,
+                    StackResolutionSessionPriorityDecision::NotActive => {
+                        let decision = priority_auto_pass_decision(state, player);
+                        match decision {
+                            AutoPassDecision::Exit => {
+                                let Some(requester) = active_until_stack_empty_requester(state)
+                                else {
+                                    break;
+                                };
+                                if requester == player {
                                     break;
                                 }
-                                AutoPassDecision::Break => break,
-                                AutoPassDecision::Pass => {}
+                                if finish_completed_or_interrupted_until_stack_empty_sessions(state)
+                                {
+                                    break;
+                                }
+                                if priority_player_has_meaningful_action(state) {
+                                    break;
+                                }
                             }
-                            None
+                            AutoPassDecision::Finish => {
+                                state.auto_pass.remove(&player);
+                                break;
+                            }
+                            AutoPassDecision::Break => break,
+                            AutoPassDecision::Pass => {}
                         }
-                    };
+                        None
+                    }
+                };
 
                 let mut events = Vec::new();
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
@@ -8079,6 +8175,39 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
     })
 }
 
+/// Installs the single fenced stack-resolution session used by committed human
+/// Resolve All, direct UntilStackEmpty, and a verified AI pass. The caller owns
+/// authorization and supplies the exact sparse preference map to restore when
+/// the bounded cohort ends.
+fn install_stack_resolution_session(
+    state: &mut GameState,
+    representatives: BTreeSet<PlayerId>,
+    budget: StackResolutionBudget,
+    policy: StackResolutionPolicy,
+    baseline: BTreeMap<PlayerId, AutoPassMode>,
+) {
+    let overlay_mode = AutoPassMode::UntilStackEmpty {
+        initial_stack_len: state.stack.len(),
+        policy,
+    };
+    for representative in &representatives {
+        state.auto_pass.insert(*representative, overlay_mode);
+    }
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: state
+            .stack
+            .iter()
+            .rev()
+            .map(StackResolutionEntryFence::capture)
+            .collect(),
+        cursor: 0,
+        representatives,
+        budget,
+        policy,
+        auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },
+    });
+}
+
 /// Converts a newly-created unanimous Resolve All authorization into the
 /// ordinary shared stack-resolution session. Legacy persisted consent runs
 /// intentionally do not take this path; their `ResolveAllReady` latch remains
@@ -8137,26 +8266,13 @@ fn materialize_live_resolve_all_session(
         .iter()
         .map(|participant| participant.representative)
         .collect();
-    let overlay_mode = AutoPassMode::UntilStackEmpty {
-        initial_stack_len: state.stack.len(),
-        policy: StackResolutionPolicy::Committed,
-    };
-    for representative in &representatives {
-        state.auto_pass.insert(*representative, overlay_mode);
-    }
-    state.stack_resolution_session = Some(StackResolutionSession {
-        entries: state
-            .stack
-            .iter()
-            .rev()
-            .map(StackResolutionEntryFence::capture)
-            .collect(),
-        cursor: 0,
+    install_stack_resolution_session(
+        state,
         representatives,
-        budget: run.max_resolutions,
-        policy: StackResolutionPolicy::Committed,
-        auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },
-    });
+        run.max_resolutions,
+        StackResolutionPolicy::Committed,
+        baseline,
+    );
     Ok(WaitingFor::Priority {
         player: run.priority_snapshot.waiting_player,
     })
@@ -8205,9 +8321,17 @@ fn pass_installed_auto_pass_priority(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    let stack_resolution_limit = match stack_resolution_session_priority_decision(state, player) {
+    let stack_resolution_limit = match stack_resolution_session_priority_decision(
+        state,
+        player,
+        StackResolutionSessionPassKind::Explicit,
+    ) {
         StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
-        StackResolutionSessionPriorityDecision::Pause => {
+        // A stale session is torn down by the decision seam. The explicit
+        // pass still means what its submitter chose, so continue through the
+        // ordinary CR 117.3d path after that restoration.
+        StackResolutionSessionPriorityDecision::Pause => None,
+        StackResolutionSessionPriorityDecision::PauseRetained => {
             return Ok(ActionResult {
                 events: std::mem::take(events),
                 waiting_for: state.waiting_for.clone(),
@@ -8312,27 +8436,13 @@ fn store_direct_auto_pass_request(
         .iter()
         .map(|(&player, &auto_pass)| (player, auto_pass))
         .collect();
-    let entries = state
-        .stack
-        .iter()
-        .rev()
-        .map(StackResolutionEntryFence::capture)
-        .collect();
-    let overlay_mode = AutoPassMode::UntilStackEmpty {
-        initial_stack_len: state.stack.len(),
-        policy: StackResolutionPolicy::Committed,
-    };
-    for representative in &representatives {
-        state.auto_pass.insert(*representative, overlay_mode);
-    }
-    state.stack_resolution_session = Some(StackResolutionSession {
-        entries,
-        cursor: 0,
+    install_stack_resolution_session(
+        state,
         representatives,
-        budget: StackResolutionBudget::Unlimited,
-        policy: StackResolutionPolicy::Committed,
-        auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },
-    });
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::Committed,
+        baseline,
+    );
 }
 
 /// Stores Resolve All's existing durable "do not make me pass each frame"
@@ -8923,13 +9033,28 @@ fn apply_action(
             // AI candidate-legality hatch and the projection fast path so the
             // three cannot drift.
             super::priority::pass_priority_legality(state, *player)?;
-            let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?
-                .waiting_for;
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-                log_entries: vec![],
-            });
+            // An explicit pass can be the final CR 117.4 pass. Route it
+            // through the same fenced session seam as an installed auto-pass,
+            // so its resolved-entry count advances the persisted cursor rather
+            // than silently bypassing a live stack-resolution authorization.
+            if stack_resolution_limit.is_some() {
+                let outcome = pass_priority_once_with_pipeline(
+                    state,
+                    &mut events,
+                    stack_resolution_limit,
+                )?;
+                advance_stack_resolution_session_after_priority_pass(
+                    state,
+                    outcome.consumed_stack_entries,
+                    &outcome.waiting_for,
+                );
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: outcome.waiting_for,
+                    log_entries: vec![],
+                });
+            }
+            return pass_installed_auto_pass_priority(state, *player, &mut events);
         }
         (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
             begin_resolve_all_consent(state, *player, max_resolutions)?

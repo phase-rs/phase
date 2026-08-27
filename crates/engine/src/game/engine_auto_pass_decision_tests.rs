@@ -2,6 +2,7 @@ use super::*;
 use std::sync::Arc;
 
 use crate::game::combat::AttackTarget;
+use crate::ai_support::AiDecisionContract;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, PtValue, QuantityExpr,
@@ -10,7 +11,9 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, StackResolutionPolicy, TurnBoundary};
+use crate::types::game_state::{
+    CastingVariant, StackResolutionBudget, StackResolutionPolicy, TurnBoundary,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaColor;
 use crate::types::phase::{PhaseStop, PhaseStopScope};
@@ -2028,6 +2031,87 @@ fn priority_probe_false_when_only_pass_available() {
         !priority_player_has_meaningful_action(&state),
         "an empty board with only PassPriority has no meaningful action"
     );
+}
+
+#[test]
+fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priority() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_101, PlayerId(1));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+    let result = apply_verified_ai_priority_pass(&mut state, &contract)
+        .expect("the issued AI pass starts its fenced recheck session");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("a meaningful follow-up priority window retains the AI session");
+    assert_eq!(
+        session.policy,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+    );
+    assert_eq!(session.cursor, 0);
+    assert!(session.representatives.contains(&PlayerId(0)));
+}
+
+#[test]
+fn stale_verified_ai_pass_does_not_install_a_session() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_102, PlayerId(1));
+    let contract = AiDecisionContract::issue(&state, PlayerId(0));
+    state.state_revision = state.state_revision.saturating_add(1);
+
+    assert!(apply_verified_ai_priority_pass(&mut state, &contract).is_err());
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "a stale AI contract must not promote an ordinary priority window"
+    );
+}
+
+#[test]
+fn explicit_pass_advances_the_recheck_session_cursor_at_one_resolution_boundary() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_103, PlayerId(1));
+    push_simple_stack_entry(&mut state, 30_104, PlayerId(1));
+    add_non_mana_activated_artifact(&mut state, PlayerId(0));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let baseline = state
+        .auto_pass
+        .iter()
+        .map(|(&player, &mode)| (player, mode))
+        .collect();
+    install_stack_resolution_session(
+        &mut state,
+        [PlayerId(0)].into_iter().collect(),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        baseline,
+    );
+
+    apply(&mut state, PlayerId(0), GameAction::PassPriority)
+        .expect("the first explicit pass changes priority");
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("the all-pass boundary resolves exactly one rechecked entry");
+
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("the next fenced entry remains available for a fresh AI recheck");
+    assert_eq!(session.cursor, 1);
+    assert_eq!(state.stack.len(), 1);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
 }
 
 #[test]
