@@ -2152,7 +2152,7 @@ fn another_canonical_representative_can_continue_a_rechecking_session() {
     .expect("the first AI representative starts the session");
     let second_contract = AiDecisionContract::issue(&state, PlayerId(1));
 
-    apply_verified_ai_priority_pass(
+    let second_result = apply_verified_ai_priority_pass(
         &mut state,
         PlayerId(1),
         &second_contract,
@@ -2160,7 +2160,21 @@ fn another_canonical_representative_can_continue_a_rechecking_session() {
     )
     .expect("a second representative may supply its own fresh AI pass");
 
-    assert!(state.stack_resolution_session.is_some());
+    assert_eq!(
+        state
+            .stack_resolution_session
+            .as_ref()
+            .map(|session| session.cursor),
+        Some(1),
+        "the second representative's fresh pass must consume exactly one fenced entry"
+    );
+    assert_eq!(state.stack.len(), 1);
+    assert!(second_result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::StackResolved {
+            object_id: ObjectId(30_107)
+        }
+    )));
 }
 
 #[test]

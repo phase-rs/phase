@@ -1101,10 +1101,11 @@ pub fn apply_verified_ai_priority_pass(
         }
     } else {
         // The shared session is installed before the ordinary action boundary
-        // so its explicit-pass seam can enforce the one-entry limit. Preserve
-        // the exact pre-install state until that boundary succeeds: a later
-        // reducer error must not leak a private session or auto-pass overlay.
-        let before_install = state.clone();
+        // so its explicit-pass seam can enforce the one-entry limit. A rejected
+        // action boundary intentionally preserves its ownerless-replacement
+        // repair, so roll back only the newly installed private overlay rather
+        // than restoring the entire pre-boundary game state.
+        let auto_pass_before_install = state.auto_pass.clone();
         let baseline = state
             .auto_pass
             .iter()
@@ -1123,7 +1124,8 @@ pub fn apply_verified_ai_priority_pass(
         {
             Ok(result) => Ok(result),
             Err(error) => {
-                *state = before_install;
+                state.auto_pass = auto_pass_before_install;
+                state.stack_resolution_session = None;
                 Err(error)
             }
         };
