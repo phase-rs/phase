@@ -1404,6 +1404,9 @@ fn finish_action_boundary_with_lifecycle(
         run_auto_pass_loop(state, &mut result)
     };
     reconcile_terminal_result(state, &mut result);
+    if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
+        take_and_restore_stack_resolution_session(state);
+    }
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
     // finalized and the next affordability probe runs. No-op when none flagged.
@@ -8059,10 +8062,40 @@ fn install_auto_pass_and_pass_priority(
             log_entries: vec![],
         });
     }
-    let waiting_for = pass_priority_once_with_pipeline(state, events, None)?.waiting_for;
+    pass_installed_auto_pass_priority(state, *player, events)
+}
+
+/// Consume the immediate pass implied by a successful direct auto-pass request.
+///
+/// This is deliberately the same pre-pass authorization boundary used by the
+/// auto-pass runner. In particular, the first pass can be the final CR 117.4
+/// pass, so it must not bypass a frozen cohort merely because it happens
+/// synchronously with installation.
+fn pass_installed_auto_pass_priority(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let stack_resolution_limit = match stack_resolution_session_priority_decision(state, player) {
+        StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
+        StackResolutionSessionPriorityDecision::Pause => {
+            return Ok(ActionResult {
+                events: std::mem::take(events),
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            });
+        }
+        StackResolutionSessionPriorityDecision::NotActive => None,
+    };
+    let outcome = pass_priority_once_with_pipeline(state, events, stack_resolution_limit)?;
+    advance_stack_resolution_session_after_priority_pass(
+        state,
+        outcome.consumed_stack_entries,
+        &outcome.waiting_for,
+    );
     Ok(ActionResult {
         events: std::mem::take(events),
-        waiting_for,
+        waiting_for: outcome.waiting_for,
         log_entries: vec![],
     })
 }

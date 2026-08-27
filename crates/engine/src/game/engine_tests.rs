@@ -3566,6 +3566,64 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
 }
 
 #[test]
+fn representative_replacement_recaptures_the_restored_baseline() {
+    use crate::types::game_state::{
+        AutoPassMode, AutoPassRequest, StackResolutionAutoPassOverlay, StackResolutionBudget,
+        StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let entry = no_op_stack_entry(7_779, PlayerId(0));
+    state.stack.push_back(entry.clone());
+    let baseline = BTreeMap::from([(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    )]);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![StackResolutionEntryFence::capture(&entry)],
+        cursor: 0,
+        representatives: [PlayerId(0)].into_iter().collect(),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("the representative may replace its live session");
+
+    assert_eq!(
+        state
+            .stack_resolution_session
+            .as_ref()
+            .expect("replacement installs a fresh session")
+            .auto_pass_overlay
+            .baseline,
+        baseline,
+        "replacement must not capture the previous overlay as its new baseline"
+    );
+    apply(&mut state, PlayerId(0), GameAction::CancelAutoPass)
+        .expect("the representative may cancel the replacement");
+    assert_eq!(state.auto_pass, baseline);
+}
+
+#[test]
 fn elimination_restores_session_baseline_before_departing_preferences_are_cleaned() {
     use crate::types::game_state::{
         AutoPassMode, StackResolutionAutoPassOverlay, StackResolutionBudget,

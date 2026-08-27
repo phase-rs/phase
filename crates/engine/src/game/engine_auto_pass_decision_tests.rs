@@ -474,6 +474,56 @@ fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability
     });
 }
 
+fn insect_token_effect() -> Effect {
+    Effect::Token {
+        name: "Insect".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string()],
+        colors: vec![ManaColor::Green],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+fn push_natural_token_batch(
+    state: &mut GameState,
+    source_id: ObjectId,
+    first_entry_id: u64,
+    count: u64,
+) {
+    for entry_id in first_entry_id..first_entry_id + count {
+        state.stack.push_back(StackEntry {
+            id: ObjectId(entry_id),
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ResolvedAbility::new(
+                    insect_token_effect(),
+                    Vec::new(),
+                    source_id,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("Landfall".to_string()),
+                source_name: "Batch source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+    }
+}
+
 #[test]
 fn exit_when_no_auto_pass_set() {
     let state = GameState::default();
@@ -1185,6 +1235,85 @@ fn fenced_session_stops_before_passing_when_the_top_entry_changes() {
 }
 
 #[test]
+fn fenced_session_with_an_empty_stack_preserves_the_current_priority_window() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_902, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let phase = state.phase;
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    state.stack.clear();
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(state.stack_resolution_session.is_none());
+    assert!(result.events.is_empty());
+    assert_eq!(
+        state.phase, phase,
+        "empty-session teardown must not advance a phase"
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+}
+
+#[test]
+fn fenced_session_with_a_new_top_entry_preserves_the_current_priority_window() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_903, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let phase = state.phase;
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    push_simple_stack_entry(&mut state, 19_904, PlayerId(1));
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        result.events.is_empty(),
+        "the new entry is not auto-passed or resolved"
+    );
+    assert_eq!(state.stack.back().unwrap().id, ObjectId(19_904));
+    assert_eq!(state.phase, phase);
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+}
+
+#[test]
 fn fenced_session_budget_caps_the_resolver_before_a_natural_batch_can_escape() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 19_903, PlayerId(0));
@@ -1238,45 +1367,7 @@ fn fenced_session_caps_a_natural_token_batch_at_its_matching_prefix() {
         "Batch source".to_string(),
         Zone::Battlefield,
     );
-    let effect = Effect::Token {
-        name: "Insect".to_string(),
-        power: PtValue::Fixed(1),
-        toughness: PtValue::Fixed(1),
-        types: vec!["Creature".to_string()],
-        colors: vec![ManaColor::Green],
-        keywords: vec![],
-        tapped: false,
-        count: QuantityExpr::Fixed { value: 1 },
-        owner: TargetFilter::Controller,
-        attach_to: None,
-        enters_attacking: false,
-        supertypes: vec![],
-        static_abilities: vec![],
-        enter_with_counters: vec![],
-    };
-    for entry_id in 19_912..19_915 {
-        state.stack.push_back(StackEntry {
-            id: ObjectId(entry_id),
-            source_id,
-            controller: PlayerId(0),
-            kind: StackEntryKind::TriggeredAbility {
-                source_id,
-                ability: Box::new(ResolvedAbility::new(
-                    effect.clone(),
-                    Vec::new(),
-                    source_id,
-                    PlayerId(0),
-                )),
-                condition: None,
-                trigger_event: None,
-                description: Some("Landfall".to_string()),
-                source_name: "Batch source".to_string(),
-                subject_match_count: None,
-                die_result: None,
-                provenance: None,
-            },
-        });
-    }
+    push_natural_token_batch(&mut state, source_id, 19_912, 3);
     let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
 
     apply(
@@ -1471,6 +1562,111 @@ fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
         .iter()
         .any(|event| matches!(event, GameEvent::StackResolved { .. })));
     assert!(state.stack_resolution_session.is_none());
+}
+
+#[test]
+fn fenced_session_tears_down_when_resolution_ends_the_game() {
+    let mut state = priority_state();
+    state.players[1].life = 1;
+    let ability = ResolvedAbility::new(
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        },
+        vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+        ObjectId(19_916),
+        PlayerId(0),
+    );
+    state.stack.push_back(StackEntry {
+        id: ObjectId(19_916),
+        source_id: ObjectId(19_916),
+        controller: PlayerId(0),
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: ObjectId(19_916),
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: Some("Lose the last life".to_string()),
+            source_name: "Terminal trigger".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    });
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::GameOver {
+            winner: Some(PlayerId(0))
+        }
+    ));
+    assert!(state.stack_resolution_session.is_none());
+    assert!(!state.auto_pass.contains_key(&PlayerId(0)));
+}
+
+#[test]
+fn two_hg_session_uses_team_representatives_in_the_live_runner() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    push_simple_stack_entry(&mut state, 19_917, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(2));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .stack_resolution_session
+            .as_ref()
+            .unwrap()
+            .representatives,
+        [PlayerId(0)].into_iter().collect()
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(2)
+        }
+    ));
+
+    state.objects.remove(&priority_action);
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(state.stack.is_empty());
+    assert!(state.stack_resolution_session.is_none());
+    assert!(result
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackResolved { .. })));
 }
 
 #[test]
