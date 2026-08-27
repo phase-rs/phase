@@ -948,6 +948,7 @@ fn client_state_wire_value(
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
     root.remove("resolved_rules_journal");
+    root.remove("stack_resolution_session");
     // CR 605.4a + CR 117.3c: Defense in depth for direct `ClientGameStateRef`
     // callers that did not first run `visibility::filter_state_for_viewer`.
     // Both are trusted persistence authorities, never client schema.
@@ -6762,6 +6763,99 @@ mod tests {
             state.pending_triggered_mana_resume.is_some()
                 && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
             "projection must not alter the authoritative carriers"
+        );
+    }
+
+    #[test]
+    fn stack_resolution_session_never_reaches_any_client_envelope() {
+        use crate::types::game_state::{
+            StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+            StackResolutionPolicy, StackResolutionSession,
+        };
+
+        const MARKER: &str = "WIRE-PRIVATE-STACK-SESSION-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let entry = StackEntry {
+            id: ObjectId(70_701),
+            source_id: ObjectId(70_702),
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(70_702),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(70_702),
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some(MARKER.to_string()),
+                source_name: MARKER.to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        state.stack_resolution_session = Some(StackResolutionSession {
+            entries: vec![StackResolutionEntryFence::capture(&entry)],
+            cursor: 0,
+            representatives: BTreeSet::from([PlayerId(0)]),
+            budget: StackResolutionBudget::from_legacy_max_resolutions(3),
+            policy: StackResolutionPolicy::Committed,
+            auto_pass_overlay: StackResolutionAutoPassOverlay {
+                baseline: BTreeMap::new(),
+            },
+        });
+
+        let trusted = serde_json::to_value(&state).expect("serialize trusted state");
+        assert!(
+            trusted
+                .as_object()
+                .expect("trusted state is an object")
+                .contains_key("stack_resolution_session"),
+            "test precondition: trusted persistence retains the exact private key"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let opponent_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let projections = [
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+                .expect("direct owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+                .expect("direct opponent wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &owner_view,
+                Some(PlayerId(0)),
+            ))
+            .expect("filtered owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &opponent_view,
+                Some(PlayerId(1)),
+            ))
+            .expect("filtered opponent wrap serializes"),
+        ];
+
+        for (index, projection) in projections.iter().enumerate() {
+            assert!(
+                projection["state"]
+                    .get("stack_resolution_session")
+                    .is_none(),
+                "projection {index} leaked the private session key"
+            );
+            assert!(
+                !serde_json::to_string(projection)
+                    .expect("projection serializes")
+                    .contains(MARKER),
+                "projection {index} leaked private session provenance"
+            );
+        }
+
+        assert!(
+            state.stack_resolution_session.is_some(),
+            "projection must not mutate the authoritative session"
         );
     }
 

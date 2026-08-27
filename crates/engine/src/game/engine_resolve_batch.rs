@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    GameState, ResolveAllConsentRun, StackResolutionBudget, WaitingFor,
-};
+use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
@@ -691,8 +689,8 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind, StackResolutionPolicy,
-        TurnBoundary,
+        AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind, StackResolutionBudget,
+        StackResolutionPolicy, TurnBoundary,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
@@ -1245,7 +1243,7 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = StackResolutionBudget::Limited(1);
+            .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 

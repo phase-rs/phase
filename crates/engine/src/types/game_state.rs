@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -14576,7 +14577,7 @@ impl StackResolutionPolicy {
 pub enum StackResolutionBudget {
     #[default]
     Unlimited,
-    Limited(u32),
+    Limited(NonZeroU32),
 }
 
 impl StackResolutionBudget {
@@ -14584,21 +14585,21 @@ impl StackResolutionBudget {
         if max_resolutions == 0 {
             Self::Unlimited
         } else {
-            Self::Limited(max_resolutions)
+            Self::Limited(NonZeroU32::new(max_resolutions).expect("nonzero branch"))
         }
     }
 
     pub const fn max_resolutions(self) -> Option<u32> {
         match self {
             Self::Unlimited => None,
-            Self::Limited(max_resolutions) => Some(max_resolutions),
+            Self::Limited(max_resolutions) => Some(max_resolutions.get()),
         }
     }
 
     const fn wire_value(self) -> u32 {
         match self {
             Self::Unlimited => 0,
-            Self::Limited(max_resolutions) => max_resolutions,
+            Self::Limited(max_resolutions) => max_resolutions.get(),
         }
     }
 }
@@ -28981,9 +28982,15 @@ mod tests {
             StackResolutionBudget::Unlimited
         );
         assert_eq!(
-            serde_json::from_str::<StackResolutionBudget>("17").unwrap(),
-            StackResolutionBudget::Limited(17)
+            StackResolutionBudget::from_legacy_max_resolutions(0),
+            StackResolutionBudget::Unlimited,
+            "an in-memory legacy zero normalizes before it can acquire a divergent meaning"
         );
+        assert_eq!(
+            serde_json::from_str::<StackResolutionBudget>("17").unwrap(),
+            StackResolutionBudget::Limited(NonZeroU32::new(17).unwrap())
+        );
+        assert!(NonZeroU32::new(0).is_none(), "a zero cap is not representable");
         assert!(
             serde_json::from_str::<StackResolutionBudget>("null").is_err(),
             "only the established numeric zero, not null, means unlimited"
