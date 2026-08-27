@@ -9,6 +9,9 @@ interface HoverCardPreviewProps {
   card: CardHoverInfo | null;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
+  /** Keep this surface's desktop preview at the side, independent of the
+   * global game-board hover preference. */
+  forceDockSide?: boolean;
 }
 
 /**
@@ -19,6 +22,7 @@ export function HoverCardPreview({
   card,
   onDismiss,
   mobileLayout,
+  forceDockSide = false,
 }: HoverCardPreviewProps) {
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs);
@@ -50,12 +54,32 @@ export function HoverCardPreview({
 
   const previewCard = cardPreviewMode === "shift" && !shiftHeld ? null : visibleCard;
 
+  useEffect(() => {
+    if (visibleCard == null || onDismiss == null || typeof window === "undefined") {
+      return undefined;
+    }
+
+    // Grid/list rows can be replaced while the pointer is over them, so React
+    // never receives their pointerleave. Clear the deck-builder-owned state on
+    // the next mouse move outside every registered hover source.
+    const handlePointerMove = (event: PointerEvent) => {
+      if (
+        event.pointerType === "mouse"
+        && document.querySelector("[data-deck-card-hover]:hover") == null
+      ) {
+        onDismiss();
+      }
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    return () => window.removeEventListener("pointermove", handlePointerMove);
+  }, [onDismiss, visibleCard]);
+
   return (
     <CardPreview
       cardName={previewCard?.name ?? null}
       scryfallId={previewCard?.scryfallId}
       sourcePrinting={previewCard?.sourcePrinting}
-      dockSide={cardPreviewMode === "side"}
+      dockSide={forceDockSide || cardPreviewMode === "side"}
       onDismiss={onDismiss}
       mobileLayout={mobileLayout}
     />

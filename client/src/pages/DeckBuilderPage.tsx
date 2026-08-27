@@ -135,6 +135,7 @@ export function DeckBuilderPage() {
         card={hoveredCard}
         onDismiss={useCallback(() => setHoveredCard(null), [])}
         mobileLayout="compact"
+        forceDockSide
       />
     </div>
   );

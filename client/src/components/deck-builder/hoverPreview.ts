@@ -28,6 +28,7 @@ export function mouseHoverPreview(
   card: CardHoverInfo,
 ) {
   return {
+    "data-deck-card-hover": "",
     onPointerEnter: (e: PointerEvent) => {
       if (e.pointerType === "mouse") onCardHover?.(card);
     },

@@ -38,6 +38,23 @@ describe("HoverCardPreview", () => {
     expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-side", "true");
   });
 
+  it("can keep a workspace preview docked without changing the game-board preference", () => {
+    render(<HoverCardPreview card={CARD} forceDockSide />);
+
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-side", "true");
+  });
+
+  it("dismisses a deck-owned preview when its hover source is removed", () => {
+    const onDismiss = vi.fn();
+    render(<HoverCardPreview card={CARD} onDismiss={onDismiss} />);
+    const querySelector = vi.spyOn(document, "querySelector").mockReturnValue(null);
+
+    fireEvent.pointerMove(window, { pointerType: "mouse" });
+
+    expect(onDismiss).toHaveBeenCalledOnce();
+    querySelector.mockRestore();
+  });
+
   it("shows a hovered card only while Shift is held in shift mode", () => {
     usePreferencesStore.setState({ cardPreviewMode: "shift" });
     render(<HoverCardPreview card={CARD} />);

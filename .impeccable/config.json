@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "client/src/components/card/CardPreview.tsx"
+        ],
+        "createdAt": "2026-08-27T14:11:01.471Z",
+        "reason": "Agent: src is rendered only in the !src false branch; static detector cannot infer JSX control flow."
+      }
+    ]
+  }
+}

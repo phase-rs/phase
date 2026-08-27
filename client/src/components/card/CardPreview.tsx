@@ -455,6 +455,8 @@ function CardPreviewInner({
         advanceFailedSource: activeImage.advanceFailedSource,
       };
   const activeRotated = activeArt.kind === "face" && activeArt.isRotated;
+  const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
+  const activeImageIsLoading = activeArt.kind === "face" && activeArt.isLoading;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
@@ -549,7 +551,9 @@ function CardPreviewInner({
 
     // The preview grows when async content settles (image load, hint bars, face
     // swap); re-clamp on size change so a late-appearing hint bar can't leave the
-    // card hanging off the bottom.
+    // card hanging off the bottom. Source state is also a dependency below:
+    // changing an image's intrinsic content does not reliably notify
+    // ResizeObserver on every browser.
     const resizeObserver =
       previewRef.current != null
         ? new ResizeObserver(() => schedulePositionUpdate())
@@ -565,6 +569,8 @@ function CardPreviewInner({
       }
     };
   }, [
+    activeImageIsLoading,
+    activeImageSrc,
     altHeld,
     dockSide,
     gap,
@@ -1072,7 +1078,7 @@ function CardImagePreview({
       : compactDesktop
         ? "absolute left-1/2 top-1/2 h-[clamp(266px,25.2vw,420px)] w-[clamp(190px,18vw,300px)] max-h-[66vh] max-w-[36vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
         : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-    : `${frameClass} object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
+    : `h-full w-full object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
   // otherwise fall back to printed mana cost. When the user holds Ctrl to view the
@@ -1118,21 +1124,9 @@ function CardImagePreview({
   const displayCost = showOtherFace ? otherFaceCost : (castCostDisplay?.displayCost ?? null);
   const displayCostReduced = castCostDisplay?.isReduced ?? false;
 
-  // Only a genuinely in-flight lookup pulses. A finished lookup with no art
-  // (issue #6156) falls through to the named placeholder below — previously it
-  // was collapsed in here, which left this component's own placeholder dead
-  // code for artless tokens and pulsed forever in the hover preview.
-  if (isLoading) {
-    return (
-      <div
-        className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
-      />
-    );
-  }
-
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${renderInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
-      <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
+      <div className={`${frameClass} ${isRotated ? "" : "aspect-[488/680]"} relative rounded-[4%] overflow-hidden`}>
         {art.kind === "back" ? (
           <CardBackFallback className={`${frameClass} rounded-[4%] border border-gray-600 shadow-2xl`} />
         ) : isLoading ? (
