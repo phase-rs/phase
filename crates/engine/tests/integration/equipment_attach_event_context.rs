@@ -254,6 +254,86 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
 }
 
 #[test]
+fn gilgamesh_singleton_samurai_and_equipment_attach_without_zone_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let samurai = scenario
+        .add_creature(P0, "Only Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    let gilgamesh = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gilgamesh, Master-at-Arms", 3, 3, GILGAMESH_ORACLE)
+        .with_subtypes(vec!["Human", "Warrior"])
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let equipment = scenario.add_card_to_library_top(P0, "Only Dug Equipment");
+    let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
+    let mut runner = scenario.build();
+    let equipment_object = runner
+        .state_mut()
+        .objects
+        .get_mut(&equipment)
+        .expect("dug Equipment exists");
+    equipment_object
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+    equipment_object
+        .card_types
+        .subtypes
+        .push("Equipment".to_string());
+    equipment_object.base_card_types = equipment_object.card_types.clone();
+
+    cast_for_free(&mut runner, gilgamesh);
+    let mut saw_dig_choice = false;
+    let mut saw_optional_attach = false;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if saw_optional_attach && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must be accepted");
+            }
+            WaitingFor::DigChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![equipment],
+                    })
+                    .expect("selecting the singleton Equipment must be accepted");
+                saw_dig_choice = true;
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting Gilgamesh's optional attachment must work");
+                saw_optional_attach = true;
+            }
+            WaitingFor::EffectZoneChoice { .. } => {
+                panic!("singleton Samurai and Equipment must bind deterministically")
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                panic!("Gilgamesh's non-targeted Samurai choice must not be stack targeting")
+            }
+            other => panic!("unexpected Gilgamesh singleton prompt: {other:?}"),
+        }
+    }
+
+    assert!(saw_dig_choice, "Gilgamesh must surface the DigChoice");
+    assert!(
+        saw_optional_attach,
+        "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(samurai)),
+        "singleton host and event-scoped attachment candidates bind without an extra choice"
+    );
+}
+
+#[test]
 fn hammer_of_nazahn_parent_target_etb_remains_attached() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

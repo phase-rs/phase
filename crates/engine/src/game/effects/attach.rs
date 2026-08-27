@@ -599,6 +599,21 @@ fn resolve_attach_target<'a>(
     filter: &TargetFilter,
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
+    if !ability.attach_attachment_candidates().is_empty() {
+        let TargetRef::Object(host_id) = ability.attach_host_target()? else {
+            return None;
+        };
+        if !ability.target_pin_is_current(*host_id, state) {
+            return None;
+        }
+        if matches!(filter, TargetFilter::ParentTarget) {
+            return Some(*host_id);
+        }
+        let ctx = FilterContext::from_ability(ability);
+        let effective = crate::game::effects::resolved_object_filter(ability, filter);
+        return matches_target_filter(state, *host_id, &effective, &ctx).then_some(*host_id);
+    }
+
     match filter {
         TargetFilter::ParentTarget => {
             if let Some(TargetRef::Object(id)) = ability.attach_host_target() {
