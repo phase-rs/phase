@@ -559,7 +559,11 @@ fn restored_stack_resolution_session_is_coherent(
     for representative in &session.representatives {
         expected_auto_pass.insert(*representative, overlay_mode);
     }
-    if state.auto_pass != expected_auto_pass {
+    if state.auto_pass.len() != expected_auto_pass.len()
+        || !expected_auto_pass
+            .iter()
+            .all(|(player, mode)| state.auto_pass.get(player) == Some(mode))
+    {
         return false;
     }
 

@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityKind, ContinuousModification, CopyCountStatus, DetachedRemainder, Duration, Effect,
-    EffectKind, FilterProp, KeywordAction, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
+    EffectKind, KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode,
+    TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;

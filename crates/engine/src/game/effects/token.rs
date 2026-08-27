@@ -19,9 +19,9 @@ use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, PendingCopyTokenBatch,
-    PendingCounterAddition, PendingCounterPostAction, PendingEffectResolutionEvent,
-    PendingTokenBattlefieldEntry, TokenEntryEventEmission, WaitingFor,
+    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, PendingCounterAddition,
+    PendingCounterPostAction, PendingEffectResolutionEvent, PendingTokenBattlefieldEntry,
+    TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
