@@ -5665,19 +5665,12 @@ pub(super) fn handle_resolution_choice(
                     set_priority(state, player);
                     effects::attach::resolve(&mut *state, &operation, events)
                         .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    let opened_follow_up_attach_choice =
-                        state.active_ability_continuation().is_some()
-                            && matches!(
-                                &state.waiting_for,
-                                WaitingFor::EffectZoneChoice {
-                                    effect_kind: EffectKind::Attach,
-                                    ..
-                                }
-                            );
+                    let opened_follow_up_prompt =
+                        !matches!(state.waiting_for, WaitingFor::Priority { .. });
                     if let Some(snapshot) = trigger_snapshot {
                         crate::game::triggers::restore_trigger_event_context(state, snapshot);
                     }
-                    if opened_follow_up_attach_choice {
+                    if opened_follow_up_prompt {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             state.waiting_for.clone(),
                         ));

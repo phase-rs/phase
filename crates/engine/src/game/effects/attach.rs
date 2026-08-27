@@ -146,7 +146,14 @@ pub fn resolve(
     let target_id = resolve_attach_target(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
-    for attachment_id in attachment_ids {
+    for (index, attachment_id) in attachment_ids.iter().copied().enumerate() {
+        if !ability.attach_attachment_targets().is_empty() {
+            // Update the child before an attached-event replacement can put a
+            // post-replacement frame above it. The eventual prompt then drains
+            // this remaining work instead of replaying the attachment that
+            // opened the prompt.
+            defer_remaining_selected_attachments(state, ability, &attachment_ids[index + 1..]);
+        }
         // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
         // object it can't legally enchant, the Aura doesn't move. Delegate to the single
         // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
@@ -201,9 +208,45 @@ pub fn resolve(
                 crate::game::replacement::park_waiting_for(state, player);
             }
         }
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(());
+        }
     }
 
     Ok(())
+}
+
+/// A selected attachment can open an attached-event replacement prompt. Keep
+/// only the unprocessed selected attachments in the active child so answering
+/// that prompt resumes the next selection rather than replaying the first one
+/// or skipping the remaining selections.
+fn defer_remaining_selected_attachments(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining: &[ObjectId],
+) {
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return;
+    };
+    let mut continuation = ability.clone();
+    continuation.set_attach_attachment_targets(
+        ability
+            .attach_attachment_targets()
+            .iter()
+            .copied()
+            .filter(|target| remaining.contains(&target.object_id))
+            .collect(),
+    );
+    if remaining.is_empty() {
+        continuation = ResolvedAbility::new(
+            Effect::NoOp,
+            Vec::new(),
+            ability.source_id,
+            ability.controller,
+        );
+    }
+    frame.pending.chain = Box::new(continuation);
+    frame.pending.attachment_choice = None;
 }
 
 /// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment
