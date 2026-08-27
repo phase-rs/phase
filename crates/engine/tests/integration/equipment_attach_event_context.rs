@@ -192,7 +192,7 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         .with_subtypes(vec!["Equipment"])
         .id();
     let second = scenario
-        .add_artifact_from_oracle(P0, "Psychic Paper", PSYCHIC_PAPER_ORACLE)
+        .add_artifact_from_oracle(P0, "Second Equipment", "")
         .with_subtypes(vec!["Equipment"])
         .id();
     let spell = scenario
@@ -306,7 +306,7 @@ fn bound_attachments_with_a_synchronous_prefix_do_not_replay_the_final_attachmen
         .with_subtypes(vec!["Equipment"])
         .id();
     let second = scenario
-        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .add_artifact_from_oracle(P0, "Psychic Paper", PSYCHIC_PAPER_ORACLE)
         .with_subtypes(vec!["Equipment"])
         .id();
     let spell = scenario
