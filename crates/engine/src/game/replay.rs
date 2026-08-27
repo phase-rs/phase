@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_player_reconstructs_atomic_resolve_all_with_two_retained_auto_passes() {
+    fn replay_player_reconstructs_a_legacy_atomic_resolve_all_boundary() {
         let header = two_player_header(101);
         let mut initial = GameState::new_two_player(header.seed);
         initial.stack.push_back(no_op_entry(1, PlayerId(0)));
@@ -698,14 +698,23 @@ mod tests {
             );
         }
 
+        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        apply(&mut initial, PlayerId(0), begin).expect("P0 begins Resolve All consent");
+        let WaitingFor::ResolveAllConsent { epoch, .. } = initial.waiting_for else {
+            panic!(
+                "P1 should be asked for consent, got {:?}",
+                initial.waiting_for
+            );
+        };
+        let run = initial
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("the consent prompt retains its private run");
+        run.auto_pass_baseline = None;
+        initial.auto_pass.remove(&PlayerId(0));
+
         let mut live = initial.clone();
         let mut log = ReplayLog::new(header);
-        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
-        apply(&mut live, PlayerId(0), begin.clone()).expect("P0 begins Resolve All consent");
-        log.push_action(PlayerId(0), begin);
-        let WaitingFor::ResolveAllConsent { epoch, .. } = live.waiting_for else {
-            panic!("P1 should be asked for consent, got {:?}", live.waiting_for);
-        };
         let grant = GameAction::RespondResolveAllConsent {
             epoch,
             decision: ResolveAllConsentDecision::Grant,

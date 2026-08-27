@@ -3753,6 +3753,26 @@ fn representative_replacement_recaptures_the_restored_baseline() {
         },
     });
 
+    let response_id = create_object(
+        &mut state,
+        CardId(7_780),
+        PlayerId(1),
+        "Priority Response".to_string(),
+        Zone::Battlefield,
+    );
+    let response = state
+        .objects
+        .get_mut(&response_id)
+        .expect("the response permanent was just created");
+    response.card_types.core_types.push(CoreType::Artifact);
+    Arc::make_mut(&mut response.abilities).push(AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+
     apply(
         &mut state,
         PlayerId(0),
