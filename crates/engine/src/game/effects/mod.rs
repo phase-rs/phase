@@ -28,7 +28,7 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
     PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
@@ -13080,6 +13080,8 @@ fn resolve_chain_body(
             return Ok(());
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
+            let attachment_candidates =
+                forwarded_attachment_candidates(state, sub, &events[events_before..]);
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
@@ -13206,6 +13208,9 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            if !attachment_candidates.is_empty() {
+                sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
+            }
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -13451,6 +13456,48 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
 /// continuation edges; when a dependent node is removed, resume at its next
 /// `SequentialSibling` rather than treating a dependent `ContinuationStep` as
 /// independently executable.
+/// Capture the exact, live objects a forward-result move delivered for the
+/// special `Attach { ParentTarget, .. }` "one of them" continuation shape. The
+/// attach operand has no standalone filter: its
+/// `ZoneChangedThisWay` gate supplies the event-relative filter. Keeping the
+/// incarnation pair here prevents a later battlefield object with the same id
+/// from becoming eligible and keeps pre-existing matching Equipment out.
+fn forwarded_attachment_candidates(
+    state: &GameState,
+    sub: &ResolvedAbility,
+    events: &[GameEvent],
+) -> Vec<ObjectIncarnationRef> {
+    let Effect::Attach {
+        attachment: TargetFilter::ParentTarget,
+        ..
+    } = &sub.effect
+    else {
+        return Vec::new();
+    };
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: Some(Zone::Battlefield),
+    }) = sub.condition.as_ref()
+    else {
+        return Vec::new();
+    };
+    let filter_ctx = filter::FilterContext::from_ability(sub);
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } if filter::matches_target_filter(state, *object_id, filter, &filter_ctx) => state
+                .objects
+                .get(object_id)
+                .map(ObjectIncarnationRef::from_object),
+            _ => None,
+        })
+        .collect()
+}
+
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {

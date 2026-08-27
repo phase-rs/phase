@@ -47886,6 +47886,11 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         attach.optional,
         "\"you may attach\" makes the attach step optional"
     );
+    assert_eq!(
+        attach.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "Gilgamesh says 'a Samurai', not 'target Samurai', so the host is chosen while resolving"
+    );
 }
 
 /// Quest for the Holy Relic / Stonehewer Giant pattern:

@@ -1738,9 +1738,21 @@ pub(super) fn change_zone_target_choice_timing(
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
     let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
-        // Equip's attachment is always `SelfRef`, so it remains a stack-time
-        // target even though the keyword's reminder text isn't in this fragment.
-        Effect::Attach { attachment, .. } => !attachment.is_context_ref(),
+        // Preserve the established resolution timing for Attach instructions
+        // whose attachment itself is unbound. The only extra host choice is the
+        // event-scoped "one of them ... to a Samurai" forward-result shape;
+        // ordinary Attach instructions do not have its host-choice continuation.
+        Effect::Attach { attachment, .. } if !attachment.is_context_ref() => true,
+        Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            ..
+        } => matches!(
+            clause_ir.parsed.condition.as_ref(),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: Some(Zone::Battlefield),
+                ..
+            })
+        ),
         Effect::CastFromZone { .. } => true,
         _ => false,
     };

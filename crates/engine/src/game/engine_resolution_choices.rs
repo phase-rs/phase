@@ -5632,8 +5632,22 @@ pub(super) fn handle_resolution_choice(
                         events,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    let opened_follow_up_attach_choice =
+                        state.active_ability_continuation().is_some()
+                            && matches!(
+                                &state.waiting_for,
+                                WaitingFor::EffectZoneChoice {
+                                    effect_kind: EffectKind::Attach,
+                                    ..
+                                }
+                            );
                     if let Some(snapshot) = trigger_snapshot {
                         crate::game::triggers::restore_trigger_event_context(state, snapshot);
+                    }
+                    if opened_follow_up_attach_choice {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
                     }
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;

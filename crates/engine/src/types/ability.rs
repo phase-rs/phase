@@ -26730,13 +26730,21 @@ struct AttachTargetBindingsInner {
     attachment_targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_target: Option<TargetRef>,
+    /// Attachments that the immediately preceding forward-result instruction
+    /// moved to the battlefield. This is distinct
+    /// from `attachment_targets`: the former is the finite event-scoped choice
+    /// population, while the latter records the one object the player selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachment_candidates: Vec<ObjectIncarnationRef>,
 }
 
 impl AttachTargetBindings {
     pub(crate) fn is_empty(&self) -> bool {
-        self.inner
-            .as_deref()
-            .is_none_or(|inner| inner.attachment_targets.is_empty() && inner.host_target.is_none())
+        self.inner.as_deref().is_none_or(|inner| {
+            inner.attachment_targets.is_empty()
+                && inner.host_target.is_none()
+                && inner.attachment_candidates.is_empty()
+        })
     }
 
     pub(crate) fn attachment_targets(&self) -> &[TargetRef] {
@@ -26760,6 +26768,16 @@ impl AttachTargetBindings {
 
     pub(crate) fn bind_host(&mut self, target: TargetRef) {
         self.inner.get_or_insert_default().host_target = Some(target);
+    }
+
+    pub(crate) fn bind_attachment_candidates(&mut self, candidates: Vec<ObjectIncarnationRef>) {
+        self.inner.get_or_insert_default().attachment_candidates = candidates;
+    }
+
+    pub(crate) fn attachment_candidates(&self) -> &[ObjectIncarnationRef] {
+        self.inner
+            .as_deref()
+            .map_or(&[], |inner| inner.attachment_candidates.as_slice())
     }
 }
 
@@ -27215,12 +27233,25 @@ impl ResolvedAbility {
         self.context.attach_target_bindings.bind_host(target);
     }
 
+    pub(crate) fn bind_attach_attachment_candidates(
+        &mut self,
+        candidates: Vec<ObjectIncarnationRef>,
+    ) {
+        self.context
+            .attach_target_bindings
+            .bind_attachment_candidates(candidates);
+    }
+
     pub(crate) fn attach_attachment_targets(&self) -> &[TargetRef] {
         self.context.attach_target_bindings.attachment_targets()
     }
 
     pub(crate) fn attach_host_target(&self) -> Option<&TargetRef> {
         self.context.attach_target_bindings.host_target()
+    }
+
+    pub(crate) fn attach_attachment_candidates(&self) -> &[ObjectIncarnationRef] {
+        self.context.attach_target_bindings.attachment_candidates()
     }
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
@@ -28350,6 +28381,9 @@ mod tests {
         populated
             .attach_target_bindings
             .bind_host(TargetRef::Object(ObjectId(12)));
+        populated
+            .attach_target_bindings
+            .bind_attachment_candidates(vec![ObjectIncarnationRef::of(ObjectId(13), 2)]);
         let wire = serde_json::to_value(&populated).expect("attachment bindings serialize");
         assert_eq!(
             wire["attach_target_bindings"]["attachment_targets"],
@@ -28358,6 +28392,10 @@ mod tests {
         assert_eq!(
             wire["attach_target_bindings"]["host_target"],
             serde_json::json!({ "Object": 12 })
+        );
+        assert_eq!(
+            wire["attach_target_bindings"]["attachment_candidates"],
+            serde_json::json!([{ "object_id": 13, "incarnation": 2 }])
         );
         assert_eq!(
             serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),

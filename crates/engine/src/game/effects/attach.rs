@@ -117,7 +117,12 @@ pub fn resolve(
     // `ability.targets` here would steal the ParentTarget bearer (Zack Fair).
     // `Any`/`Any` pairs share one iterator so [equipment, host] slots stay ordered.
     let mut target_slots = ability.targets.iter();
-    let attachment_id = if matches!(attachment_filter, TargetFilter::ParentTarget) {
+    let attachment_id = if !ability.attach_attachment_candidates().is_empty() {
+        // CR 608.2d: This event-scoped Attach may resolve only the explicitly
+        // selected member of its forwarded candidate set. Do not fall back to
+        // a trigger event or a general ParentTarget projection.
+        resolve_bound_attachment_target(state, ability, attachment_filter)
+    } else if matches!(attachment_filter, TargetFilter::ParentTarget) {
         resolve_parent_target_attachment_from_trigger(state)
             .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
@@ -340,8 +345,11 @@ fn prompt_resolution_attachment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     attachment_filter: &TargetFilter,
-    _events: &mut Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
+    if !ability.attach_attachment_candidates().is_empty() {
+        return prompt_forwarded_attachment_choice(state, ability, events);
+    }
     if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
         return Ok(false);
     }
@@ -374,52 +382,127 @@ fn prompt_resolution_attachment_choice(
         (0, _, _) | (_, 0, 0) => Ok(true),
         (1, 1, 1) => Ok(false),
         _ => {
-            // Replace any stale continuation (e.g. a deferred optional sub stashed
-            // by the parent chain walker) with this exact attach instruction.
-            let continuation = crate::types::game_state::PendingContinuation::new(
-                Box::new(ability.clone()),
-                state,
-            );
-            if state.active_ability_continuation().is_some() {
-                state
-                    .replace_active_ability_continuation(
-                        crate::types::resolution::AbilityContinuationFrame {
-                            pending: continuation,
-                            choose_zone_trigger_context: None,
-                        },
-                    )
-                    .expect("attach prompt replaces its active continuation");
-            } else {
-                state.park_ability_continuation(continuation);
-            }
-            state.waiting_for = WaitingFor::EffectZoneChoice {
-                player: ability.controller,
-                cards: eligible,
-                count: bounds.max,
-                min_count: bounds.min,
-                up_to: bounds.min != bounds.max,
-                source_id: ability.source_id,
-                effect_kind: EffectKind::Attach,
-                zone: Zone::Battlefield,
-                destination: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enter_transformed: false,
-                enters_under_player: None,
-                enters_attacking: false,
-                owner_library: false,
-                track_exiled_by_source: false,
-                face_down_profile: None,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                count_param: 0,
-                library_position: None,
-                is_cost_payment: false,
-                enters_modified_if: None,
-                duration: None,
-            };
+            park_resolution_attachment_choice(state, ability, eligible, bounds);
             Ok(true)
         }
     }
+}
+
+/// CR 115.10a: An Attach whose attachment operand is the moved set from a
+/// `forward_result` parent must choose its host first, then choose
+/// from that parent-owned set. Neither choice is targeting, and the attachment
+/// pool must never be recomputed from the battlefield after the event window.
+fn prompt_forwarded_attachment_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    let candidates: Vec<ObjectId> = ability
+        .attach_attachment_candidates()
+        .iter()
+        .filter(|candidate| candidate.is_current(state))
+        .map(|candidate| candidate.object_id)
+        .collect();
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+
+    let Effect::Attach { target, .. } = &ability.effect else {
+        unreachable!("forwarded attachment choices only resolve Attach effects");
+    };
+
+    if ability.attach_host_target().is_none() {
+        let hosts = resolved_object_ids_for_filter(state, ability, target);
+        match hosts.len() {
+            0 => return Ok(true),
+            1 => {
+                let mut bound = ability.clone();
+                bound.bind_attach_host_target(TargetRef::Object(hosts[0]));
+                return prompt_forwarded_attachment_choice(state, &bound, events);
+            }
+            _ => {
+                park_resolution_attachment_choice(
+                    state,
+                    ability,
+                    hosts,
+                    MultiTargetBounds { min: 1, max: 1 },
+                );
+                return Ok(true);
+            }
+        }
+    }
+
+    if !ability.attach_attachment_targets().is_empty() {
+        return Ok(false);
+    }
+
+    let bounds = attachment_choice_bounds(state, ability, candidates.len())?;
+    match (candidates.len(), bounds.min, bounds.max) {
+        (0, _, _) | (_, 0, 0) => Ok(true),
+        (1, 1, 1) => {
+            let mut bound = ability.clone();
+            bound.bind_attach_attachment_target(TargetRef::Object(candidates[0]));
+            resolve(state, &bound, events)?;
+            Ok(true)
+        }
+        _ => {
+            park_resolution_attachment_choice(state, ability, candidates, bounds);
+            Ok(true)
+        }
+    }
+}
+
+/// Park the exact Attach instruction that owns a resolution-time choice. The
+/// eventual resume distinguishes host and attachment choices from the bindings
+/// already present on this continuation, so `EffectZoneChoice` needs no
+/// cross-cutting role field.
+fn park_resolution_attachment_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    cards: Vec<ObjectId>,
+    bounds: MultiTargetBounds,
+) {
+    // Replace any stale continuation (e.g. a deferred optional sub stashed by
+    // the parent chain walker) with this exact attach instruction.
+    let continuation =
+        crate::types::game_state::PendingContinuation::new(Box::new(ability.clone()), state);
+    if state.active_ability_continuation().is_some() {
+        state
+            .replace_active_ability_continuation(
+                crate::types::resolution::AbilityContinuationFrame {
+                    pending: continuation,
+                    choose_zone_trigger_context: None,
+                },
+            )
+            .expect("attach prompt replaces its active continuation");
+    } else {
+        state.park_ability_continuation(continuation);
+    }
+    state.waiting_for = WaitingFor::EffectZoneChoice {
+        player: ability.controller,
+        cards,
+        count: bounds.max,
+        min_count: bounds.min,
+        up_to: bounds.min != bounds.max,
+        source_id: ability.source_id,
+        effect_kind: EffectKind::Attach,
+        zone: Zone::Battlefield,
+        destination: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source: false,
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: None,
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration: None,
+    };
 }
 
 fn attachment_choice_bounds(
@@ -446,13 +529,17 @@ pub(crate) fn complete_resolution_attachment_choice(
     attachment_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    for &attachment_id in attachment_ids {
+    let selecting_host = !ability.attach_attachment_candidates().is_empty()
+        && ability.attach_host_target().is_none();
+    for &selected_id in attachment_ids {
         let mut choice_ability = ability.clone();
         choice_ability.sub_ability = None;
-        choice_ability
-            .targets
-            .push(TargetRef::Object(attachment_id));
-        choice_ability.bind_attach_attachment_target(TargetRef::Object(attachment_id));
+        choice_ability.targets.push(TargetRef::Object(selected_id));
+        if selecting_host {
+            choice_ability.bind_attach_host_target(TargetRef::Object(selected_id));
+        } else {
+            choice_ability.bind_attach_attachment_target(TargetRef::Object(selected_id));
+        }
         resolve(state, &choice_ability, events)?;
     }
     Ok(())
@@ -467,6 +554,24 @@ fn resolve_bound_attachment_target(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<ObjectId> {
+    if !ability.attach_attachment_candidates().is_empty() {
+        return ability
+            .attach_attachment_targets()
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id)
+                    if ability
+                        .attach_attachment_candidates()
+                        .iter()
+                        .any(|candidate| {
+                            candidate.object_id == *id && candidate.is_current(state)
+                        }) =>
+                {
+                    Some(*id)
+                }
+                TargetRef::Object(_) | TargetRef::Player(_) => None,
+            });
+    }
     let ctx = FilterContext::from_ability(ability);
     let effective = crate::game::effects::resolved_object_filter(ability, filter);
     ability

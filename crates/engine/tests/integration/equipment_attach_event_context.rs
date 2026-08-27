@@ -126,14 +126,19 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
         .with_subtypes(vec!["Human", "Warrior"])
         .with_mana_cost(ManaCost::default())
         .id();
+    let preexisting_equipment = scenario
+        .add_artifact_from_oracle(P0, "Preexisting Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
     let dug_equipment = scenario.add_card_to_library_top(P0, "Swordsman's Steel");
+    let other_dug_equipment = scenario.add_card_to_library_top(P0, "Second Dug Equipment");
     let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
     let mut runner = scenario.build();
-    {
+    for equipment_id in [dug_equipment, other_dug_equipment] {
         let equipment = runner
             .state_mut()
             .objects
-            .get_mut(&dug_equipment)
+            .get_mut(&equipment_id)
             .expect("dug Equipment exists");
         equipment.card_types.core_types.push(CoreType::Artifact);
         equipment.card_types.subtypes.push("Equipment".to_string());
@@ -143,11 +148,12 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
     cast_for_free(&mut runner, gilgamesh);
     let mut saw_dig_choice = false;
     let mut saw_optional_attach = false;
-    let mut saw_samurai_choice = false;
-    for _ in 0..48 {
+    let mut saw_host_choice = false;
+    let mut saw_attachment_choice = false;
+    for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                if saw_samurai_choice && runner.state().stack.is_empty() {
+                if saw_attachment_choice && runner.state().stack.is_empty() {
                     break;
                 }
                 runner
@@ -159,11 +165,15 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
                     cards.contains(&dug_equipment),
                     "Dig must offer the Equipment"
                 );
+                assert!(
+                    cards.contains(&other_dug_equipment),
+                    "Dig must offer every moved Equipment candidate"
+                );
                 runner
                     .act(GameAction::SelectCards {
-                        cards: vec![dug_equipment],
+                        cards: vec![dug_equipment, other_dug_equipment],
                     })
-                    .expect("selecting the dug Equipment must be accepted");
+                    .expect("selecting the dug Equipment candidates must be accepted");
                 saw_dig_choice = true;
             }
             WaitingFor::OptionalEffectChoice { .. } => {
@@ -178,20 +188,40 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
                 );
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
-                assert!(
-                    cards.contains(&samurai),
-                    "Gilgamesh's resolution-time attachment choice must offer the chosen Samurai"
-                );
-                assert!(
-                    cards.contains(&other_samurai),
-                    "Gilgamesh's resolution-time attachment choice must offer every legal Samurai"
-                );
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: vec![samurai],
-                    })
-                    .expect("selecting the Samurai must be accepted");
-                saw_samurai_choice = true;
+                if !saw_host_choice {
+                    assert!(
+                        cards.contains(&samurai),
+                        "Gilgamesh's resolution-time host choice must offer the chosen Samurai"
+                    );
+                    assert!(
+                        cards.contains(&other_samurai),
+                        "Gilgamesh's host choice must offer every legal Samurai"
+                    );
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![samurai],
+                        })
+                        .expect("selecting the Samurai host must be accepted");
+                    saw_host_choice = true;
+                } else {
+                    assert_eq!(
+                        cards.len(),
+                        2,
+                        "the attachment choice must be scoped to the two Equipment moved by this Dig"
+                    );
+                    assert!(cards.contains(&dug_equipment));
+                    assert!(cards.contains(&other_dug_equipment));
+                    assert!(
+                        !cards.contains(&preexisting_equipment),
+                        "a matching Equipment that was already on the battlefield is not 'one of them'"
+                    );
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![other_dug_equipment],
+                        })
+                        .expect("selecting the moved Equipment must be accepted");
+                    saw_attachment_choice = true;
+                }
             }
             other => panic!("unexpected Gilgamesh resolution prompt: {other:?}"),
         }
@@ -203,13 +233,23 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
         "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
     );
     assert!(
-        saw_samurai_choice,
-        "the optional attachment must prompt for a Samurai"
+        saw_host_choice,
+        "the optional attachment must first prompt for a Samurai host"
     );
     assert_eq!(
-        runner.state().objects[&dug_equipment].attached_to,
+        runner.state().objects[&other_dug_equipment].attached_to,
         Some(AttachTarget::Object(samurai)),
-        "the Equipment selected from the Dig attaches to the selected Samurai"
+        "the selected Equipment from the Dig attaches to the selected Samurai"
+    );
+    assert!(
+        saw_attachment_choice,
+        "the two moved Equipment must produce a second, candidate-scoped attachment choice"
+    );
+    assert_eq!(runner.state().objects[&dug_equipment].attached_to, None);
+    assert_eq!(
+        runner.state().objects[&preexisting_equipment].attached_to,
+        None,
+        "a preexisting matching Equipment must not be attached by Gilgamesh's event-scoped choice"
     );
 }
 
