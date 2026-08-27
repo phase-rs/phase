@@ -256,6 +256,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -311,6 +313,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -349,6 +353,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -394,6 +400,7 @@ pub fn resolve(
             zone_pipeline::defer_completion_on_pause(
                 state,
                 BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player: revealing_player,
                     source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),

@@ -5452,6 +5452,16 @@ impl DigRestDeliveryOutcome {
     }
 }
 
+/// Identifies which half of a Dig is settling through a shared rest-pile
+/// completion. A kept delivery can pause before the rest-pile routing begins,
+/// while each half needs its own settled-object outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DigDeliveryStage {
+    Kept,
+    #[default]
+    Rest,
+}
+
 /// CR 614.1 + CR 616.1 + CR 400.7: Stamp a Dig delivery completion with its
 /// exact settled destination arrivals. Only the zone pipeline owns a complete
 /// logical group, so this is the single seam where a selected pile becomes an
@@ -5462,12 +5472,16 @@ pub(crate) fn settle_dig_delivery_outcome(
     group: &LogicalZoneChangeGroup,
 ) {
     match completion {
-        BatchCompletion::DigKeptDeliveryComplete { kept_delivery, .. } => {
-            kept_delivery.settle_from_logical_group(state, group);
-        }
-        BatchCompletion::RevealRestPile { rest_delivery, .. } => {
-            rest_delivery.settle_from_logical_group(state, group);
-        }
+        BatchCompletion::RevealRestPile {
+            delivery_stage: DigDeliveryStage::Kept,
+            kept_delivery,
+            ..
+        } => kept_delivery.settle_from_logical_group(state, group),
+        BatchCompletion::RevealRestPile {
+            delivery_stage: DigDeliveryStage::Rest,
+            rest_delivery,
+            ..
+        } => rest_delivery.settle_from_logical_group(state, group),
         _ => {}
     }
 }
@@ -5610,25 +5624,6 @@ pub enum BatchCompletion {
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
     },
-    /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
-    /// the battlefield. Its rest routing, tracked-set publication, and
-    /// continuation drain must follow the delivery, while the published set and
-    /// parent-target continuation set remain independently typed.
-    DigKeptDeliveryComplete {
-        player: PlayerId,
-        source_id: Option<ObjectId>,
-        rest_cards: Vec<ObjectId>,
-        rest_destination: Zone,
-        #[serde(default)]
-        rest_order: DigRestOrder,
-        publish_tracked_set: Vec<ObjectId>,
-        continuation_targets: Vec<ObjectId>,
-        /// The exact selected identities that completed their requested
-        /// delivery. This survives a replacement-ordering pause so a Dig's
-        /// "this way" continuation never observes merely selected cards.
-        #[serde(default)]
-        kept_delivery: DigKeptDeliveryOutcome,
-    },
     /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
     /// settled, so its tracked-set extension and next-member prompt can run.
     ForEachCategoryExileComplete {
@@ -5666,6 +5661,10 @@ pub enum BatchCompletion {
     /// runs exactly once after the kept delivery settles — otherwise the rest
     /// cards strand in the library (the early-`return` bug).
     RevealRestPile {
+        /// A Dig first carries the kept delivery through this completion, then
+        /// changes to `Rest` before it routes the deferred unkept pile.
+        #[serde(default)]
+        delivery_stage: DigDeliveryStage,
         /// The player whose continuation drains after the pile lands.
         player: PlayerId,
         /// CR 400.7: The resolving effect's source, preserved so any rest-pile
@@ -19839,6 +19838,14 @@ impl GameState {
         &mut self,
     ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
         self.resolution_stack.take_active_ability_continuation()
+    }
+
+    /// Consume only the continuation that owns the active Attach choice.
+    pub fn take_active_attachment_choice_continuation(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        self.resolution_stack
+            .take_active_attachment_choice_continuation()
     }
 
     /// Clear the active continuation when the enclosing resolution is

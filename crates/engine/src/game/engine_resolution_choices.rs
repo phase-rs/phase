@@ -1849,6 +1849,7 @@ pub(super) fn handle_resolution_choice(
                     crate::game::zone_pipeline::defer_completion_on_pause(
                         state,
                         crate::types::game_state::BatchCompletion::RevealRestPile {
+                            delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                             player,
                             source_id: Some(source_id),
                             rest_cards: graveyard_cards,
@@ -2105,6 +2106,8 @@ pub(super) fn handle_resolution_choice(
                             crate::game::zone_pipeline::defer_completion_on_pause(
                                 state,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player,
                                     source_id: Some(source_id),
                                     rest_cards: misses,
@@ -2173,6 +2176,7 @@ pub(super) fn handle_resolution_choice(
                 &misses,
                 rest_destination,
                 Some(crate::types::game_state::BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id: Some(source_id),
                     rest_cards: Vec::new(),
@@ -3536,6 +3540,8 @@ pub(super) fn handle_resolution_choice(
                             crate::game::zone_pipeline::defer_completion_on_pause(
                                 state,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player,
                                     source_id: dig_source_id,
                                     rest_cards: Vec::new(),
@@ -3597,25 +3603,27 @@ pub(super) fn handle_resolution_choice(
                 crate::game::zone_pipeline::move_objects_simultaneously_then(
                     state,
                     reqs,
-                    Some(
-                        crate::types::game_state::BatchCompletion::DigKeptDeliveryComplete {
-                            player,
-                            source_id: dig_source_id,
-                            rest_cards: if defer_rest_routing {
-                                Vec::new()
-                            } else {
-                                unkept
-                            },
-                            rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
-                            rest_order,
-                            publish_tracked_set: publish_set,
-                            continuation_targets: kept.clone(),
-                            kept_delivery:
-                                crate::types::game_state::DigKeptDeliveryOutcome::pending(
-                                    state, kept, kept_zone,
-                                ),
+                    Some(crate::types::game_state::BatchCompletion::RevealRestPile {
+                        delivery_stage: crate::types::game_state::DigDeliveryStage::Kept,
+                        player,
+                        source_id: dig_source_id,
+                        rest_cards: if defer_rest_routing {
+                            Vec::new()
+                        } else {
+                            unkept
                         },
-                    ),
+                        rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                        rest_order,
+                        clear_markers: Vec::new(),
+                        publish_tracked_set: Some(publish_set),
+                        emit_reveal_until_resolved: None,
+                        manifested_for_continuation: None,
+                        kept_delivery: crate::types::game_state::DigKeptDeliveryOutcome::pending(
+                            state, kept, kept_zone,
+                        ),
+                        continuation_targets: kept.clone(),
+                        rest_delivery: Default::default(),
+                    }),
                     events,
                 );
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3656,6 +3664,7 @@ pub(super) fn handle_resolution_choice(
                     ordered_unkept.shuffle(&mut state.rng);
                 }
                 let completion = crate::types::game_state::BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id: dig_source_id,
                     rest_cards: Vec::new(),
@@ -5619,66 +5628,29 @@ pub(super) fn handle_resolution_choice(
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
                 EffectKind::Attach => {
-                    let Some(frame) = state
-                        .take_active_ability_continuation()
+                    let Some(mut frame) = state
+                        .take_active_attachment_choice_continuation()
                         .expect("attach choice cannot consume a buried continuation")
                     else {
                         return Err(EngineError::InvalidAction(
                             "Attach EffectZoneChoice missing stashed ability".to_string(),
                         ));
                     };
-                    let trigger_context = frame.pending.trigger_context.clone();
-                    let trigger_firing = frame.pending.trigger_firing;
                     let attachment_choice =
-                        frame.pending.attachment_choice.clone().ok_or_else(|| {
+                        frame.pending.attachment_choice.take().ok_or_else(|| {
                             EngineError::InvalidAction(
                                 "Attach EffectZoneChoice missing typed attachment operation"
                                     .to_string(),
                             )
                         })?;
-                    effects::restore_continuation_trigger_firing(state, trigger_firing);
-                    let trigger_snapshot = trigger_context.as_ref().map(|context| {
-                        crate::game::triggers::push_resolving_trigger_context(state, context)
-                    });
                     let operation = effects::attach::bind_resolution_attachment_choice(
                         &*state,
                         *attachment_choice.operation,
                         &chosen,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    let mut child = frame;
-                    child.pending.chain = Box::new(operation.clone());
-                    child.pending.attachment_choice =
-                        Some(crate::types::game_state::PendingAttachmentChoice {
-                            operation: Box::new(operation.clone()),
-                        });
-                    state
-                        .resolve_and_apply_frame_transition(
-                            crate::types::resolved_commands::ResolvedFrameTransition::Push {
-                                frame:
-                                    crate::types::resolution::ResolutionFrame::AbilityContinuation(
-                                        child,
-                                    ),
-                            },
-                        )
-                        .expect("attachment choice child frame must push atomically");
-                    set_priority(state, player);
-                    effects::attach::resolve(&mut *state, &operation, events)
-                        .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    let opened_follow_up_prompt =
-                        !matches!(state.waiting_for, WaitingFor::Priority { .. });
-                    if let Some(snapshot) = trigger_snapshot {
-                        crate::game::triggers::restore_trigger_event_context(state, snapshot);
-                    }
-                    if opened_follow_up_prompt {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                    state
-                        .take_active_ability_continuation()
-                        .expect("completed attachment child must remain active")
-                        .expect("completed attachment child must exist");
+                    frame.pending.chain = Box::new(operation);
+                    state.push_ability_continuation(frame);
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -7348,6 +7320,7 @@ fn route_kept_card_or_defer(
             crate::game::zone_pipeline::defer_completion_on_pause(
                 state,
                 crate::types::game_state::BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id: Some(source_id),
                     rest_cards: misses.to_vec(),
@@ -7924,65 +7897,6 @@ pub(crate) fn run_batch_completion(
             );
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
-        BatchCompletion::DigKeptDeliveryComplete {
-            player,
-            source_id,
-            rest_cards,
-            rest_destination,
-            rest_order,
-            publish_tracked_set,
-            continuation_targets,
-            kept_delivery,
-        } => {
-            if !rest_cards.is_empty() {
-                let mut ordered_rest_cards = rest_cards.clone();
-                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_rest_cards.shuffle(&mut state.rng);
-                }
-                let completion = BatchCompletion::RevealRestPile {
-                    player,
-                    source_id,
-                    rest_cards: Vec::new(),
-                    rest_destination,
-                    rest_order,
-                    clear_markers: Vec::new(),
-                    publish_tracked_set: Some(publish_tracked_set),
-                    emit_reveal_until_resolved: None,
-                    manifested_for_continuation: None,
-                    kept_delivery,
-                    continuation_targets,
-                    rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
-                        state,
-                        ordered_rest_cards.clone(),
-                        rest_destination,
-                    ),
-                };
-                return route_rest_partition_then(
-                    state,
-                    &ordered_rest_cards,
-                    rest_destination,
-                    source_id,
-                    Some(completion),
-                    events,
-                );
-            }
-            // CR 608.2c + CR 614.1 + CR 616.1: After the complete
-            // replacement-choice sequence, settled kept cards drive the
-            // `last_zone_changed_ids` ledger and continuation target filtering.
-            let completed = kept_delivery.completed_ids();
-            effects::publish_fresh_tracked_set(state, publish_tracked_set);
-            state.last_zone_changed_ids = completed.clone();
-            if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                frame.pending.chain.targets = continuation_targets
-                    .iter()
-                    .filter(|id| completed.contains(id))
-                    .map(|&id| TargetRef::Object(id))
-                    .collect();
-                frame.pending.chain.context.optional_effect_performed = !completed.is_empty();
-            }
-            finish_with_continuation(state, player, events);
-            crate::game::zone_pipeline::BatchMoveResult::Done
-        }
         BatchCompletion::ForEachCategoryExileComplete {
             ability,
             pool,
@@ -8035,6 +7949,7 @@ pub(crate) fn run_batch_completion(
         // continuation wiring (if any), then drain the continuation — exactly the
         // tail the synchronous path runs inline.
         BatchCompletion::RevealRestPile {
+            delivery_stage,
             player,
             source_id,
             rest_cards,
@@ -8048,6 +7963,45 @@ pub(crate) fn run_batch_completion(
             continuation_targets,
             rest_delivery,
         } => {
+            // CR 608.2c + CR 614.1 + CR 616.1: A kept Dig delivery can pause
+            // before its rest pile starts. Keep its completion in the same
+            // typed carrier, then advance it to the rest stage before routing
+            // the unkept cards so replacement re-parks retain the full tail.
+            if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept
+                && !rest_cards.is_empty()
+            {
+                let mut ordered_rest_cards = rest_cards.clone();
+                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
+                    ordered_rest_cards.shuffle(&mut state.rng);
+                }
+                let completion = BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+                    player,
+                    source_id,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    rest_order,
+                    clear_markers,
+                    publish_tracked_set,
+                    emit_reveal_until_resolved,
+                    manifested_for_continuation,
+                    kept_delivery,
+                    continuation_targets,
+                    rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                        state,
+                        ordered_rest_cards.clone(),
+                        rest_destination,
+                    ),
+                };
+                return route_rest_partition_then(
+                    state,
+                    &ordered_rest_cards,
+                    rest_destination,
+                    source_id,
+                    Some(completion),
+                    events,
+                );
+            }
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
             // reveal-until path routes through `move_rest_then`, including
@@ -8059,6 +8013,7 @@ pub(crate) fn run_batch_completion(
                     ordered_rest_cards.shuffle(&mut state.rng);
                 }
                 let cleanup = BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id,
                     rest_cards: Vec::new(),
@@ -8091,6 +8046,7 @@ pub(crate) fn run_batch_completion(
                 // this completion as cleanup-only so reveal markers and
                 // continuation drain run after the pile actually lands.
                 let cleanup = BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id,
                     rest_cards: Vec::new(),

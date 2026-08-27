@@ -734,7 +734,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
                 .state()
                 .active_batch_delivery()
                 .and_then(|pending| pending.completion.as_ref()),
-            Some(BatchCompletion::RevealRestPile { .. })
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Kept,
+                ..
+            })
         ),
         "the kept-card pause must retain a RevealRestPile completion for the deferred rest pile"
     );
@@ -754,7 +757,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     assert!(
         matches!(
             first_rest_park.completion.as_ref(),
-            Some(BatchCompletion::RevealRestPile { .. })
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Rest,
+                ..
+            })
         ),
         "the first rest redirect must retain the RevealRestPile completion"
     );
@@ -773,7 +779,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
                 .state()
                 .active_batch_delivery()
                 .and_then(|pending| pending.completion.as_ref()),
-            Some(BatchCompletion::RevealRestPile { .. })
+            Some(BatchCompletion::RevealRestPile {
+                delivery_stage: engine::types::game_state::DigDeliveryStage::Rest,
+                ..
+            })
         ),
         "the re-parked rest delivery must retain its RevealRestPile completion"
     );

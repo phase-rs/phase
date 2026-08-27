@@ -4,14 +4,15 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, ChoiceType, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
-    TargetRef,
+    AdditionalCostRepeatability, ChoiceType, Effect, EffectKind, MultiTargetSpec, QuantityExpr,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 
 const SOKKA_AND_SUKI_ORACLE: &str = "Whenever Sokka and Suki or another Ally you control enters, \
@@ -76,13 +77,14 @@ fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         .with_subtypes(vec!["Equipment"])
         .id();
     let host = scenario.add_creature(P0, "Paid Instead Host", 2, 2).id();
+    scenario.add_basic_land(P0, ManaColor::Green);
     let spell = scenario
         .add_spell_to_hand(P0, "Paid Instead Attach", false)
         .with_mana_cost(ManaCost::zero())
-        .with_additional_cost(AdditionalCost::Optional {
-            cost: AbilityCost::Mana {
-                cost: ManaCost::zero(),
-            },
+        .with_additional_cost(AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }],
             repeatability: AdditionalCostRepeatability::Once,
         })
         .with_ability_definition(paid_instead_attach_definition())
@@ -106,7 +108,7 @@ fn cast_paid_instead_attach_to_target_selection(runner: &mut GameRunner, spell: 
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
                     .act(GameAction::DecideOptionalCost { pay: true })
-                    .expect("zero additional cost must be paid");
+                    .expect("kicker cost must be paid");
             }
             WaitingFor::ManaPayment { .. } => {
                 runner
@@ -293,6 +295,103 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+#[test]
+fn bound_attachments_without_a_pause_do_not_replay_the_final_attachment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Attachment Host", 2, 2).id();
+    let first = scenario
+        .add_artifact_from_oracle(P0, "First Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let second = scenario
+        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Attach Both", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::Any,
+                    target: TargetFilter::Any,
+                },
+            )
+            .multi_target(MultiTargetSpec::fixed(2, 2))
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        )
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("attach-both spell must begin casting");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![
+                TargetRef::Object(first),
+                TargetRef::Object(second),
+                TargetRef::Object(host),
+            ],
+        })
+        .expect("both attachment roles and their host must be selectable");
+
+    for _ in 0..8 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("attachment spell must keep resolving"),
+            ref other => panic!("ordinary attachments must not open a prompt: {other:?}"),
+        };
+    }
+
+    for attachment in [first, second] {
+        assert_eq!(
+            runner.state().objects[&attachment].attached_to,
+            Some(AttachTarget::Object(host)),
+            "each ordinary selected Equipment must attach"
+        );
+    }
+    assert_eq!(
+        runner.life(P0),
+        life_before + 1,
+        "the trailing effect resolves once"
+    );
+    assert_eq!(
+        runner
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        source_id,
+                        ..
+                    } if *source_id == spell
+                )
+            })
+            .count(),
+        2,
+        "each selected attachment must resolve exactly once when none pauses"
+    );
 }
 
 #[test]
@@ -503,6 +602,9 @@ fn gilgamesh_direct_equipment_choice_completes_to_priority() {
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
                 runner
                     .act(GameAction::PassPriority)
                     .expect("priority pass must be accepted");
@@ -657,6 +759,9 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
                 runner
                     .act(GameAction::PassPriority)
                     .expect("priority pass must be accepted");
@@ -807,6 +912,9 @@ fn gilgamesh_host_then_equipment_choice_preserves_event_scoped_candidates() {
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
                 runner
                     .act(GameAction::PassPriority)
                     .expect("priority pass must be accepted");

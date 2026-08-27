@@ -12952,6 +12952,11 @@ fn resolve_chain_body(
             && (state
                 .active_ability_continuation()
                 .is_some_and(|pending| pending.attachment_choice.is_some())
+                || state.active_ability_continuation().is_some_and(|pending| {
+                    matches!(pending.chain.effect, Effect::Attach { .. })
+                        && pending.chain.sub_ability.is_none()
+                        && !pending.chain.attach_attachment_targets().is_empty()
+                })
                 || state
                     .resolution_stack
                     .consume_active_post_replacement_attach_child_marker());

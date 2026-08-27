@@ -147,13 +147,6 @@ pub fn resolve(
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
     for (index, attachment_id) in attachment_ids.iter().copied().enumerate() {
-        if !ability.attach_attachment_targets().is_empty() {
-            // Update the child before an attached-event replacement can put a
-            // post-replacement frame above it. The eventual prompt then drains
-            // this remaining work instead of replaying the attachment that
-            // opened the prompt.
-            defer_remaining_selected_attachments(state, ability, &attachment_ids[index + 1..]);
-        }
         // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
         // object it can't legally enchant, the Aura doesn't move. Delegate to the single
         // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
@@ -190,7 +183,15 @@ pub fn resolve(
                 if let Some(waiting_for) =
                     deliver_attach(state, attachment_id, target_id, source_id, events)
                 {
+                    if !ability.attach_attachment_targets().is_empty() {
+                        defer_remaining_selected_attachments(
+                            state,
+                            ability,
+                            &attachment_ids[index + 1..],
+                        );
+                    }
                     state.waiting_for = waiting_for;
+                    return Ok(());
                 }
             }
             crate::game::replacement::ReplacementResult::Prevented => {
@@ -205,11 +206,16 @@ pub fn resolve(
                 // for the ordering choice. `handle_replacement_choice`'s
                 // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
                 // the player orders them.
+                if !ability.attach_attachment_targets().is_empty() {
+                    defer_remaining_selected_attachments(
+                        state,
+                        ability,
+                        &attachment_ids[index + 1..],
+                    );
+                }
                 crate::game::replacement::park_waiting_for(state, player);
+                return Ok(());
             }
-        }
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return Ok(());
         }
     }
 
@@ -236,41 +242,19 @@ fn defer_remaining_selected_attachments(
             .collect(),
     );
     if remaining.is_empty() {
-        if let Some(frame) = state
-            .active_ability_continuation_frame_mut()
-            .filter(|frame| frame.pending.attachment_choice.is_some())
-        {
-            *frame.pending.chain = ResolvedAbility::new(
-                Effect::NoOp,
-                Vec::new(),
-                ability.source_id,
-                ability.controller,
-            );
-            frame.pending.attachment_choice = None;
-        }
-        return;
-    }
-
-    if let Some(frame) = state
-        .active_ability_continuation_frame_mut()
-        .filter(|frame| frame.pending.attachment_choice.is_some())
-    {
-        *frame.pending.chain = continuation;
-        frame.pending.attachment_choice = None;
         return;
     }
 
     // CR 608.2c + CR 616.1: an already selected multi-attachment operation can
-    // pause on its first Attached replacement without having first opened an
-    // EffectZoneChoice. Split this Attach's printed tail into its parent, then
-    // park an Attach-owned child for the remaining bound attachments. The child
-    // is deliberately marked as an attachment operation so its final member
-    // drains back to the parent tail instead of replacing it.
+    // pause on its first Attached replacement without having opened an
+    // Equipment choice. Split its printed tail into the parent and park the
+    // remaining bound members as an ordinary continuation. `attachment_choice`
+    // is reserved for an actual `EffectZoneChoice` owner, never a synthetic
+    // marker for this direct bound sequence.
     let tail = continuation.sub_ability.take();
     if let Some(tail) = tail {
         if let Some(frame) = state.active_ability_continuation_frame_mut() {
             frame.pending.chain = tail;
-            frame.pending.attachment_choice = None;
         } else {
             state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
                 tail, state,
@@ -278,12 +262,10 @@ fn defer_remaining_selected_attachments(
         }
     }
 
-    let mut child =
-        crate::types::game_state::PendingContinuation::new(Box::new(continuation.clone()), state);
-    child.attachment_choice = Some(crate::types::game_state::PendingAttachmentChoice {
-        operation: Box::new(continuation),
-    });
-    state.park_ability_continuation(child);
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
+        Box::new(continuation),
+        state,
+    ));
 }
 
 /// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment

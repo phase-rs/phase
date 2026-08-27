@@ -930,6 +930,21 @@ impl ResolutionStack {
         }
     }
 
+    /// Consume only an active continuation that owns an Attach
+    /// `EffectZoneChoice`; callers must never take a generic continuation just
+    /// because the current UI prompt happens to be an Attach choice.
+    pub fn take_active_attachment_choice_continuation(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        if !self
+            .active_ability_continuation()
+            .is_some_and(|frame| frame.pending.attachment_choice.is_some())
+        {
+            return Ok(None);
+        }
+        self.take_active_ability_continuation()
+    }
+
     /// Consumes the active continuation, or its exact parent when a
     /// `BatchDelivery` child currently owns the stack top. The batch remains
     /// parked so its undelivered zone-change members settle before the enclosing
