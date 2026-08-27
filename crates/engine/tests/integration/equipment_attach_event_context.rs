@@ -289,6 +289,115 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         "the enclosing Attach tail must resume after both attachments"
     );
     assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn singleton_bound_attachment_replacement_preserves_trailing_effect_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Singleton Attachment Host", 2, 2)
+        .id();
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Singleton Psychic Paper", PSYCHIC_PAPER_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Attach Once", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::Any,
+                    target: TargetFilter::Any,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec!["Llanowar Elves".to_string()].into();
+    let life_before = runner.life(P0);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("singleton Attach spell must begin casting");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(equipment), TargetRef::Object(host)],
+        })
+        .expect("the attachment and host must be selectable");
+
+    let mut saw_attached_replacement = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("singleton attachment spell must keep resolving");
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CardName,
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Llanowar Elves".to_string(),
+                    })
+                    .expect("attachment replacement name choice must be accepted");
+                saw_attached_replacement = true;
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Zombie".to_string(),
+                    })
+                    .expect("attachment replacement type choice must be accepted");
+            }
+            other => panic!("unexpected singleton Attach prompt: {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_attached_replacement,
+        "the bound attachment must pause through its Attached replacement"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(host)),
+        "the bound Equipment must attach after its replacement pause"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before + 1,
+        "the trailing effect must resolve exactly once"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]

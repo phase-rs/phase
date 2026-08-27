@@ -12941,15 +12941,21 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
-        // An Attach choice already split this node's trailing instructions into
-        // the parent continuation below its typed child. The generic pause path
-        // must not prepend the same tail onto the child operation, or a host
-        // choice followed by an Equipment choice would duplicate that tail.
-        if matches!(ability.effect, Effect::Attach { .. })
-            && state
+        // CR 608.2c + CR 616.1: An Attach choice already split this node's
+        // trailing instructions into the parent continuation below its typed
+        // child. An Attached replacement leaves that child immediately below
+        // its active PostReplacement owner, so consume the marker at this
+        // hand-off before the child drains. The generic pause path must not
+        // prepend the same tail onto the child operation, or a host choice
+        // followed by an Equipment choice would duplicate that tail.
+        let attach_child_already_owns_tail = matches!(ability.effect, Effect::Attach { .. })
+            && (state
                 .active_ability_continuation()
                 .is_some_and(|pending| pending.attachment_choice.is_some())
-        {
+                || state
+                    .resolution_stack
+                    .consume_active_post_replacement_attach_child_marker());
+        if attach_child_already_owns_tail {
             return Ok(());
         }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),

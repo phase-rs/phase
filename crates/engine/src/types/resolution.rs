@@ -2800,6 +2800,39 @@ impl ResolutionStack {
         self.frames.get(self.frames.below(top)?)
     }
 
+    /// Consume the typed Attach-child marker only across the exact active
+    /// `AbilityContinuation` → `PostReplacement` boundary.
+    ///
+    /// The marker has served its sole purpose once the resolver has observed
+    /// that the Attach operation already split its printed tail into the
+    /// parent continuation. Clearing it before the child becomes active lets
+    /// the ordinary continuation drain consume that child without mistaking it
+    /// for a fresh `EffectZoneChoice` owner.
+    pub fn consume_active_post_replacement_attach_child_marker(&mut self) -> bool {
+        let Some(post_replacement) = self.frames.top() else {
+            return false;
+        };
+        let Some(attachment_child) = self.frames.below(post_replacement) else {
+            return false;
+        };
+        if !matches!(
+            (self.frames.get(attachment_child), self.frames.get(post_replacement)),
+            (
+                Some(ResolutionFrame::AbilityContinuation(child)),
+                Some(ResolutionFrame::PostReplacement(_)),
+            ) if child.pending.attachment_choice.is_some()
+        ) {
+            return false;
+        }
+        let Some(ResolutionFrame::AbilityContinuation(child)) =
+            self.frames.get_mut(attachment_child)
+        else {
+            unreachable!("checked attachment child must retain its frame kind")
+        };
+        child.pending.attachment_choice = None;
+        true
+    }
+
     /// True only for the live general-drain/draw pair at the active stack
     /// boundary. This inspects the top and its exact immediate predecessor; it
     /// is not a search for a buried PostReplacement frame.
