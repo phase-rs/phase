@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, EngineSnapshot, GameState, LegalActionsResult } from "../../adapter/types";
+import type { EngineAdapter, EngineSnapshot, LegalActionsResult } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import {
   buildGameState,
