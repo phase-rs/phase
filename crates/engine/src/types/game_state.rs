@@ -14560,6 +14560,10 @@ pub enum AutoPassRequest {
 
 /// Per-window continuation rule for a stack-resolution session.
 ///
+/// CR 117.3d + CR 117.4: a stack entry resolves only after consecutive passes;
+/// this policy selects the engine's authorized pass behavior without changing
+/// that priority rule.
+///
 /// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
 /// armed it, the engine keeps passing until the stack empties or grows beyond
 /// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
@@ -14581,6 +14585,9 @@ impl StackResolutionPolicy {
 
 /// A persisted resolution cap. The established `0` wire spelling and an
 /// absent field both mean no cap; nonzero values preserve the exact cap.
+///
+/// CR 117.3d + CR 117.4: the cap bounds automated consecutive passes; it never
+/// changes the rules condition that resolves the top stack entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StackResolutionBudget {
     #[default]
@@ -14764,14 +14771,20 @@ impl StackResolutionEntryFence {
 /// The temporary auto-pass overlay installed for a shared resolution session.
 /// The full sparse map is retained so ending the session can restore the exact
 /// pre-session preferences transactionally.
+///
+/// CR 117.3d + CR 117.4: records only temporary pass preferences, leaving the
+/// engine's ordinary consecutive-pass and stack-resolution procedure intact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackResolutionAutoPassOverlay {
     pub baseline: BTreeMap<PlayerId, AutoPassMode>,
 }
 
 /// Persisted state for the one ordinary stack-resolution runner shared by
-/// consented human Resolve All and verified AI continuation. Phase 1 only
-/// stores this data; later phases construct and consume it.
+/// consented human Resolve All and verified AI continuation.
+///
+/// CR 117.3d + CR 117.4: retains the exact cohort and pass policy for an
+/// ordinary priority-driven resolution sequence rather than directly resolving
+/// stack entries outside the rules procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackResolutionSession {
     /// Ordered from the next entry to resolve toward the bottom of the

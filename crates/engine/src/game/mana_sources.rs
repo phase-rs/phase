@@ -855,6 +855,9 @@ pub(crate) fn preflight_tap_land_action(
             ));
         }
     };
+    // CR 723.5 + CR 723.5a: a turn controller makes the waiting player's
+    // choices, but activates that player's mana sources and spends only that
+    // player's resources.
     if turn_control::authorized_submitter_for_player(state, waiting_player) != player {
         return Err(EngineError::WrongPlayer);
     }
