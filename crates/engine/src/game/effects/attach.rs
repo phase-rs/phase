@@ -517,10 +517,10 @@ fn prompt_forwarded_attachment_choice(
     }
 }
 
-/// Park the exact Attach instruction that owns a resolution-time choice. The
-/// child frame retains only that Attach operation; its parent owns the printed
-/// chain tail, so resolving either a host or attachment choice cannot discard
-/// or duplicate later instructions.
+/// CR 608.2d: Park the exact Attach instruction that owns a resolution-time
+/// choice. The child frame retains only that Attach operation; its parent owns
+/// the printed chain tail, so resolving either a host or attachment choice
+/// cannot discard or duplicate later instructions.
 fn park_resolution_attachment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -529,6 +529,31 @@ fn park_resolution_attachment_choice(
 ) {
     let mut operation = ability.clone();
     let tail = operation.sub_ability.take();
+    let waiting_for = WaitingFor::EffectZoneChoice {
+        player: ability.controller,
+        cards,
+        count: bounds.max,
+        min_count: bounds.min,
+        up_to: bounds.min != bounds.max,
+        source_id: ability.source_id,
+        effect_kind: EffectKind::Attach,
+        zone: Zone::Battlefield,
+        destination: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source: false,
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: None,
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration: None,
+    };
 
     if let Some(active) = state.active_ability_continuation_frame() {
         if active.pending.attachment_choice.is_some() {
@@ -551,6 +576,7 @@ fn park_resolution_attachment_choice(
                     },
                 )
                 .expect("attachment choice child frame must re-park atomically");
+            state.waiting_for = waiting_for;
             return;
         }
     }
@@ -586,31 +612,7 @@ fn park_resolution_attachment_choice(
             },
         )
         .expect("attachment choice child frame must push atomically");
-    state.waiting_for = WaitingFor::EffectZoneChoice {
-        player: ability.controller,
-        cards,
-        count: bounds.max,
-        min_count: bounds.min,
-        up_to: bounds.min != bounds.max,
-        source_id: ability.source_id,
-        effect_kind: EffectKind::Attach,
-        zone: Zone::Battlefield,
-        destination: None,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enter_transformed: false,
-        enters_under_player: None,
-        enters_attacking: false,
-        owner_library: false,
-        track_exiled_by_source: false,
-        face_down_profile: None,
-        enter_with_counters: vec![],
-        conditional_enter_with_counters: vec![],
-        count_param: 0,
-        library_position: None,
-        is_cost_payment: false,
-        enters_modified_if: None,
-        duration: None,
-    };
+    state.waiting_for = waiting_for;
 }
 
 fn attachment_choice_bounds(

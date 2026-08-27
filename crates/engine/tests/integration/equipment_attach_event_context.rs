@@ -368,6 +368,124 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
 }
 
 #[test]
+fn gilgamesh_host_then_equipment_choice_preserves_event_scoped_candidates() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let samurai = scenario
+        .add_creature(P0, "Chosen Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    let other_samurai = scenario
+        .add_creature(P0, "Other Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    let gilgamesh = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gilgamesh, Master-at-Arms", 3, 3, GILGAMESH_ORACLE)
+        .with_subtypes(vec!["Human", "Warrior"])
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let first_equipment = scenario.add_card_to_library_top(P0, "First Dug Equipment");
+    let second_equipment = scenario.add_card_to_library_top(P0, "Second Dug Equipment");
+    let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
+    let mut runner = scenario.build();
+    for equipment_id in [first_equipment, second_equipment] {
+        let equipment = runner
+            .state_mut()
+            .objects
+            .get_mut(&equipment_id)
+            .expect("dug Equipment exists");
+        equipment.card_types.core_types.push(CoreType::Artifact);
+        equipment.card_types.subtypes.push("Equipment".to_string());
+        equipment.base_card_types = equipment.card_types.clone();
+    }
+
+    cast_for_free(&mut runner, gilgamesh);
+    let mut saw_dig_choice = false;
+    let mut saw_optional_attach = false;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must be accepted");
+            }
+            WaitingFor::DigChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![first_equipment, second_equipment],
+                    })
+                    .expect("selecting the two dug Equipment must be accepted");
+                saw_dig_choice = true;
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting Gilgamesh's optional attachment must work");
+                saw_optional_attach = true;
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(saw_dig_choice, "Gilgamesh must surface the DigChoice");
+                assert!(
+                    saw_optional_attach,
+                    "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
+                );
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "the first choice must offer both Samurai hosts"
+                );
+                assert!(cards.contains(&samurai));
+                assert!(cards.contains(&other_samurai));
+
+                let after_host = runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![samurai],
+                    })
+                    .expect("selecting the Samurai host must be accepted");
+                let WaitingFor::EffectZoneChoice {
+                    cards: equipment_cards,
+                    effect_kind,
+                    ..
+                } = &after_host.waiting_for
+                else {
+                    panic!(
+                        "selecting one of multiple Samurai must open the Equipment choice before resolution continues"
+                    );
+                };
+                assert_eq!(*effect_kind, engine::types::ability::EffectKind::Attach);
+                assert_eq!(
+                    equipment_cards.len(),
+                    2,
+                    "the second choice must contain exactly the Equipment moved by this Dig"
+                );
+                assert!(equipment_cards.contains(&first_equipment));
+                assert!(equipment_cards.contains(&second_equipment));
+
+                let resolved = runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![second_equipment],
+                    })
+                    .expect("selecting the event-scoped Equipment must be accepted");
+                assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
+                assert_eq!(
+                    runner.state().objects[&second_equipment].attached_to,
+                    Some(AttachTarget::Object(samurai)),
+                    "the selected moved Equipment attaches to the selected Samurai"
+                );
+                assert_eq!(runner.state().objects[&first_equipment].attached_to, None);
+                return;
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                panic!("Gilgamesh's non-targeted choices must not be stack targeting")
+            }
+            other => panic!("unexpected Gilgamesh combined prompt: {other:?}"),
+        }
+    }
+
+    panic!("Gilgamesh's combined host and Equipment choices did not resolve");
+}
+
+#[test]
 fn hammer_of_nazahn_parent_target_etb_remains_attached() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
