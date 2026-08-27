@@ -3690,7 +3690,7 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
             policy: StackResolutionPolicy::Committed,
         },
     );
-    let baseline = HashMap::from([(
+    let baseline = BTreeMap::from([(
         PlayerId(1),
         AutoPassMode::UntilTurnBoundary {
             until: TurnBoundary::MyNextTurnStart,
@@ -3711,7 +3711,10 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
         .expect("the representative may cancel its own session");
 
     assert!(state.stack_resolution_session.is_none());
-    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(
+        state.auto_pass,
+        baseline.into_iter().collect::<HashMap<_, _>>()
+    );
 }
 
 #[test]
@@ -3724,7 +3727,7 @@ fn representative_replacement_recaptures_the_restored_baseline() {
     let mut state = setup_game_at_main_phase();
     let entry = no_op_stack_entry(7_779, PlayerId(0));
     state.stack.push_back(entry.clone());
-    let baseline = HashMap::from([(
+    let baseline = BTreeMap::from([(
         PlayerId(1),
         AutoPassMode::UntilTurnBoundary {
             until: TurnBoundary::MyNextTurnStart,
@@ -3769,7 +3772,10 @@ fn representative_replacement_recaptures_the_restored_baseline() {
     );
     apply(&mut state, PlayerId(0), GameAction::CancelAutoPass)
         .expect("the representative may cancel the replacement");
-    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(
+        state.auto_pass,
+        baseline.into_iter().collect::<HashMap<_, _>>()
+    );
 }
 
 #[test]

@@ -953,8 +953,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       .toBeLessThan(persistenceMocks.clearGame.mock.invocationCallOrder[0]!);
     expect(persistenceMocks.clearGame.mock.invocationCallOrder[0])
       .toBeLessThan(send.mock.invocationCallOrder[0]!);
-    expect((await reconnect.getSentMessages()).map((message) => (message as { type: string }).type))
-      .toEqual(["reconnect_ack", "terminal_result"]);
+    await vi.waitFor(async () => {
+      expect((await reconnect.getSentMessages()).map((message) => (message as { type: string }).type))
+        .toEqual(["reconnect_ack", "terminal_result"]);
+    });
     adapter.dispose();
   });
 
