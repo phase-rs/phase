@@ -7550,6 +7550,7 @@ pub(crate) fn take_and_restore_stack_resolution_session(state: &mut GameState) -
 /// validates the saved authorization before selecting this lifecycle seam.
 pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> ActionResult {
     let boundary_snapshot = state.clone();
+    let journal_start = state.resolved_rules_journal.entries().len();
     let mut result = ActionResult {
         events: Vec::new(),
         waiting_for: state.waiting_for.clone(),
@@ -7565,6 +7566,7 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
         take_and_restore_stack_resolution_session(state);
     }
     super::mana_payment::refill_infinite_mana(state);
+    remember_public_reveals(state, &result.events, journal_start);
     mark_public_state_from_events(state, &result.events);
     finalize_rules_state(state);
     result.waiting_for = state.waiting_for.clone();

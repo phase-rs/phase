@@ -511,8 +511,21 @@ fn repair_restored_stack_automation(state: &mut GameState) -> ActionResult {
         state.waiting_for,
         WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
     );
+    let legacy_ready_without_baseline =
+        matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. })
+            && state
+                .resolve_all_consent_run
+                .as_ref()
+                .is_none_or(|run| run.auto_pass_baseline.is_none());
     if had_consent_wait && !restored_session {
         turn_control::rebase_invalid_resolve_all_consent(state);
+        // Legacy Ready requires an empty live map for coherence. Once that
+        // condition is violated there is no captured baseline to restore, so
+        // retaining its modes would make the first ordinary priority boundary
+        // silently resolve the stack the repair deliberately left intact.
+        if legacy_ready_without_baseline {
+            state.auto_pass.clear();
+        }
     } else {
         state.resolve_all_consent_run = None;
         restore_ordinary_priority_after_stack_automation_repair(state);

@@ -36,6 +36,9 @@ use engine::types::interaction::{
 };
 use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedRulesCommand,
+};
 use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
@@ -1406,6 +1409,65 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
 }
 
 #[test]
+fn explicit_restore_resume_publishes_revealed_cards_through_the_boundary_journal() {
+    let mut state = restored_session_state(1);
+    let revealed = create_object(
+        &mut state,
+        CardId(77),
+        P0,
+        "Restored Reveal".to_string(),
+        Zone::Library,
+    );
+    state.stack.clear();
+    state.stack.push_back(ability_entry(
+        1,
+        P0,
+        Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        },
+        vec![],
+    ));
+    let entries = state
+        .stack
+        .iter()
+        .rev()
+        .map(StackResolutionEntryFence::capture)
+        .collect();
+    let session = state
+        .stack_resolution_session
+        .as_mut()
+        .expect("fixture has a session");
+    session.entries = entries;
+    session.auto_pass_overlay.baseline.clear();
+    for mode in state.auto_pass.values_mut() {
+        *mode = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        };
+    }
+
+    let RestoredStackAutomationResult::Progressed(result) =
+        resume_restored_stack_automation(&mut state)
+    else {
+        panic!("a coherent reveal session must enter the runner");
+    };
+    assert!(result.events.iter().any(|event| {
+        matches!(event, GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![revealed])
+    }));
+    assert!(state.viewer_knows_card_identity(P1, revealed));
+    assert!(state.resolved_rules_journal.entries().iter().any(|entry| {
+        matches!(
+            entry.command.as_ref(),
+            Some(ResolvedRulesCommand::Information(information))
+                if information.audience == ResolvedInformationAudience::Public
+                    && information.edit == ResolvedInformationEdit::Reveal
+                    && information.occurrences.iter().any(|occurrence| occurrence.object_id == revealed)
+        )
+    }));
+}
+
+#[test]
 fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() {
     let mut state = restored_session_state(0);
     state
@@ -1658,6 +1720,19 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "recovery must restore ordinary priority, got {:?}",
         state.waiting_for
+    );
+    assert!(
+        state.auto_pass.is_empty(),
+        "an incoherent legacy Ready latch has no valid live auto-pass baseline"
+    );
+    let ordinary_pass = apply(&mut state, P0, GameAction::PassPriority)
+        .expect("ordinary priority resumes after repair");
+    assert!(
+        !ordinary_pass
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+        "the first ordinary boundary must not inherit the discarded Ready auto-pass"
     );
     assert_ne!(
         state.active_interaction_slots, ready_era_slots,
