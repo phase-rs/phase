@@ -625,6 +625,12 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     let equipment = scenario.add_card_to_library_top(P0, "Only Dug Equipment");
     let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
     let mut runner = scenario.build();
+    let psychic_paper_replacements = runner.state().objects[&psychic_paper_template]
+        .replacement_definitions
+        .clone();
+    let psychic_paper_base_replacements = runner.state().objects[&psychic_paper_template]
+        .base_replacement_definitions
+        .clone();
     let equipment_object = runner
         .state_mut()
         .objects
@@ -639,9 +645,8 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
         .subtypes
         .push("Equipment".to_string());
     equipment_object.base_card_types = equipment_object.card_types.clone();
-    equipment_object.replacements = runner.state().objects[&psychic_paper_template]
-        .replacements
-        .clone();
+    equipment_object.replacement_definitions = psychic_paper_replacements;
+    equipment_object.base_replacement_definitions = psychic_paper_base_replacements;
     runner.state_mut().all_card_names = vec!["Llanowar Elves".to_string()].into();
 
     cast_for_free(&mut runner, gilgamesh);
