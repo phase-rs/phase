@@ -531,7 +531,12 @@ fn pending_non_auto_pass_preference_does_not_mutate_the_consent_baseline() {
             policy: StackResolutionPolicy::Committed,
         },
     );
-    let baseline = state.auto_pass.clone();
+    let expected_auto_pass = state.auto_pass.clone();
+    let baseline: BTreeMap<_, _> = state
+        .auto_pass
+        .iter()
+        .map(|(&player, &mode)| (player, mode))
+        .collect();
     let epoch = begin(&mut state);
     let stops = vec![PhaseStop {
         phase: Phase::End,
@@ -547,7 +552,7 @@ fn pending_non_auto_pass_preference_does_not_mutate_the_consent_baseline() {
     )
     .expect("an actor-scoped phase-stop preference remains legal during consent");
 
-    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(state.auto_pass, expected_auto_pass);
     assert_eq!(
         state
             .resolve_all_consent_run
@@ -567,7 +572,7 @@ fn pending_non_auto_pass_preference_does_not_mutate_the_consent_baseline() {
     )
     .expect("the queued representative may decline");
 
-    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(state.auto_pass, expected_auto_pass);
     assert_eq!(state.phase_stops.get(&P1), Some(&stops));
 }
 
@@ -634,7 +639,11 @@ fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
-            baseline: state.auto_pass.clone(),
+            baseline: state
+                .auto_pass
+                .iter()
+                .map(|(&player, &mode)| (player, mode))
+                .collect(),
         },
     });
     let before = state.clone();

@@ -475,14 +475,18 @@ pub fn pending_resolve_all_ready_requester(state: &GameState) -> Option<PlayerId
 /// when the owner is ready to drive a restored stack automation session.
 pub fn classify_restored_stack_automation(state: &GameState) -> RestoredStackAutomation {
     if let Some(session) = state.stack_resolution_session.as_ref() {
-        return restored_stack_resolution_session_is_coherent(state, session)
-            .then_some(RestoredStackAutomation::ActiveSession)
-            .unwrap_or(RestoredStackAutomation::Repair);
+        return if restored_stack_resolution_session_is_coherent(state, session) {
+            RestoredStackAutomation::ActiveSession
+        } else {
+            RestoredStackAutomation::Repair
+        };
     }
     if matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
-        return restored_legacy_ready_is_coherent(state)
-            .then_some(RestoredStackAutomation::LegacyResolveAllReady)
-            .unwrap_or(RestoredStackAutomation::Repair);
+        return if restored_legacy_ready_is_coherent(state) {
+            RestoredStackAutomation::LegacyResolveAllReady
+        } else {
+            RestoredStackAutomation::Repair
+        };
     }
     RestoredStackAutomation::None
 }
@@ -1559,7 +1563,7 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = StackResolutionBudget::Limited(1);
+            .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
         state.auto_pass.insert(
             PlayerId(0),
             AutoPassMode::UntilTurnBoundary {
@@ -1591,7 +1595,7 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = StackResolutionBudget::Limited(1);
+            .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
         let initial_stack_len = state.stack.len();
         state.auto_pass.insert(
             PlayerId(0),

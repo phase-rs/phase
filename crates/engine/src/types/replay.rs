@@ -130,6 +130,17 @@ impl ReplayLog {
             kind: RecordedActionKind::VerifiedAiPriorityPass { semantic_owner },
         });
     }
+
+    /// Records the transport-owned consumption of an already-ready Resolve All
+    /// latch. Playback runs the same engine consumer after this many ordinary
+    /// actions, preserving automatic follow-up without replaying its internal
+    /// passes as independent user actions.
+    pub fn push_resolve_all_boundary(&mut self, requester: PlayerId) {
+        self.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: self.actions.len() as u32,
+            requester,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -169,16 +180,5 @@ mod tests {
                 semantic_owner: PlayerId(0)
             }
         ));
-    }
-
-    /// Records the transport-owned consumption of an already-ready Resolve All
-    /// latch. Playback runs the same engine consumer after this many ordinary
-    /// actions, preserving automatic follow-up without replaying its internal
-    /// passes as independent user actions.
-    pub fn push_resolve_all_boundary(&mut self, requester: PlayerId) {
-        self.resolve_all_boundaries.push(RecordedResolveAll {
-            after_action_count: self.actions.len() as u32,
-            requester,
-        });
     }
 }

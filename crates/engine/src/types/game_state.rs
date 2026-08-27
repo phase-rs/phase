@@ -14662,7 +14662,29 @@ pub enum StackResolutionEntryProvenance {
         source_id: ObjectId,
         ability: Box<ResolvedAbility>,
     },
-    TriggeredAbility {
+    TriggeredAbility(Box<TriggeredAbilityProvenance>),
+    KeywordAction {
+        action: KeywordAction,
+    },
+}
+
+/// Captured fields for a triggered stack entry. Heap indirection keeps the
+/// provenance enum compact while preserving its exhaustive fence semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggeredAbilityProvenance {
+    source_id: ObjectId,
+    ability: Box<ResolvedAbility>,
+    condition: Option<TriggerCondition>,
+    trigger_event: Option<GameEvent>,
+    description: Option<String>,
+    source_name: String,
+    subject_match_count: Option<u32>,
+    die_result: Option<i32>,
+    provenance: Option<SyntheticTriggerProvenance>,
+}
+
+impl StackResolutionEntryProvenance {
+    fn triggered_ability(
         source_id: ObjectId,
         ability: Box<ResolvedAbility>,
         condition: Option<TriggerCondition>,
@@ -14672,10 +14694,19 @@ pub enum StackResolutionEntryProvenance {
         subject_match_count: Option<u32>,
         die_result: Option<i32>,
         provenance: Option<SyntheticTriggerProvenance>,
-    },
-    KeywordAction {
-        action: KeywordAction,
-    },
+    ) -> Self {
+        Self::TriggeredAbility(Box::new(TriggeredAbilityProvenance {
+            source_id,
+            ability,
+            condition,
+            trigger_event,
+            description,
+            source_name,
+            subject_match_count,
+            die_result,
+            provenance,
+        }))
+    }
 }
 
 impl StackResolutionEntryFence {
@@ -14708,17 +14739,17 @@ impl StackResolutionEntryFence {
                 subject_match_count,
                 die_result,
                 provenance,
-            } => StackResolutionEntryProvenance::TriggeredAbility {
-                source_id: *source_id,
-                ability: ability.clone(),
-                condition: condition.clone(),
-                trigger_event: trigger_event.clone(),
-                description: description.clone(),
-                source_name: source_name.clone(),
-                subject_match_count: *subject_match_count,
-                die_result: *die_result,
-                provenance: provenance.clone(),
-            },
+            } => StackResolutionEntryProvenance::triggered_ability(
+                *source_id,
+                ability.clone(),
+                condition.clone(),
+                trigger_event.clone(),
+                description.clone(),
+                source_name.clone(),
+                *subject_match_count,
+                *die_result,
+                provenance.clone(),
+            ),
             StackEntryKind::KeywordAction { action } => {
                 StackResolutionEntryProvenance::KeywordAction {
                     action: action.clone(),

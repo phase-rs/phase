@@ -1446,7 +1446,7 @@ async fn serve() {
                                         .sessions
                                         .get(game_code)
                                         .expect("active startup handoff retains its session");
-                                    let reconnect_players = session
+                                    let reconnect_players: Vec<PlayerId> = session
                                         .player_tokens
                                         .iter()
                                         .enumerate()
@@ -2169,9 +2169,8 @@ mod restored_full_startup_tests {
     use engine::game::deck_loading::PlayerDeckPayload;
     use engine::types::game_state::WaitingFor;
     use engine::types::player::PlayerId;
-    use server_core::{
-        FullPersistDisposition, FullPersistSnapshot, FullSessionKey, SessionManager,
-    };
+    use server_core::session::GameSession;
+    use server_core::{FullPersistSnapshot, FullSessionKey, SessionManager};
     use tempfile::NamedTempFile;
 
     use super::{finish_restored_full_startup, persistence, RestoredFullStartup, SharedGameDb};
@@ -2188,7 +2187,7 @@ mod restored_full_startup_tests {
     fn snapshot_for(
         game_code: String,
         generation: u64,
-        session: &server_core::GameSession,
+        session: &GameSession,
     ) -> FullPersistSnapshot {
         FullPersistSnapshot {
             key: FullSessionKey {
@@ -2201,12 +2200,9 @@ mod restored_full_startup_tests {
         }
     }
 
-    fn restore(snapshot: &FullPersistSnapshot) -> server_core::GameSession {
-        server_core::GameSession::from_persisted(
-            snapshot.persisted.clone(),
-            &CardDatabase::default(),
-        )
-        .expect("persisted test session restores")
+    fn restore(snapshot: &FullPersistSnapshot) -> GameSession {
+        GameSession::from_persisted(snapshot.persisted.clone(), &CardDatabase::default())
+            .expect("persisted test session restores")
     }
 
     #[test]

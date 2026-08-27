@@ -7474,8 +7474,8 @@ mod tests {
         use super::super::{
             batch_run_len, effects, fixed_controller_gain_life_run_len,
             fixed_opponent_effect_run_len, observers_are_batch_safe,
-            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit, resolve_top,
-            self_counter_run_len,
+            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit,
+            resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -8270,12 +8270,12 @@ mod tests {
                 2
             );
 
-            for mutation in [
+            let mutations: [fn(&mut GameState, ObjectId); 3] = [
                 |proof: &mut GameState, entry_id| {
                     proof
                         .stack_paid_facts
                         .insert(entry_id, StackPaidSnapshot::default());
-                } as fn(&mut GameState, ObjectId),
+                },
                 |proof: &mut GameState, entry_id| {
                     proof
                         .stack_trigger_event_batches
@@ -8286,7 +8286,8 @@ mod tests {
                         .stack_trigger_firings
                         .insert(entry_id, TriggerFiring::Ordinary);
                 },
-            ] {
+            ];
+            for mutation in mutations {
                 let mut state = build();
                 let entry_id = state.stack.back().unwrap().id;
                 let before = state.clone();

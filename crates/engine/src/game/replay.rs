@@ -363,12 +363,12 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(70_200),
-                ability: crate::types::ability::ResolvedAbility::new(
+                ability: Box::new(crate::types::ability::ResolvedAbility::new(
                     Effect::NoOp,
                     Vec::new(),
                     ObjectId(70_200),
                     PlayerId(1),
-                ),
+                )),
             },
         });
         let object_id = create_object(
