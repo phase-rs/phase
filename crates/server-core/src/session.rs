@@ -140,9 +140,9 @@ pub struct AiRunOutcome {
 }
 
 /// Internal result of one uninterrupted AI decision batch. Keeping the exact
-/// stop reason until [`GameSession::run_ai`] has consumed a possible
-/// AI-produced Resolve All latch is necessary: a safety cap is terminal only
-/// when an AI submitter is still eligible in the resulting state.
+/// stop reason until [`GameSession::run_ai`] has finished the engine-owned
+/// stack-resolution session is necessary: a safety cap is terminal only when
+/// an AI submitter is still eligible in the resulting state.
 struct AiActionBatch {
     transitions: Vec<RevisionedActionResult>,
     stop: AiActionsStop,
@@ -976,11 +976,9 @@ impl GameSession {
 
     /// Run AI actions and return per-action broadcast data.
     ///
-    /// Most entries are one AI action: raw state snapshot, events, legal actions,
-    /// and log entries. An entry may instead be a Resolve All collapse frame,
-    /// which carries no events and a bounded log tail — see
-    /// [`Self::consume_ai_granted_resolve_all`] for why the wire form differs
-    /// from what the session observes.
+    /// Each entry is one authoritative transition: raw state snapshot, events,
+    /// legal actions, and log entries. Stack automation remains in that ordinary
+    /// engine transition stream rather than using a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
     /// Returns an empty vec if the session has no AI seats.
     ///
