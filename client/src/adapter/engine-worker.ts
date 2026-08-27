@@ -35,7 +35,6 @@ import init, {
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
-  resolve_all,
   estimate_bracket_for_deck,
   has_replay_recording,
   export_replay_log,
@@ -113,7 +112,6 @@ type EngineRequest =
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
-  | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
   | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
   | { type: "hasReplayRecording"; id: number }
   | { type: "exportReplayLog"; id: number }
@@ -580,24 +578,6 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "projectSeatView": {
         const view = project_seat_view(msg.stateJson);
         result(msg.id, view ?? null);
-        break;
-      }
-
-      case "resolveAll": {
-        const outcome = resolve_all(msg.requester, msg.aiSeatsJson, msg.maxResolutions);
-        if (typeof outcome === "string") {
-          error(msg.id, outcome);
-          break;
-        }
-        if (!isActionOutcome(outcome)) {
-          malformedOutcomeError(msg.id);
-          break;
-        }
-        if (outcome.status === "rejected") {
-          rejectionError(msg.id, outcome.rejection);
-          break;
-        }
-        result(msg.id, outcome.result);
         break;
       }
 

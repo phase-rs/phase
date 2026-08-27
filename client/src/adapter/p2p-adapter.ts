@@ -53,10 +53,12 @@ import type { BrokerClient } from "../services/brokerClient";
 import type { FullSessionKey } from "../services/multiplayerSession";
 import {
   clearP2PHostSession,
+  clearGame,
   type NativeAiDriverFault,
   type NativeP2PServerSession,
   type PersistedP2PHostSession,
   saveGame,
+  saveResumableGameStrict,
   saveP2PHostSession,
 } from "../services/gamePersistence";
 import {
@@ -1150,6 +1152,34 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /**
+   * Resume is a publish barrier, unlike ordinary best-effort autosave. The
+   * exact post-automation state must reach durable storage before a guest can
+   * reconnect to it.
+   */
+  private async persistResumedAuthority(): Promise<void> {
+    if (!this.ownsAuthority() || this.nativeBridge || !this.gameId) {
+      throw new AdapterError("P2P_ERROR", "Resumed host has no durable WASM authority", false);
+    }
+    const json = await this.wasm.exportPersistenceState();
+    await saveResumableGameStrict(this.gameId, JSON.parse(json) as PersistedGameState);
+  }
+
+  /** Abort an unpublished resumed engine so no reconnect can observe volatile state. */
+  private async abortUnpublishedResume(): Promise<void> {
+    this.resumedAutomation = null;
+    this.unsubscribeHostConnections();
+    this.disposed = true;
+    if (sharedEngineHost === this.engineClaim) sharedEngineHost = null;
+    await this.wasm.releaseHostSession(true);
+    releaseP2PHostLease(this.authority);
+    try {
+      this.hostPeer.destroy();
+    } catch {
+      /* best-effort transport teardown after the durable barrier failed */
+    }
+  }
+
+  /**
    * The persisted lease is checked at every authority boundary. This is a
    * fence, not advisory bookkeeping: a resumed host with the same session key
    * has already superseded this adapter and its delayed work must become inert.
@@ -1543,6 +1573,10 @@ export class P2PHostAdapter implements EngineAdapter {
       // in the same call that installs the state. No client code sets the flag,
       // so an open lobby leaves zero engine footprint.
       if (this.isResume && this.resumeGameState) {
+        const gameId = this.gameId;
+        if (!gameId) {
+          throw new AdapterError("P2P_ERROR", "Resumed host is missing its durable game id", false);
+        }
         this.resumedAutomation = await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
         this.resumeGameState = null;
         // The engine now holds both this game's state and the multiplayer
@@ -1551,9 +1585,20 @@ export class P2PHostAdapter implements EngineAdapter {
         if (this.disposed) await this.bailDisposed(true, "resume");
         sharedEngineHost = this.engineClaim;
         // Persist the post-automation authority before any reconnect can be
-        // accepted or snapshot published. The saved input may have contained
-        // a now-completed session, so writing it back would replay the burst.
-        await this.persistAuthoritativeState();
+        // accepted or snapshot published. A terminal restore first creates its
+        // durable terminal record, then drops stale resumable state instead.
+        if (this.resumedAutomation.snapshot.state.waiting_for.type === "GameOver") {
+          const committed = await this.commitTerminalIfComplete(
+            this.resumedAutomation.snapshot,
+            ++this.authoritativeRevision,
+          );
+          if (!committed) {
+            throw new AdapterError("P2P_ERROR", "Failed to retain resumed terminal result", false);
+          }
+          await clearGame(gameId);
+        } else {
+          await this.persistResumedAuthority();
+        }
         traceAdapter("Host", "initialize-resume", {
           tokens: this.playerTokens.size,
           gameStarted: this.gameStarted,
@@ -1561,6 +1606,9 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       this.resolvePregameReady();
     } catch (err) {
+      if (this.isResume && sharedEngineHost === this.engineClaim) {
+        await this.abortUnpublishedResume();
+      }
       this.unsubscribeHostConnections();
       this.rejectPregameReady(err);
       throw err;
@@ -2180,9 +2228,9 @@ export class P2PHostAdapter implements EngineAdapter {
     snapshot: EngineSnapshot,
     revision: number,
     reason: string = "Game complete",
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { waiting_for: waitingFor } = snapshot.state;
-    if (waitingFor.type !== "GameOver" || this.terminalResult) return;
+    if (waitingFor.type !== "GameOver" || this.terminalResult) return true;
     this.authoritativeRevision = Math.max(this.authoritativeRevision, revision);
     const winner = waitingFor.data.winner;
     const display = { winner, reason };
@@ -2201,7 +2249,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const result = await createResult(0, snapshot.state);
     if (!(await commitP2PTerminalResult(result))) {
       this.emit({ type: "terminalUnavailable", message: "Failed to retain P2P terminal result" });
-      return;
+      return false;
     }
     this.terminalResult = result;
     this.gameRunState = "terminal";
@@ -2213,6 +2261,7 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.send(session, { type: "terminal_result", result: recipientResult });
     }));
     this.emit({ type: "terminalResult", result });
+    return true;
   }
 
   /**

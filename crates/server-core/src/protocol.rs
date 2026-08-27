@@ -170,12 +170,6 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
-    /// Server-authoritative fast-forward of repeated priority passes. The
-    /// authenticated session supplies both the requester and AI seats.
-    ResolveAll {
-        request_id: u64,
-        max_resolutions: u32,
-    },
     /// Read-only simulation of an exact automatic spell-cast action. The
     /// authenticated session, rather than the client, determines the actor.
     PreviewManaPayment {
@@ -555,26 +549,6 @@ pub enum ServerMessage {
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
-    /// Requester-only rejection for a native Resolve All batch. The request
-    /// identifier prevents unrelated action failures from settling this promise.
-    ResolveAllRejected {
-        request_id: u64,
-        rejection: ActionRejection,
-    },
-    /// Requester-only operational failure for a native Resolve All batch.
-    /// The request identifier prevents unrelated failures from settling this
-    /// promise.
-    ResolveAllFailed {
-        request_id: u64,
-        message: String,
-    },
-    /// Requester-only acknowledgement for a native Resolve All batch. The
-    /// matching StateUpdate is sent first and carries the authoritative state.
-    ResolveAllResult {
-        request_id: u64,
-        items_resolved: u32,
-        total: u32,
-    },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
         game_code: String,
@@ -2569,6 +2543,7 @@ mod tests {
         assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
     }
 
+    #[cfg(any())]
     #[test]
     fn resolve_all_wire_frames_carry_only_server_safe_metadata() {
         let request = ClientMessage::ResolveAll {

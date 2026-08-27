@@ -59,7 +59,6 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::Action { action } | ClientMessage::PreviewManaPayment { action, .. } => {
             guard_game_action_payload(action)
         }
-        ClientMessage::ResolveAll { .. } => Ok(()),
         ClientMessage::Interaction { submission } => {
             guard_interaction_submission_payload(submission)
         }
@@ -245,7 +244,8 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         ClientMessage::ClientHello { .. }
         | ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
-        | ClientMessage::ResolveAll { .. }
+        | ClientMessage::Action { .. }
+        | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SubscribeLobby
@@ -351,7 +351,6 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
-        | ClientMessage::ResolveAll { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }

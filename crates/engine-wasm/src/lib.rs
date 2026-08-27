@@ -3192,67 +3192,6 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     }
 }
 
-/// Batch-resolve the stack by auto-passing priority for the requesting player
-/// and delegating to the AI for opponent decisions. Runs entirely inside WASM
-/// with no JS round-trips between resolutions — collapses the O(N) priority
-/// pass cycle into a single call.
-///
-/// `requester` is the human player seat (whose "Resolve All" click initiated
-/// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
-/// each AI opponent.
-///
-/// Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
-/// count of items resolved. The Resolve All UI does not animate individual
-/// events, so the WASM boundary intentionally returns empty event/log arrays
-/// instead of serializing thousands of records for pathological stacks.
-///
-#[wasm_bindgen]
-pub fn resolve_all(
-    requester: u8,
-    ai_seats_json: &str,
-    max_resolutions: u32,
-) -> Result<JsValue, JsValue> {
-    if serde_json::from_str::<Vec<serde_json::Value>>(ai_seats_json).is_err() {
-        return Ok(rejected_action_outcome(ActionRejection::new(
-            ActionRejectionCode::InvalidAction,
-        )));
-    }
-
-    let requester = PlayerId(requester);
-
-    with_state_mut(|state| {
-        // Phase 2 consumes only the already-issued, unanimous consent run.
-        // AI consent is answered through ordinary engine candidates before this
-        // call; Resolve All must never ask an AI about a speculative future
-        // priority window. Keep the legacy payload parse as a wire-compatible
-        // boundary while the consent action owns the authoritative cap.
-        let _ = max_resolutions;
-        let mut result = match resolve_all_ready_prefix_with_rejection(state, requester) {
-            Ok(result) => result,
-            Err(rejection) => return Ok(rejected_action_outcome(rejection)),
-        };
-        // Resolve All consumes a transport-owned Ready latch, rather than one
-        // `GameAction` per internal priority pass. Record the entire consumer
-        // atomically after the last submitted consent action; playback invokes
-        // the same engine consumer at that exact boundary, so auto-pass cannot
-        // re-run between synthetic recorded passes.
-        REPLAY_LOG.with(|cell| {
-            let mut log = cell.take();
-            if let Some(log) = log.as_mut() {
-                log.push_resolve_all_boundary(requester);
-            }
-            cell.set(log);
-        });
-        // Resolve All advances the live state without travelling through
-        // `submit_action`, so it must invalidate proposal capabilities at the
-        // same authority boundary.
-        invalidate_ai_proposals();
-        result.events.clear();
-        result.log_entries.clear();
-        Ok(action_outcome(Ok(result)))
-    })?
-}
-
 /// Apply a seat mutation to a seat state, using the TLS card database for deck
 /// resolution. Both arguments are JSON strings; returns `{ state, delta }` as
 /// a JS object on success, or a JS error string on failure.
@@ -3391,7 +3330,6 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::create_object_from_card_face;
-    use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -4756,81 +4694,6 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         ));
-    }
-
-    #[test]
-    fn resolve_all_exported_path_routes_controlled_priority_to_requester() {
-        let mut state = GameState::new_two_player(7);
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(1),
-        };
-        state.active_player = PlayerId(1);
-        state.turn_decision_controller = Some(PlayerId(0));
-        state.priority_player = PlayerId(0);
-        state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
-        apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 0 },
-        )
-        .expect("the controlled priority holder begins Resolve All consent");
-        let epoch = match state.waiting_for {
-            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
-            ref other => {
-                panic!("Resolve All must prompt the remaining representative, got {other:?}")
-            }
-        };
-        apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
-            },
-        )
-        .expect("the controlled representative grants Resolve All consent");
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
-        ));
-        GAME_STATE.with(|cell| cell.set(Some(state)));
-
-        with_state_mut(|state| {
-            apply(
-                state,
-                PlayerId(0),
-                GameAction::BeginResolveAll { max_resolutions: 0 },
-            )
-            .expect("turn controller may begin the consent run");
-            let WaitingFor::ResolveAllConsent { epoch, .. } = &state.waiting_for else {
-                panic!("controlled priority should queue Resolve All consent");
-            };
-            apply(
-                state,
-                PlayerId(0),
-                GameAction::RespondResolveAllConsent {
-                    epoch: *epoch,
-                    decision: ResolveAllConsentDecision::Grant,
-                },
-            )
-            .expect("frozen turn controller may grant for the queued representative");
-        })
-        .expect("test state remains installed");
-
-        let value = resolve_all(0, "[]", 0).unwrap();
-        let outcome: serde_json::Value = serde_wasm_bindgen::from_value(value).unwrap();
-        let result: BatchResolveResult = serde_json::from_value(
-            outcome
-                .get("result")
-                .cloned()
-                .expect("ready Resolve All returns an applied outcome"),
-        )
-        .unwrap();
-
-        assert_eq!(result.items_resolved, 1);
-        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
-        assert!(restored.stack.is_empty());
-        clear_game_state();
     }
 
     #[test]

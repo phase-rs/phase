@@ -3,7 +3,6 @@ import type {
   AiDecisionDiagnosticReceipt,
   AiDecisionDiagnosticsCapability,
   AiProposalSubmission,
-  BatchResolveResult,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -716,23 +715,6 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       }
       console.warn("AI worker pool unavailable; using authoritative single worker", error);
       return null;
-    }
-  }
-
-  async resolveAll(
-    requester: number,
-    aiSeats: { playerId: number; difficulty: string }[],
-    maxResolutions: number = 0,
-  ): Promise<BatchResolveResult> {
-    this.assertInitialized();
-    try {
-      const result = this.engine
-        ? await this.engine.resolveAll(requester, aiSeats, maxResolutions)
-        : await this.fallback!.resolveAll(requester, aiSeats, maxResolutions);
-      this.invalidateAiDecisionDiagnostics();
-      return result;
-    } catch (err) {
-      throw await classifyEngineErrorAsync(err, this.takePanic);
     }
   }
 

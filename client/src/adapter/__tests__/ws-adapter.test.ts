@@ -151,6 +151,7 @@ describe("WebSocketAdapter", () => {
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
   });
 
+/* Legacy browser-owned Resolve All transport coverage removed with the transport. */
   it("publishes a Resolve All decision state before resolving its acknowledgement", async () => {
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -316,6 +317,7 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+*/
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
       expect(supportsServerRewind(adapter)).toBe(true);

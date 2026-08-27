@@ -174,6 +174,25 @@ export async function saveGame(gameId: string, state: PersistedGameState): Promi
 }
 
 /**
+ * Writes a known-resumable authority snapshot. Resume initialization uses this
+ * strict boundary before a host may publish or accept a reconnect: swallowing
+ * a failed write there could replay an already-consumed automation session.
+ */
+export async function saveResumableGameStrict(
+  gameId: string,
+  state: PersistedGameState,
+): Promise<void> {
+  const publicState = "state" in state ? state.state : state;
+  if (
+    publicState.match_phase === "Completed"
+    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
+  ) {
+    throw new Error("Refusing to retain a terminal game as resumable state");
+  }
+  await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
+}
+
+/**
  * Persist the engine's trusted envelope whenever this adapter owns an engine;
  * adapters that only hold a public remote view retain the legacy raw snapshot.
  */

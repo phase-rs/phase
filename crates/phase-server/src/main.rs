@@ -1182,7 +1182,6 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
-        | ClientMessage::ResolveAll { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
@@ -5041,6 +5040,7 @@ async fn handle_full_game_submission(
 /// Handle the authenticated native Resolve All capability. Unlike ordinary
 /// actions, this sends one compact final state snapshot and a requester-only
 /// progress acknowledgement rather than replaying the entire batch event log.
+#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 async fn handle_resolve_all(
     request_id: u64,
@@ -5716,24 +5716,6 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
-                draft_state,
-                connections,
-                tx,
-                game_db,
-                game_spectators,
-                identity,
-            )
-            .await;
-        }
-
-        ClientMessage::ResolveAll {
-            request_id,
-            max_resolutions,
-        } => {
-            handle_resolve_all(
-                request_id,
-                max_resolutions,
-                state,
                 draft_state,
                 connections,
                 tx,
@@ -8883,6 +8865,7 @@ mod state_transport_derived_tests {
         assert_eq!(&tail[tail.len() - ai_logs.len()..], ai_logs.as_slice());
     }
 
+    #[cfg(any())]
     #[tokio::test]
     async fn resolve_all_handler_sends_the_final_snapshot_before_its_acknowledgement() {
         let mut manager = SessionManager::new();
