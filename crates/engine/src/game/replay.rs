@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn due_resolve_all_boundary_rejects_an_unentitled_requester() {
+    fn due_resolve_all_boundary_rejects_a_legacy_boundary_after_engine_owned_resolution() {
         let header = two_player_header(5);
         let mut initial = GameState::new_two_player(header.seed);
         initial.stack.push_back(no_op_entry(1, PlayerId(0)));
@@ -562,11 +562,11 @@ mod tests {
         replay.checkpoints.insert(0, initial);
         let error = replay
             .seek(2)
-            .expect_err("a non-participant cannot consume Resolve All Ready");
+            .expect_err("new Resolve All actions resolve through the engine without a Ready latch");
         assert!(matches!(
             error,
             ReplayError::Desync { message, .. }
-                if message == "Resolve All boundary requester is not entitled to the Ready latch"
+                if message == "Resolve All boundary was due without a Ready latch"
         ));
     }
 
