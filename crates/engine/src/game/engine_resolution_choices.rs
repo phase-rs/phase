@@ -5641,30 +5641,22 @@ pub(super) fn handle_resolution_choice(
                     };
                     let trigger_context = frame.pending.trigger_context.clone();
                     let trigger_firing = frame.pending.trigger_firing;
-                    let attachment_choice =
-                        frame.pending.attachment_choice.clone().ok_or_else(|| {
-                            EngineError::InvalidAction(
-                                "Attach EffectZoneChoice missing typed attachment operation"
-                                    .to_string(),
-                            )
-                        })?;
                     effects::restore_continuation_trigger_firing(state, trigger_firing);
                     let trigger_snapshot = trigger_context.as_ref().map(|context| {
                         crate::game::triggers::push_resolving_trigger_context(state, context)
                     });
-                    let operation = effects::attach::bind_resolution_attachment_choice(
-                        &*state,
-                        *attachment_choice.operation,
-                        &chosen,
-                    )
-                    .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                     set_priority(state, player);
-                    let resolve_result = effects::attach::resolve(&mut *state, &operation, events);
+                    let resolve_result = effects::attach::resolve_selected_attachment_choice(
+                        &mut *state,
+                        &chosen,
+                        events,
+                    );
                     if let Some(snapshot) = trigger_snapshot {
                         crate::game::triggers::restore_trigger_event_context(state, snapshot);
                     }
-                    resolve_result.map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    let completed =
+                        resolve_result.map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    if !completed {
                         // CR 608.2c + CR 616.1: A host answer can replace its
                         // marker with the following Equipment-choice child,
                         // and an Attached replacement parks above that same
@@ -5674,10 +5666,6 @@ pub(super) fn handle_resolution_choice(
                             state.waiting_for.clone(),
                         ));
                     }
-                    let _ = state
-                        .take_active_attachment_choice_continuation()
-                        .expect("completed attach choice must retain its active child")
-                        .expect("completed attach choice must own its active child");
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(

@@ -719,6 +719,62 @@ pub(crate) fn bind_resolution_attachment_choice(
     Ok(choice_ability)
 }
 
+/// CR 608.2c + CR 608.2d: Bind and resolve an Attach `EffectZoneChoice`
+/// against the exact child frame that owns the prompt. The resolver must read
+/// the stored, bound operation: resolving a detached clone leaves the child
+/// carrying its pre-choice operands, so its eventual continuation cannot
+/// deliver the selected attachment.
+///
+/// Returns `true` only after the bound operation completed to priority and its
+/// typed child was retired. A host answer that re-parks an Equipment answer, or
+/// an Attached replacement that parks a post-replacement child, leaves its
+/// current owner in place and returns `false`.
+pub(crate) fn resolve_selected_attachment_choice(
+    state: &mut GameState,
+    attachment_ids: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    let operation = state
+        .active_ability_continuation_frame()
+        .and_then(|frame| frame.pending.attachment_choice.as_ref())
+        .map(|choice| choice.operation.as_ref().clone())
+        .ok_or_else(|| {
+            EffectError::MissingParam(
+                "Attach EffectZoneChoice missing typed attachment operation".to_string(),
+            )
+        })?;
+    let bound_operation = bind_resolution_attachment_choice(state, operation, attachment_ids)?;
+    let operation = {
+        let frame = state
+            .active_ability_continuation_frame_mut()
+            .expect("Attach EffectZoneChoice owner must remain active while binding");
+        let choice = frame
+            .pending
+            .attachment_choice
+            .as_mut()
+            .expect("Attach EffectZoneChoice owner must retain its typed operation");
+        choice.operation = Box::new(bound_operation);
+        let operation = choice.operation.as_ref().clone();
+        frame.pending.chain = Box::new(operation.clone());
+        operation
+    };
+
+    // `resolve` needs mutable access to the state, so it cannot borrow the
+    // operation from the active frame directly. This clone is deliberately
+    // taken only after the frame has become the authoritative bound owner.
+    resolve(state, &operation, events)?;
+
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(false);
+    }
+
+    let _ = state
+        .take_active_attachment_choice_continuation()
+        .expect("completed attach choice must retain its active child")
+        .expect("completed attach choice must own its active child");
+    Ok(true)
+}
+
 /// Resolve an explicitly chosen attachment through its role binding before the
 /// generic target projection. Resolution-time attachment choices append to
 /// `targets` after their event-context host, so position alone cannot identify
