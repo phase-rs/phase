@@ -2922,9 +2922,7 @@ fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
     let budget = session
         .budget
         .max_resolutions()
-        .map(|maximum| {
-            maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
-        })
+        .map(|maximum| maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX)))
         .unwrap_or(u32::MAX);
     let fenced_prefix = state
         .stack
@@ -3772,105 +3770,6 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && parent_target_missing_reason.is_none()
 }
 
-/// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
-/// `consumed` times (§5.2a — no count-fusion in v1), with the pipeline
-/// checkpoint hoisted to once-after by the caller. Per-entry `StackResolved`
-/// events are emitted for every consumed entry (§5.4) so the frontend's
-/// per-entry fade still works. Returns the number of entries consumed.
-///
-/// `consumed` equals the full run length for the base-token path, but the
-/// copy-prefix path (CR 707.2) may consume a value-equal PREFIX shorter than
-/// the run — the divergent tail resolves in a subsequent `resolve_next` step.
-///
-/// CR 603.4: This path does NOT bump `ability_resolutions_this_turn`. A
-/// resolution-count-dependent intervening-if lives as an entry-level condition,
-/// and `batch_run_key` refuses any entry with `condition.is_some()`, so no
-/// batched run can carry a `NthResolutionThisTurn`-gated condition that the
-/// missing counter bump would desynchronize.
-fn resolve_batched(
-    state: &mut GameState,
-    plan: &effects::BatchPlan,
-    ability: &crate::types::ability::ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> u32 {
-    let consumed = plan.consumed();
-    crate::game::perf_counters::record_stack_batched_entries(consumed);
-    debug_assert!(state.resolving_stack_entry.is_none());
-    debug_assert!(state.resolving_trigger_firing.is_none());
-    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-    state.resolution_source_relatch = None;
-
-    // Pop the run's entries (resolution order is back-to-front) through the same
-    // authority `resolve_top` uses for a single entry, so the per-entry side
-    // tables settle with each removal.
-    let mut popped = Vec::with_capacity(consumed as usize);
-    for _ in 0..consumed {
-        let Some(removed) = pop_top_stack_entry(state) else {
-            break;
-        };
-        popped.push(removed);
-    }
-
-    // CR 603.7c: Set the trigger event context once from the (identical) top
-    // entry — all popped entries are deep-equal by `BatchRunKey`, so a single
-    // set/clear is equivalent to N idempotent sequential set/clear cycles.
-    if let Some(top) = popped.first() {
-        if let crate::types::game_state::StackEntryKind::TriggeredAbility {
-            trigger_event: Some(te),
-            subject_match_count,
-            die_result,
-            ..
-        } = &top.entry.kind
-        {
-            state.current_trigger_event = Some(te.clone());
-            state.current_trigger_events = vec![te.clone()];
-            state.current_trigger_match_count = *subject_match_count;
-            // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll
-            // result into resolution scope for a reflexive "When you do … the
-            // result" sub-ability (see `resolve_top`).
-            state.die_result_this_resolution = *die_result;
-        }
-    }
-
-    if let Some(popped) = popped.first() {
-        begin_resolving_stack_entry(state, popped.entry.clone(), popped.trigger_firing);
-    }
-
-    // CR 608.2: Apply the effect N times through the existing per-resolution body.
-    plan.execute(state, ability, events);
-
-    // CR 603.7c: Clear trigger context after resolution completes.
-    state.current_trigger_event = None;
-    state.current_trigger_events.clear();
-    state.current_trigger_match_count = None;
-    // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
-    // cross-resolution boundary as the batched subject count.
-    state.die_result_this_resolution = None;
-
-    let popped_count = popped.len() as u32;
-
-    // §5.4: one StackResolved and terminal settlement per consumed entry.
-    for (index, popped) in popped.into_iter().enumerate() {
-        events.push(GameEvent::StackResolved {
-            object_id: popped.entry.id,
-        });
-        if index == 0 {
-            finish_resolving_stack_entry(
-                state,
-                super::lifecycle::DelayedTerminalDisposition::Resolved,
-            );
-        } else if let Some(firing) = popped.trigger_firing {
-            super::lifecycle::record_delayed_terminal(
-                firing,
-                super::lifecycle::DelayedTerminalDisposition::Resolved,
-            );
-        }
-    }
-    state.resolution_source_relatch = None;
-
-    popped_count
-}
-
 /// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
 /// observer-order-invariance gate. A batched run is order-invariant iff NO
 /// battlefield trigger fans out on the token-ETB events the batch will emit.
@@ -4035,10 +3934,11 @@ fn ability_has_no_legal_resolution_targets(
 }
 
 fn inert_noop_run_len(state: &mut GameState) -> Option<u32> {
-    let count = state
-        .stack
+    // The classifier can consult mutable choice caches, so do not retain an
+    // immutable borrow into `state.stack` while it runs.
+    let entries = state.stack.iter().rev().cloned().collect::<Vec<_>>();
+    let count = entries
         .iter()
-        .rev()
         // An already-recorded Decline is resolution-inert regardless of the
         // trigger source or firing event.  The speculative runner still proves
         // each exact entry and checkpoint before committing the prefix.
@@ -7570,11 +7470,11 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            GameState, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-            StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-            StackResolutionSession,
+            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
+            StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
+            StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession,
         };
-        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;
         use crate::types::player::PlayerId;
         use crate::types::proposed_event::TokenSpec;
@@ -7605,6 +7505,38 @@ mod tests {
         fn resolve_next_committed(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
             arm_committed_session(state);
             resolve_next_with_limit(state, events, Some(u32::MAX))
+        }
+
+        fn push_declined_noop_trigger(state: &mut GameState, source: ObjectId, event: GameEvent) {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+            ability.optional = true;
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index: 0 });
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: Some(event),
+                    description: Some("you may untap Battered Golem".to_string()),
+                    source_name: "Battered Golem".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.set_may_trigger_auto_choice(
+                MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id: source,
+                    origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                },
+                AutoMayChoice::Decline,
+            );
         }
 
         /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
@@ -8244,6 +8176,61 @@ mod tests {
             let mut events = Vec::new();
             assert_eq!(resolve_next(&mut state, &mut events), 1);
             assert_eq!(state.stack.len(), 2);
+        }
+
+        #[test]
+        fn recheck_session_cannot_authorize_a_multi_entry_resolution() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+            arm_committed_session(&mut state);
+            state.stack_resolution_session.as_mut().unwrap().policy =
+                StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+
+            let mut events = Vec::new();
+            assert_eq!(
+                resolve_next_with_limit(&mut state, &mut events, Some(u32::MAX)),
+                1
+            );
+            assert_eq!(state.stack.len(), 2);
+        }
+
+        #[test]
+        fn committed_declined_golem_triggers_batch_across_distinct_events() {
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Battered Golem");
+            push_declined_noop_trigger(&mut state, source, life_event(PlayerId(0), 1));
+            push_declined_noop_trigger(&mut state, source, life_event(PlayerId(1), 2));
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next_committed(&mut state, &mut events), 2);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                2
+            );
+        }
+
+        #[test]
+        fn captured_batch_member_rejects_changed_side_rows() {
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Battered Golem");
+            push_declined_noop_trigger(&mut state, source, life_event(PlayerId(0), 1));
+            let member = capture_batch_members(&state, 1).pop().unwrap();
+            let entry_id = state.stack.back().unwrap().id;
+
+            state
+                .stack_trigger_firings
+                .insert(entry_id, TriggerFiring::Ordinary);
+            assert!(!top_matches_captured_member(&state, &member));
+            state
+                .stack_trigger_event_batches
+                .insert(entry_id, vec![life_event(PlayerId(1), 2)]);
+            assert!(!top_matches_captured_member(&state, &member));
         }
 
         #[test]

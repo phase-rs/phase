@@ -2749,7 +2749,7 @@ pub(crate) fn try_resolve_batch(
 /// This is deliberately read-only; `resolve` remains the sole production
 /// authority for creating each token.
 pub(crate) fn supports_sequential_batch_proof(ability: &ResolvedAbility) -> bool {
-    matches!(&ability.effect, Effect::Token { .. })
+    token_effect_is_source_independent(ability)
 }
 
 /// CR 608.2c + CR 707.2: A met `ConditionInstead` whose swapped effect is a
