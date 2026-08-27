@@ -5,7 +5,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 function RevealCard({ card }: { card: { name: string; oracleId?: string; faceName?: string } }) {
-  const { src, rungs, advanceFailedSource } = useCardImage(card.name, {
+  const { src, advanceFailedSource } = useCardImage(card.name, {
     size: "small",
     oracleId: card.oracleId,
     faceName: card.faceName,
