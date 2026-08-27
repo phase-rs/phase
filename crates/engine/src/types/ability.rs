@@ -26825,6 +26825,10 @@ impl AttachTargetBindings {
             .push(target);
     }
 
+    pub(crate) fn set_attachment_targets(&mut self, targets: Vec<ObjectIncarnationRef>) {
+        self.inner.get_or_insert_default().attachment_targets = targets;
+    }
+
     pub(crate) fn bind_host(&mut self, target: ObjectIncarnationRef) {
         self.inner.get_or_insert_default().host_target = Some(target);
     }
@@ -27286,6 +27290,12 @@ impl ResolvedAbility {
 
     pub(crate) fn bind_attach_attachment_target(&mut self, target: ObjectIncarnationRef) {
         self.context.attach_target_bindings.bind_attachment(target);
+    }
+
+    pub(crate) fn set_attach_attachment_targets(&mut self, targets: Vec<ObjectIncarnationRef>) {
+        self.context
+            .attach_target_bindings
+            .set_attachment_targets(targets);
     }
 
     pub(crate) fn bind_attach_host_target(&mut self, target: ObjectIncarnationRef) {
