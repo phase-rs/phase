@@ -7,8 +7,10 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply_with_rejection, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
-    resolve_all_ready_prefix, resolve_all_ready_prefix_with_rejection, start_game,
+    apply, apply_with_rejection, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
+    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with_rejection,
+    resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
+    ResolveAllReadyAccess, RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::layers::flush_layers;
@@ -279,6 +281,25 @@ pub type BroadcastSnapshot = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// Server-owned result of explicitly resuming persisted stack automation.
+///
+/// Persistence reconstruction remains pure: callers invoke this only after the
+/// restored session has been hydrated, finalized, bound to fresh interaction
+/// authority, and stamped with this process's hosting policy. The engine keeps
+/// the complete event batch for server bookkeeping; the transport receives
+/// only its bounded presentation plus a freshly-derived snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoredStackAutomationResume {
+    /// Allocated exactly once when the engine progressed or repaired a saved
+    /// automation session. A no-op leaves the restored revision unchanged.
+    pub state_revision: Option<u64>,
+    /// Engine-authored, bounded transport presentation of the resume outcome.
+    pub presentation: RestoredStackAutomationPresentation,
+    /// Recomputed only for a state-changing resume. Its state and legal-action
+    /// projections are the authoritative payload for the subsequent broadcast.
+    pub broadcast: Option<BroadcastSnapshot>,
+}
+
 pub const PUBLIC_SEAT_RESERVATION_MS: u64 = 120_000;
 
 #[derive(Debug, Clone)]
@@ -390,9 +411,9 @@ pub struct GameSession {
     ///    authoritative transition handlers, all of which require a started
     ///    game. Deliberately not a count: the tally here has been wrong before,
     ///    and the property that matters is "every caller is post-start", which
-    ///    no number states. `recover_orphaned_resolve_all` is NOT one of them —
-    ///    it runs inside `from_persisted`, the placeholder window this fence
-    ///    warns about, and never calls `observe_transition`.
+    ///    no number states. `resume_restored_stack_automation` reaches this
+    ///    reader only after `SessionManager::restore_session` has re-stamped
+    ///    this field for the current process.
     /// 3. `takeback::offers_turn_rewind`, via `GameSession::rewind_options`
     ///    and `GameSession::request_takeback` — likewise post-start.
     ///
@@ -1234,8 +1255,8 @@ impl GameSession {
     /// leave the hang this seam exists to close.
     ///
     /// Admit-and-repair instead, matching every other consumer
-    /// ([`Self::resolve_all_for_player`], wasm `resolve_all`, and
-    /// [`recover_orphaned_resolve_all`]): the resolver collapses a coherent
+    /// ([`Self::resolve_all_for_player`], wasm `resolve_all`, and the explicit
+    /// restored-stack automation resume): the resolver collapses a coherent
     /// run and repairs an incoherent one back to ordinary priority.
     fn consume_ai_granted_resolve_all(&mut self) -> Option<RevisionedActionResult> {
         if !matches!(self.state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
@@ -1388,7 +1409,7 @@ impl GameSession {
 
         let rewind_game_number = state.game_number;
 
-        let mut session = GameSession {
+        Ok(GameSession {
             game_code: ps.game_code,
             full_runtime: None,
             state_revision: ps.state_revision,
@@ -1421,35 +1442,42 @@ impl GameSession {
             takeback_history: VecDeque::new(),
             turn_rewind_history: VecDeque::new(),
             rewind_game_number,
-        };
-        session.recover_orphaned_resolve_all();
-        Ok(session)
+        })
     }
 
-    /// Discharges a `WaitingFor::ResolveAllReady` latch whose consumer did not
-    /// survive the process.
+    /// Explicitly resumes a persisted stack automation session after the
+    /// restore owner has finished attaching runtime authority.
     ///
-    /// The latch is consumed by whoever submitted its final Grant — a client
-    /// from its consent modal, or this session's own AI hand-off. Neither
-    /// outlives a restart, and the state itself offers no way out: it has no
-    /// acting player, every seat's legal-action set is empty, and no client
-    /// will volunteer `ClientMessage::ResolveAll` for a batch it never started.
-    /// A session restored into that state would be permanently unadvanceable.
-    ///
-    /// Running engine work at load time is deliberate and bounded: the consent
-    /// was already unanimous and its cap was frozen at `BeginResolveAll`, so
-    /// this discharges an authorization the players already gave rather than
-    /// making a new decision. Nothing can race it — no socket is attached yet.
-    fn recover_orphaned_resolve_all(&mut self) {
-        let Some(batch) = recover_orphaned_resolve_all(&mut self.state) else {
-            return;
-        };
-        warn!(
-            game = %self.game_code,
-            items_resolved = batch.items_resolved,
-            "discharged an orphaned Resolve All latch on session restore"
-        );
-        self.advance_state_revision();
+    /// Generic [`Self::from_persisted`] intentionally does not call this: a
+    /// decode is not an implicit priority pass. The restore owner invokes this
+    /// once after it has supplied process-owned hosting policy, then broadcasts
+    /// the returned bounded presentation with the recomputed snapshot.
+    pub fn resume_restored_stack_automation(&mut self) -> RestoredStackAutomationResume {
+        let resumed = resume_engine_restored_stack_automation(&mut self.state);
+        let presentation = resumed.presentation.clone();
+        if presentation.outcome == RestoredStackAutomationOutcome::Noop {
+            return RestoredStackAutomationResume {
+                state_revision: None,
+                presentation,
+                broadcast: None,
+            };
+        }
+
+        // The engine's complete event batch stays server-internal. In
+        // particular, a collapsed session can contain far more lifecycle
+        // events than a transport frame may carry, while rewind bookkeeping
+        // still needs to observe every one of them.
+        let post_state = self.state.clone();
+        self.observe_transition(&resumed.action_result().events, &post_state);
+        let revision = self.advance_state_revision();
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
+
+        RestoredStackAutomationResume {
+            state_revision: Some(revision),
+            presentation,
+            broadcast: Some((post_state, legal_actions, auto_pass, spell_costs, by_object)),
+        }
     }
 }
 
@@ -7083,12 +7111,11 @@ mod tests {
             "no stack entry may resolve through a repair"
         );
     }
-    /// A latch outlives the process that owed its consumption. Restoring a
-    /// session into `ResolveAllReady` would otherwise hand the players back a
-    /// game with no acting player and no client willing to send `ResolveAll` for
-    /// a batch it never started.
+    /// Generic reconstruction deliberately preserves a coherent automation
+    /// session. The restore owner must opt into the one explicit resume after
+    /// it finishes attaching runtime authority.
     #[test]
-    fn restoring_a_session_discharges_an_orphaned_resolve_all_latch() {
+    fn restored_session_resumes_a_coherent_automation_once_on_explicit_request() {
         let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
@@ -7119,33 +7146,75 @@ mod tests {
         let revision_before = session.state_revision;
         let persisted = session.to_persisted();
 
-        let restored = GameSession::from_persisted(persisted, &CardDatabase::default())
+        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
             .expect("the snapshot restores");
 
         assert!(
-            !matches!(
+            matches!(
                 restored.state.waiting_for,
                 WaitingFor::ResolveAllReady { .. }
             ),
-            "an orphaned latch must not survive restore, got {:?}",
+            "generic restore must not advance a coherent latch, got {:?}",
             restored.state.waiting_for
         );
         assert!(
-            restored.state.stack.is_empty(),
-            "the consented entry must have resolved on restore"
+            !restored.state.stack.is_empty(),
+            "generic restore must not resolve a stack entry"
         );
-        assert!(restored.state.resolve_all_consent_run.is_none());
+        assert_eq!(restored.state_revision, revision_before);
+
+        let resumed = restored.resume_restored_stack_automation();
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed,
+            "the coherent authorization enters the ordinary runner"
+        );
+        assert_eq!(resumed.state_revision, Some(revision_before + 1));
+        let broadcast = resumed
+            .broadcast
+            .as_ref()
+            .expect("resume recomputes broadcast");
+        let (expected_legal, expected_costs, expected_by_object) =
+            engine_legal_actions_full(&restored.state);
+        assert_eq!(&broadcast.0, &restored.state);
+        assert_eq!(&broadcast.1, &expected_legal);
+        assert_eq!(
+            broadcast.2,
+            auto_pass_recommended(&restored.state, &broadcast.1)
+        );
+        assert_eq!(&broadcast.3, &expected_costs);
+        assert_eq!(&broadcast.4, &expected_by_object);
         assert!(
-            restored.state_revision > revision_before,
-            "clients must not see changed content under an unchanged revision"
+            resumed.presentation.omitted_event_count > 0,
+            "the runner's complete internal event batch must be accounted for"
+        );
+        let presentation_wire =
+            serde_json::to_string(&resumed.presentation).expect("bounded presentation serializes");
+        assert!(
+            !presentation_wire.contains("events"),
+            "the transport presentation must not serialize the internal event batch"
+        );
+        assert!(restored.state.stack.is_empty());
+        assert!(restored.state.resolve_all_consent_run.is_none());
+
+        let repeated = restored.resume_restored_stack_automation();
+        assert_eq!(
+            repeated.presentation.outcome,
+            RestoredStackAutomationOutcome::Noop
+        );
+        assert_eq!(repeated.state_revision, None);
+        assert!(repeated.broadcast.is_none());
+        assert_eq!(
+            restored.state_revision,
+            revision_before + 1,
+            "the explicit resume must be one-shot"
         );
     }
 
-    /// The restore repair must also cover a latch whose run is gone, where
-    /// there is no prefix to collapse and the only correct outcome is a return
-    /// to ordinary priority with the stack untouched.
+    /// An incoherent saved authorization is repaired only by the explicit
+    /// engine-resume seam. Generic reconstruction leaves it untouched.
     #[test]
-    fn restoring_a_session_repairs_a_latch_whose_run_is_gone() {
+    fn explicit_restore_resume_repairs_a_latch_whose_run_is_gone() {
         let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
@@ -7172,8 +7241,15 @@ mod tests {
         session.state.resolve_all_consent_run = None;
         let persisted = session.to_persisted();
 
-        let restored = GameSession::from_persisted(persisted, &CardDatabase::default())
+        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
             .expect("the snapshot restores");
+
+        assert!(matches!(
+            restored.state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+        let revision_before = restored.state_revision;
+        let resumed = restored.resume_restored_stack_automation();
 
         assert!(
             matches!(restored.state.waiting_for, WaitingFor::Priority { .. }),
@@ -7185,5 +7261,31 @@ mod tests {
             1,
             "nothing may resolve without a run to authorize it"
         );
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::ZeroResolutionRepair
+        );
+        assert_eq!(resumed.state_revision, Some(revision_before + 1));
+        assert!(resumed.broadcast.is_some());
+    }
+
+    #[test]
+    fn explicit_restore_resume_is_a_revision_preserving_noop_for_ordinary_priority() {
+        let (mgr, game_code, _) = ai_table_awaiting_one_consent();
+        let session = mgr.sessions.get(&game_code).expect("session exists");
+        let persisted = session.to_persisted();
+        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
+            .expect("ordinary state restores");
+        let revision_before = restored.state_revision;
+
+        let resumed = restored.resume_restored_stack_automation();
+
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::Noop
+        );
+        assert_eq!(resumed.state_revision, None);
+        assert!(resumed.broadcast.is_none());
+        assert_eq!(restored.state_revision, revision_before);
     }
 }
