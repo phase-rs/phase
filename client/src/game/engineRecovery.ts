@@ -43,7 +43,7 @@ import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types
  * the current mode is not locally recoverable.
  */
 export async function attemptStateRehydrate(): Promise<boolean> {
-  const { adapter, gameState, gameMode, gameId } = useGameStore.getState();
+  const { adapter, gameState, gameMode, gameId, gameSessionGeneration } = useGameStore.getState();
 
   if (!adapter) {
     debugLog("engine-recovery: no adapter", "warn");
@@ -91,7 +91,12 @@ export async function attemptStateRehydrate(): Promise<boolean> {
     await adapter.restoreState(snapshot);
     const resumed = await adapter.resumeRestoredGameState?.();
     if (resumed) {
-      useGameStore.getState().commitEngineSnapshot(resumed.snapshot, {
+      const current = useGameStore.getState();
+      if (current.adapter !== adapter || current.gameSessionGeneration !== gameSessionGeneration) {
+        debugLog("engine-recovery: session changed before restored automation completed", "warn");
+        return true;
+      }
+      current.commitEngineSnapshot(resumed.snapshot, {
         events: [],
         logEntries: resumed.presentation.logEntries,
         extraState: { restoredStackAutomation: resumed.presentation },
