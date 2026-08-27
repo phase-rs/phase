@@ -1508,6 +1508,139 @@ fn nonrepresentative_set_auto_pass_survives_later_session_teardown() {
 }
 
 #[test]
+fn nonrepresentative_cancel_does_not_resurrect_at_session_teardown() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::free_for_all(),
+        3,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    push_simple_stack_entry(&mut state, 19_908, PlayerId(0));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    add_non_mana_activated_artifact(&mut state, PlayerId(2));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        },
+    )
+    .unwrap();
+    assert!(state.stack_resolution_session.is_some());
+    assert!(state
+        .stack_resolution_session
+        .as_ref()
+        .unwrap()
+        .auto_pass_overlay
+        .baseline
+        .contains_key(&PlayerId(1)));
+
+    apply(&mut state, PlayerId(1), GameAction::CancelAutoPass).unwrap();
+    assert!(!state.auto_pass.contains_key(&PlayerId(1)));
+    assert!(!state
+        .stack_resolution_session
+        .as_ref()
+        .unwrap()
+        .auto_pass_overlay
+        .baseline
+        .contains_key(&PlayerId(1)));
+
+    // A fresh top invalidates P0's frozen cohort and exercises the ordinary
+    // session teardown path after P1's out-of-turn preference cancellation.
+    push_simple_stack_entry(&mut state, 19_909, PlayerId(2));
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "teardown must not restore P1's cancelled preference"
+    );
+}
+
+#[test]
+fn nonrepresentative_deliberate_action_does_not_resurrect_at_session_teardown() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::free_for_all(),
+        3,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    push_simple_stack_entry(&mut state, 19_910, PlayerId(0));
+    let p1_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    add_non_mana_activated_artifact(&mut state, PlayerId(2));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        },
+    )
+    .unwrap();
+    assert!(state.stack_resolution_session.is_some());
+
+    // P2's meaningful action paused the session. Give P1 an ordinary priority
+    // window, then activate its artifact through the production action route.
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::ActivateAbility {
+            source_id: p1_action,
+            ability_index: 0,
+        },
+    )
+    .unwrap();
+
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "a deliberate action must not be undone by the session's baseline restore"
+    );
+}
+
+#[test]
 fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
     let mut state = priority_state();
     let source_id = create_object(

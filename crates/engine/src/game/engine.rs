@@ -8417,6 +8417,13 @@ fn apply_action(
             take_and_restore_stack_resolution_session(state);
         } else {
             state.auto_pass.remove(&actor);
+            if let Some(session) = state.stack_resolution_session.as_mut() {
+                // A nonrepresentative preference can be merged into the
+                // pre-overlay baseline while a session is live. Cancelling it
+                // must remove the same saved key, or later teardown would
+                // resurrect a preference the player explicitly withdrew.
+                session.auto_pass_overlay.baseline.remove(&actor);
+            }
         }
         return Ok(ActionResult {
             events: vec![],
@@ -8730,6 +8737,15 @@ fn apply_action(
         | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
             state.auto_pass.remove(&actor);
+            let representative = super::topology::priority_pass_representative(state, actor);
+            if let Some(session) = state.stack_resolution_session.as_mut() {
+                if !session.representatives.contains(&representative) {
+                    // A deliberate action revokes this nonrepresentative's standing
+                    // preference. Keep the deferred restore baseline in lockstep so
+                    // a later session teardown cannot resurrect the revoked mode.
+                    session.auto_pass_overlay.baseline.remove(&actor);
+                }
+            }
         }
     }
 
