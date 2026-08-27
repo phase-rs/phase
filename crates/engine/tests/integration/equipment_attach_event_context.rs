@@ -309,7 +309,21 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
                     .expect("selecting the Samurai host must consume the prompt");
                 assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
                 saw_host_choice = true;
-                break;
+                assert!(saw_dig_choice, "Gilgamesh must surface the DigChoice");
+                assert!(
+                    saw_host_choice,
+                    "multiple Samurai must require the host choice"
+                );
+                assert!(
+                    saw_optional_attach,
+                    "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
+                );
+                assert_eq!(
+                    runner.state().objects[&equipment].attached_to,
+                    Some(AttachTarget::Object(samurai)),
+                    "the singleton Equipment must attach after its host choice without retaining a stale prompt"
+                );
+                return;
             }
             WaitingFor::TriggerTargetSelection { .. } => {
                 panic!("Gilgamesh's non-targeted Samurai choice must not be stack targeting")
