@@ -307,12 +307,28 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    #[cfg(test)]
+    eprintln!(
+        "attach trace: deliver attachment={attachment_id:?} target={target_id:?} before={:?}",
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|object| object.attached_to)
+    );
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
             old_target,
         });
     }
+    #[cfg(test)]
+    eprintln!(
+        "attach trace: deliver attachment={attachment_id:?} target={target_id:?} after={:?}",
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|object| object.attached_to)
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -1218,7 +1234,12 @@ pub(crate) fn attach_to_with_authority(
     target_id: ObjectId,
     authority: AttachmentAuthority<'_>,
 ) -> Option<TargetRef> {
-    if !can_attach_to_object_with_authority(state, attachment_id, target_id, authority) {
+    let legal = can_attach_to_object_with_authority(state, attachment_id, target_id, authority);
+    #[cfg(test)]
+    eprintln!(
+        "attach trace: authority attachment={attachment_id:?} target={target_id:?} legal={legal}"
+    );
+    if !legal {
         return None;
     }
 
@@ -1290,6 +1311,14 @@ pub(crate) fn attach_to_with_authority(
             resulting_timestamp,
         );
     }
+    #[cfg(test)]
+    eprintln!(
+        "attach trace: authority attachment={attachment_id:?} target={target_id:?} after={:?}",
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|object| object.attached_to)
+    );
     old_target
 }
 
