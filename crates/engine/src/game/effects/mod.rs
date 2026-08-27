@@ -815,6 +815,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             trigger_context,
             trigger_firing,
             attachment_choice,
+            attachment_remainder: _,
         } = cont;
         debug_assert!(
             attachment_choice.is_none(),
@@ -1836,6 +1837,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             trigger_context,
             trigger_firing,
             attachment_choice,
+            attachment_remainder,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -1849,6 +1851,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 trigger_context,
                 trigger_firing,
                 attachment_choice,
+                attachment_remainder,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -10312,6 +10315,26 @@ fn should_repeat_while_condition(
     true
 }
 
+/// Whether `pending` is the remaining, already-bound subset of `ability`'s
+/// Attach operation after an earlier selected attachment raised a child.
+///
+/// The strict subset is the provenance proof: a merely similar Attach
+/// continuation is not enough to claim ownership of this instruction's tail.
+fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &ResolvedAbility) -> bool {
+    let remaining = pending.chain.attach_attachment_targets();
+    let selected = ability.attach_attachment_targets();
+    pending
+        .attachment_remainder
+        .as_ref()
+        .is_some_and(|remainder| remainder.producer.as_ref() == ability)
+        && pending.attachment_choice.is_none()
+        && matches!(pending.chain.effect, Effect::Attach { .. })
+        && pending.chain.sub_ability.is_none()
+        && !remaining.is_empty()
+        && remaining.len() < selected.len()
+        && remaining.iter().all(|target| selected.contains(target))
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -12941,25 +12964,31 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
-        // CR 608.2c + CR 616.1: An Attach choice already split this node's
-        // trailing instructions into the parent continuation below its typed
-        // child. An Attached replacement leaves that child immediately below
-        // its active PostReplacement owner, so consume the marker at this
-        // hand-off before the child drains. The generic pause path must not
-        // prepend the same tail onto the child operation, or a host choice
-        // followed by an Equipment choice would duplicate that tail.
+        // CR 608.2c + CR 616.1: An Attach choice or a bound remaining subset
+        // already split this node's trailing instructions into an outer
+        // continuation. An Attached replacement can leave either owner below
+        // its active PostReplacement frame. The generic pause path must not
+        // prepend that same tail onto the child operation.
         let attach_child_already_owns_tail = matches!(ability.effect, Effect::Attach { .. })
             && (state
                 .active_ability_continuation()
                 .is_some_and(|pending| pending.attachment_choice.is_some())
-                || state.active_ability_continuation().is_some_and(|pending| {
-                    matches!(pending.chain.effect, Effect::Attach { .. })
-                        && pending.chain.sub_ability.is_none()
-                        && !pending.chain.attach_attachment_targets().is_empty()
-                })
+                || state
+                    .active_ability_continuation()
+                    .is_some_and(|pending| is_bound_attach_remainder_for(pending, ability))
                 || state
                     .resolution_stack
-                    .consume_active_post_replacement_attach_child_marker());
+                    .has_active_post_replacement_attach_choice_pair()
+                || matches!(
+                    (
+                        state.resolution_stack.last(),
+                        state.resolution_stack.active_predecessor(),
+                    ),
+                    (
+                        Some(ResolutionFrame::PostReplacement(_)),
+                        Some(ResolutionFrame::AbilityContinuation(frame)),
+                    ) if is_bound_attach_remainder_for(&frame.pending, ability)
+                ));
         if attach_child_already_owns_tail {
             return Ok(());
         }
@@ -15072,6 +15101,42 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::WhenYouDo)
+    }
+
+    #[test]
+    fn bound_attach_remainder_requires_exact_producer_provenance() {
+        let state = GameState::new_two_player(42);
+        let first = ObjectIncarnationRef::of(ObjectId(1), 0);
+        let second = ObjectIncarnationRef::of(ObjectId(2), 0);
+        let mut producer = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Any,
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        producer.set_attach_attachment_targets(vec![first, second]);
+
+        let mut remainder_chain = producer.clone();
+        remainder_chain.set_attach_attachment_targets(vec![second]);
+        let mut pending = PendingContinuation::new(Box::new(remainder_chain), &state);
+        pending.attachment_remainder = Some(crate::types::game_state::PendingAttachmentRemainder {
+            producer: Box::new(producer.clone()),
+        });
+
+        assert!(
+            is_bound_attach_remainder_for(&pending, &producer),
+            "the stamped producer owns its bound remaining attachment subset"
+        );
+
+        let mut distinct_producer = producer.clone();
+        distinct_producer.source_id = ObjectId(101);
+        assert!(
+            !is_bound_attach_remainder_for(&pending, &distinct_producer),
+            "the same selected subset from a distinct Attach producer cannot claim this tail"
+        );
     }
 
     /// CR 608.2c + CR 614.6: a destination-bound "this way" rider must not

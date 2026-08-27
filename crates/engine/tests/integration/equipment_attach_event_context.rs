@@ -72,14 +72,21 @@ fn paid_instead_attach_definition() -> AbilityDefinition {
     )
 }
 
-fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let equipment = scenario
         .add_artifact_from_oracle(P0, "Paid Instead Equipment", "")
         .with_subtypes(vec!["Equipment"])
         .id();
+    let other_equipment = scenario
+        .add_artifact_from_oracle(P0, "Other Paid Instead Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
     let host = scenario.add_creature(P0, "Paid Instead Host", 2, 2).id();
+    let other_host = scenario
+        .add_creature(P0, "Other Paid Instead Host", 2, 2)
+        .id();
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(
@@ -100,7 +107,14 @@ fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         })
         .with_ability_definition(paid_instead_attach_definition())
         .id();
-    (scenario.build(), spell, equipment, host)
+    (
+        scenario.build(),
+        spell,
+        equipment,
+        host,
+        other_equipment,
+        other_host,
+    )
 }
 
 fn cast_paid_instead_attach_to_target_selection(runner: &mut GameRunner, spell: ObjectId) {
@@ -137,6 +151,8 @@ fn assert_paid_attachment_bindings_and_resolve(
     runner: &mut GameRunner,
     equipment: ObjectId,
     host: ObjectId,
+    other_equipment: ObjectId,
+    other_host: ObjectId,
 ) {
     let ability = runner
         .state()
@@ -163,23 +179,40 @@ fn assert_paid_attachment_bindings_and_resolve(
         Some(AttachTarget::Object(host)),
         "the paid override must resolve the chosen Equipment and host roles"
     );
+    assert_eq!(
+        runner.state().objects[&other_equipment].attached_to,
+        None,
+        "the alternate Equipment must remain unattached"
+    );
+    assert!(
+        runner.state().objects[&other_host].attachments.is_empty(),
+        "the alternate host must not receive the selected Equipment"
+    );
 }
 
 #[test]
 fn paid_instead_attach_select_targets_preserves_role_bindings_to_resolution() {
-    let (mut runner, spell, equipment, host) = paid_instead_attach_fixture();
+    let (mut runner, spell, equipment, host, other_equipment, other_host) =
+        paid_instead_attach_fixture();
     cast_paid_instead_attach_to_target_selection(&mut runner, spell);
     runner
         .act(GameAction::SelectTargets {
             targets: vec![TargetRef::Object(equipment), TargetRef::Object(host)],
         })
         .expect("bulk target submission must complete the paid attachment cast");
-    assert_paid_attachment_bindings_and_resolve(&mut runner, equipment, host);
+    assert_paid_attachment_bindings_and_resolve(
+        &mut runner,
+        equipment,
+        host,
+        other_equipment,
+        other_host,
+    );
 }
 
 #[test]
 fn paid_instead_attach_choose_target_preserves_role_bindings_to_resolution() {
-    let (mut runner, spell, equipment, host) = paid_instead_attach_fixture();
+    let (mut runner, spell, equipment, host, other_equipment, other_host) =
+        paid_instead_attach_fixture();
     cast_paid_instead_attach_to_target_selection(&mut runner, spell);
     runner
         .act(GameAction::ChooseTarget {
@@ -191,7 +224,13 @@ fn paid_instead_attach_choose_target_preserves_role_bindings_to_resolution() {
             target: Some(TargetRef::Object(host)),
         })
         .expect("second role target must complete the paid attachment cast");
-    assert_paid_attachment_bindings_and_resolve(&mut runner, equipment, host);
+    assert_paid_attachment_bindings_and_resolve(
+        &mut runner,
+        equipment,
+        host,
+        other_equipment,
+        other_host,
+    );
 }
 
 #[test]
@@ -204,7 +243,7 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         .with_subtypes(vec!["Equipment"])
         .id();
     let second = scenario
-        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .add_artifact_from_oracle(P0, "Second Psychic Paper", PSYCHIC_PAPER_ORACLE)
         .with_subtypes(vec!["Equipment"])
         .id();
     let spell = scenario
@@ -251,7 +290,8 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         })
         .expect("both attachment roles and their host must be selectable");
 
-    let mut saw_attached_replacement = false;
+    let mut card_name_choices = 0;
+    let mut creature_type_choices = 0;
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
@@ -268,8 +308,8 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
                     .act(GameAction::ChooseOption {
                         choice: "Llanowar Elves".to_string(),
                     })
-                    .expect("first attachment replacement name choice must be accepted");
-                saw_attached_replacement = true;
+                    .expect("attachment replacement name choice must be accepted");
+                card_name_choices += 1;
             }
             WaitingFor::NamedChoice {
                 choice_type: ChoiceType::CreatureType { .. },
@@ -279,21 +319,26 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
                     .act(GameAction::ChooseOption {
                         choice: "Zombie".to_string(),
                     })
-                    .expect("first attachment replacement type choice must be accepted");
+                    .expect("attachment replacement type choice must be accepted");
+                creature_type_choices += 1;
             }
             other => panic!("unexpected attach-both prompt: {other:?}"),
         }
     }
 
-    assert!(
-        saw_attached_replacement,
-        "the first bound attachment must pause through its Attached replacement"
+    assert_eq!(
+        card_name_choices, 2,
+        "each bound Psychic Paper must resolve its Attached card-name choice exactly once"
+    );
+    assert_eq!(
+        creature_type_choices, 2,
+        "each bound Psychic Paper must resolve its Attached creature-type choice exactly once"
     );
     for attachment in [first, second] {
         assert_eq!(
             runner.state().objects[&attachment].attached_to,
             Some(AttachTarget::Object(host)),
-            "each bound attachment must resolve after the first replacement pause"
+            "each bound attachment must resolve after its replacement pause"
         );
     }
     assert_eq!(
@@ -302,6 +347,10 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         "the enclosing Attach tail must resume after both attachments"
     );
     assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the two completed Attached replacements must leave no continuation frame"
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -420,6 +469,10 @@ fn bound_attachments_with_a_synchronous_prefix_do_not_replay_the_final_attachmen
         creature_type_choices, 1,
         "the paused second attachment must not replay its creature-type replacement"
     );
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the completed Attached replacement must leave no continuation frame"
+    );
 }
 
 #[test]
@@ -521,6 +574,10 @@ fn singleton_bound_attachment_replacement_preserves_trailing_effect_once() {
         "the trailing effect must resolve exactly once"
     );
     assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the completed direct attachment replacement must leave no continuation frame"
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -703,6 +760,10 @@ fn gilgamesh_direct_equipment_choice_completes_to_priority() {
                     None,
                     "a preexisting matching Equipment must not be attached by Gilgamesh's event-scoped choice"
                 );
+                assert!(
+                    runner.state().resolution_stack.is_empty(),
+                    "the final Equipment choice must consume its typed child before priority"
+                );
                 return;
             }
             other => panic!("unexpected Gilgamesh resolution prompt: {other:?}"),
@@ -873,6 +934,10 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
                     Some(AttachTarget::Object(samurai)),
                     "the singleton forwarded attachment must resume through its enclosing continuation"
                 );
+                assert!(
+                    runner.state().resolution_stack.is_empty(),
+                    "the Attached replacement must retire its typed Attach child before priority"
+                );
                 return;
             }
             WaitingFor::TriggerTargetSelection { .. } => {
@@ -1011,6 +1076,10 @@ fn gilgamesh_host_then_equipment_choice_preserves_event_scoped_candidates() {
                     "the selected moved Equipment attaches to the selected Samurai"
                 );
                 assert_eq!(runner.state().objects[&first_equipment].attached_to, None);
+                assert!(
+                    runner.state().resolution_stack.is_empty(),
+                    "the re-parked host and Equipment choices must retire their typed child before priority"
+                );
                 return;
             }
             WaitingFor::TriggerTargetSelection { .. } => {

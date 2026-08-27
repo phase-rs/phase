@@ -12,6 +12,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
     ResolvedAttachmentCommand, ResolvedAttachmentReplayInvariantError,
 };
@@ -173,6 +174,7 @@ pub fn resolve(
         // so an "as it becomes attached, choose …" definition on the attachment
         // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
         // attachment resolves — the attach-time analogue of "as ~ enters, choose".
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
         let proposed = crate::types::proposed_event::ProposedEvent::Attach {
             attachment_id,
             target_id,
@@ -188,6 +190,7 @@ pub fn resolve(
                             state,
                             ability,
                             &attachment_ids[index + 1..],
+                            child_stack_start,
                         );
                     }
                     state.waiting_for = waiting_for;
@@ -211,6 +214,7 @@ pub fn resolve(
                         state,
                         ability,
                         &attachment_ids[index + 1..],
+                        child_stack_start,
                     );
                 }
                 crate::game::replacement::park_waiting_for(state, player);
@@ -231,9 +235,15 @@ fn defer_remaining_selected_attachments(
     state: &mut GameState,
     ability: &ResolvedAbility,
     remaining: &[ObjectId],
+    child_stack_start: ChildStackDepth,
 ) {
-    let mut continuation = ability.clone();
-    continuation.set_attach_attachment_targets(
+    if remaining.is_empty() {
+        return;
+    }
+
+    let mut remainder = ability.clone();
+    let tail = remainder.sub_ability.take();
+    remainder.set_attach_attachment_targets(
         ability
             .attach_attachment_targets()
             .iter()
@@ -241,31 +251,47 @@ fn defer_remaining_selected_attachments(
             .filter(|target| remaining.contains(&target.object_id))
             .collect(),
     );
-    if remaining.is_empty() {
-        return;
-    }
 
-    // CR 608.2c + CR 616.1: an already selected multi-attachment operation can
-    // pause on its first Attached replacement without having opened an
-    // Equipment choice. Split its printed tail into the parent and park the
-    // remaining bound members as an ordinary continuation. `attachment_choice`
-    // is reserved for an actual `EffectZoneChoice` owner, never a synthetic
-    // marker for this direct bound sequence.
-    let tail = continuation.sub_ability.take();
-    if let Some(tail) = tail {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
-            frame.pending.chain = tail;
-        } else {
-            state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
-                tail, state,
-            ));
+    // CR 608.2c + CR 616.1: an already selected multi-attachment operation
+    // may pause after the current member raises a replacement child. Keep the
+    // remaining bound members and the printed tail as separate ordinary
+    // continuations, outside that exact child stack. `attachment_choice` is
+    // reserved for a real EffectZoneChoice owner, never a synthetic marker.
+    let mut remainder =
+        crate::types::game_state::PendingContinuation::new(Box::new(remainder), state);
+    remainder.attachment_remainder = Some(crate::types::game_state::PendingAttachmentRemainder {
+        producer: Box::new(ability.clone()),
+    });
+    let tail = tail.map(|tail| crate::types::game_state::PendingContinuation::new(tail, state));
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&child_stack_start)
+    {
+        std::cmp::Ordering::Less => {
+            panic!(
+                "Attach delivery removed a parent before its remaining attachments could be parked"
+            )
+        }
+        std::cmp::Ordering::Equal => {
+            if let Some(tail) = tail {
+                state.park_ability_continuation(tail);
+            }
+            state.park_ability_continuation(remainder);
+        }
+        std::cmp::Ordering::Greater => {
+            state
+                .insert_ability_continuation_parent_at_child_boundary(remainder, child_stack_start)
+                .expect(
+                    "remaining Attach members must be inserted outside their replacement child",
+                );
+            if let Some(tail) = tail {
+                state
+                    .insert_ability_continuation_parent_at_child_boundary(tail, child_stack_start)
+                    .expect("Attach tail must be inserted outside its replacement child");
+            }
         }
     }
-
-    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
-        Box::new(continuation),
-        state,
-    ));
 }
 
 /// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment

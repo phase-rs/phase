@@ -2381,6 +2381,16 @@ pub struct PendingAttachmentChoice {
     pub operation: Box<ResolvedAbility>,
 }
 
+/// The exact Attach instruction that created an ordinary continuation for its
+/// remaining already-selected attachments. This is distinct from
+/// [`PendingAttachmentChoice`]: no player choice owns this continuation, but
+/// the producer identity proves which Attach instruction already split off its
+/// printed tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttachmentRemainder {
+    pub producer: Box<ResolvedAbility>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -2406,6 +2416,10 @@ pub struct PendingContinuation {
     /// parent retains only the following instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_choice: Option<PendingAttachmentChoice>,
+    /// The producer identity for an ordinary continuation containing only the
+    /// unprocessed members of a selected multi-attachment operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_remainder: Option<PendingAttachmentRemainder>,
 }
 
 impl PendingContinuation {
@@ -2420,6 +2434,7 @@ impl PendingContinuation {
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
+            attachment_remainder: None,
         }
     }
 
@@ -2439,6 +2454,7 @@ impl PendingContinuation {
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
+            attachment_remainder: None,
         }
     }
 }
@@ -19788,6 +19804,23 @@ impl GameState {
         })
     }
 
+    /// Insert a continuation immediately outside the exact child stack raised
+    /// after `child_stack_start` was captured by its producer.
+    pub fn insert_ability_continuation_parent_at_child_boundary(
+        &mut self,
+        pending: PendingContinuation,
+        child_stack_start: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        let choose_zone_trigger_context = pending.trigger_context.clone();
+        self.resolution_stack.insert_parent_at_child_boundary(
+            super::resolution::ResolutionFrame::AbilityContinuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context,
+            }),
+            child_stack_start,
+        )
+    }
+
     /// Inserts the continuation outside an active general-drain/draw pair so
     /// the paused `PostReplacement` frame remains the draw's exact immediate
     /// parent until the child draw is complete.
@@ -20954,14 +20987,21 @@ impl GameState {
             .finish_post_replacement_dispatch(dispatch)
     }
 
-    /// Retires only the exact top general drain whose continuation paused and
-    /// whose MultiDraw child has already completed.
+    /// CR 608.2c + CR 614.1a: Retires the exact top general drain after its
+    /// interrupted instruction completes. An empty Attach replacement pair
+    /// also retires its marked child before generic continuation draining can
+    /// replay that instruction.
     pub fn finish_active_paused_post_replacement_dispatch(&mut self) {
         let finished = self
             .active_post_replacement_drains_mut()
             .and_then(PostReplacementDrainStack::finish_paused_dispatch);
         if finished.is_some() {
-            self.remove_empty_active_post_replacement_frame();
+            if !self
+                .resolution_stack
+                .take_active_empty_post_replacement_attach_choice_pair()
+            {
+                self.remove_empty_active_post_replacement_frame();
+            }
             // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
             // resident while its exact post-replacement child resolves. Once that
             // child is retired, the snapshot is again the active owner and its
