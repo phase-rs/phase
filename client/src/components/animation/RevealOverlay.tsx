@@ -71,7 +71,7 @@ export function RevealOverlay() {
       const obj = gameState.objects[id];
       // `revealed_cards` is the public set, so the engine un-redacts these for
       // every viewer; guard against a redacted name defensively only.
-      if (obj?.display_visible_to_viewer && obj.name && obj.name !== "Hidden Card") {
+      if (obj?.display_visible_to_viewer !== false && obj?.name && obj.name !== "Hidden Card") {
         cards.push({
           id,
           name: obj.name,

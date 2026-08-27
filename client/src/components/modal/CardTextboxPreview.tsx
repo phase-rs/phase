@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { CardType } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
@@ -50,6 +52,7 @@ export function CardTextboxPreview({
   cardTypes?: CardType;
 }) {
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal" });
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
   // Still resolving — stay absent rather than flash a band into the modal.
   if (isLoading) return null;
@@ -58,7 +61,7 @@ export function CardTextboxPreview({
   // erased the card-identification band from the decision modals that host
   // this (ChoiceModal, PermanentTypeSlotModal, AlternativeCostModal) for
   // exactly the cards whose identity is hardest to infer. Name it instead.
-  if (!src) {
+  if (!src || failedSrc === src) {
     return (
       <div
         className="flex w-full items-center justify-center overflow-hidden rounded-[10px] border border-white/10 bg-black/40 px-3 py-2 shadow-inner"
@@ -82,7 +85,10 @@ export function CardTextboxPreview({
         {...getCardImageSrcSetProps(src, rungs)}
         alt=""
         draggable={false}
-        onError={() => advanceFailedSource?.(src)}
+        onError={() => {
+          if (advanceFailedSource) advanceFailedSource(src);
+          else setFailedSrc(src);
+        }}
         className="absolute inset-x-0 top-0 w-full"
         style={{ transform: `translateY(-${top * 100}%)` }}
       />

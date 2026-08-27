@@ -24,6 +24,10 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
     src: cardName ? `${cardName}.png` : null,
     isLoading: false,
   }),
+  useCardBackImage: () => ({
+    src: "card-back.png",
+    isLoading: false,
+  }),
 }));
 
 function cardObject(id: number, owner: number, name: string) {

@@ -2,6 +2,7 @@ import {
   useManaSymbolImage,
   type ManaSymbolShard,
 } from "../../hooks/useFixedVisualImage.ts";
+import { manaSymbolSourceUrl } from "../../services/scryfall.ts";
 
 interface ManaGlyphPresentationProps {
   shard: ManaSymbolShard | null;
@@ -27,8 +28,15 @@ export function ManaGlyphPresentation({
       />
     );
   }
-  if (isLoading) {
-    return <span aria-label={notation} className={className} role="img" />;
+  if (isLoading && shard) {
+    return (
+      <img
+        src={manaSymbolSourceUrl(shard)}
+        alt={notation}
+        className={className}
+        draggable={false}
+      />
+    );
   }
   return <span className={className}>{notation}</span>;
 }

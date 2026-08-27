@@ -93,12 +93,13 @@ interface CardTileProps {
 }
 
 function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
-  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(card.name, {
+  const cardName = card.name ?? "";
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
   const hoverInfo = {
-    name: card.name,
+    name: cardName,
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   };
   const { handlers, firedRef } = useLongPress(() => onHover(hoverInfo));
@@ -120,15 +121,23 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
       className={`relative cursor-pointer overflow-hidden rounded-[14px] ring-1 ring-white/10 transition-all duration-150 hover:scale-[1.02] hover:ring-white/20
         ${dimmed ? "opacity-70 hover:opacity-90" : ""}`}
     >
-      {isLoading || !src ? (
+      {isLoading ? (
         <div className="flex aspect-[488/680] animate-pulse items-center justify-center bg-white/5">
-          <span className="px-2 text-center text-xs text-white/40">{card.name}</span>
+          <span className="px-2 text-center text-xs text-white/40">{cardName}</span>
+        </div>
+      ) : !src ? (
+        <div
+          className="flex aspect-[488/680] items-center justify-center bg-white/5"
+          role="img"
+          aria-label={cardName}
+        >
+          <span className="px-2 text-center text-xs text-white/40">{cardName}</span>
         </div>
       ) : (
         <img
           src={src}
           {...getCardImageSrcSetProps(src, rungs)}
-          alt={card.name}
+          alt={cardName}
           draggable={false}
           onError={() => advanceFailedSource?.(src)}
           className="aspect-[488/680] w-full object-cover"
@@ -136,7 +145,7 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
       )}
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
         <span className="line-clamp-1 text-[10px] leading-tight text-white/80">
-          {card.name}
+          {cardName}
         </span>
       </div>
       {count !== undefined && count > 1 && (

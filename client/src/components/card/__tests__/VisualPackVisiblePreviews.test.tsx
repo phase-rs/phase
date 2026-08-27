@@ -172,7 +172,7 @@ describe("visual-pack visible previews", () => {
       advanceFailedSource,
     });
 
-    render(<CardCoverageDashboard />);
+    const { rerender } = render(<CardCoverageDashboard />);
     fireEvent.click(await screen.findByRole("button", { name: /Coverage Card/i }));
     const image = await screen.findByRole("img", { name: "Coverage Card" });
     expect(image).toHaveAttribute(
@@ -188,8 +188,7 @@ describe("visual-pack visible previews", () => {
       isRotated: false,
       isFlip: false,
     });
-    fireEvent.click(screen.getByRole("button", { name: /Coverage Card/i }));
-    fireEvent.click(screen.getByRole("button", { name: /Coverage Card/i }));
+    rerender(<CardCoverageDashboard />);
     expect(await screen.findByRole("img", { name: "Coverage Card" })).toHaveTextContent(
       "Coverage Card",
     );

@@ -315,7 +315,7 @@ function CardReportRow({
   const imageLookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
   const { src: artSrc } = useCardImage(imageLookup.name, {
-    size: "art_crop",
+    size: isToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
