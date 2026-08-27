@@ -18,6 +18,7 @@ import { GameCardPreview } from "../GameCardPreview.tsx";
 // assert the forwarded name without loading Scryfall assets. Mirrors the mocks
 // in CardPreview.test.tsx.
 vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardBackImage: () => ({ src: "card-back.png", isLoading: false }),
   useCardImage: () => ({
     src: "card.png",
     isLoading: false,
@@ -268,7 +269,7 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.getAllByAltText("Card back").length).toBeGreaterThan(0);
     expect(screen.queryByAltText("Pithing Needle")).toBeNull();
   });
 
@@ -285,7 +286,7 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.getAllByAltText("Card back").length).toBeGreaterThan(0);
     expect(screen.queryByAltText("Pithing Needle")).toBeNull();
   });
 

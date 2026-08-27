@@ -34,7 +34,7 @@ vi.mock("../../../services/scryfall.ts", async (importOriginal) => {
         border_color: "black",
         frame_effects: [],
         full_art: false,
-        faces: [{ normal: cardUrl(EN_ID), art_crop: cardUrl(EN_ID) }],
+        faces: [{ small: cardUrl(EN_ID), normal: cardUrl(EN_ID), art_crop: cardUrl(EN_ID) }],
       },
     ]),
   };
@@ -56,10 +56,14 @@ describe("PrintingPickerModal localized art", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
+        (url: string) => {
+          if (url !== "/scryfall-images.de.json") {
+            return Promise.resolve(new Response(null, { status: 404 }));
+          }
+          return new Promise<Response>((resolve) => {
             settle = resolve;
-          }),
+          });
+        },
       ),
     );
 
@@ -75,7 +79,12 @@ describe("PrintingPickerModal localized art", () => {
     expect(img).toHaveAttribute("src", cardUrl(EN_ID));
 
     settle!(
-      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+      new Response(JSON.stringify({
+        [EN_ID]: {
+          id: DE_ID,
+          faces: [{ small: cardUrl(DE_ID), normal: cardUrl(DE_ID), art_crop: cardUrl(DE_ID) }],
+        },
+      }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),

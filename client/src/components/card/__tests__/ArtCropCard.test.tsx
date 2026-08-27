@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
-import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { ArtCropCard } from "../ArtCropCard.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
   useCardImage: vi.fn(() => ({ src: null, isLoading: true })),
 }));
 
@@ -152,11 +152,13 @@ describe("ArtCropCard", () => {
     // A URL that resolves but 404s (future-dated set, stale token image ref).
     // Without an onError handler the default renderer would show the browser's
     // broken-image glyph — the same defect issue #6156 reports.
+    const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "https://example.invalid/kuruk.png",
       isLoading: false,
       isRotated: false,
       isFlip: false,
+      advanceFailedSource,
     });
 
     render(<ArtCropCard objectId={101} />);
@@ -164,6 +166,21 @@ describe("ArtCropCard", () => {
     const img = document.querySelector("img");
     expect(img).not.toBeNull();
     fireEvent.error(img!);
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/kuruk.png");
+
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...transformedPermanent(), timestamp: 2 } },
+        } as never,
+      });
+    });
 
     expect(screen.getByRole("img", { name: "Kuruk, the Mastodon" })).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
@@ -172,19 +189,20 @@ describe("ArtCropCard", () => {
   });
 
   it("re-tries the art when the source changes after a load failure", () => {
-    // Mirrors CardImage's equivalent. Without the reset effect a permanent
-    // whose front-face art 404s would stay latched on the text tile across a
-    // DFC transform forever, even once a loadable face arrives.
+    // Mirrors CardImage's equivalent. A permanent whose front-face source
+    // fails must still render the new source supplied after a DFC transform.
+    const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "https://example.invalid/front.png",
       isLoading: false,
       isRotated: false,
       isFlip: false,
+      advanceFailedSource,
     });
 
     render(<ArtCropCard objectId={101} />);
     fireEvent.error(document.querySelector("img")!);
-    expect(document.querySelector("img")).toBeNull();
+    expect(advanceFailedSource).toHaveBeenCalledWith("https://example.invalid/front.png");
 
     // ArtCropCard is memo()'d on `objectId`, so re-rendering with identical
     // props bails out before the hook is re-read. Push a fresh object identity
@@ -243,7 +261,7 @@ describe("ArtCropCard", () => {
 
     render(<ArtCropCard objectId={101} />);
 
-    expect(screen.getByAltText("Face-down card")).toBeInTheDocument();
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
     expect(mockUseCardImage).toHaveBeenCalledWith(
       "",
       expect.objectContaining({
@@ -287,14 +305,15 @@ describe("ArtCropCard", () => {
 
   it("falls back to the card back when face-down marker art fails to load", () => {
     // ArtCropCard is the default battlefield renderer. Keep its marker failure
-    // path covered separately from CardImage: the component owns its own
-    // artError state and must never leave a face-down permanent as a broken
-    // image when a marker printing is unavailable.
+    // path covered separately from CardImage: it must advance the hook-owned
+    // source chain and never leave a face-down permanent as a broken image.
+    const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
       isLoading: false,
       isRotated: false,
       isFlip: false,
+      advanceFailedSource,
     });
     const permanent = {
       ...transformedPermanent(),
@@ -319,7 +338,24 @@ describe("ArtCropCard", () => {
 
     fireEvent.error(marker);
 
-    expect(screen.getByAltText("Manifest")).toHaveAttribute("src", CARD_BACK_URL);
+    expect(advanceFailedSource).toHaveBeenCalledWith(
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...permanent, timestamp: 2 } },
+        } as never,
+      });
+    });
+
+    expect(screen.getByAltText("Card back")).toHaveAttribute("src", "card-back.png");
   });
 
   it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {

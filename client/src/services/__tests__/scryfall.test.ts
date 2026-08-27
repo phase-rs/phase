@@ -315,6 +315,23 @@ describe("fetchCardData — combined multi-face names", () => {
   });
 });
 
+describe("manaSymbolSourceUrl", () => {
+  it.each([
+    ["W/U", "WU"],
+    ["W/U/P", "WUP"],
+    ["2/G", "2G"],
+    ["∞", "INFINITY"],
+    ["½", "HALF"],
+    ["1000000", "1000000"],
+  ])("maps %s to the exact Scryfall filename %s", async (shard, filename) => {
+    const { manaSymbolSourceUrl } = await loadScryfallModule();
+
+    expect(manaSymbolSourceUrl(shard)).toBe(
+      `https://svgs.scryfall.io/card-symbols/${filename}.svg`,
+    );
+  });
+});
+
 describe("fetchCardImageUrl", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -1357,12 +1374,38 @@ describe("localized card art", () => {
     frame_effects: [],
     full_art: false,
     faces: [
-      { normal: cardUrl(id, "normal", "front", query), art_crop: cardUrl(id, "art_crop") },
-      { normal: cardUrl(id, "normal", "back", query), art_crop: cardUrl(id, "art_crop", "back") },
+      {
+        small: cardUrl(id, "small", "front", query),
+        normal: cardUrl(id, "normal", "front", query),
+        art_crop: cardUrl(id, "art_crop"),
+      },
+      {
+        small: cardUrl(id, "small", "back", query),
+        normal: cardUrl(id, "normal", "back", query),
+        art_crop: cardUrl(id, "art_crop", "back"),
+      },
     ],
   });
 
-  function stubLocaleArt(map: Record<string, string>) {
+  function localizedArt(id: string) {
+    return {
+      id,
+      faces: [
+        {
+          small: cardUrl(id, "small", "front", "?exact-small"),
+          normal: cardUrl(id),
+          art_crop: cardUrl(id, "art_crop"),
+        },
+        {
+          small: cardUrl(id, "small", "back", "?exact-small"),
+          normal: cardUrl(id, "normal", "back"),
+          art_crop: cardUrl(id, "art_crop", "back"),
+        },
+      ],
+    };
+  }
+
+  function stubLocaleArt(map: Record<string, ReturnType<typeof localizedArt>>) {
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(map), {
         status: 200,
@@ -1377,7 +1420,7 @@ describe("localized card art", () => {
 
   it("swaps the image to the localized printing, keeping the chosen printing", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     const resolved = mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal");
@@ -1389,7 +1432,7 @@ describe("localized card art", () => {
 
   it("keeps English art when the printing has no localized sibling", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     // Reach guard FIRST: prove the map actually loaded and the lookup runs.
@@ -1404,7 +1447,7 @@ describe("localized card art", () => {
 
   it("localizes the back face and the art crop", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     // A localized Scryfall id addresses the whole printing; front/back is a path
@@ -1415,11 +1458,14 @@ describe("localized card art", () => {
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "art_crop")).toBe(
       cardUrl(DE_ID, "art_crop"),
     );
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "small")).toBe(
+      cardUrl(DE_ID, "small", "front", "?exact-small"),
+    );
   });
 
   it("is a no-op for English", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
 
@@ -1439,7 +1485,11 @@ describe("localized card art", () => {
     const mod = await loadScryfallModule();
     // Map the placeholder's and card back's own ids too, so the guard is doing
     // the work rather than a lookup simply missing.
-    stubLocaleArt({ [EN_ID]: DE_ID, soon: DE_ID, "0aeebaf5-8c7d-4636-9e82-8c27447861f7": DE_ID });
+    stubLocaleArt({
+      [EN_ID]: localizedArt(DE_ID),
+      soon: localizedArt(DE_ID),
+      "0aeebaf5-8c7d-4636-9e82-8c27447861f7": localizedArt(DE_ID),
+    });
     await mod.loadLocaleArt("de");
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
 
@@ -1485,7 +1535,7 @@ describe("localized card art", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     settle!(
-      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+      new Response(JSON.stringify({ [EN_ID]: localizedArt(DE_ID) }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -1495,7 +1545,7 @@ describe("localized card art", () => {
     // Same Map instance, so the body was parsed once and both callers observe
     // one shared map rather than two equal copies.
     expect(mapA).toBe(mapB);
-    expect(mapA.get(EN_ID)).toBe(DE_ID);
+    expect(mapA.get(EN_ID)).toEqual(localizedArt(DE_ID));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // Reach guard: the deduped map is the one that actually got installed, so
     // the identity assertions above are not describing a map nobody uses.
