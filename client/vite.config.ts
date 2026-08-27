@@ -196,7 +196,7 @@ function dataFileDefines(mode: string): Record<string, string> {
     // printing has no localized sibling. An explicit env override still wins.
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify(
       process.env.SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE ||
-        (base ? `${base}/scryfall-images.{lng}.json` : "/scryfall-images.{lng}.json"),
+        (base ? `${base}/scryfall-images.v2.{lng}.json` : "/scryfall-images.v2.{lng}.json"),
     ),
   };
   for (const filename of manifest) {
@@ -338,7 +338,7 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            // Per-locale card-ART maps (`scryfall-images.<lng>.json`), the image
+            // Per-locale card-ART maps (`scryfall-images.v2.<lng>.json`), the image
             // counterpart to the content sidecars above. The data-manifest rule
             // below is an exact-name alternation that does not list these, and
             // the precache glob covers only js/css/html — so without this rule a
@@ -355,7 +355,7 @@ export default defineConfig(({ mode }) => ({
             // second branch keeps the same-origin path working in dev/Tauri,
             // where the files are served from the site root.
             urlPattern:
-              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.[a-z]{2}\.json$|\/scryfall-images\.[a-z]{2}\.json$)/,
+              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.v2\.[a-z]{2}\.json$|\/scryfall-images\.v2\.[a-z]{2}\.json$)/,
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "card-art-locale-maps",

@@ -57,7 +57,7 @@ describe("PrintingPickerModal localized art", () => {
       "fetch",
       vi.fn(
         (url: string) => {
-          if (url !== "/scryfall-images.de.json") {
+          if (url !== "/scryfall-images.v2.de.json") {
             return Promise.resolve(new Response(null, { status: 404 }));
           }
           return new Promise<Response>((resolve) => {

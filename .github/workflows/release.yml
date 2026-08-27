@@ -319,17 +319,18 @@ jobs:
         #
         # Same `mtgjson-` prefix as the draft-pools pair (so /clear-caches
         # mtgjson sweeps it) and the same published-data suffix. The generator's
-        # script hash joins the key because LOCALE_MAP lives in the script: a
-        # locale added there must rebuild, and the data-version suffix alone
-        # cannot see a source change.
+        # The v2 schema name prevents an old ID-only cache entry from reaching a
+        # client that expects exact face URLs. The Scryfall bulk cache rolls
+        # daily, so its day belongs in this output cache key too: exact face
+        # URLs are an input to this map, not merely a validation detail.
         #
         # NO restore-keys: every input to the output is in the key, so an
         # inexact hit is by construction a stale map.
         id: locale-images-cache
         uses: actions/cache/restore@v4
         with:
-          path: client/public/scryfall-images.*.json
-          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          path: client/public/scryfall-images.v2.*.json
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
 
       # Separate from the Scryfall step: this reads MTGJSON set files, not the
       # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
@@ -348,8 +349,8 @@ jobs:
         if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: client/public/scryfall-images.*.json
-          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          path: client/public/scryfall-images.v2.*.json
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
 
       - name: Save Scryfall bulk data
         # data/scryfall is complete once the four generators have run. Banking
