@@ -89,6 +89,14 @@ export async function attemptStateRehydrate(): Promise<boolean> {
     // restore when `MULTIPLAYER_MODE` is set, but we've already short-
     // circuited non-ai/non-local modes above.
     await adapter.restoreState(snapshot);
+    const resumed = await adapter.resumeRestoredGameState?.();
+    if (resumed) {
+      useGameStore.getState().commitEngineSnapshot(resumed.snapshot, {
+        events: [],
+        logEntries: resumed.presentation.logEntries,
+        extraState: { restoredStackAutomation: resumed.presentation },
+      });
+    }
     debugLog(
       `engine-recovery: rehydrated from ${usedIdbFallback ? "IDB" : "store"}`,
       "warn",

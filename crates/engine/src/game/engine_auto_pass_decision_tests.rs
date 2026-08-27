@@ -1427,7 +1427,8 @@ fn fenced_session_caps_a_natural_token_batch_at_its_matching_prefix() {
         state
             .battlefield
             .iter()
-            .filter(|id| state.objects[id].is_token)
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.is_token)
             .count(),
         2,
         "the true token batch ran, but its execution was capped at the authorized prefix"

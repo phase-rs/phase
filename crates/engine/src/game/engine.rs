@@ -7647,17 +7647,18 @@ fn stack_resolution_session_priority_decision(
             if remaining_budget == 0 || !top_matches {
                 None
             } else {
-                if priority_player_has_meaningful_action(state) {
-                    if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
-                        && matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
-                    {
-                        return StackResolutionSessionPriorityDecision::PauseRetained;
-                    }
-                    if !session.representatives.contains(&canonical_holder)
-                        && matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
-                    {
-                        return StackResolutionSessionPriorityDecision::Pause;
-                    }
+                let rechecks =
+                    session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+                let holder_is_representative = session.representatives.contains(&canonical_holder);
+                if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+                    && (rechecks || !holder_is_representative)
+                    && priority_player_has_meaningful_action(state)
+                {
+                    return if rechecks {
+                        StackResolutionSessionPriorityDecision::PauseRetained
+                    } else {
+                        StackResolutionSessionPriorityDecision::Pause
+                    };
                 }
                 let matching_prefix = state
                     .stack

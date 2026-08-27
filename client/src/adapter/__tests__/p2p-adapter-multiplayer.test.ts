@@ -139,7 +139,12 @@ const mocks = vi.hoisted(() => {
         legalResult: { actions: [], autoPassRecommended: false },
         seq: 1,
       },
-      presentation: { type: "None" },
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
     })),
     projectSeatView: vi.fn(async (stateJson: string) => {
       const state = JSON.parse(stateJson) as {

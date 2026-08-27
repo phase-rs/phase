@@ -274,8 +274,8 @@ export function ActionButton() {
   // A committed human authorization is visible and revocable. AI recheck
   // sessions use the same engine mechanism, but are an internal decision
   // policy rather than a human-owned UI state.
-  const isResolvingStack =
-    autoPass?.type === "UntilStackEmpty" && autoPass.policy !== "RecheckNoMeaningfulPriorityAction";
+  const isResolvingStack = autoPass?.type === "UntilStackEmpty" &&
+    (autoPass.policy === "Committed" || autoPass.policy === undefined);
   const canActDuringAutoPass =
     mode === "combat-attackers" || mode === "combat-blockers";
 

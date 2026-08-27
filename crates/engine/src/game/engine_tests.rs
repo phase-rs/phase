@@ -3815,7 +3815,7 @@ fn elimination_restores_session_baseline_before_departing_preferences_are_cleane
     });
 
     let mut events = Vec::new();
-    elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+    crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
 
     assert!(state.stack_resolution_session.is_none());
     assert!(

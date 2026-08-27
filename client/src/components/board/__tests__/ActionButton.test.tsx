@@ -353,6 +353,7 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resolving Stack..." })).not.toBeInTheDocument();
   });
 

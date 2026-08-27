@@ -352,8 +352,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           }
         }
         // Re-check the complete attempt identity after every await. A matching
-        // WaitingFor payload in a new game/session is still stale, as is a
-        // Priority action computed before Resolve All took ownership.
+        // WaitingFor payload in a new game/session is still stale.
         if (!isAttemptCurrent(attempt)) {
           const currentWaitingFor = useGameStore.getState().gameState?.waiting_for ?? null;
           debugLog(
@@ -439,8 +438,6 @@ export function createAIController(config: AIControllerConfig): AIController {
           // A new snapshot gets a fresh failure budget even for an A→A
           // transition whose serialized WaitingFor payload is identical.
           lastWaitingForKey = null;
-        }
-        if (waitingForChanged || sessionChanged) {
           checkAndSchedule();
         }
       },

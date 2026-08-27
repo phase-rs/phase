@@ -41,7 +41,7 @@ export function ResolutionProgressOverlay() {
               </div>
               <button
                 type="button"
-                className="rounded-md px-2 py-1 text-xs font-medium text-cyan-200 transition hover:bg-white/10"
+                className="min-h-11 min-w-11 rounded-md px-2 py-1 text-xs font-medium text-cyan-200 transition hover:bg-white/10"
                 onClick={dismiss}
               >
                 {t("restoredAutomation.dismiss")}
