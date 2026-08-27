@@ -1,11 +1,14 @@
 import { motion } from "framer-motion";
 
-import { useCardImage } from "../../hooks/useCardImage";
+import {
+  ResolvedAnimationImage,
+  type AnimationImageSnapshot,
+} from "./ResolvedAnimationImage.tsx";
 
 interface CastArcAnimationProps {
   from: { x: number; y: number };
   to: { x: number; y: number };
-  cardName: string;
+  snapshot: AnimationImageSnapshot | null;
   mode: "cast" | "resolve-permanent" | "resolve-spell";
   onComplete: () => void;
 }
@@ -14,10 +17,44 @@ const CARD_WIDTH = 80;
 const CARD_HEIGHT = 112;
 const ARC_HEIGHT = 100;
 
+function CardTileFallback({ cardName }: { cardName: string | null }) {
+  return (
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        backgroundColor: "rgba(0,0,0,0.7)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "white",
+        fontSize: "0.6rem",
+        textAlign: "center",
+        padding: 4,
+      }}
+    >
+      {cardName}
+    </div>
+  );
+}
+
+function CastCardImage({ snapshot }: { snapshot: AnimationImageSnapshot | null }) {
+  if (!snapshot) return <CardTileFallback cardName={null} />;
+  return (
+    <ResolvedAnimationImage
+      snapshot={snapshot}
+      size="normal"
+      alt={snapshot.cardName}
+      fallback={<CardTileFallback cardName={snapshot.cardName} />}
+      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+    />
+  );
+}
+
 export function CastArcAnimation({
   from,
   to,
-  cardName,
+  snapshot,
   mode,
   onComplete,
 }: CastArcAnimationProps) {
@@ -25,8 +62,6 @@ export function CastArcAnimation({
   // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
   // upscale. Requesting `normal` keeps this overlay byte-identical to before
   // `small` became a distinct asset.
-  const { src } = useCardImage(cardName, { size: "normal" });
-
   if (mode === "resolve-spell") {
     // Instant/sorcery: fade out with scale reduction at current position
     return (
@@ -48,31 +83,7 @@ export function CastArcAnimation({
           boxShadow: "0 0 12px rgba(59, 130, 246, 0.5)",
         }}
       >
-        {src && (
-          <img
-            src={src}
-            alt={cardName}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-          />
-        )}
-        {!src && (
-          <div
-            style={{
-              width: "100%",
-              height: "100%",
-              backgroundColor: "rgba(0,0,0,0.7)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "white",
-              fontSize: "0.6rem",
-              textAlign: "center",
-              padding: 4,
-            }}
-          >
-            {cardName}
-          </div>
-        )}
+        <CastCardImage snapshot={snapshot} />
       </motion.div>
     );
   }
@@ -114,31 +125,7 @@ export function CastArcAnimation({
         overflow: "hidden",
       }}
     >
-      {src && (
-        <img
-          src={src}
-          alt={cardName}
-          style={{ width: "100%", height: "100%", objectFit: "cover" }}
-        />
-      )}
-      {!src && (
-        <div
-          style={{
-            width: "100%",
-            height: "100%",
-            backgroundColor: "rgba(0,0,0,0.7)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "white",
-            fontSize: "0.6rem",
-            textAlign: "center",
-            padding: 4,
-          }}
-        >
-          {cardName}
-        </div>
-      )}
+      <CastCardImage snapshot={snapshot} />
       {/* Glow intensifies at destination */}
       <motion.div
         initial={{ boxShadow: "0 0 4px rgba(59, 130, 246, 0.2)" }}

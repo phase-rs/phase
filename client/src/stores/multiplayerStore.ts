@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
+
 import type {
   FormatConfig,
   GameFormat,
@@ -265,8 +267,8 @@ interface MultiplayerState {
   isSpectator: boolean;
   // PlayerId → display name, captured from playerSlots at game start (ephemeral — not persisted)
   playerNames: Map<number, string>;
-  // PlayerId → avatar art crop URL (ephemeral — assigned at game start)
-  playerAvatars: Map<number, string>;
+  // PlayerId → semantic avatar identity (ephemeral — assigned at game start)
+  playerAvatars: Map<number, PlayerAvatarIdentity>;
   compatibilityPlayerCount: number | null;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;

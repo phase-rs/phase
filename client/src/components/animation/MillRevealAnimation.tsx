@@ -1,11 +1,14 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef } from "react";
 
-import { useCardImage } from "../../hooks/useCardImage";
+import {
+  ResolvedAnimationImage,
+  type AnimationImageSnapshot,
+} from "./ResolvedAnimationImage.tsx";
 
-interface MillCard {
+export interface MillCard {
   objectId: number;
-  cardName: string;
+  snapshot: AnimationImageSnapshot | null;
   colors: string[];
 }
 
@@ -40,7 +43,6 @@ function MillCardElement({
   // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
   // upscale. Requesting `normal` keeps this overlay byte-identical to before
   // `small` became a distinct asset.
-  const { src } = useCardImage(card.cardName, { size: "normal" });
   const glowColor = card.colors.length > 0
     ? card.colors[0]
     : "#6366f1";
@@ -82,10 +84,29 @@ function MillCardElement({
         overflow: "hidden",
       }}
     >
-      {src ? (
-        <img
-          src={src}
-          alt={card.cardName}
+      {card.snapshot ? (
+        <ResolvedAnimationImage
+          snapshot={card.snapshot}
+          size="normal"
+          alt={card.snapshot.cardName}
+          fallback={(
+            <div
+              style={{
+                width: "100%",
+                height: "100%",
+                backgroundColor: "rgba(0,0,0,0.7)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "white",
+                fontSize: "0.6rem",
+                textAlign: "center",
+                padding: 4,
+              }}
+            >
+              {card.snapshot.cardName}
+            </div>
+          )}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       ) : (
@@ -103,7 +124,6 @@ function MillCardElement({
             padding: 4,
           }}
         >
-          {card.cardName}
         </div>
       )}
       <motion.div
