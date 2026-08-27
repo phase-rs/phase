@@ -17,7 +17,10 @@ use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::engine::{
     apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    recover_orphaned_resolve_all, resolve_all_ready_prefix_with_rejection,
+    apply_for_simulation, recover_orphaned_resolve_all, resolve_all_ready_access,
+    resolve_all_ready_prefix, resolve_all_ready_prefix_with_rejection,
+    resume_restored_stack_automation, ResolveAllReadyAccess, RestoredStackAutomationOutcome,
+    RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::preview::{
@@ -2317,10 +2320,6 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
-    // A snapshot written while a Resolve All latch was outstanding restores
-    // with no acting seat; the consumer that would have advanced it lived in
-    // the worker that produced the snapshot.
-    recover_orphaned_resolve_all(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2328,6 +2327,50 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
     Ok(())
+}
+
+/// Explicitly drive any persisted stack automation after a successful restore.
+///
+/// [`restore_game_state`] deliberately remains an undo/decode boundary: it
+/// installs a playable snapshot but never manufactures a priority pass. This
+/// separately-invoked transition is the only WASM owner allowed to ask the
+/// engine to resume a saved `StackResolutionSession` or legacy Ready latch.
+/// Its bounded engine-authored presentation describes the automated burst;
+/// callers read the final game snapshot through the normal state exports.
+#[wasm_bindgen]
+pub fn resume_restored_game_state() -> Result<JsValue, JsValue> {
+    resume_loaded_stack_automation(false)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Resume persisted stack automation from the state currently installed in
+/// this WASM instance.
+///
+/// A normal local restore has already invalidated undo's abandoned replay and
+/// proposal authority, so its no-op resume leaves those stores alone. A real
+/// engine transition (including an authorization repair) invalidates them once
+/// at the same boundary. Multiplayer host resume installs a new game identity,
+/// so it requests that reset even for an ordinary-priority no-op.
+fn resume_loaded_stack_automation(
+    reset_on_noop: bool,
+) -> Result<RestoredStackAutomationPresentation, String> {
+    let resumed = GAME_STATE.with(|cell| {
+        let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
+        let resumed = resume_restored_stack_automation(&mut state);
+        cell.set(Some(state));
+        Ok::<_, String>(resumed)
+    })?;
+    let changed = !matches!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Noop
+    );
+    if changed || reset_on_noop {
+        clear_ai_session_cache();
+        REPLAY_LOG.with(|cell| cell.set(None));
+        invalidate_ai_proposals();
+    }
+    Ok(resumed.presentation)
 }
 
 /// Resume a multiplayer host session from a persisted `GameState`.
@@ -2362,7 +2405,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
 /// Refuses when the engine is already in use — this is a fresh-instance
 /// entry point. Callers must clear any existing state first.
 #[wasm_bindgen]
-pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
+pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err(JsValue::from_str(
             "resume_multiplayer_host_state refused: multiplayer mode already set",
@@ -2392,20 +2435,15 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
-    // Mirrors `server-core::GameSession::from_persisted`: a host that reloaded
-    // while a Resolve All latch was outstanding would otherwise resume into a
-    // state no seat can advance, with returning guests bound to a dead prompt.
-    recover_orphaned_resolve_all(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
-    clear_ai_session_cache();
-    // Multiplayer games are out of scope for v1 recording (see
-    // `crates/engine/src/types/replay.rs`); ensure no stale local-game
-    // recording from this worker's previous session lingers.
-    REPLAY_LOG.with(|cell| cell.set(None));
-    invalidate_ai_proposals();
-    Ok(())
+    // The fresh RNG state is installed before the engine evaluates the saved
+    // session, and no caller can observe the hosted snapshot until this
+    // returns its bounded engine presentation.
+    resume_loaded_stack_automation(true)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
@@ -4638,6 +4676,42 @@ mod tests {
         }
     }
 
+    fn legacy_ready_state() -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.priority_player = PlayerId(0);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_200, PlayerId(1)));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 0 },
+        )
+        .expect("controlled priority holder starts Resolve All consent");
+        let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {
+            panic!("Resolve All must prompt its remaining representative");
+        };
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("representative grants the legacy consent run");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+        ));
+        state
+    }
+
     fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
         let object_id = create_object(
             state,
@@ -4736,59 +4810,82 @@ mod tests {
     }
 
     #[test]
-    fn resolve_all_exported_path_records_one_atomic_replay_boundary() {
+    fn restore_is_decode_only_until_explicit_stack_automation_resume() {
         clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&legacy_ready_state()).expect("state serializes");
 
-        let mut state = GameState::new_two_player(8);
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        state.priority_player = PlayerId(0);
-        state.stack.push_back(no_op_stack_entry(1, PlayerId(0)));
-        let header = ReplayHeader {
-            format_config: state.format_config.clone(),
-            match_config: state.match_config,
-            player_count: state.players.len() as u8,
-            first_player: Some(0),
-            seed: state.rng_seed,
-            deck_data: None,
-        };
-        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        restore_game_state(&json).expect("generic restore installs the snapshot");
+        with_state(|state| {
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ResolveAllReady { .. }
+            ));
+            assert_eq!(state.stack.len(), 1, "restore must not resolve an entry");
+        })
+        .expect("restored state remains installed");
 
-        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
-        apply(&mut state, PlayerId(0), begin.clone())
-            .expect("P0 begins the Resolve All consent run");
-        record_replay_action(false, PlayerId(0), begin);
-        let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {
-            panic!(
-                "P1 should be asked for consent, got {:?}",
-                state.waiting_for
-            );
-        };
-        let grant = GameAction::RespondResolveAllConsent {
-            epoch,
-            decision: ResolveAllConsentDecision::Grant,
-        };
-        apply(&mut state, PlayerId(1), grant.clone()).expect("P1 grants Resolve All consent");
-        record_replay_action(false, PlayerId(1), grant);
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
-        GAME_STATE.with(|cell| cell.set(Some(state)));
+        let presentation: RestoredStackAutomationPresentation = serde_wasm_bindgen::from_value(
+            resume_restored_game_state().expect("explicit resume enters the engine seam"),
+        )
+        .expect("explicit resume presentation deserializes");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        with_state(|state| assert!(state.stack.is_empty()))
+            .expect("resumed state remains installed");
+        clear_game_state();
+    }
 
-        resolve_all(0, "[]", 0).expect("the Ready consumer resolves through the WASM bridge");
+    #[test]
+    fn explicit_resume_is_one_shot_and_revokes_proposals_on_progress() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&legacy_ready_state()).expect("state serializes");
+        restore_game_state(&json).expect("generic restore installs the snapshot");
 
-        REPLAY_LOG.with(|cell| {
-            let log = cell.take().expect("the replay log remains installed");
-            assert_eq!(log.actions.len(), 2);
-            assert_eq!(log.resolve_all_boundaries.len(), 1);
-            let boundary = &log.resolve_all_boundaries[0];
-            assert_eq!(boundary.after_action_count, 2);
-            assert_eq!(boundary.requester, PlayerId(0));
-            cell.set(Some(log));
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
         });
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+
+        let first = resume_loaded_stack_automation(false).expect("resume progresses once");
+        assert_eq!(first.outcome, RestoredStackAutomationOutcome::Progressed);
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+
+        let second = resume_loaded_stack_automation(false).expect("second resume is harmless");
+        assert_eq!(second.outcome, RestoredStackAutomationOutcome::Noop);
         clear_game_state();
+    }
+
+    #[test]
+    fn multiplayer_host_resume_returns_post_automation_presentation() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&legacy_ready_state()).expect("state serializes");
+
+        let presentation: RestoredStackAutomationPresentation = serde_wasm_bindgen::from_value(
+            resume_multiplayer_host_state(&json).expect("host resume succeeds"),
+        )
+        .expect("host resume presentation deserializes");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(is_multiplayer_mode());
+        with_state(|state| assert!(state.stack.is_empty()))
+            .expect("post-resume host state remains installed");
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 
     #[test]
