@@ -11718,7 +11718,7 @@ fn apply_action(
                 mode: AutoPassRequest::UntilTurnBoundary { until },
             },
         ) => {
-            store_auto_pass_request(
+            store_direct_auto_pass_request(
                 state,
                 *player,
                 AutoPassRequest::UntilTurnBoundary { until },
@@ -11743,7 +11743,7 @@ fn apply_action(
                 mode: AutoPassRequest::UntilTurnBoundary { until },
             },
         ) => {
-            store_auto_pass_request(
+            store_direct_auto_pass_request(
                 state,
                 *player,
                 AutoPassRequest::UntilTurnBoundary { until },

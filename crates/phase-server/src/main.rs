@@ -4366,10 +4366,6 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::Concede => Some(ServerMessage::ActionFailed { message }),
-        ClientMessage::ResolveAll { request_id, .. } => Some(ServerMessage::ResolveAllFailed {
-            request_id: *request_id,
-            message,
-        }),
         ClientMessage::PreviewManaPayment { request_id, .. } => {
             Some(ServerMessage::ManaPaymentPreviewFailed {
                 request_id: *request_id,
@@ -10302,16 +10298,6 @@ mod mode_gate_tests {
                 "disabled".to_string(),
             ),
             Some(ServerMessage::ActionFailed { message }) if message == "disabled"
-        ));
-        assert!(matches!(
-            operation_failed_message(
-                &ClientMessage::ResolveAll {
-                    request_id: 4,
-                    max_resolutions: 1,
-                },
-                "disabled".to_string(),
-            ),
-            Some(ServerMessage::ResolveAllFailed { request_id: 4, message }) if message == "disabled"
         ));
         assert!(matches!(
             operation_failed_message(
