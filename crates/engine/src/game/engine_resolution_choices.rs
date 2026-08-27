@@ -5657,39 +5657,23 @@ pub(super) fn handle_resolution_choice(
                         &chosen,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    let mut child = frame;
-                    child.pending.chain = Box::new(operation.clone());
-                    child.pending.attachment_choice =
-                        Some(crate::types::game_state::PendingAttachmentChoice {
-                            operation: Box::new(operation.clone()),
-                        });
-                    state
-                        .resolve_and_apply_frame_transition(
-                            crate::types::resolved_commands::ResolvedFrameTransition::Push {
-                                frame:
-                                    crate::types::resolution::ResolutionFrame::AbilityContinuation(
-                                        child,
-                                    ),
-                            },
-                        )
-                        .expect("attachment choice child frame must push atomically");
                     set_priority(state, player);
                     let resolve_result = effects::attach::resolve(&mut *state, &operation, events);
                     if let Some(snapshot) = trigger_snapshot {
                         crate::game::triggers::restore_trigger_event_context(state, snapshot);
                     }
                     resolve_result.map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    let opened_follow_up_prompt =
-                        !matches!(state.waiting_for, WaitingFor::Priority { .. });
-                    if opened_follow_up_prompt {
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        // CR 608.2c + CR 616.1: `attach::resolve` creates a
+                        // fresh typed child when its chosen host opens another
+                        // Attach choice. An Attached replacement instead parks
+                        // directly above the printed outer continuation, so the
+                        // consumed Attach operation cannot replay after that
+                        // replacement settles.
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             state.waiting_for.clone(),
                         ));
                     }
-                    state
-                        .take_active_ability_continuation()
-                        .expect("completed attachment child must remain active")
-                        .expect("completed attachment child must exist");
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
