@@ -8725,9 +8725,25 @@ fn apply_action(
     let action_for_divergence = action.clone();
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
-    // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
-    // variants (where `authorized_submitter` is None when multiple players are pending)
-    // still clear per-actor side-effect state correctly.
+    // CR 723.1: A Priority-window action belongs to the semantic priority
+    // seat, not necessarily to its authenticated submitter. In
+    // particular, a turn controller can act for P0; tearing down P2's
+    // representative instead would leave P0's frozen cohort live and let the
+    // boundary runner resolve an entry after P0 deliberately acted. Outside a
+    // Priority window retain the authenticated actor: simultaneous mulligan
+    // variants have no single semantic priority seat.
+    // CR 117.6 + CR 805.5b: Canonicalize that seat before consulting a
+    // session, because a shared team's representative owns its priority pass.
+    let session_preference_owner = match (&state.waiting_for, &action) {
+        // CR 104.3a: Concede is the one self-authorized action that may be
+        // submitted while another player holds priority, so it remains scoped
+        // to its authenticated actor rather than that other priority seat.
+        (_, GameAction::Concede { .. }) => actor,
+        (WaitingFor::Priority { player }, _) => {
+            super::topology::priority_pass_representative(state, *player)
+        }
+        _ => actor,
+    };
     match &action {
         GameAction::SetAutoPass { .. }
         | GameAction::PassPriority
@@ -8736,11 +8752,10 @@ fn apply_action(
         | GameAction::RespondResolveAllConsent { .. }
         | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
-            let representative = super::topology::priority_pass_representative(state, actor);
             if state
                 .stack_resolution_session
                 .as_ref()
-                .is_some_and(|session| session.representatives.contains(&representative))
+                .is_some_and(|session| session.representatives.contains(&session_preference_owner))
             {
                 // A representative's deliberate action revokes the frozen
                 // authorization before this action reaches its reducer. Restore
@@ -8750,14 +8765,17 @@ fn apply_action(
                 // resurrect the preference the representative just cancelled.
                 take_and_restore_stack_resolution_session(state);
             } else if let Some(session) = state.stack_resolution_session.as_mut() {
-                if !session.representatives.contains(&representative) {
+                if !session.representatives.contains(&session_preference_owner) {
                     // A deliberate action revokes this nonrepresentative's standing
                     // preference. Keep the deferred restore baseline in lockstep so
                     // a later session teardown cannot resurrect the revoked mode.
-                    session.auto_pass_overlay.baseline.remove(&actor);
+                    session
+                        .auto_pass_overlay
+                        .baseline
+                        .remove(&session_preference_owner);
                 }
             }
-            state.auto_pass.remove(&actor);
+            state.auto_pass.remove(&session_preference_owner);
         }
     }
 

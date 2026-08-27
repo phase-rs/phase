@@ -1715,6 +1715,94 @@ fn representative_mana_action_ends_session_without_resolving_frozen_entry() {
     );
 }
 
+/// A turn controller's deliberate Priority action belongs to the controlled
+/// semantic seat. The frozen session and its restored preference must therefore
+/// be keyed by P0, rather than the authenticated controller P2.
+#[test]
+fn turn_controller_action_ends_controlled_representative_session_without_resolving() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.turn_decision_controller = Some(PlayerId(2));
+    state.priority_player = PlayerId(2);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+
+    let frozen_entry_id = ObjectId(19_912);
+    push_simple_stack_entry(&mut state, frozen_entry_id.0, PlayerId(0));
+    let p1_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let land_id = create_object(
+        &mut state,
+        CardId(19_913),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&land_id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+
+    // P2 is the authenticated controller, but this installs P0's semantic
+    // Priority preference and pauses at P1's meaningful response.
+    apply(
+        &mut state,
+        PlayerId(2),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    assert!(state.stack_resolution_session.is_some());
+    assert_eq!(state.stack.back().unwrap().id, frozen_entry_id);
+
+    // Give the controlled P0 seat another normal Priority window with no
+    // opponent response. Playing a land is a deliberate, off-stack action.
+    state.objects.remove(&p1_action);
+    state.priority_player = PlayerId(2);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let result = apply(
+        &mut state,
+        PlayerId(2),
+        GameAction::PlayLand {
+            object_id: land_id,
+            card_id: CardId(19_913),
+        },
+    )
+    .unwrap();
+
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(state.stack.back().unwrap().id, frozen_entry_id);
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+        "the former cohort must not resolve after P2 acts for P0"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "teardown must not resurrect P0's pre-overlay preference"
+    );
+}
+
 #[test]
 fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
     let mut state = priority_state();
