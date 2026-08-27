@@ -1087,6 +1087,147 @@ fn until_stack_empty_resolves_large_stack_in_one_apply() {
 }
 
 #[test]
+fn direct_until_stack_empty_installs_a_fenced_session_before_auto_resolving() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_900, PlayerId(0));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("a nonempty direct UntilStackEmpty request installs a session");
+    assert_eq!(session.cursor, 0);
+    assert_eq!(session.entries.len(), 1);
+    assert_eq!(
+        session.representatives,
+        [PlayerId(0)].into_iter().collect(),
+        "the direct request stores the semantic priority representative"
+    );
+    assert_eq!(session.policy, StackResolutionPolicy::Committed);
+    assert_eq!(
+        session.budget,
+        crate::types::game_state::StackResolutionBudget::Unlimited
+    );
+    assert!(matches!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(AutoPassMode::UntilStackEmpty {
+            policy: StackResolutionPolicy::Committed,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fenced_session_stops_before_passing_when_the_top_entry_changes() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_901, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    state.stack.back_mut().unwrap().source_id = ObjectId(19_902);
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "a changed top fence tears down the authorization"
+    );
+    assert!(
+        result.events.is_empty(),
+        "the changed entry was never passed or resolved"
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(1)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "teardown restores the complete pre-overlay preference map"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "the temporary representative overlay is removed with the session"
+    );
+}
+
+#[test]
+fn fenced_session_budget_caps_the_resolver_before_a_natural_batch_can_escape() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_903, PlayerId(0));
+    push_simple_stack_entry(&mut state, 19_904, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.stack_resolution_session.as_mut().unwrap().budget =
+        crate::types::game_state::StackResolutionBudget::from_legacy_max_resolutions(1);
+    state.objects.remove(&priority_action);
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert_eq!(state.stack.len(), 1, "the one-entry budget is exact");
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        1
+    );
+    assert!(state.stack_resolution_session.is_none());
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
+#[test]
 fn until_stack_empty_stops_on_non_requester_meaningful_action() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 20_000, PlayerId(1));

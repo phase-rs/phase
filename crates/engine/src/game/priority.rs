@@ -29,15 +29,25 @@ pub fn handle_priority_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    handle_priority_pass_with_limit(current_seat, state, events, None)
+    handle_priority_pass_with_limit(current_seat, state, events, None).waiting_for
 }
 
-pub fn handle_priority_pass_with_limit(
+/// The observable result of one CR 117.4 priority-pass boundary.
+///
+/// `consumed_stack_entries` is the exact count returned by the stack resolver,
+/// rather than a before/after stack-length estimate. A resolution can create
+/// triggers, so a length delta is not a trustworthy authorization cursor.
+pub(crate) struct PriorityPassOutcome {
+    pub(crate) waiting_for: WaitingFor,
+    pub(crate) consumed_stack_entries: usize,
+}
+
+pub(crate) fn handle_priority_pass_with_limit(
     current_seat: PlayerId,
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
-) -> WaitingFor {
+) -> PriorityPassOutcome {
     let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
 
     // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: In shared-team
@@ -75,7 +85,10 @@ pub fn handle_priority_pass_with_limit(
                     .as_ref()
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
-                turns::auto_advance(state, events)
+                PriorityPassOutcome {
+                    waiting_for: turns::auto_advance(state, events),
+                    consumed_stack_entries: 0,
+                }
             } else if state.phase == crate::types::phase::Phase::Cleanup {
                 // CR 514.3a: Triggered abilities that triggered during the
                 // cleanup step (e.g. Stolen Uniform's "when you lose control
@@ -87,11 +100,17 @@ pub fn handle_priority_pass_with_limit(
                 // returns `None` and advances normally (the until-EOT control
                 // TCE is already pruned, so no new loss event re-fires — the
                 // one-shot trigger is gone, guaranteeing termination).
-                turns::auto_advance(state, events)
+                PriorityPassOutcome {
+                    waiting_for: turns::auto_advance(state, events),
+                    consumed_stack_entries: 0,
+                }
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
                 let _ = turns::advance_phase_once(state, events);
-                turns::auto_advance(state, events)
+                PriorityPassOutcome {
+                    waiting_for: turns::auto_advance(state, events),
+                    consumed_stack_entries: 0,
+                }
             }
         } else {
             // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
@@ -103,12 +122,30 @@ pub fn handle_priority_pass_with_limit(
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
-            for mode in state.auto_pass.values_mut() {
+            let session_representative_auto_pass_keys = state
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| {
+                    state
+                        .auto_pass
+                        .keys()
+                        .copied()
+                        .filter(|player| {
+                            session.representatives.contains(
+                                &super::topology::priority_pass_representative(state, *player),
+                            )
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            for (&player, mode) in state.auto_pass.iter_mut() {
                 if let AutoPassMode::UntilStackEmpty {
                     initial_stack_len, ..
                 } = mode
                 {
-                    *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
+                    if !session_representative_auto_pass_keys.contains(&player) {
+                        *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
+                    }
                 }
             }
 
@@ -116,13 +153,17 @@ pub fn handle_priority_pass_with_limit(
             // ScryChoice, SearchChoice), preserve it instead of overwriting
             // with Priority. Only reset to Priority if the effect didn't
             // request player interaction.
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let waiting_for = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 reset_priority(state);
                 WaitingFor::Priority {
                     player: state.active_player,
                 }
             } else {
                 state.waiting_for.clone()
+            };
+            PriorityPassOutcome {
+                waiting_for,
+                consumed_stack_entries: consumed,
             }
         }
     } else {
@@ -137,7 +178,10 @@ pub fn handle_priority_pass_with_limit(
 
         events.push(GameEvent::PriorityPassed { player_id: next });
 
-        WaitingFor::Priority { player: next }
+        PriorityPassOutcome {
+            waiting_for: WaitingFor::Priority { player: next },
+            consumed_stack_entries: 0,
+        }
     }
 }
 

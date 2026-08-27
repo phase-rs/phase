@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
@@ -3521,6 +3522,47 @@ fn cancel_auto_pass_routes_by_actor() {
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
     );
+}
+
+#[test]
+fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
+    use crate::types::game_state::{
+        AutoPassMode, StackResolutionAutoPassOverlay, StackResolutionBudget,
+        StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let entry = no_op_stack_entry(7_777, PlayerId(0));
+    state.stack.push_back(entry.clone());
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline = BTreeMap::from([(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    )]);
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![StackResolutionEntryFence::capture(&entry)],
+        cursor: 0,
+        representatives: [PlayerId(0)].into_iter().collect(),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    apply(&mut state, PlayerId(0), GameAction::CancelAutoPass)
+        .expect("the representative may cancel its own session");
+
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(state.auto_pass, baseline);
 }
 
 /// Actor-scoped preference mutations must not advance an already-active

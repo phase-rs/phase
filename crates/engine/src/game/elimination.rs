@@ -153,6 +153,14 @@ pub fn eliminate_players_simultaneously(
         }
     }
 
+    // CR 800.4a: elimination can remove frozen stack entries and a session's
+    // canonical representative. Restore the pre-overlay preferences before
+    // `do_eliminate` removes the departing player's own state, so teardown
+    // cannot later resurrect an eliminated seat's auto-pass preference.
+    if !leaving_set.is_empty() {
+        super::engine::take_and_restore_stack_resolution_session(state);
+    }
+
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
         .is_none()
@@ -209,13 +217,6 @@ pub fn eliminate_players_simultaneously(
     if !eliminated_any {
         return;
     }
-
-    // A frozen stack cohort cannot survive CR 800.4a: elimination removes
-    // stack objects and can remove one of the session's canonical
-    // representatives. Phase 1 keeps sessions inert, so clearing the stale
-    // authority is the only safe schema-level response; later session phases
-    // own any overlay restoration before a live runner can install one.
-    state.stack_resolution_session = None;
 
     // CR 800.4a: after ALL owned-exiles, end control effects the leaving players
     // control and exile anything still under a leaver's control. Runs ONCE over
