@@ -36,6 +36,7 @@ import type {
 import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
 import type { ArtChainEntry } from "../stores/preferencesStore.ts";
 import { useFixedVisualImage } from "./useFixedVisualImage.ts";
+import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 
 export interface SourcePrinting {
   setCode: string;
@@ -871,17 +872,14 @@ export function useCardImage(
 
   const activeSource = sources[sourceIndex] ?? null;
   const advanceFailedSource = useCallback((failedSrc: string) => {
-    const current = sources[sourceIndex];
-    if (!current?.src || current.src !== failedSrc) return;
     if (failedSources.current.generation !== requestKey) return;
-    if (failedSources.current.values.has(failedSrc)) return;
-    failedSources.current.values.add(failedSrc);
-    let nextIndex = sourceIndex + 1;
-    while (true) {
-      const nextSrc = sources[nextIndex]?.src;
-      if (!nextSrc || !failedSources.current.values.has(nextSrc)) break;
-      nextIndex += 1;
-    }
+    const nextIndex = nextImageSourceIndex(
+      sources,
+      sourceIndex,
+      failedSources.current.values,
+      failedSrc,
+    );
+    if (nextIndex === null) return;
     const next = sources[nextIndex];
     setSourceIndex(nextIndex);
     setSrc(next?.src ?? null);

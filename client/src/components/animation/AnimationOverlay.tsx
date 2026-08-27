@@ -246,7 +246,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       setActiveShatters((previous) => [
         ...previous,
         {
-          id: pending.id,
+          id: ++deathCloneIdCounter,
           position: pending.position,
           image: outcome.image,
         },

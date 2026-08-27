@@ -24,6 +24,17 @@ export type FaceDownMarkerVisual =
       reason: "no_printed_marker";
     };
 
+const MYSTERIOUS_CREATURE: FaceDownMarkerVisual = {
+  outcome: "reference",
+  name: "A Mysterious Creature",
+  reference: {
+    scryfall_id: "",
+    scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
+    face_name: "a mysterious creature",
+    preset_id: "face-down-cloak",
+  },
+};
+
 /**
  * Exhaustive source table shared by the UI and the offline visual-pack audit.
  * Keeping the explicit `none` row here prevents a newly-added engine cause from
@@ -55,26 +66,8 @@ export const FACE_DOWN_MARKER_VISUALS: Record<FaceDownCause, FaceDownMarkerVisua
   },
   // https://scryfall.com/card/tmkm/21/a-mysterious-creature — cloak and
   // disguise are different rules (CR 701.58a vs CR 702.168a) with one printing.
-  Cloak: {
-    outcome: "reference",
-    name: "A Mysterious Creature",
-    reference: {
-      scryfall_id: "",
-      scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
-      face_name: "a mysterious creature",
-      preset_id: "face-down-cloak",
-    },
-  },
-  Disguise: {
-    outcome: "reference",
-    name: "A Mysterious Creature",
-    reference: {
-      scryfall_id: "",
-      scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
-      face_name: "a mysterious creature",
-      preset_id: "face-down-cloak",
-    },
-  },
+  Cloak: MYSTERIOUS_CREATURE,
+  Disguise: MYSTERIOUS_CREATURE,
   // `TurnedFaceDown` (Ixidron class) has no printed marker and deliberately
   // keeps the generic card back.
   TurnedFaceDown: {

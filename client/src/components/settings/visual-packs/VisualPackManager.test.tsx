@@ -82,7 +82,7 @@ describe("VisualPackManager initialization", () => {
   afterEach(async () => {
     cleanup();
     usePreferencesStore.getState().setLanguage("en");
-    await i18n.changeLanguage("en");
+    await waitFor(() => expect(i18n.resolvedLanguage).toBe("en"));
   });
 
   it("treats plain web as unavailable without making lifecycle calls", async () => {
@@ -233,6 +233,6 @@ describe("VisualPackManager initialization", () => {
     platform.load.mockResolvedValue(null);
     render(<VisualPackManager />);
     expect(await screen.findByText("Catálogo visual sin conexión")).toBeInTheDocument();
-    expect(screen.getByText(/no están configuradas en esta compilación/i)).toBeInTheDocument();
+    expect(screen.getByText(/no ofrece las funciones de almacenamiento local/i)).toBeInTheDocument();
   });
 });

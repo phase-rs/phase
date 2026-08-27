@@ -202,23 +202,23 @@
   },
   "visualPacks": {
     "title": "Catálogo visual sin conexión",
-    "description": "Elija qué imágenes de tarjetas confiables desea conservar en este dispositivo o instale el catálogo actual completo.",
+    "description": "Elige las imágenes que quieres conservar en este dispositivo. El catálogo de tarjetas se almacena en caché desde Scryfall y cada imagen se descarga directamente desde Scryfall.",
     "availability": {
       "loading": "Comprobando el soporte del catálogo visual sin conexión...",
-      "browser": "Las descargas de imágenes sin conexión no están configuradas en esta compilación.",
-      "browserFuture": "Esta compilación no incluye la política de firma de catálogo de confianza necesaria para verificar las descargas de imágenes.",
+      "browser": "Este navegador no ofrece las funciones de almacenamiento local necesarias para descargar imágenes sin conexión.",
+      "browserFuture": "Usa un navegador de escritorio actual con Cache Storage, IndexedDB y compatibilidad con descompresión gzip.",
       "unsupported": "Esta aplicación de escritorio es demasiado antigua para administrar catálogos visuales sin conexión. Actualiza la aplicación para continuar.",
       "empty": "Aún no se ha descargado ningún catálogo visual confiable.",
       "invalid": "No se podía confiar en el catálogo visual local. Actualízalo antes de continuar."
     },
     "selector": {
       "title": "Selección de catálogo",
-      "core": "Imágenes principales",
+      "core": "Reverso de carta",
       "printing": "Impresiones en inglés",
       "locale": "Impresiones de conjuntos localizados",
-      "complete": "Catálogo completo actual",
-      "setCode": "Establecer código",
-      "setPlaceholder": "por ej. aleta",
+      "complete": "Todas las imágenes actuales de cartas en inglés",
+      "setCode": "Código de colección",
+      "setPlaceholder": "por ej. fin",
       "language": "Idioma de la imagen",
       "currentRoot": "Raíz del catálogo actual: {{root}}",
       "invalidSet": "Ingrese un código de juego de caracteres válido de tres a seis."
@@ -240,7 +240,7 @@
       "removeAll": "Eliminar todos los elementos visuales sin conexión"
     },
     "estimate": {
-      "title": "Estimación de backend y cierre de dependencia"
+      "title": "Análisis de la instantánea de Scryfall"
     },
     "metrics": {
       "assetRecords": "Registros de activos",

@@ -33,7 +33,7 @@ function secretOpponent(): GameObject {
     controller: 1,
     zone: "Hand",
     name: "SECRET FACE",
-    printed_ref: { oracle_id: "secret-oracle", face_name: "SECRET FACE" } as never,
+    printed_ref: { oracle_id: "secret-oracle", face_name: "SECRET FACE" },
     token_image_ref: {
       scryfall_id: "secret-printing",
       scryfall_oracle_id: "secret-token-oracle",
@@ -182,7 +182,7 @@ describe("visual-pack owned hand surfaces", () => {
       printed_ref: {
         oracle_id: "current-oracle",
         face_name: "Localized Spirit",
-      } as never,
+      },
       token_image_ref: {
         scryfall_id: "token-printing",
         scryfall_oracle_id: "token-oracle",

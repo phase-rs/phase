@@ -309,8 +309,14 @@ export function useVisualPackManager(): VisualPackManagerState {
     setAvailability({ kind: "loading" });
     setActionError(null);
     try {
-      backendLoadRef.current ??= loadVisualPackBackend();
-      const backend = await backendLoadRef.current;
+      const load = backendLoadRef.current ??= loadVisualPackBackend();
+      let backend: VisualPackBackend | null;
+      try {
+        backend = await load;
+      } catch (error) {
+        if (backendLoadRef.current === load) backendLoadRef.current = null;
+        throw error;
+      }
       if (!mountedRef.current || generation !== requestRef.current.initialize) return;
       if (!backend) {
         setAvailability({ kind: "browser_unavailable" });

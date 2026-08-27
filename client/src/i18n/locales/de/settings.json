@@ -209,7 +209,7 @@
       "browserFuture": "Dieser Build enthält nicht die vertrauenswürdige Katalogsignaturrichtlinie, die zum Überprüfen von Bilddownloads erforderlich ist.",
       "unsupported": "Diese Desktop-App ist zu alt, um visuelle Offline-Kataloge zu verwalten. Aktualisieren Sie die App, um fortzufahren.",
       "empty": "Es wurde noch kein vertrauenswürdiger visueller Katalog heruntergeladen.",
-      "invalid": "Dem lokalen visuellen Katalog konnte nicht vertraut werden. Aktualisieren Sie es, bevor Sie fortfahren."
+      "invalid": "Dem lokalen visuellen Katalog konnte nicht vertraut werden. Aktualisieren Sie ihn, bevor Sie fortfahren."
     },
     "selector": {
       "title": "Katalogauswahl",
@@ -218,7 +218,7 @@
       "locale": "Lokalisierte Satzdrucke",
       "complete": "Kompletter aktueller Katalog",
       "setCode": "Code festlegen",
-      "setPlaceholder": "z.B. Flosse",
+      "setPlaceholder": "z. B. fin",
       "language": "Bildsprache",
       "currentRoot": "Aktueller Katalogstamm: {{root}}",
       "invalidSet": "Geben Sie einen gültigen Code mit drei bis sechs Zeichen ein."
@@ -234,7 +234,7 @@
       "refreshing": "Scryfall-Katalog wird geprüft…",
       "verifyMetadata": "Metadaten überprüfen",
       "verifyFull": "Überprüfen Sie alle Dateien",
-      "repair": "Reparatur ausgewählt",
+      "repair": "Auswahl reparieren",
       "removeSelected": "Ausgewählte entfernen",
       "removeComplete": "Kompletten Katalog entfernen",
       "removeAll": "Entfernen Sie alle Offline-Visuals"
@@ -320,7 +320,7 @@
     "confirm": {
       "cascadeTitle": "Abhängige Pakete entfernen?",
       "cascadeMessage": "Andere installierte Pakete hängen von {{selection}} ab. Die eingefrorene Auswahl und ihre abhängigen Elemente entfernen?",
-      "cascadeAction": "Angehörige entfernen",
+      "cascadeAction": "Abhängige Pakete entfernen",
       "completeTitle": "Diesen kompletten Katalog entfernen?",
       "completeMessage": "Jedes installierte Paket aus dem Katalogstamm {{selection}} entfernen?",
       "allTitle": "Alle Offline-Visuals entfernen?",

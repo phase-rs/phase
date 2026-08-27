@@ -7,6 +7,7 @@ import type {
   CandidateKey,
   CardImageSource,
 } from "../services/visualPacks/types.ts";
+import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 
 export interface UseFixedVisualImageResult {
   src: string | null;
@@ -75,18 +76,14 @@ export function useFixedVisualImage(
   }, [candidate, remoteSrc, requestKey]);
 
   const advanceFailedSource = useCallback((failedSrc: string) => {
-    const current = sources[sourceIndex];
-    if (!current?.src || current.src !== failedSrc) return;
     if (failedSources.current.generation !== requestKey) return;
-    if (failedSources.current.values.has(failedSrc)) return;
-    failedSources.current.values.add(failedSrc);
-
-    let nextIndex = sourceIndex + 1;
-    while (true) {
-      const nextSrc = sources[nextIndex]?.src;
-      if (!nextSrc || !failedSources.current.values.has(nextSrc)) break;
-      nextIndex += 1;
-    }
+    const nextIndex = nextImageSourceIndex(
+      sources,
+      sourceIndex,
+      failedSources.current.values,
+      failedSrc,
+    );
+    if (nextIndex === null) return;
     setSourceIndex(nextIndex);
   }, [requestKey, sourceIndex, sources]);
 

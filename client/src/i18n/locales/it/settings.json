@@ -202,23 +202,23 @@
   },
   "visualPacks": {
     "title": "Catalogo visivo offline",
-    "description": "Scegli quali immagini di carte attendibili conservare su questo dispositivo o installa il catalogo corrente completo.",
+    "description": "Scegli le immagini da conservare su questo dispositivo. Il catalogo delle carte viene memorizzato nella cache da Scryfall, poi ogni immagine viene scaricata direttamente da Scryfall.",
     "availability": {
       "loading": "Verifica del supporto del catalogo visivo offline…",
-      "browser": "I download di immagini offline non sono configurati in questa build.",
-      "browserFuture": "Questa build non include la policy di firma del catalogo attendibile necessaria per verificare i download delle immagini.",
+      "browser": "Questo browser non offre le funzioni di archiviazione locale necessarie per i download di immagini offline.",
+      "browserFuture": "Usa un browser desktop aggiornato con Cache Storage, IndexedDB e supporto alla decompressione gzip.",
       "unsupported": "Questa app desktop è troppo vecchia per gestire i cataloghi visivi offline. Aggiorna l'app per continuare.",
       "empty": "Nessun catalogo visivo attendibile è stato ancora scaricato.",
       "invalid": "Non è possibile considerare attendibile il catalogo visivo locale. Aggiornalo prima di continuare."
     },
     "selector": {
       "title": "Selezione del catalogo",
-      "core": "Elementi visivi principali",
+      "core": "Retro della carta",
       "printing": "Stampe inglesi",
       "locale": "Stampe di set localizzate",
-      "complete": "Catalogo attuale completo",
-      "setCode": "Imposta il codice",
-      "setPlaceholder": "ad es. pinna",
+      "complete": "Tutte le immagini attuali delle carte inglesi",
+      "setCode": "Codice del set",
+      "setPlaceholder": "ad es. fin",
       "language": "Linguaggio dell'immagine",
       "currentRoot": "Radice del catalogo corrente: {{root}}",
       "invalidSet": "Immettere un codice set di caratteri valido da tre a sei caratteri."
@@ -240,7 +240,7 @@
       "removeAll": "Rimuovi tutti gli elementi visivi offline"
     },
     "estimate": {
-      "title": "Stima del backend e chiusura delle dipendenze"
+      "title": "Analisi dell'istantanea di Scryfall"
     },
     "metrics": {
       "assetRecords": "Registri patrimoniali",
@@ -320,7 +320,7 @@
     "confirm": {
       "cascadeTitle": "Rimuovere i pacchetti dipendenti?",
       "cascadeMessage": "Gli altri pacchetti installati dipendono da {{selection}}. Rimuovere la selezione congelata e i suoi dipendenti?",
-      "cascadeAction": "Rimuovere le persone a carico",
+      "cascadeAction": "Rimuovi pacchetti dipendenti",
       "completeTitle": "Rimuovere questo catalogo completo?",
       "completeMessage": "Rimuovere tutti i pacchetti installati dalla radice del catalogo {{selection}}?",
       "allTitle": "Rimuovere tutte le immagini offline?",

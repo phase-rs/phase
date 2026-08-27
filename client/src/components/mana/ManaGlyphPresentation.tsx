@@ -1,5 +1,3 @@
-import { createElement } from "react";
-
 import {
   useManaSymbolImage,
   type ManaSymbolShard,
@@ -30,12 +28,7 @@ export function ManaGlyphPresentation({
     );
   }
   if (isLoading) {
-    return createElement("mana-symbol-placeholder", {
-      alt: notation,
-      "aria-label": notation,
-      className,
-      role: "img",
-    });
+    return <span aria-label={notation} className={className} role="img" />;
   }
   return <span className={className}>{notation}</span>;
 }

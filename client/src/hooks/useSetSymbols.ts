@@ -35,10 +35,10 @@ function validateSetCatalog(value: unknown): ScryfallSetCatalog | null {
       || typeof (raw as Record<string, unknown>).name !== "string"
       || typeof (raw as Record<string, unknown>).released_at !== "string"
     ) {
-      return null;
+      continue;
     }
     const icon = (raw as Record<string, unknown>).icon_svg_uri;
-    if (icon !== undefined && icon !== null && typeof icon !== "string") return null;
+    if (icon !== undefined && icon !== null && typeof icon !== "string") continue;
     catalog[code] = {
       name: (raw as Record<string, string>).name,
       released_at: (raw as Record<string, string>).released_at,

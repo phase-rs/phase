@@ -11,9 +11,7 @@ export interface UsePlayerAvatarImageResult {
   advanceFailedSource(failedSrc: string): void;
 }
 
-type ValidAvatarIdentity = PlayerAvatarIdentity | null;
-
-function validAvatarIdentity(identity: PlayerAvatarIdentity | null): ValidAvatarIdentity {
+function validAvatarIdentity(identity: PlayerAvatarIdentity | null): PlayerAvatarIdentity | null {
   if (!identity || typeof identity !== "object") return null;
   switch (identity.kind) {
     case "card":
@@ -24,8 +22,6 @@ function validAvatarIdentity(identity: PlayerAvatarIdentity | null): ValidAvatar
       return typeof identity.url === "string" && identity.url.trim().length > 0
         ? identity
         : null;
-    default:
-      return null;
   }
 }
 

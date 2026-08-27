@@ -371,7 +371,10 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   }
 
   private async finish(selectedOperation: OperationId): Promise<void> {
-    const finishing = await this.updateOperation(selectedOperation, (current) => ({ ...current, state: "finalizing" }));
+    const finishing = await this.updateOperation(selectedOperation, (current) =>
+      current.state === "downloading" ? { ...current, state: "finalizing" } : current,
+    );
+    if (finishing.state !== "finalizing") return;
     const transaction = this.database.transaction(["state", "operations"], "readwrite");
     const currentOperation = await transaction.objectStore("operations").get(selectedOperation);
     if (!currentOperation || currentOperation.state !== "finalizing") {

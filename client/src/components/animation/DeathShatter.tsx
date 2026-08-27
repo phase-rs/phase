@@ -74,16 +74,16 @@ function generateFragments(width: number, height: number): Fragment[] {
 
 export function DeathShatter({ position, image, onComplete }: DeathShatterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const completedRef = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
+    let completed = false;
     let animationFrame: number | null = null;
     let safetyTimer: ReturnType<typeof setTimeout> | null = null;
     const completeOnce = () => {
-      if (completedRef.current) return;
-      completedRef.current = true;
+      if (completed) return;
+      completed = true;
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       if (safetyTimer !== null) clearTimeout(safetyTimer);
       onCompleteRef.current();
@@ -123,7 +123,7 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
     const startTime = performance.now();
 
     const tick = (now: number) => {
-      if (completedRef.current) return;
+      if (completed) return;
 
       const elapsed = (now - startTime) / 1000;
       const progress = Math.min(elapsed / DURATION, 1);
@@ -177,7 +177,7 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
     animationFrame = requestAnimationFrame(tick);
 
     return () => {
-      completedRef.current = true;
+      completed = true;
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       if (safetyTimer !== null) clearTimeout(safetyTimer);
     };
