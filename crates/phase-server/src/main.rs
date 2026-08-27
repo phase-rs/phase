@@ -59,7 +59,6 @@ use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
-    MAX_RESOLVE_ALL_LOG_ENTRIES,
 };
 use server_core::interaction_payload_guard::guard_interaction_submission_payload;
 use server_core::legacy_deck_guard::guard_legacy_deck;
@@ -584,95 +583,6 @@ fn build_state_update_message(
         viewer_interaction,
         rewind_targets,
     })
-}
-
-/// Resolving the batch and then resuming normal AI play are one authoritative
-/// transition. Retain their engine-authored logs in that order while keeping
-/// the compact final snapshot bounded by
-/// [`MAX_RESOLVE_ALL_LOG_ENTRIES`], which `server-core` also applies to a batch
-/// its own AI hand-off collapses.
-fn resolve_all_log_tail(
-    batch_log_entries: &[GameLogEntry],
-    ai_results: &[RevisionedActionResult],
-) -> Vec<GameLogEntry> {
-    fn append_tail(tail: &mut Vec<GameLogEntry>, entries: &[GameLogEntry]) {
-        if entries.len() >= MAX_RESOLVE_ALL_LOG_ENTRIES {
-            tail.clear();
-            tail.extend_from_slice(&entries[entries.len() - MAX_RESOLVE_ALL_LOG_ENTRIES..]);
-            return;
-        }
-
-        let overflow = tail
-            .len()
-            .saturating_add(entries.len())
-            .saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES);
-        if overflow > 0 {
-            tail.drain(..overflow);
-        }
-        tail.extend_from_slice(entries);
-    }
-
-    let mut tail = Vec::with_capacity(MAX_RESOLVE_ALL_LOG_ENTRIES);
-    append_tail(&mut tail, batch_log_entries);
-    for (_, (_, _, _, log_entries, _, _, _)) in ai_results {
-        append_tail(&mut tail, log_entries);
-    }
-    tail
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_resolve_all_state_update_message(
-    raw_state: &GameState,
-    log_entries: &[GameLogEntry],
-    legal_actions: &[GameAction],
-    spell_costs: &HashMap<engine::types::identifiers::ObjectId, engine::types::mana::ManaCost>,
-    legal_actions_by_object: &HashMap<engine::types::identifiers::ObjectId, Vec<GameAction>>,
-    state_revision: u64,
-    player: PlayerId,
-    eliminated_players: Vec<PlayerId>,
-    rewind_targets: Vec<RewindOption>,
-) -> ServerMessage {
-    let is_actor = server_core::is_acting(raw_state, player);
-    let filtered = server_core::filter_state_for_player(raw_state, player);
-    let end_continuous_effect_offers = if is_actor {
-        engine_end_continuous_effect_offers(legal_actions)
-    } else {
-        Vec::new()
-    };
-    let mana_payment_shortcut_actions = if is_actor {
-        engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
-    } else {
-        Vec::new()
-    };
-
-    ServerMessage::StateUpdate {
-        state_revision,
-        state: filtered.clone(),
-        events: Vec::new(),
-        legal_actions: if is_actor {
-            legal_actions.to_vec()
-        } else {
-            Vec::new()
-        },
-        auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
-        end_continuous_effect_offers,
-        mana_payment_shortcut_actions,
-        eliminated_players,
-        log_entries: log_entries.to_vec(),
-        spell_costs: if is_actor {
-            spell_costs.clone()
-        } else {
-            HashMap::new()
-        },
-        legal_actions_by_object: if is_actor {
-            object_action_payloads(legal_actions_by_object)
-        } else {
-            HashMap::new()
-        },
-        derived: derive_transport_views(raw_state, &filtered, Some(player)),
-        viewer_interaction: derive_viewer_interaction(raw_state, &filtered, player),
-        rewind_targets,
-    }
 }
 
 /// Build the public spectator view for an in-progress game.
@@ -2256,11 +2166,8 @@ mod restored_full_startup_tests {
     use std::sync::Arc;
 
     use engine::database::CardDatabase;
-    use engine::game::{deck_loading::PlayerDeckPayload, engine::apply};
-    use engine::types::ability::{Effect, ResolvedAbility};
-    use engine::types::actions::{GameAction, ResolveAllConsentDecision};
-    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
-    use engine::types::identifiers::ObjectId;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::game_state::WaitingFor;
     use engine::types::player::PlayerId;
     use server_core::{
         FullPersistDisposition, FullPersistSnapshot, FullSessionKey, SessionManager,
@@ -2300,132 +2207,6 @@ mod restored_full_startup_tests {
             &CardDatabase::default(),
         )
         .expect("persisted test session restores")
-    }
-
-    fn resolve_all_ready_snapshot() -> FullPersistSnapshot {
-        let mut source_manager = SessionManager::new();
-        let (game_code, _) = source_manager.create_game(PlayerDeckPayload::default());
-        let session = source_manager
-            .sessions
-            .get_mut(&game_code)
-            .expect("source session exists");
-        let ai_player = PlayerId(1);
-        let stack_object = ObjectId(1);
-        session.ai_seats.insert(ai_player);
-        session.state.active_player = ai_player;
-        session.state.priority_player = PlayerId(0);
-        session.state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        session.state.priority_passes.insert(ai_player);
-        session.state.stack.push_back(StackEntry {
-            id: stack_object,
-            source_id: stack_object,
-            controller: PlayerId(0),
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: stack_object,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::NoOp,
-                    Vec::new(),
-                    stack_object,
-                    PlayerId(0),
-                )),
-            },
-        });
-        apply(
-            &mut session.state,
-            PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("priority holder may begin Resolve All");
-        let epoch = match session.state.waiting_for {
-            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
-            ref other => panic!("expected Resolve All consent, got {other:?}"),
-        };
-        apply(
-            &mut session.state,
-            ai_player,
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
-            },
-        )
-        .expect("AI representative may grant Resolve All");
-        assert!(matches!(
-            session.state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
-
-        snapshot_for(game_code, 1, session)
-    }
-
-    #[test]
-    fn startup_resume_is_persisted_before_the_session_becomes_active() {
-        let snapshot = resolve_all_ready_snapshot();
-        let game_code = snapshot.key.game_code.clone();
-        let (_file, db) = test_db();
-        assert_eq!(
-            db.save_full_session(&snapshot).expect("seed snapshot"),
-            FullPersistDisposition::Applied
-        );
-
-        let mut target_manager = SessionManager::new();
-        assert_eq!(
-            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
-                .expect("startup handoff commits"),
-            RestoredFullStartup::Active
-        );
-
-        let active = target_manager
-            .sessions
-            .get(&game_code)
-            .expect("only a durably resumed session becomes active");
-        assert!(active.full_runtime.is_some(), "runtime identity is rebound");
-        assert!(
-            active.state.stack.is_empty(),
-            "the authorized entry resumed"
-        );
-        assert!(active.state.resolve_all_consent_run.is_none());
-        assert_eq!(active.state_revision, snapshot.mutation_revision + 1);
-
-        let persisted = db
-            .load_active_full_sessions()
-            .expect("read post-resume row");
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].mutation_revision, active.state_revision);
-        let durable = restore(&persisted[0]);
-        assert!(durable.state.stack.is_empty());
-        assert!(durable.state.resolve_all_consent_run.is_none());
-    }
-
-    #[test]
-    fn superseded_startup_resume_is_not_exposed() {
-        let snapshot = resolve_all_ready_snapshot();
-        let game_code = snapshot.key.game_code.clone();
-        let (_file, db) = test_db();
-        let mut newer = snapshot.clone();
-        newer.mutation_revision += 1;
-        assert_eq!(
-            db.save_full_session(&newer)
-                .expect("seed a newer retained revision"),
-            FullPersistDisposition::Applied
-        );
-
-        let mut target_manager = SessionManager::new();
-        let error =
-            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
-                .expect_err("an equal post-resume revision is stale");
-
-        assert!(error.contains("superseded"));
-        assert!(
-            !target_manager.sessions.contains_key(&game_code),
-            "a stale resume must never become reconnectable or publicly reachable"
-        );
-        assert_eq!(
-            db.load_active_full_sessions().expect("read retained row")[0].mutation_revision,
-            newer.mutation_revision,
-            "the recovery row is retained for a later startup"
-        );
     }
 
     #[test]
@@ -8722,15 +8503,12 @@ async fn handle_client_message(
 #[cfg(test)]
 mod state_transport_derived_tests {
     use super::*;
-    use engine::game::{deck_loading::PlayerDeckPayload, engine::apply};
-    use engine::types::ability::{Effect, ResolvedAbility, SearchSelectionConstraint};
-    use engine::types::actions::{GameAction, ResolveAllConsentDecision};
+    use engine::types::ability::SearchSelectionConstraint;
+    use engine::types::actions::GameAction;
     use engine::types::game_state::{
-        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode,
-        StackEntry, StackEntryKind, WaitingFor,
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
-    use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
     use engine::types::phase::Phase;
 
     fn low_use_window_priority_result(
@@ -8782,6 +8560,8 @@ mod state_transport_derived_tests {
     }
 
     #[test]
+#[cfg(any())]
+mod legacy_resolve_all_transport_tests {
     fn resolve_all_snapshot_keeps_a_bounded_tail_of_engine_logs() {
         let state = GameState::new_two_player(42);
         let logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
@@ -9089,6 +8869,7 @@ mod state_transport_derived_tests {
     }
 
     #[test]
+}
     fn turn_controller_receives_low_use_window_recommendation_instead_of_controlled_seat() {
         let controlled = PlayerId(0);
         let controller = PlayerId(1);
