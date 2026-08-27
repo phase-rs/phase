@@ -4803,7 +4803,6 @@ pub(crate) enum BatchExecutionPlan {
     CopyToken {
         probe_spec: crate::types::proposed_event::TokenSpec,
         probe_mana_value: u32,
-        prefix_len: u32,
     },
 }
 
@@ -4840,7 +4839,6 @@ impl BatchPlan {
             plan: BatchExecutionPlan::CopyToken {
                 probe_spec,
                 probe_mana_value,
-                prefix_len,
             },
             consumed: prefix_len,
         }
