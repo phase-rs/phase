@@ -2083,6 +2083,12 @@ pub struct ResolveAllConsentRun {
     pub max_resolutions: StackResolutionBudget,
     pub priority_snapshot: ResolveAllPrioritySnapshot,
     pub participants: Vec<ResolveAllConsentParticipant>,
+    /// The complete sparse auto-pass map captured before a fresh Resolve All
+    /// run installs its temporary shared-resolution overlay. `None` identifies
+    /// a pre-session legacy consent run; `Some(empty)` is a deliberately
+    /// captured empty baseline and must remain distinguishable on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_pass_baseline: Option<BTreeMap<PlayerId, AutoPassMode>>,
 }
 
 impl ResolveAllConsentRun {
@@ -34522,5 +34528,40 @@ mod tests {
             "the latch fires on DISAGREEMENT, not on repetition — without this arm an \
              always-false equality would satisfy (a) and (b)"
         );
+    }
+
+    #[test]
+    fn resolve_all_consent_baseline_distinguishes_legacy_missing_from_captured_empty() {
+        let run = ResolveAllConsentRun {
+            epoch: 1,
+            max_resolutions: StackResolutionBudget::Unlimited,
+            priority_snapshot: ResolveAllPrioritySnapshot {
+                waiting_player: PlayerId(0),
+                priority_player: PlayerId(0),
+                priority_pass_count: 0,
+                priority_passes: BTreeSet::new(),
+            },
+            participants: vec![ResolveAllConsentParticipant {
+                representative: PlayerId(0),
+                authorized_submitter: PlayerId(0),
+                granted: true,
+            }],
+            auto_pass_baseline: Some(BTreeMap::new()),
+        };
+        let captured_empty = serde_json::to_value(&run).expect("fresh run serializes");
+        assert_eq!(
+            captured_empty["auto_pass_baseline"],
+            serde_json::json!({}),
+            "a fresh empty baseline is persisted rather than collapsed into legacy absence"
+        );
+
+        let mut legacy_wire = captured_empty;
+        legacy_wire
+            .as_object_mut()
+            .expect("run wire is an object")
+            .remove("auto_pass_baseline");
+        let legacy: ResolveAllConsentRun =
+            serde_json::from_value(legacy_wire).expect("legacy run without the new field loads");
+        assert_eq!(legacy.auto_pass_baseline, None);
     }
 }

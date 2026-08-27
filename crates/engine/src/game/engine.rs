@@ -1165,6 +1165,7 @@ struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
     is_actor_scoped_preference: bool,
+    suppress_auto_pass_once: bool,
     boundary_snapshot: GameState,
     previous_interaction_waiting: WaitingFor,
     previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
@@ -1278,6 +1279,13 @@ fn apply_action_boundary_core(
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
+    let suppress_auto_pass_once = matches!(
+        &action,
+        GameAction::RespondResolveAllConsent {
+            decision: ResolveAllConsentDecision::Decline,
+            ..
+        } | GameAction::RevokeResolveAllConsent { .. }
+    );
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -1354,6 +1362,7 @@ fn apply_action_boundary_core(
         result,
         journal_start,
         is_actor_scoped_preference,
+        suppress_auto_pass_once,
         boundary_snapshot,
         previous_interaction_waiting,
         previous_interaction_slots,
@@ -1388,6 +1397,7 @@ fn finish_action_boundary_with_lifecycle(
         mut result,
         journal_start,
         is_actor_scoped_preference,
+        suppress_auto_pass_once,
         boundary_snapshot,
         previous_interaction_waiting,
         previous_interaction_slots,
@@ -1398,7 +1408,11 @@ fn finish_action_boundary_with_lifecycle(
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    let auto_pass_advanced = if is_actor_scoped_preference {
+    // Decline/Revoke are transactional consent rollbacks. They restore the
+    // frozen Priority checkpoint exactly; a standing auto-pass may resume on
+    // the next ordinary action boundary, but must not consume that checkpoint
+    // as an implicit side effect of withdrawing the authorization.
+    let auto_pass_advanced = if is_actor_scoped_preference || suppress_auto_pass_once {
         false
     } else {
         run_auto_pass_loop(state, &mut result)
@@ -7956,6 +7970,11 @@ fn begin_resolve_all_consent(
     priority_player: PlayerId,
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
+    if state.stack_resolution_session.is_some() {
+        return Err(EngineError::ActionNotAllowed(
+            "Resolve All cannot replace an active stack-resolution session".to_string(),
+        ));
+    }
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
@@ -7998,7 +8017,16 @@ fn begin_resolve_all_consent(
                 granted: representative == current_representative,
             })
             .collect(),
+        auto_pass_baseline: Some(state.auto_pass.clone()),
     });
+
+    if state
+        .resolve_all_consent_run
+        .as_ref()
+        .is_some_and(|run| run.participants.len() == 1)
+    {
+        return materialize_live_resolve_all_session(state, None);
+    }
 
     resolve_all_consent_waiting_for(state).ok_or_else(|| {
         EngineError::ActionNotAllowed(
@@ -8009,14 +8037,16 @@ fn begin_resolve_all_consent(
 
 fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
     let run = state.resolve_all_consent_run.as_ref()?;
-    Some(
-        run.next_pending_representative()
-            .map(|representative| WaitingFor::ResolveAllConsent {
-                epoch: run.epoch,
-                representative,
-            })
-            .unwrap_or(WaitingFor::ResolveAllReady { epoch: run.epoch }),
-    )
+    run.next_pending_representative()
+        .map(|representative| WaitingFor::ResolveAllConsent {
+            epoch: run.epoch,
+            representative,
+        })
+        .or_else(|| {
+            run.auto_pass_baseline
+                .is_none()
+                .then_some(WaitingFor::ResolveAllReady { epoch: run.epoch })
+        })
 }
 
 // CR 117.3d + CR 117.4: A declined optimized batch restores the exact
@@ -8026,6 +8056,9 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
     let run = state.resolve_all_consent_run.take().ok_or_else(|| {
         EngineError::InvalidAction("Resolve All consent is not active".to_string())
     })?;
+    if let Some(baseline) = run.auto_pass_baseline {
+        state.auto_pass = baseline;
+    }
     let snapshot = run.priority_snapshot;
     state.priority_player = snapshot.priority_player;
     state.priority_pass_count = snapshot.priority_pass_count;
@@ -8035,11 +8068,94 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
     })
 }
 
+/// Converts a newly-created unanimous Resolve All authorization into the
+/// ordinary shared stack-resolution session. Legacy persisted consent runs
+/// intentionally do not take this path; their `ResolveAllReady` latch remains
+/// readable until its migration phase.
+///
+/// CR 117.3d + CR 117.4: the session resumes at the exact normal Priority
+/// checkpoint and lets the ordinary priority-pass pipeline resolve each entry.
+/// CR 400.7: the captured fence compares entry-local provenance, never a live
+/// source object that may have left and returned.
+fn materialize_live_resolve_all_session(
+    state: &mut GameState,
+    expected_grant_epoch: Option<u64>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(run) = state.resolve_all_consent_run.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent is not active".to_string(),
+        ));
+    };
+    let origin_matches = match expected_grant_epoch {
+        Some(epoch) => {
+            matches!(
+                state.waiting_for,
+                WaitingFor::ResolveAllConsent { epoch: active, .. } if active == epoch
+            ) && run.epoch == epoch
+        }
+        None => {
+            matches!(state.waiting_for, WaitingFor::Priority { .. }) && run.participants.len() == 1
+        }
+    };
+    let coherent = origin_matches
+        && run.auto_pass_baseline.is_some()
+        && run
+            .participants
+            .iter()
+            .all(|participant| participant.granted)
+        && state.stack_resolution_session.is_none()
+        && !state.stack.is_empty()
+        && state.priority_player == run.priority_snapshot.priority_player
+        && state.priority_pass_count == run.priority_snapshot.priority_pass_count
+        && state.priority_passes == run.priority_snapshot.priority_passes
+        && turn_control::resolve_all_consent_authority_matches_live(state, run);
+    if !coherent {
+        turn_control::rebase_invalid_resolve_all_consent(state);
+        return Ok(state.waiting_for.clone());
+    }
+
+    let run = state
+        .resolve_all_consent_run
+        .take()
+        .expect("coherent Resolve All consent run remains present");
+    let baseline = run
+        .auto_pass_baseline
+        .expect("a live Resolve All session requires a captured baseline");
+    let representatives = run
+        .participants
+        .iter()
+        .map(|participant| participant.representative)
+        .collect();
+    let overlay_mode = AutoPassMode::UntilStackEmpty {
+        initial_stack_len: state.stack.len(),
+        policy: StackResolutionPolicy::Committed,
+    };
+    for representative in &representatives {
+        state.auto_pass.insert(*representative, overlay_mode);
+    }
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: state
+            .stack
+            .iter()
+            .rev()
+            .map(StackResolutionEntryFence::capture)
+            .collect(),
+        cursor: 0,
+        representatives,
+        budget: run.max_resolutions,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },
+    });
+    Ok(WaitingFor::Priority {
+        player: run.priority_snapshot.waiting_player,
+    })
+}
+
 /// Installs one player's requested auto-pass mode and, when that player holds
 /// the current Priority window, consumes it through the ordinary pipeline.
 ///
-/// Direct `SetAutoPass` owns the live session producer. Resolve All remains on
-/// its legacy path until its consent producer is migrated to this runner.
+/// Direct `SetAutoPass` owns its own live session producer. Resolve All uses
+/// the same session type after its separate unanimous-consent handshake.
 fn install_auto_pass_and_pass_priority(
     state: &mut GameState,
     auto_pass_owner: PlayerId,
@@ -8115,6 +8231,23 @@ fn store_legacy_auto_pass_request(
         AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
     };
     state.auto_pass.insert(auto_pass_owner, stored_mode);
+}
+
+/// Applies a cancellation to both the live map and a pending fresh Resolve All
+/// baseline. The baseline is the source restored by either consent rollback,
+/// so omitting this mirror would resurrect a preference the player withdrew
+/// while another representative was considering the authorization.
+fn cancel_pending_resolve_all_auto_pass(state: &mut GameState, actor: PlayerId) -> bool {
+    let representative = super::topology::priority_pass_representative(state, actor);
+    let Some(run) = state.resolve_all_consent_run.as_mut() else {
+        return false;
+    };
+    let Some(baseline) = run.auto_pass_baseline.as_mut() else {
+        return false;
+    };
+    state.auto_pass.remove(&representative);
+    baseline.remove(&representative);
+    true
 }
 
 fn store_direct_auto_pass_request(
@@ -8234,42 +8367,6 @@ pub(crate) fn install_until_stack_empty_auto_pass(
     store_legacy_auto_pass_request(state, auto_pass_owner, AutoPassRequest::UntilStackEmpty);
 }
 
-/// CR 117.3d + CR 117.4: Declining the optimized Resolve All batch preserves
-/// the requester's intent by switching to the ordinary engine auto-pass flow.
-fn decline_resolve_all_consent_with_auto_pass(
-    state: &mut GameState,
-    epoch: u64,
-    representative: PlayerId,
-    response_epoch: u64,
-    events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
-    let waiting_for = respond_resolve_all_consent(
-        state,
-        epoch,
-        representative,
-        response_epoch,
-        ResolveAllConsentDecision::Decline,
-    )?;
-    let WaitingFor::Priority { player } = waiting_for else {
-        unreachable!("declined Resolve All consent must restore Priority");
-    };
-    // `pass_priority_once_with_pipeline` derives the semantic priority seat
-    // from this state. Install the captured Priority window before reusing the
-    // normal SetAutoPass path, rather than passing from the consent prompt.
-    state.waiting_for = WaitingFor::Priority { player };
-    // The outer action boundary drives an existing preference immediately.
-    // Replacing it here would turn a retained time-boundary request into a
-    // stack-bound fallback before that normal progression can observe it.
-    if state.auto_pass.contains_key(&player) {
-        return Ok(ActionResult {
-            events: std::mem::take(events),
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        });
-    }
-    install_until_stack_empty_auto_pass_and_pass_priority(state, player, events)
-}
-
 fn respond_resolve_all_consent(
     state: &mut GameState,
     epoch: u64,
@@ -8303,21 +8400,14 @@ fn respond_resolve_all_consent(
     if matches!(decision, ResolveAllConsentDecision::Decline) {
         return restore_resolve_all_priority_snapshot(state);
     }
+    if state.resolve_all_consent_run.as_ref().is_some_and(|run| {
+        run.auto_pass_baseline.is_some() && run.next_pending_representative().is_none()
+    }) {
+        return materialize_live_resolve_all_session(state, Some(epoch));
+    }
     let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
         EngineError::InvalidAction("Resolve All consent is not active".to_string())
     })?;
-    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
-    // deliberately leaves `priority_player` alone. Restore the saved priority
-    // cursor now; the Ready consumer validates this exact snapshot before it
-    // begins its first materialized CR 117.4 pass cycle.
-    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
-        state.priority_player = state
-            .resolve_all_consent_run
-            .as_ref()
-            .expect("an active consent run produced ResolveAllReady")
-            .priority_snapshot
-            .priority_player;
-    }
     Ok(waiting_for)
 }
 
@@ -8415,6 +8505,10 @@ fn apply_action(
             .is_some_and(|session| session.representatives.contains(&representative))
         {
             take_and_restore_stack_resolution_session(state);
+        } else if cancel_pending_resolve_all_auto_pass(state, actor) {
+            // A fresh consent run owns a complete rollback baseline. The helper
+            // changes both representations atomically; legacy runs intentionally
+            // retain their pre-session cancellation behavior below.
         } else {
             state.auto_pass.remove(&actor);
             if let Some(session) = state.stack_resolution_session.as_mut() {
@@ -8829,13 +8923,13 @@ fn apply_action(
                 decision: ResolveAllConsentDecision::Decline,
             },
         ) => {
-            return decline_resolve_all_consent_with_auto_pass(
+            respond_resolve_all_consent(
                 state,
                 *epoch,
                 *representative,
                 response_epoch,
-                &mut events,
-            );
+                ResolveAllConsentDecision::Decline,
+            )?
         }
         (
             WaitingFor::ResolveAllConsent {

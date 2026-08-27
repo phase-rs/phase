@@ -364,10 +364,12 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
     let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
         return None;
     };
-    let run = state
-        .resolve_all_consent_run
-        .as_ref()
-        .filter(|run| run.epoch == *epoch && run.participants.iter().all(|p| p.granted))?;
+    let run = state.resolve_all_consent_run.as_ref().filter(|run| {
+        state.auto_pass.is_empty()
+        && run.epoch == *epoch
+        && run.auto_pass_baseline.is_none()
+        && run.participants.iter().all(|p| p.granted)
+    })?;
     (run.participants
         .iter()
         .any(|participant| participant.authorized_submitter == requester)
@@ -379,22 +381,7 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
 }
 
 fn consent_authorization_matches(state: &GameState, run: &ResolveAllConsentRun) -> bool {
-    let mut representatives = topology::priority_pass_participants(state);
-    let current =
-        topology::priority_pass_representative(state, run.priority_snapshot.waiting_player);
-    let Some(current_index) = representatives
-        .iter()
-        .position(|representative| *representative == current)
-    else {
-        return false;
-    };
-    representatives.rotate_left(current_index);
-    representatives.len() == run.participants.len()
-        && run.participants.iter().all(|frozen| {
-            representatives.contains(&frozen.representative)
-                && turn_control::authorized_submitter_for_player(state, frozen.representative)
-                    == frozen.authorized_submitter
-        })
+    turn_control::resolve_all_consent_authority_matches_live(state, run)
 }
 
 /// Performs exactly one actual priority cycle on a proof clone. Every seeded

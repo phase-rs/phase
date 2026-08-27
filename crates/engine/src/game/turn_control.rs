@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use crate::types::ability::ControlWindow;
 use crate::types::game_state::{
-    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
+    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ResolveAllConsentRun,
+    ScheduledTurnControl, WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -203,6 +206,20 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     }
 }
 
+/// The current, unfrozen controller for a semantic player. Resolve All uses
+/// this only to verify that a consent-time submitter was not rebound before
+/// materializing its shared stack-resolution session.
+pub(crate) fn live_authorized_submitter_for_player(
+    state: &GameState,
+    semantic_player: PlayerId,
+) -> PlayerId {
+    match search_decision_authority(state, semantic_player) {
+        Some(ActiveSearchDecisionAuthority::LatchedController { controller }) => controller,
+        Some(ActiveSearchDecisionAuthority::SearcherFallback) => semantic_player,
+        None => effective_authority_for_player(state, semantic_player),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PlayerControlCandidate {
     controller: PlayerId,
@@ -372,11 +389,33 @@ pub fn authorized_submitter_for_player(state: &GameState, semantic_player: Playe
             }
         }
     }
-    match search_decision_authority(state, semantic_player) {
-        Some(ActiveSearchDecisionAuthority::LatchedController { controller }) => controller,
-        Some(ActiveSearchDecisionAuthority::SearcherFallback) => semantic_player,
-        None => effective_authority_for_player(state, semantic_player),
-    }
+    live_authorized_submitter_for_player(state, semantic_player)
+}
+
+/// Whether a frozen Resolve All participant set still names precisely the
+/// current priority representatives and their live submitting authorities.
+///
+/// CR 117.6 + CR 805.5b: representatives are the shared-team priority seats.
+/// CR 723.5: a live controller change must not rebind a consent response that
+/// was authorized for a different submitter.
+pub(crate) fn resolve_all_consent_authority_matches_live(
+    state: &GameState,
+    run: &ResolveAllConsentRun,
+) -> bool {
+    let frozen_representatives: BTreeSet<_> = run
+        .participants
+        .iter()
+        .map(|participant| participant.representative)
+        .collect();
+    let live_representatives: BTreeSet<_> = super::topology::priority_pass_participants(state)
+        .into_iter()
+        .collect();
+
+    frozen_representatives == live_representatives
+        && run.participants.iter().all(|participant| {
+            live_authorized_submitter_for_player(state, participant.representative)
+                == participant.authorized_submitter
+        })
 }
 
 /// Returns the frozen submitter who may revoke one granted Resolve All consent.
@@ -419,11 +458,55 @@ pub fn resolve_all_granted_submitter(
 /// discarded consent state had suspended, so priority resumes from the
 /// repaired holder rather than from a partial round nobody can complete.
 pub fn invalidate_resolve_all_consent(state: &mut GameState) {
-    state.resolve_all_consent_run = None;
+    invalidate_resolve_all_consent_inner(state, false);
+}
+
+/// Invalidates a frozen consent run because the player topology is about to
+/// change. Even before the departing seat is physically removed, its pending
+/// departure makes the saved pass round unusable, so this deliberately chooses
+/// the projected-live rebase rather than exact snapshot rollback.
+pub fn invalidate_resolve_all_consent_for_topology_change(state: &mut GameState) {
+    rebase_invalid_resolve_all_consent(state);
+}
+
+/// Discards an incoherent consent run and projects ordinary priority from the
+/// live table rather than replaying its no-longer-valid saved pass round.
+pub(crate) fn rebase_invalid_resolve_all_consent(state: &mut GameState) {
+    invalidate_resolve_all_consent_inner(state, true);
+}
+
+fn invalidate_resolve_all_consent_inner(state: &mut GameState, force_projected_rebase: bool) {
+    let run = state.resolve_all_consent_run.take();
+    if let Some(baseline) = run.as_ref().and_then(|run| run.auto_pass_baseline.as_ref()) {
+        state.auto_pass = baseline.clone();
+    }
     if !matches!(
         state.waiting_for,
         WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
     ) {
+        return;
+    }
+    let exact_snapshot_is_live = !force_projected_rebase
+        && run.as_ref().is_some_and(|run| {
+            matches!(
+                state.waiting_for,
+                WaitingFor::ResolveAllConsent { epoch, .. } if epoch == run.epoch
+            ) && state.priority_player == run.priority_snapshot.priority_player
+                && state.priority_pass_count == run.priority_snapshot.priority_pass_count
+                && state.priority_passes == run.priority_snapshot.priority_passes
+                && resolve_all_consent_authority_matches_live(state, run)
+        });
+    if exact_snapshot_is_live {
+        let snapshot = &run
+            .as_ref()
+            .expect("exact Resolve All recovery retains its run")
+            .priority_snapshot;
+        state.waiting_for = WaitingFor::Priority {
+            player: snapshot.waiting_player,
+        };
+        state.priority_player = snapshot.priority_player;
+        state.priority_pass_count = snapshot.priority_pass_count;
+        state.priority_passes = snapshot.priority_passes.clone();
         return;
     }
     let preferred = super::topology::priority_pass_representative(state, state.active_player);

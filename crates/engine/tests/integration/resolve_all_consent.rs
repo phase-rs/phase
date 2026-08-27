@@ -1,5 +1,7 @@
 //! Phase-1 protocol coverage for explicit Resolve All consent.
 
+use std::collections::BTreeSet;
+
 use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
 use engine::game::elimination::eliminate_player;
 use engine::game::engine::{
@@ -22,9 +24,9 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, StackResolutionPolicy,
-    TurnBoundary,
-    WaitingFor,
+    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
@@ -179,7 +181,7 @@ fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam(
             representative: P2,
         } if next_epoch == epoch
     ));
-    apply(
+    let result = apply(
         &mut state,
         P2,
         GameAction::RespondResolveAllConsent {
@@ -188,18 +190,18 @@ fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam(
         },
     )
     .expect("the final AI grants consent");
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
-    ));
-
-    let result = resolve_all_ready_prefix(&mut state, P2);
-
     assert_eq!(
-        result.items_resolved, 1,
-        "a granted browser Resolve All must not return to manual priority with the Equip still on the stack"
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1,
+        "a granted browser Resolve All must use the ordinary runner and resolve the Equip"
     );
     assert!(state.stack.is_empty());
+    assert!(state.stack_resolution_session.is_none());
+    assert!(state.resolve_all_consent_run.is_none());
     assert_eq!(
         state.objects[&equipment].attached_to,
         Some(AttachTarget::Object(creature)),
@@ -208,8 +210,7 @@ fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam(
 }
 
 #[test]
-fn browser_partial_priority_equip_keeps_the_requesters_no_manual_resolution_intent_when_a_pending_event_blocks_batch_proof(
-) {
+fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_proof() {
     let (mut state, equipment, creature) = browser_partial_priority_equip_state();
     // This is the latent combat-damage event carrier present in the live game.
     // It makes the proof checkpoint intentionally fail closed, but it must not
@@ -248,20 +249,13 @@ fn browser_partial_priority_equip_keeps_the_requesters_no_manual_resolution_inte
         )
         .expect("each AI representative grants the live Resolve All prompt");
     }
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
-    ));
-
-    let result = resolve_all_ready_prefix(&mut state, P2);
-
-    assert_eq!(
-        result.items_resolved, 1,
-        "the proof resolves nothing, but the live continuation resolves Equip through ordinary auto-pass"
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }),
+        "fresh consent never hands off to the legacy Ready-prefix resolver"
     );
     assert!(
         state.stack.is_empty(),
-        "the failed proof resumes the requester's no-manual-resolution intent"
+        "the ordinary session runner resolves the Equip without another manual P0 action"
     );
     assert_eq!(
         state.objects[&equipment].attached_to,
@@ -296,11 +290,12 @@ fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
 }
 
 #[test]
-fn consent_queue_reaches_inert_ready_only_after_every_representative_grants() {
+fn final_grant_materializes_the_ordinary_session_without_a_ready_latch() {
     let mut state = GameState::new_two_player(42);
+    state.stack.push_back(no_op_entry(1, P0));
     let epoch = begin(&mut state);
 
-    apply(
+    let result = apply(
         &mut state,
         P1,
         GameAction::RespondResolveAllConsent {
@@ -309,25 +304,110 @@ fn consent_queue_reaches_inert_ready_only_after_every_representative_grants() {
         },
     )
     .expect("queued representative may grant");
-    assert!(matches!(
-        &state.waiting_for,
-        WaitingFor::ResolveAllReady { epoch: ready_epoch } if *ready_epoch == epoch
+    assert!(!matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllReady { .. }
     ));
-    assert_eq!(
-        state.priority_player, P0,
-        "Ready preserves the saved priority cursor"
+    assert!(state.stack.is_empty());
+    assert!(state.stack_resolution_session.is_none());
+    assert!(result
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+}
+
+#[test]
+fn pending_consent_preserves_modes_and_cancellation_is_not_resurrected_on_revoke() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0xC0A5_E17);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
     );
-    assert!(apply(&mut state, P1, GameAction::PassPriority).is_err());
+    state.auto_pass.insert(
+        P2,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    );
+    let expected_before_cancel = state.auto_pass.clone();
+    let epoch = begin(&mut state);
+    assert_eq!(
+        state.auto_pass, expected_before_cancel,
+        "Begin is non-destructive"
+    );
+
+    apply(&mut state, P0, GameAction::CancelAutoPass)
+        .expect("a grantor may cancel its pending preference");
+    assert!(!state.auto_pass.contains_key(&P0));
+    apply(
+        &mut state,
+        P0,
+        GameAction::RevokeResolveAllConsent {
+            epoch,
+            representative: P0,
+        },
+    )
+    .expect("the original grantor may revoke while consent is pending");
+
+    assert!(!state.auto_pass.contains_key(&P0));
+    assert_eq!(
+        state.auto_pass.get(&P2),
+        expected_before_cancel.get(&P2),
+        "a cancellation changes only its canonical representative's baseline entry"
+    );
+    assert!(state.resolve_all_consent_run.is_none());
     assert!(matches!(
-        &state.waiting_for,
-        WaitingFor::ResolveAllReady { epoch: ready_epoch } if *ready_epoch == epoch
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
     ));
 }
 
 #[test]
-fn stale_epoch_and_decline_continue_through_the_requesters_engine_auto_pass() {
+fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
+    let mut state = GameState::new_two_player(0x5E55_10_u64);
+    state.stack.push_back(no_op_entry(1, P0));
+    let fence =
+        StackResolutionEntryFence::capture(state.stack.back().expect("fixture stack entry exists"));
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![fence],
+        cursor: 0,
+        representatives: BTreeSet::from([P0, P1]),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: state.auto_pass.clone(),
+        },
+    });
+    let before = state.clone();
+
+    assert!(apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll { max_resolutions: 1 },
+    )
+    .is_err());
+    assert_eq!(
+        state, before,
+        "a rejected Begin leaves the active session untouched"
+    );
+}
+
+#[test]
+fn stale_epoch_and_decline_restore_the_exact_preconsent_priority_checkpoint() {
     let mut state = GameState::new_two_player(43);
     state.stack.push_back(no_op_entry(1, P0));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let expected_auto_pass = state.auto_pass.clone();
     let epoch = begin(&mut state);
 
     assert!(apply(
@@ -339,7 +419,7 @@ fn stale_epoch_and_decline_continue_through_the_requesters_engine_auto_pass() {
         },
     )
     .is_err());
-    let decline = apply(
+    apply(
         &mut state,
         P1,
         GameAction::RespondResolveAllConsent {
@@ -349,15 +429,12 @@ fn stale_epoch_and_decline_continue_through_the_requesters_engine_auto_pass() {
     )
     .expect("queued representative may decline");
 
-    assert!(
-        state.stack.is_empty(),
-        "the two-player auto-pass resolves the stack immediately"
-    );
-    assert!(decline.events.iter().any(|event| matches!(
-        event,
-        engine::types::events::GameEvent::EffectResolved { .. }
-    )));
-    assert!(state.auto_pass.is_empty());
+    assert_eq!(state.stack.len(), 1, "decline resolves no stack entry");
+    assert_eq!(state.auto_pass, expected_auto_pass);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
     assert!(state.resolve_all_consent_run.is_none());
     assert!(apply(
         &mut state,
@@ -411,7 +488,7 @@ fn decline_preserves_the_requesters_retained_end_of_turn_auto_pass() {
 }
 
 #[test]
-fn persisted_pending_consent_keeps_the_initiators_auto_pass_fallback() {
+fn persisted_pending_consent_decline_restores_the_captured_baseline() {
     let mut state = GameState::new_two_player(430);
     state.stack.push_back(no_op_entry(1, P0));
     let epoch = begin(&mut state);
@@ -426,7 +503,7 @@ fn persisted_pending_consent_keeps_the_initiators_auto_pass_fallback() {
         WaitingFor::ResolveAllConsent { epoch: restored_epoch, representative } if restored_epoch == epoch && representative == P1
     ));
 
-    let decline = apply(
+    apply(
         &mut restored,
         P1,
         GameAction::RespondResolveAllConsent {
@@ -435,14 +512,7 @@ fn persisted_pending_consent_keeps_the_initiators_auto_pass_fallback() {
         },
     )
     .expect("restored responder may decline");
-    assert!(
-        decline.events.iter().any(|event| matches!(
-            event,
-            engine::types::events::GameEvent::EffectResolved { .. }
-        )),
-        "declining after a save resumes the normal auto-pass pipeline"
-    );
-    assert!(restored.stack.is_empty());
+    assert_eq!(restored.stack.len(), 1);
     assert!(restored.auto_pass.is_empty());
 }
 
@@ -464,7 +534,7 @@ fn restored_mid_stack_priority_can_start_a_new_resolve_all_consent_run() {
 }
 
 #[test]
-fn decline_auto_pass_is_owned_by_the_semantic_priority_seat_under_turn_control() {
+fn decline_under_turn_control_restores_the_semantic_priority_snapshot() {
     let mut state = GameState::new_two_player(432);
     state.active_player = P0;
     state.turn_decision_controller = Some(P1);
@@ -499,20 +569,35 @@ fn decline_auto_pass_is_owned_by_the_semantic_priority_seat_under_turn_control()
     )
     .expect("the responder may decline");
 
-    assert!(
-        state.stack.is_empty(),
-        "the semantic priority seat P0 was passed immediately; using submitter P1 would leave the stack intact"
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "declining does not resolve a stack entry"
     );
-    assert!(decline.events.iter().any(|event| matches!(
-        event,
-        engine::types::events::GameEvent::EffectResolved { .. }
-    )));
+    assert!(decline.events.is_empty());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
     assert!(state.auto_pass.is_empty());
 }
 
 #[test]
 fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priority() {
     let mut state = GameState::new(FormatConfig::free_for_all(), 3, 44);
+    state.auto_pass.insert(
+        P1,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    state.auto_pass.insert(
+        P2,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    );
     apply(
         &mut state,
         P0,
@@ -537,7 +622,14 @@ fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priori
     assert_eq!(state.priority_player, P0);
     assert_eq!(state.priority_pass_count, 0);
     assert!(state.priority_passes.is_empty());
-    assert!(state.auto_pass.is_empty());
+    assert!(
+        !state.auto_pass.contains_key(&P1),
+        "the leaving seat's restored baseline is pruned by ordinary elimination cleanup"
+    );
+    assert!(
+        state.auto_pass.contains_key(&P2),
+        "the survivor's pre-consent preference survives projected recovery"
+    );
     assert!(!state.players[P2.0 as usize].is_eliminated);
 }
 
@@ -576,6 +668,9 @@ fn queued_response_and_candidate_keep_the_frozen_submitter_after_control_changes
         },
     )
     .expect("frozen submitter, not the new live controller, answers the prompt");
+    assert!(state.resolve_all_consent_run.is_none());
+    assert!(state.stack_resolution_session.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert!(apply(
         &mut state,
         P0,
@@ -588,7 +683,7 @@ fn queued_response_and_candidate_keep_the_frozen_submitter_after_control_changes
 }
 
 #[test]
-fn rotated_three_player_consent_reaches_the_ready_prefix() {
+fn rotated_three_player_consent_runs_through_the_shared_session() {
     let mut state = GameState::new(FormatConfig::free_for_all(), 3, 49);
     let entry = StackEntry {
         id: ObjectId(1),
@@ -615,7 +710,7 @@ fn rotated_three_player_consent_reaches_the_ready_prefix() {
         state.waiting_for,
         WaitingFor::ResolveAllConsent { representative, .. } if representative == P2
     ));
-    apply(
+    let result = apply(
         &mut state,
         P2,
         GameAction::RespondResolveAllConsent {
@@ -624,15 +719,20 @@ fn rotated_three_player_consent_reaches_the_ready_prefix() {
         },
     )
     .expect("second queued representative grants");
-
-    let result = resolve_all_ready_prefix(&mut state, P0);
-    assert_eq!(result.items_resolved, 1);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
     assert!(state.stack.is_empty());
+    assert!(!matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllReady { .. }
+    ));
 }
 
 #[test]
 fn granted_representative_can_revoke_off_queue_and_private_run_is_not_visible() {
-    let mut state = GameState::new_two_player(45);
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 45);
     let epoch = begin(&mut state);
     apply(
         &mut state,
@@ -642,10 +742,12 @@ fn granted_representative_can_revoke_off_queue_and_private_run_is_not_visible() 
             decision: ResolveAllConsentDecision::Grant,
         },
     )
-    .expect("reach ready state");
+    .expect("first queued representative grants");
 
     let view = filter_state_for_viewer(&state, P1);
-    assert!(matches!(&view.waiting_for, WaitingFor::ResolveAllReady { epoch: e } if *e == epoch));
+    assert!(
+        matches!(&view.waiting_for, WaitingFor::ResolveAllConsent { epoch: e, representative: P2 } if *e == epoch)
+    );
     assert!(view.resolve_all_consent_run.is_none());
 
     let candidates = candidate_actions(&state);
@@ -666,7 +768,7 @@ fn granted_representative_can_revoke_off_queue_and_private_run_is_not_visible() 
             representative: P0,
         },
     )
-    .expect("a granted representative may revoke from Ready");
+    .expect("a granted representative may revoke while another representative is queued");
     assert!(matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0));
     assert!(state.resolve_all_consent_run.is_none());
     assert!(state.auto_pass.is_empty());
@@ -746,17 +848,10 @@ fn transport_surfaces_only_each_grantors_own_revoke_and_uses_exact_consent_choic
 
 #[test]
 fn ready_state_transport_materializes_each_grantors_frozen_revoke() {
-    let mut state = GameState::new_two_player(47);
-    let epoch = begin(&mut state);
-    apply(
-        &mut state,
-        P1,
-        GameAction::RespondResolveAllConsent {
-            epoch,
-            decision: ResolveAllConsentDecision::Grant,
-        },
-    )
-    .expect("the final grant reaches Ready");
+    let mut state = ready_two_seat_state();
+    let WaitingFor::ResolveAllReady { epoch } = state.waiting_for else {
+        panic!("legacy fixture reaches Ready");
+    };
 
     bind_interaction_authority(
         &mut state,
@@ -822,6 +917,11 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     .into_iter()
     .collect();
     let epoch = begin(&mut state);
+    state
+        .resolve_all_consent_run
+        .as_mut()
+        .expect("pending run exists")
+        .auto_pass_baseline = None;
     apply(
         &mut state,
         P1,
@@ -849,7 +949,9 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
         "the bounded proof continuation must not install an ordinary auto-pass session"
     );
 }
-/// Drives a two-seat run to unanimous consent and returns the latched state.
+/// Builds an old persisted two-seat consent run that still uses the legacy
+/// Ready reader. Fresh Begin/Grant states deliberately retain `Some(...)` and
+/// never reach this helper's latch.
 fn ready_two_seat_state() -> GameState {
     let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE0);
     state.stack.push_back(no_op_entry(1, P1));
@@ -865,6 +967,11 @@ fn ready_two_seat_state() -> GameState {
             state.waiting_for
         );
     };
+    state
+        .resolve_all_consent_run
+        .as_mut()
+        .expect("fresh pending run exists")
+        .auto_pass_baseline = None;
     apply(
         &mut state,
         P1,
@@ -873,7 +980,7 @@ fn ready_two_seat_state() -> GameState {
             decision: ResolveAllConsentDecision::Grant,
         },
     )
-    .expect("the remaining representative may grant");
+    .expect("the remaining representative may grant on the legacy wire path");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::ResolveAllReady { .. }
@@ -1084,6 +1191,11 @@ fn proof_stopping_ready_state() -> GameState {
     .into_iter()
     .collect();
     let epoch = begin(&mut state);
+    state
+        .resolve_all_consent_run
+        .as_mut()
+        .expect("pending run exists")
+        .auto_pass_baseline = None;
     apply(
         &mut state,
         P1,
