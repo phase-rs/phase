@@ -488,7 +488,7 @@ fn final_grant_prompt_restores_the_preconsent_overlay_before_waiting_for_choice(
 
 #[test]
 fn final_grant_terminal_resolution_restores_a_survivors_preconsent_overlay() {
-    let mut state = GameState::new_two_player(0x7E21_A1);
+    let mut state = GameState::new_two_player(0x007E_21A1);
     state.stack.push_back(ability_entry(
         1,
         P0,
@@ -578,7 +578,7 @@ fn pending_non_auto_pass_preference_does_not_mutate_the_consent_baseline() {
 
 #[test]
 fn pending_consent_preserves_modes_and_cancellation_is_not_resurrected_on_revoke() {
-    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0xC0A5_E17);
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0x0C0A_5E17);
     state.stack.push_back(no_op_entry(1, P0));
     state.auto_pass.insert(
         P0,
@@ -628,7 +628,7 @@ fn pending_consent_preserves_modes_and_cancellation_is_not_resurrected_on_revoke
 
 #[test]
 fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
-    let mut state = GameState::new_two_player(0x5E55_10_u64);
+    let mut state = GameState::new_two_player(0x005E_5510_u64);
     state.stack.push_back(no_op_entry(1, P0));
     let fence =
         StackResolutionEntryFence::capture(state.stack.back().expect("fixture stack entry exists"));
@@ -782,7 +782,7 @@ fn persisted_pending_consent_decline_restores_the_captured_baseline() {
 
 #[test]
 fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
-    let mut state = GameState::new_two_player(0x1E6A_C0);
+    let mut state = GameState::new_two_player(0x001E_6AC0);
     state.stack.push_back(no_op_entry(1, P0));
     state.auto_pass.insert(
         P1,

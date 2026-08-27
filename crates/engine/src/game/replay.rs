@@ -570,6 +570,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn current_version_roundtrips_semantic_mana_source_selections() {
         let source = ObjectIncarnationRef::of(ObjectId(7), 3);
         let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
