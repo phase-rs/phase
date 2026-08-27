@@ -1703,8 +1703,8 @@ export class P2PHostAdapter implements EngineAdapter {
           session.close("Malformed P2P authority");
           return;
         }
-        this.handleReconnect(session, msg.playerToken, msg.sessionKey, msg.authority);
-      } else {
+        void this.handleReconnect(session, msg.playerToken, msg.sessionKey, msg.authority);
+      } else if (msg.type === "guest_deck") {
         traceAdapter("Host", "first-message", { type: msg.type });
         void this.handleNewGuest(
           session,
@@ -2812,12 +2812,24 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "gamePaused", reason: "Player disconnected" });
   }
 
-  private handleReconnect(
+  private async handleReconnect(
     session: PeerSession,
     playerToken: string,
     sessionKey?: P2PSessionKey,
     authority?: P2PAuthorityStamp,
-  ): void {
+  ): Promise<void> {
+    // A resumed host may not publish its state until initialization has
+    // persisted the post-resume authority. `pregameReady` resolves only after
+    // that barrier; on a failed resume it rejects and the lease is released,
+    // so the subsequent authority check closes this unpublishable channel.
+    try {
+      await this.pregameReady;
+    } catch {
+      // `abortUnpublishedResume` has already fenced this host. This channel
+      // was never admitted, so close it without publishing a resume failure.
+      session.close("Host initialization failed");
+      return;
+    }
     if (!this.ownsAuthority()) {
       this.rejectSuperseded(session);
       return;

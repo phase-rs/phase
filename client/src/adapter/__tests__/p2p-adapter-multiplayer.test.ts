@@ -17,6 +17,7 @@ import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
+import { ownsP2PHostLease } from "../../services/p2pSession";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
@@ -42,12 +43,37 @@ vi.mock("../../network/protocol", async (orig) => {
   };
 });
 
+const terminalMocks = vi.hoisted(() => ({
+  clearP2PTerminalResult: vi.fn(async () => undefined),
+  commitP2PTerminalResult: vi.fn(async () => true),
+}));
+
 vi.mock("../../services/p2pTerminalResult", async (orig) => {
   const actual = await orig<typeof import("../../services/p2pTerminalResult")>();
   return {
     ...actual,
-    clearP2PTerminalResult: vi.fn(async () => undefined),
-    commitP2PTerminalResult: vi.fn(async () => true),
+    clearP2PTerminalResult: terminalMocks.clearP2PTerminalResult,
+    commitP2PTerminalResult: terminalMocks.commitP2PTerminalResult,
+  };
+});
+
+const persistenceMocks = vi.hoisted(() => ({
+  clearGame: vi.fn(async () => undefined),
+  clearP2PHostSession: vi.fn(async () => undefined),
+  saveGame: vi.fn(async () => undefined),
+  saveP2PHostSession: vi.fn(async () => undefined),
+  saveResumableGameStrict: vi.fn(async () => undefined),
+}));
+
+vi.mock("../../services/gamePersistence", async (orig) => {
+  const actual = await orig<typeof import("../../services/gamePersistence")>();
+  return {
+    ...actual,
+    clearGame: persistenceMocks.clearGame,
+    clearP2PHostSession: persistenceMocks.clearP2PHostSession,
+    saveGame: persistenceMocks.saveGame,
+    saveP2PHostSession: persistenceMocks.saveP2PHostSession,
+    saveResumableGameStrict: persistenceMocks.saveResumableGameStrict,
   };
 });
 
@@ -105,6 +131,15 @@ const mocks = vi.hoisted(() => {
     submitAiActionProposal: vi.fn(async () => ({
       status: "applied",
       result: { events: [], log_entries: [] },
+    })),
+    exportPersistenceState: vi.fn(async () => JSON.stringify({ players: [], objects: {} })),
+    resumeMultiplayerHostState: vi.fn(async () => ({
+      snapshot: {
+        state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } },
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      presentation: { type: "None" },
     })),
     projectSeatView: vi.fn(async (stateJson: string) => {
       const state = JSON.parse(stateJson) as {
@@ -291,6 +326,8 @@ vi.mock("../wasm-adapter", () => {
     getViewerSnapshot: mocks.getViewerSnapshot,
     getAiActionProposal: mocks.getAiActionProposal,
     submitAiActionProposal: mocks.submitAiActionProposal,
+    exportPersistenceState: mocks.exportPersistenceState,
+    resumeMultiplayerHostState: mocks.resumeMultiplayerHostState,
     applySeatMutation: mocks.applySeatMutation,
     projectSeatView: mocks.projectSeatView,
     setMultiplayerMode: mocks.setMultiplayerMode,
@@ -322,6 +359,31 @@ beforeEach(() => {
   mockGetState.mockClear();
   mockGetAiActionProposal.mockClear();
   mockSubmitAiActionProposal.mockClear();
+  mocks.exportPersistenceState.mockReset();
+  mocks.exportPersistenceState.mockResolvedValue(JSON.stringify({ players: [], objects: {} }));
+  mocks.resumeMultiplayerHostState.mockReset();
+  mocks.resumeMultiplayerHostState.mockResolvedValue({
+    snapshot: {
+      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } },
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 1,
+    },
+    presentation: { type: "None" },
+  });
+  persistenceMocks.clearGame.mockReset();
+  persistenceMocks.clearGame.mockResolvedValue(undefined);
+  persistenceMocks.clearP2PHostSession.mockReset();
+  persistenceMocks.clearP2PHostSession.mockResolvedValue(undefined);
+  persistenceMocks.saveGame.mockReset();
+  persistenceMocks.saveGame.mockResolvedValue(undefined);
+  persistenceMocks.saveP2PHostSession.mockReset();
+  persistenceMocks.saveP2PHostSession.mockResolvedValue(undefined);
+  persistenceMocks.saveResumableGameStrict.mockReset();
+  persistenceMocks.saveResumableGameStrict.mockResolvedValue(undefined);
+  terminalMocks.clearP2PTerminalResult.mockReset();
+  terminalMocks.clearP2PTerminalResult.mockResolvedValue(undefined);
+  terminalMocks.commitP2PTerminalResult.mockReset();
+  terminalMocks.commitP2PTerminalResult.mockResolvedValue(true);
   mocks.setAiDecisionDiagnosticsEnabled.mockClear();
   mocks.subscribeAiDecisionDiagnostics.mockClear();
   // `mockReset`, not `mockClear`: these two carry per-test
@@ -444,6 +506,46 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: For
     formatConfig,
     undefined,
     gracePeriodMs,
+  );
+  return { adapter, emitConnection };
+}
+
+function makeResumedHost() {
+  const { peer, onGuestConnected, emitConnection } = createFakePeer();
+  const hostDeck = {
+    player: { main_deck: ["Mountain"], sideboard: [] },
+    opponent: { main_deck: ["Forest"], sideboard: [] },
+    ai_decks: [],
+  };
+  const persistedSession = {
+    gameId: "resume-game",
+    roomCode: "ABCDE",
+    sessionKey: "resume-session",
+    useBroker: false,
+    playerTokens: { 1: "guest-token" },
+    guestDecks: { 1: { main_deck: ["Forest"], sideboard: [] } },
+    kickedTokens: [],
+    eliminatedSeats: [],
+    playerCount: 2,
+    hostDeckData: hostDeck,
+    gameStarted: true,
+  };
+  const adapter = new P2PHostAdapter(
+    hostDeck,
+    peer as unknown as Peer,
+    onGuestConnected,
+    2,
+    undefined,
+    undefined,
+    5_000,
+    undefined,
+    true,
+    undefined,
+    {
+      gameId: "resume-game",
+      roomCode: "ABCDE",
+      resumeData: { state: { persisted: true } as unknown as PersistedGameState, session: persistedSession },
+    },
   );
   return { adapter, emitConnection };
 }
@@ -728,6 +830,126 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     stale.dispose();
     current.dispose();
+  });
+
+  it("persists resumed authority before acknowledging a reconnect", async () => {
+    const persisted = deferred<void>();
+    persistenceMocks.saveResumableGameStrict.mockImplementationOnce(() => persisted.promise);
+    const { adapter, emitConnection } = makeResumedHost();
+
+    const initialize = adapter.initialize();
+    await flushPromises();
+    expect(mocks.resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    expect(persistenceMocks.saveResumableGameStrict).toHaveBeenCalledOnce();
+
+    const reconnect = new FakeOpenableConnection();
+    const send = vi.spyOn(reconnect, "send");
+    emitConnection(reconnect as unknown as DataConnection);
+    reconnect.fireOpen();
+    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+    await flushPromises();
+
+    expect(send).not.toHaveBeenCalled();
+
+    persisted.resolve();
+    await initialize;
+    await flushPromises();
+
+    expect(await reconnect.getSentMessages()).toContainEqual(expect.objectContaining({ type: "reconnect_ack" }));
+    expect(persistenceMocks.saveResumableGameStrict.mock.invocationCallOrder[0])
+      .toBeLessThan(send.mock.invocationCallOrder[0]!);
+    adapter.dispose();
+  });
+
+  it("releases unpublished resumed authority after a strict-save failure without acknowledging guests", async () => {
+    persistenceMocks.saveResumableGameStrict.mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+    const { adapter, emitConnection } = makeResumedHost();
+    const authority = (adapter as unknown as { authority: { sessionKey: string; hostIncarnation: string } }).authority;
+
+    const initialize = adapter.initialize();
+    await flushPromises();
+    const reconnect = new FakeOpenableConnection();
+    emitConnection(reconnect as unknown as DataConnection);
+    reconnect.fireOpen();
+    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+
+    await expect(initialize).rejects.toThrow("IndexedDB unavailable");
+    await flushPromises();
+
+    expect(ownsP2PHostLease(authority)).toBe(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(await reconnect.getSentMessages()).toEqual([]);
+  });
+
+  it("commits a terminal resumed result before clearing its stale resumable save or publishing it", async () => {
+    const terminalState = {
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    mocks.resumeMultiplayerHostState.mockResolvedValueOnce({
+      snapshot: {
+        state: terminalState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      presentation: { type: "None" },
+    });
+    (mockGetViewerSnapshot as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
+      state: terminalState,
+      actions: [],
+      autoPassRecommended: false,
+    });
+    const committed = deferred<boolean>();
+    terminalMocks.commitP2PTerminalResult.mockImplementationOnce(() => committed.promise);
+    const { adapter, emitConnection } = makeResumedHost();
+
+    const initialize = adapter.initialize();
+    await flushPromises();
+    expect(terminalMocks.commitP2PTerminalResult).toHaveBeenCalledOnce();
+    expect(persistenceMocks.clearGame).not.toHaveBeenCalled();
+
+    const reconnect = new FakeOpenableConnection();
+    const send = vi.spyOn(reconnect, "send");
+    emitConnection(reconnect as unknown as DataConnection);
+    reconnect.fireOpen();
+    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+    await flushPromises();
+    expect(send).not.toHaveBeenCalled();
+
+    committed.resolve(true);
+    await initialize;
+    await flushPromises();
+
+    expect(persistenceMocks.clearGame).toHaveBeenCalledWith("resume-game");
+    expect(terminalMocks.commitP2PTerminalResult.mock.invocationCallOrder[0])
+      .toBeLessThan(persistenceMocks.clearGame.mock.invocationCallOrder[0]!);
+    expect(persistenceMocks.clearGame.mock.invocationCallOrder[0])
+      .toBeLessThan(send.mock.invocationCallOrder[0]!);
+    expect((await reconnect.getSentMessages()).map((message) => (message as { type: string }).type))
+      .toEqual(["reconnect_ack", "terminal_result"]);
+    adapter.dispose();
+  });
+
+  it("consumes a resumed automation result exactly once", async () => {
+    const restored = {
+      snapshot: {
+        state: remoteState("resumed"),
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      presentation: { type: "None" },
+    };
+    mocks.resumeMultiplayerHostState.mockResolvedValueOnce(restored);
+    const { adapter } = makeResumedHost();
+
+    await adapter.initialize();
+    await adapter.initialize();
+
+    expect(mocks.resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    await expect(adapter.resumeRestoredGameState()).resolves.toBe(restored);
+    await expect(adapter.resumeRestoredGameState()).resolves.toBeNull();
+    adapter.dispose();
   });
 
   it("retries failed initialization without duplicating guest connections", async () => {
