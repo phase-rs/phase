@@ -35,8 +35,12 @@ export function ResolutionProgressOverlay() {
                 <p className="mt-1 text-xs text-cyan-100/80">
                   {t(`restoredAutomation.${presentation.outcome}.summary`, {
                     count: presentation.automatedResolutionCount,
-                    omitted: presentation.omittedEventCount,
                   })}
+                  {presentation.outcome === "progressed" && (
+                    <> {t("restoredAutomation.progressed.omitted", {
+                      count: presentation.omittedEventCount,
+                    })}</>
+                  )}
                 </p>
               </div>
               <button
