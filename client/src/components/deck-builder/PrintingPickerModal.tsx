@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useLocaleArt } from "../../hooks/useCardImage.ts";
-import { getCardPrintings, resolvePrintingImageUrl } from "../../services/scryfall.ts";
+import { useCardImage } from "../../hooks/useCardImage.ts";
+import { getCardPrintings } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import type { CardHoverHandler } from "./hoverPreview";
 
@@ -17,6 +18,77 @@ interface PrintingPickerModalProps {
 
 const INITIAL_PAGE_SIZE = 30;
 
+function PrintingTile({
+  cardName,
+  oracleId,
+  printing,
+  selected,
+  onSelect,
+  onHover,
+}: {
+  cardName: string;
+  oracleId: string;
+  printing: PrintingEntry;
+  selected: boolean;
+  onSelect: (printing: PrintingEntry) => void;
+  onHover?: CardHoverHandler;
+}) {
+  const { t } = useTranslation("deck-builder");
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, {
+    oracleId,
+    scryfallId: printing.id,
+    size: "normal",
+  });
+  const isBorderless = printing.border_color === "borderless";
+  const isExtended = printing.frame_effects.includes("extendedart");
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(printing)}
+      onMouseEnter={() => onHover?.({ name: cardName, scryfallId: printing.id })}
+      onMouseLeave={() => onHover?.(null)}
+      className={`group relative overflow-hidden rounded-xl border transition-all ${
+        selected
+          ? "border-sky-400 ring-2 ring-sky-400/40"
+          : "border-white/10 hover:border-white/25"
+      }`}
+    >
+      {src ? (
+        <img
+          src={src}
+          {...getCardImageSrcSetProps(src, rungs)}
+          alt={`${cardName} — ${printing.set_name} #${printing.collector_number}`}
+          className="aspect-[5/7] w-full object-cover"
+          loading="lazy"
+          onError={() => advanceFailedSource?.(src)}
+        />
+      ) : (
+        <div className={`flex aspect-[5/7] w-full items-center justify-center bg-slate-800 text-xs text-slate-500 ${isLoading ? "animate-pulse" : ""}`}>
+          {t("printingPicker.noImage")}
+        </div>
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/80 to-transparent px-2 pb-2 pt-6">
+        <div className="truncate text-[10px] font-medium text-white">{printing.set_name}</div>
+        <div className="flex items-center gap-1 text-[9px] text-slate-400">
+          <span className="uppercase">{printing.set}</span>
+          <span>#{printing.collector_number}</span>
+          {(isBorderless || isExtended) && (
+            <span className="ml-auto rounded bg-fuchsia-500/20 px-1 text-fuchsia-300">
+              {isBorderless ? "Borderless" : "Extended"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {selected && (
+        <div className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-sky-500 text-xs text-white">✓</div>
+      )}
+    </button>
+  );
+}
+
 export function PrintingPickerModal({
   cardName,
   oracleId,
@@ -28,15 +100,6 @@ export function PrintingPickerModal({
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
   const [query, setQuery] = useState("");
-
-  // Tile URLs come from `resolvePrintingImageUrl` during render, which reads the
-  // installed locale-art map. Without this the picker would render whatever
-  // vocabulary happened to be loaded when it mounted: open it while the map is
-  // still in flight and every tile shows English art with no re-render when the
-  // map lands. The hook loads the active language's map and ticks this
-  // component when it arrives; the tile URLs are recomputed inline, so a
-  // re-render is all that is needed to pick up the swap.
-  useLocaleArt();
 
   const currentOverride = usePreferencesStore((s) => s.artOverrides[oracleId]);
   const setArtOverride = usePreferencesStore((s) => s.setArtOverride);
@@ -142,62 +205,16 @@ export function PrintingPickerModal({
           <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
             {visiblePrintings.map((printing) => {
               const isSelected = currentOverride?.scryfallId === printing.id;
-              // Go through the shared resolver rather than reading the face URL
-              // directly: it applies the active locale's art, so the picker
-              // previews each printing in the same language the board renders.
-              // It also maps Scryfall's "image coming soon" placeholder to null,
-              // which this tile already renders as a proper "no image" cell.
-              const imgUrl = resolvePrintingImageUrl(printing, 0, "normal");
-              const isBorderless = printing.border_color === "borderless";
-              const isExtended = printing.frame_effects.includes("extendedart");
-
               return (
-                <button
+                <PrintingTile
                   key={printing.id}
-                  type="button"
-                  onClick={() => handleSelect(printing)}
-                  onMouseEnter={() => onCardHover?.({ name: cardName, scryfallId: printing.id })}
-                  onMouseLeave={() => onCardHover?.(null)}
-                  className={`group relative overflow-hidden rounded-xl border transition-all ${
-                    isSelected
-                      ? "border-sky-400 ring-2 ring-sky-400/40"
-                      : "border-white/10 hover:border-white/25"
-                  }`}
-                >
-                  {imgUrl ? (
-                    <img
-                      src={imgUrl}
-                      alt={`${cardName} — ${printing.set_name} #${printing.collector_number}`}
-                      className="aspect-[5/7] w-full object-cover"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <div className="flex aspect-[5/7] w-full items-center justify-center bg-slate-800 text-xs text-slate-500">
-                      {t("printingPicker.noImage")}
-                    </div>
-                  )}
-
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/80 to-transparent px-2 pb-2 pt-6">
-                    <div className="truncate text-[10px] font-medium text-white">
-                      {printing.set_name}
-                    </div>
-                    <div className="flex items-center gap-1 text-[9px] text-slate-400">
-                      <span className="uppercase">{printing.set}</span>
-                      <span>#{printing.collector_number}</span>
-                      {(isBorderless || isExtended) && (
-                        <span className="ml-auto rounded bg-fuchsia-500/20 px-1 text-fuchsia-300">
-                          {isBorderless ? "Borderless" : "Extended"}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {isSelected && (
-                    <div className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-sky-500 text-xs text-white">
-                      ✓
-                    </div>
-                  )}
-                </button>
+                  cardName={cardName}
+                  oracleId={oracleId}
+                  printing={printing}
+                  selected={isSelected}
+                  onSelect={handleSelect}
+                  onHover={onCardHover}
+                />
               );
             })}
           </div>

@@ -182,7 +182,7 @@ describe("VisualPackManager initialization", () => {
     render(<VisualPackManager />);
     await screen.findByText(/Offline card images/i);
     fireEvent.click(screen.getByRole("button", { name: /verify metadata/i }));
-    fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
+    fireEvent.click(screen.getByRole("button", { name: /check Scryfall catalog/i }));
     expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
     pending.resolve({ revision: installedRevision("90071992547409930"), issues: [{ kind: "projection_drift" }] });
     await waitFor(() => expect(screen.queryByText(/lookup records differ/i)).not.toBeInTheDocument());
@@ -194,11 +194,11 @@ describe("VisualPackManager initialization", () => {
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
     await screen.findByText(/Offline card images/i);
-    fireEvent.click(screen.getByRole("button", { name: /estimate download/i }));
-    expect(await screen.findByText(/Backend estimate and dependency closure/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    expect(await screen.findByText(/Scryfall snapshot scan/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /check Scryfall catalog/i }));
     expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
-    expect(screen.queryByText(/Backend estimate and dependency closure/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Scryfall snapshot scan/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /install selection/i })).toBeDisabled();
   });
 
@@ -211,7 +211,7 @@ describe("VisualPackManager initialization", () => {
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
     await screen.findByText(/Offline card images/i);
-    fireEvent.click(screen.getByRole("button", { name: /estimate download/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
     fireEvent.click(screen.getByRole("button", { name: /verify metadata/i }));
     expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
     expect(fixture.value.verify).toHaveBeenCalledWith("metadata");

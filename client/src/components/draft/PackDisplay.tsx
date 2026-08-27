@@ -5,6 +5,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 const EMPTY_DRAFT_EFFECTS: DraftCardInstance[] = [];
 
@@ -28,7 +29,7 @@ function PackCard({
   onHover,
 }: PackCardProps) {
   const { t } = useTranslation("draft");
-  const { src, isLoading } = useCardImage(card.name, {
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(card.name, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
@@ -54,8 +55,10 @@ function PackCard({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={card.name}
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
             className="aspect-[488/680] w-full object-cover"
           />
         )}

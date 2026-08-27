@@ -8,6 +8,7 @@ import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { SelectField } from "../ui/SelectField";
 import { copyText } from "../../services/copyText";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -1291,7 +1292,12 @@ function annotateOracleLine(line: string, indexed: IndexedItem[]): TextSegment[]
 function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: () => void }) {
   const { t } = useTranslation("game");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const { src: cardImageSrc, isLoading: cardImageLoading } = useCardImage(card.card_name, { size: "normal" });
+  const {
+    src: cardImageSrc,
+    isLoading: cardImageLoading,
+    rungs: cardImageRungs,
+    advanceFailedSource,
+  } = useCardImage(card.card_name, { size: "normal" });
 
   const onHover = useCallback((id: string | null) => setHoveredId(id), []);
 
@@ -1349,9 +1355,11 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
           ) : (
             <img
               src={cardImageSrc}
+              {...getCardImageSrcSetProps(cardImageSrc, cardImageRungs)}
               alt={card.card_name}
               className="w-full rounded-lg shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
               draggable={false}
+              onError={() => advanceFailedSource?.(cardImageSrc)}
             />
           )}
         </div>

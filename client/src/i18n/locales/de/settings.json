@@ -225,11 +225,13 @@
     },
     "actions": {
       "estimate": "Geschätzter Download",
+      "estimating": "Scryfall-Katalog wird durchsucht…",
       "install": "Auswahl installieren",
       "cancel": "Vorgang abbrechen",
       "resume": "Betrieb wieder aufnehmen",
       "retry": "Versuchen Sie es erneut",
-      "refresh": "Katalog aktualisieren",
+      "refresh": "Scryfall-Katalog prüfen",
+      "refreshing": "Scryfall-Katalog wird geprüft…",
       "verifyMetadata": "Metadaten überprüfen",
       "verifyFull": "Überprüfen Sie alle Dateien",
       "repair": "Reparatur ausgewählt",
@@ -261,7 +263,8 @@
       "id": "Betrieb",
       "root": "Katalogstamm",
       "packs": "Pakete: {{current}} von {{total}}",
-      "objects": "Objekte: {{current}} von {{total}}",
+      "objects": "Bilder: {{current}} von {{total}}",
+      "scanNote": "Die Gesamtzahl wächst beim Durchsuchen des Scryfall-Snapshots. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "finalizing": "Die Installation des Katalogs wird abgeschlossen"
     },
     "status": {

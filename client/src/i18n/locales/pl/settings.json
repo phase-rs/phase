@@ -225,11 +225,13 @@
     },
     "actions": {
       "estimate": "Oszacuj pobranie",
+      "estimating": "Skanowanie katalogu Scryfall…",
       "install": "Zainstaluj wybór",
       "cancel": "Anuluj operację",
       "resume": "Wznów działanie",
       "retry": "Spróbuj ponownie",
-      "refresh": "Odśwież katalog",
+      "refresh": "Sprawdź katalog Scryfall",
+      "refreshing": "Sprawdzanie katalogu Scryfall…",
       "verifyMetadata": "Zweryfikuj metadane",
       "verifyFull": "Sprawdź wszystkie pliki",
       "repair": "Wybrano naprawę",
@@ -261,7 +263,8 @@
       "id": "Operacja",
       "root": "Katalog główny",
       "packs": "Pakiety: {{current}} z {{total}}",
-      "objects": "Obiekty: {{current}} z {{total}}",
+      "objects": "Obrazy: {{current}} z {{total}}",
+      "scanNote": "Łączna liczba rośnie podczas skanowania migawki Scryfall. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
       "finalizing": "Kończenie instalacji katalogu"
     },
     "status": {

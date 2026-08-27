@@ -13,6 +13,7 @@ import {
 } from "../../services/engineRuntime";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { CommanderPanel } from "../deck-builder/CommanderPanel";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
 import type {
@@ -92,7 +93,7 @@ interface CardTileProps {
 }
 
 function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
-  const { src, isLoading } = useCardImage(card.name, {
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(card.name, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
@@ -126,8 +127,10 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
       ) : (
         <img
           src={src}
+          {...getCardImageSrcSetProps(src, rungs)}
           alt={card.name}
           draggable={false}
+          onError={() => advanceFailedSource?.(src)}
           className="aspect-[488/680] w-full object-cover"
         />
       )}

@@ -225,11 +225,13 @@
     },
     "actions": {
       "estimate": "Descarga de presupuesto",
+      "estimating": "Analizando el catálogo de Scryfall…",
       "install": "Instalar selección",
       "cancel": "Cancelar operación",
       "resume": "Reanudar operación",
       "retry": "Inténtalo de nuevo",
-      "refresh": "Actualizar catálogo",
+      "refresh": "Comprobar catálogo de Scryfall",
+      "refreshing": "Comprobando el catálogo de Scryfall…",
       "verifyMetadata": "Verificar metadatos",
       "verifyFull": "Verificar todos los archivos",
       "repair": "Reparación seleccionada",
@@ -261,7 +263,8 @@
       "id": "Operación",
       "root": "raíz del catálogo",
       "packs": "Paquetes: {{current}} de {{total}}",
-      "objects": "Objetos: {{current}} de {{total}}",
+      "objects": "Imágenes: {{current}} de {{total}}",
+      "scanNote": "El total aumenta mientras se analiza la instantánea de Scryfall. Las imágenes ya descargadas permanecen locales y se omiten al reanudar.",
       "finalizing": "Finalizando la instalación del catálogo"
     },
     "status": {

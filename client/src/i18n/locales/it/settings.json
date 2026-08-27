@@ -225,11 +225,13 @@
     },
     "actions": {
       "estimate": "Scarica preventivo",
+      "estimating": "Scansione del catalogo Scryfall…",
       "install": "Installa la selezione",
       "cancel": "Annulla l'operazione",
       "resume": "Riprendere l'operazione",
       "retry": "Riprova",
-      "refresh": "Aggiorna catalogo",
+      "refresh": "Controlla il catalogo Scryfall",
+      "refreshing": "Controllo del catalogo Scryfall…",
       "verifyMetadata": "Verifica i metadati",
       "verifyFull": "Verifica tutti i file",
       "repair": "Riparazione selezionata",
@@ -261,7 +263,8 @@
       "id": "Operazione",
       "root": "Radice del catalogo",
       "packs": "Pacchetti: {{current}} di {{total}}",
-      "objects": "Oggetti: {{current}} di {{total}}",
+      "objects": "Immagini: {{current}} di {{total}}",
+      "scanNote": "Il totale cresce durante la scansione dell’istantanea Scryfall. Le immagini già scaricate restano locali e vengono ignorate alla ripresa.",
       "finalizing": "Finalizzazione dell'installazione del catalogo"
     },
     "status": {

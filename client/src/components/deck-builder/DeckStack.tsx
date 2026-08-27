@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
@@ -181,7 +182,7 @@ function DeckStackCard({
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
-  const { src, isLoading } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
@@ -298,8 +299,10 @@ function DeckStackCard({
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={item.name}
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
             className="object-cover"
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}
           />

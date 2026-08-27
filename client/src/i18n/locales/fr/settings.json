@@ -225,11 +225,13 @@
     },
     "actions": {
       "estimate": "Téléchargement de devis",
+      "estimating": "Analyse du catalogue Scryfall…",
       "install": "Sélection d'installation",
       "cancel": "Annuler l'opération",
       "resume": "Reprendre l'opération",
       "retry": "Réessayez",
-      "refresh": "Actualiser le catalogue",
+      "refresh": "Vérifier le catalogue Scryfall",
+      "refreshing": "Vérification du catalogue Scryfall…",
       "verifyMetadata": "Vérifier les métadonnées",
       "verifyFull": "Vérifier tous les fichiers",
       "repair": "Réparation sélectionnée",
@@ -261,7 +263,8 @@
       "id": "Fonctionnement",
       "root": "Racine du catalogue",
       "packs": "Packs : {{current}} sur {{total}}",
-      "objects": "Objets : {{current}} sur {{total}}",
+      "objects": "Images : {{current}} sur {{total}}",
+      "scanNote": "Le total augmente pendant l’analyse de l’instantané Scryfall. Les images déjà téléchargées restent locales et sont ignorées à la reprise.",
       "finalizing": "Finalisation de l'installation du catalogue"
     },
     "status": {

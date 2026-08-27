@@ -4,8 +4,12 @@ import { useMemo } from "react";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
-function RevealCard({ cardName }: { cardName: string }) {
-  const { src } = useCardImage(cardName, { size: "small" });
+function RevealCard({ card }: { card: { name: string; oracleId?: string; faceName?: string } }) {
+  const { src, rungs, advanceFailedSource } = useCardImage(card.name, {
+    size: "small",
+    oracleId: card.oracleId,
+    faceName: card.faceName,
+  });
 
   return (
     <motion.div
@@ -20,9 +24,10 @@ function RevealCard({ cardName }: { cardName: string }) {
       {src ? (
         <img
           src={src}
-          alt={cardName}
+          alt={card.name}
           className="h-full w-full object-cover"
           draggable={false}
+          onError={() => advanceFailedSource?.(src)}
         />
       ) : (
         <div className="h-full w-full border border-gray-600 bg-gray-700" />
@@ -60,14 +65,19 @@ export function RevealOverlay() {
       for (const id of player.library ?? []) libraryIds.add(id);
     }
 
-    const cards: { id: number; name: string }[] = [];
+    const cards: { id: number; name: string; oracleId?: string; faceName?: string }[] = [];
     for (const id of ids) {
       if (!libraryIds.has(id)) continue;
       const obj = gameState.objects[id];
       // `revealed_cards` is the public set, so the engine un-redacts these for
       // every viewer; guard against a redacted name defensively only.
-      if (obj?.name && obj.name !== "Hidden Card") {
-        cards.push({ id, name: obj.name });
+      if (obj?.display_visible_to_viewer && obj.name && obj.name !== "Hidden Card") {
+        cards.push({
+          id,
+          name: obj.name,
+          oracleId: obj.printed_ref?.oracle_id,
+          faceName: obj.printed_ref?.face_name,
+        });
       }
     }
     return cards;
@@ -100,7 +110,7 @@ export function RevealOverlay() {
         </svg>
         <AnimatePresence mode="popLayout">
           {revealed.map((card) => (
-            <RevealCard key={card.id} cardName={card.name} />
+            <RevealCard key={card.id} card={card} />
           ))}
         </AnimatePresence>
       </motion.div>

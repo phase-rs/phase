@@ -9,6 +9,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
@@ -202,6 +203,10 @@ export function MobileHandDrawer() {
                     key={obj.id}
                     objectId={obj.id}
                     cardName={obj.name}
+                    oracleId={obj.printed_ref?.oracle_id}
+                    faceName={obj.printed_ref?.face_name}
+                    isToken={obj.display_source === "Token"}
+                    tokenImageRef={obj.token_image_ref}
                     manaCost={obj.mana_cost}
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
@@ -222,6 +227,10 @@ export function MobileHandDrawer() {
 interface DrawerCardProps {
   objectId: number;
   cardName: string;
+  oracleId?: string;
+  faceName?: string;
+  isToken: boolean;
+  tokenImageRef?: GameObject["token_image_ref"];
   manaCost: ManaCost;
   isPlayable: boolean;
   hasPriority: boolean;
@@ -233,6 +242,10 @@ interface DrawerCardProps {
 const DrawerCard = memo(function DrawerCard({
   objectId,
   cardName,
+  oracleId,
+  faceName,
+  isToken,
+  tokenImageRef,
   manaCost,
   isPlayable,
   hasPriority,
@@ -243,7 +256,13 @@ const DrawerCard = memo(function DrawerCard({
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
-  const { src } = useCardImage(cardName, { size: "normal" });
+  const { src, rungs, advanceFailedSource } = useCardImage(cardName, {
+    size: "normal",
+    oracleId,
+    faceName,
+    isToken,
+    tokenImageRef,
+  });
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
 
   // Mouse hover (desktop) + long-press (touch) both open the card preview, and
@@ -293,9 +312,11 @@ const DrawerCard = memo(function DrawerCard({
       {src ? (
         <img
           src={src}
+          {...getCardImageSrcSetProps(src, rungs)}
           alt={cardName}
           className="h-full w-full object-cover"
           draggable={false}
+          onError={() => advanceFailedSource?.(src)}
         />
       ) : (
         <div className="h-full w-full bg-gray-700" />
