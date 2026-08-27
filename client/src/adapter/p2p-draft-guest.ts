@@ -283,9 +283,10 @@ export class P2PDraftGuest {
 
   // ── Actions ────────────────────────────────────────────────────────
 
-  async submitPick(cardInstanceId: string): Promise<void> {
+  /** Submit one whole CR 903.13b pick step — every card this seat drafts now. */
+  async submitPick(cardInstanceIds: string[]): Promise<void> {
     if (!this.session) throw new Error("Not connected to draft host");
-    await this.session.send({ type: "draft_pick", cardInstanceId });
+    await this.session.send({ type: "draft_pick", cardInstanceIds });
   }
 
   async submitPickWithDraftEffect(
@@ -300,9 +301,9 @@ export class P2PDraftGuest {
     });
   }
 
-  submitDeck(mainDeck: string[]): Promise<void> {
+  submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
     if (this.pendingDeckSubmission) return this.pendingDeckSubmission;
-    const submission = this.submitDeckInner(mainDeck);
+    const submission = this.submitDeckInner(mainDeck, commanders);
     this.pendingDeckSubmission = submission;
     void submission.then(
       () => {
@@ -315,29 +316,40 @@ export class P2PDraftGuest {
     return submission;
   }
 
-  private async submitDeckInner(mainDeck: string[]): Promise<void> {
+  private async submitDeckInner(mainDeck: string[], commanders: string[]): Promise<void> {
     const identity = this.deckSubmissionIdentity();
     if (!identity) throw new Error("Draft identity is unavailable");
     const existing = await loadDraftDeckSubmission(this.hostPeerId, identity);
+    // CR 903.3: the designation is part of the payload's identity, not a
+    // decoration on it. Fingerprinting `mainDeck` alone would let a resubmit
+    // that changes only the commander read as "same payload" and silently
+    // replay the STORED designation, discarding the player's change.
     const samePayload = existing !== null
-      && deckSubmissionFingerprint(existing.mainDeck) === deckSubmissionFingerprint(mainDeck);
+      && deckSubmissionFingerprint(existing.mainDeck) === deckSubmissionFingerprint(mainDeck)
+      && deckSubmissionFingerprint(existing.commanders) === deckSubmissionFingerprint(commanders);
     if (existing && !samePayload) {
       throw new Error("A deck submission is still awaiting host confirmation");
     }
     const submissionId = existing?.submissionId ?? crypto.randomUUID();
     const payload = existing?.mainDeck ?? mainDeck;
+    const designation = existing?.commanders ?? commanders;
     if (!existing) {
       await saveDraftDeckSubmission(this.hostPeerId, {
         ...identity,
         draftCode: this.draftCode!,
         submissionId,
         mainDeck: payload,
+        commanders: designation,
       });
     }
-    await this.sendDeckSubmission(submissionId, payload);
+    await this.sendDeckSubmission(submissionId, payload, designation);
   }
 
-  private async sendDeckSubmission(submissionId: string, mainDeck: string[]): Promise<void> {
+  private async sendDeckSubmission(
+    submissionId: string,
+    mainDeck: string[],
+    commanders: string[],
+  ): Promise<void> {
     if (!this.session) throw new Error("Not connected to draft host");
     let waiter = this.deckSubmissionWaiters.get(submissionId);
     if (!waiter) {
@@ -351,7 +363,7 @@ export class P2PDraftGuest {
       this.deckSubmissionWaiters.set(submissionId, waiter);
     }
     try {
-      await this.session.send({ type: "draft_submit_deck", submissionId, mainDeck });
+      await this.session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders });
       await waiter.acknowledgement;
     } finally {
       if (this.deckSubmissionWaiters.get(submissionId) === waiter) {
@@ -375,7 +387,7 @@ export class P2PDraftGuest {
     if (!pending || !this.session) return;
     // Do not await here: the reconnect handshake must finish before normal
     // state consumers run, while its durable submission can wait for its ack.
-    void this.sendDeckSubmission(pending.submissionId, pending.mainDeck)
+    void this.sendDeckSubmission(pending.submissionId, pending.mainDeck, pending.commanders)
       .catch((error: unknown) => this.emit({
         type: "error",
         message: error instanceof Error ? error.message : String(error),

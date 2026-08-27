@@ -10,7 +10,7 @@ use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allow
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::format::{DeckCopyLimit, FormatConfig, GameFormat, SideboardPolicy};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::match_config::MatchType;
 
@@ -42,6 +42,12 @@ pub struct DeckCompatibilityRequest {
     pub player_count: usize,
     #[serde(default)]
     pub summary_only: bool,
+    /// CR 903.13e / CR 903.13f(3): the set code of the draft boosters this deck
+    /// was built from. `None` for constructed play, which is why a constructed
+    /// Commander deck is unaffected by the Commander Draft concessions.
+    /// Latched by the draft session; never derived from a card's printing.
+    #[serde(default)]
+    pub draft_set_code: Option<String>,
 }
 
 /// Engine-authored deck-builder state for selecting an Oathbreaker's signature
@@ -355,6 +361,7 @@ pub fn validate_name_deck_for_format_with_sig(
         &[],
         &[],
         signature_spell,
+        None,
         selected_format,
         selected_match_type,
         default_player_count(),
@@ -371,6 +378,7 @@ pub fn validate_name_deck_for_format_full(
     planar_deck: &[String],
     scheme_deck: &[String],
     signature_spell: &[String],
+    draft_set_code: Option<&str>,
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
     player_count: usize,
@@ -387,6 +395,7 @@ pub fn validate_name_deck_for_format_full(
         selected_match_type,
         player_count,
         summary_only: false,
+        draft_set_code: draft_set_code.map(str::to_string),
     };
     validate_deck_for_format(db, &request)
 }
@@ -452,7 +461,7 @@ fn evaluate_constructed(
 
     // CR 100.2a + CR 100.4a: The 4-card limit applies to main + sideboard combined.
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, 4);
+    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(
             "More than 4 copies (main + sideboard combined)",
@@ -540,7 +549,7 @@ fn evaluate_planechase(
     }
 
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, 4);
+    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(
             "More than 4 copies (main + sideboard combined)",
@@ -648,7 +657,7 @@ fn evaluate_archenemy(
     }
 
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, 4);
+    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(
             "More than 4 copies (main + sideboard combined)",
@@ -729,8 +738,6 @@ fn evaluate_commander(
         db,
         request,
         unknown_cards,
-        LegalityFormat::Commander,
-        "Commander",
         CommanderVariantRules::commander(),
         GameFormat::Commander,
     )
@@ -740,6 +747,10 @@ struct CommanderVariantRules {
     eligible: fn(&CardFace) -> bool,
     eligibility_error: &'static str,
     skip_commander_legality: bool,
+    /// CR 903.13f(3): the deckbuilding partner grant in force, or `None` for
+    /// every variant the rule does not reach — which is all of them except
+    /// Commander Draft from a granting set.
+    partner_grant: Option<PartnerGrant>,
 }
 
 impl CommanderVariantRules {
@@ -749,6 +760,7 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
+            partner_grant: None,
         }
     }
 
@@ -758,6 +770,7 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Duel Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
+            partner_grant: None,
         }
     }
 
@@ -767,6 +780,59 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Pauper Commander commander must be an uncommon creature, Vehicle, or Spacecraft",
             skip_commander_legality: true,
+            partner_grant: None,
+        }
+    }
+
+    /// CR 903.13f: "Commander Draft deck construction follows the same rules as
+    /// Commander deck construction (see rule 903.5) with three exceptions."
+    ///
+    /// Two of the three exceptions are format axes already answered by
+    /// `GameFormat` and read through it by the shared validators —
+    /// CR 903.13f(1) deck size via `FormatConfig::for_format(..).deck_size`
+    /// (`Minimum(60)`), and CR 903.13f(2) the copy limit via
+    /// `default_deck_copy_limit()` (`Unlimited`). The third, CR 903.13f(3), is
+    /// a per-SESSION property and arrives here as `partner_grant`.
+    ///
+    /// `eligible` is CR 903.3, identical to Commander: CR 903.13f names no
+    /// exception to it, and the grant affects pairing rather than eligibility.
+    /// `skip_commander_legality` is `true` because CR 903.13e makes the drafted
+    /// cards the pool — there is no constructed legality table to consult, and
+    /// `GameFormat::CommanderDraft.legality_format()` is correspondingly `None`.
+    ///
+    /// # CR 702.124h is NOT enforced on this path, and that is not an oversight
+    ///
+    /// CR 702.124h: "You may designate two legendary CARDS as your commander
+    /// rather than one if each of them has partner." Two designations need two
+    /// cards. This validator cannot decide that, because it has no pool and
+    /// every production producer of a Commander Draft request is
+    /// commanders-OUTSIDE (`removeCommandersFromMain` on import,
+    /// `handleSetCommander`'s `main.filter` in the builder). On that shape
+    /// `{ main_deck: <no X>, commander: [X, X] }` is BYTE-IDENTICAL to the
+    /// request of a LEGAL deck holding two copies of X — legal because
+    /// CR 903.13f(2) sets no copy limit and CR 903.13f(1) sets no maximum deck
+    /// size. Any guard written here would therefore reject legal decks,
+    /// including the ordinary one-commander case.
+    ///
+    /// The rule is decidable only against a complete, authoritative list PLUS a
+    /// pool, which is `validate_limited_deck`'s step 5 in draft-core — and that
+    /// path IS guarded.
+    ///
+    /// Nothing is deferred here. On the request shape this validator receives the
+    /// rule is undecidable by the argument above, and its decidable form — the
+    /// CR 702.124h + CR 903.3 multiset comparison — is landed in draft-core's
+    /// `validate_limited_deck`, which owns the pool this one lacks.
+    ///
+    /// This block lives on the single constructor both dispatch arms route
+    /// through rather than being copied into each of them, so the two can never
+    /// drift apart.
+    fn commander_draft(partner_grant: Option<PartnerGrant>) -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Commander Draft cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: true,
+            partner_grant,
         }
     }
 }
@@ -852,15 +918,32 @@ fn validate_commander_companion(
 /// the legality table, commander eligibility, and display label differ.
 /// DuelCommander's 30-life / 1v1-only rules are expressed in `FormatConfig`,
 /// not deck validation.
+///
+/// A fact one twin DERIVES from `game_format` and the other HARD-CODES is a
+/// divergence: the full and summary paths would then state different verdicts
+/// for the same request. Derive on both sides, or pass on both sides — the
+/// invariant is that the two agree, not that any particular fact is derived.
+///
+/// `legality_format()` is an `Option` because CR 903.13e leaves Commander
+/// Draft with no constructed legality table at all — `None` skips the legality
+/// loop, which is the only shape that can express "the drafted cards ARE the
+/// pool".
 fn evaluate_commander_with_format(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
-    legality_format: LegalityFormat,
-    format_label: &str,
     rules: CommanderVariantRules,
     game_format: GameFormat,
 ) -> CompatibilityCheck {
+    let legality_format = game_format.legality_format();
+    let format_label = game_format.label();
+    // CR 903.5a / CR 903.13f(1): the format's `DeckSizeRule` is the single
+    // authority for min-vs-exact. Compared only through `accepts`, never by
+    // hand — CR 903.13f(1) sets a minimum with NO maximum, which a literal
+    // equality cannot express.
+    let deck_size = FormatConfig::for_format(game_format)
+        .expect("evaluate_commander_with_format is only dispatched for a built-in commander format")
+        .deck_size;
     // CR 903.5e: the sideboard is dropped at game load for Commander-style
     // formats. Re-scope the request so singleton, color-identity, and legality
     // checks operate on the actual game deck.
@@ -905,7 +988,9 @@ fn evaluate_commander_with_format(
             let face_a = db.get_face_by_name(&request.commander[0]);
             let face_b = db.get_face_by_name(&request.commander[1]);
             if let (Some(a), Some(b)) = (face_a, face_b) {
-                if !are_valid_partners(a, b) {
+                // CR 903.13f(3): the grant is a per-variant axis, so it comes
+                // from the variant rules rather than from the cards.
+                if !are_valid_partners(a, b, rules.partner_grant) {
                     reasons.push(format!(
                         "Invalid partner pairing: {} and {} do not have compatible partner keywords",
                         request.commander[0], request.commander[1]
@@ -932,17 +1017,25 @@ fn evaluate_commander_with_format(
         })
         .count();
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
-    if total_cards != 100 {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "{format_label} deck must have exactly 100 cards (found {total_cards})"
+            "{format_label} deck must have {} cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
     // CR 903.5b: Other than basic lands, each card in a Commander deck must have
     // a different English name. Canonicalization (CR 201.3) is handled inside
     // the shared helper.
+    //
+    // CR 903.13f(2) displaces that rule for Commander Draft — "A player's deck
+    // may include any number of cards from that player's card pool with the
+    // same name" — which is exactly what `default_deck_copy_limit()` already
+    // reports as `Unlimited`, so the format answers this rather than the
+    // caller.
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, 1);
+    let singleton_violations =
+        copy_limit_violations(db, &counts, game_format.default_deck_copy_limit());
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -952,25 +1045,29 @@ fn evaluate_commander_with_format(
     }
 
     let mut illegal_cards = BTreeSet::new();
-    for name in all_deck_cards(request) {
-        if unknown_cards.contains(name) {
-            continue;
-        }
-        if rules.skip_commander_legality
-            && request
-                .commander
-                .iter()
-                .any(|commander| commander.eq_ignore_ascii_case(name))
-        {
-            continue;
-        }
-        match db.legality_status(resolve_card_name(db, name), legality_format) {
-            Some(status) if status.is_legal() => {}
-            Some(status) => {
-                illegal_cards.insert(format!("{name} ({})", status_label(status)));
+    // CR 903.13e: a format with no constructed legality table has nothing to
+    // check here — the drafted cards ARE the pool.
+    if let Some(legality_format) = legality_format {
+        for name in all_deck_cards(request) {
+            if unknown_cards.contains(name) {
+                continue;
             }
-            None => {
-                illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+            if rules.skip_commander_legality
+                && request
+                    .commander
+                    .iter()
+                    .any(|commander| commander.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            match db.legality_status(resolve_card_name(db, name), legality_format) {
+                Some(status) if status.is_legal() => {}
+                Some(status) => {
+                    illegal_cards.insert(format!("{name} ({})", status_label(status)));
+                }
+                None => {
+                    illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+                }
             }
         }
     }
@@ -1086,13 +1183,12 @@ fn evaluate_brawl(
     // a sideboard. Extra entries in the submitted list are silently ignored at
     // load time — see `load_deck_into_state` in `deck_loading.rs`.
 
-    // Exact total card count from the format config (main + commander,
-    // accounting for commander listed in main).
-    let deck_size = usize::from(
-        FormatConfig::for_format(game_format)
-            .expect("evaluate_brawl is only dispatched for a Brawl-family GameFormat")
-            .deck_size,
-    );
+    // CR 903.5a (via Brawl variant): the format's rule is authoritative for the
+    // total card count (main + commander, accounting for commander listed in
+    // main) — never re-derive min-vs-exact here.
+    let deck_size = FormatConfig::for_format(game_format)
+        .expect("evaluate_brawl is only dispatched for a Brawl-family GameFormat")
+        .deck_size;
     let represented_in_main = request
         .commander
         .iter()
@@ -1104,16 +1200,17 @@ fn evaluate_brawl(
         })
         .count();
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
-    if total_cards != deck_size {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "{format_label} deck must have exactly {deck_size} cards (found {total_cards})"
+            "{format_label} deck must have {} cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
     // CR 903.5b (Brawl variant): singleton rule, basic lands exempt, canonicalized
     // via CR 201.3 in the shared helper.
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, 1);
+    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1317,7 +1414,12 @@ fn evaluate_tiny_leaders(
             let face_a = db.get_face_by_name(resolve_card_name(db, &request.commander[0]));
             let face_b = db.get_face_by_name(resolve_card_name(db, &request.commander[1]));
             if let (Some(a), Some(b)) = (face_a, face_b) {
-                if !are_valid_partners(a, b) {
+                // CR 903.13f(3) is scoped to Commander Draft. Tiny Leaders has
+                // no `CommanderVariantRules` and no draft set code, so it
+                // passes `None` UNCONDITIONALLY — a grant reaching this arm
+                // would silently change a second format's legality. Do not
+                // "clean this up" into a variable.
+                if !are_valid_partners(a, b, None) {
                     reasons.push(format!(
                         "Invalid partner pairing: {} and {} do not have compatible partner keywords",
                         request.commander[0], request.commander[1]
@@ -1352,7 +1454,7 @@ fn evaluate_tiny_leaders(
     }
 
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, 1);
+    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1685,7 +1787,7 @@ fn evaluate_oathbreaker(
     // singleton command-zone formats). `all_deck_cards` now includes `signature_spell`
     // so a card in both the main deck and signature-spell slot is caught here.
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, 1);
+    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1965,23 +2067,29 @@ fn evaluate_selected_format_summary(
         GameFormat::Commander => quick_commander_check(
             db,
             request,
-            LegalityFormat::Commander,
-            "Commander",
             CommanderVariantRules::commander(),
-            100,
             GameFormat::Commander,
         ),
         GameFormat::PauperCommander | GameFormat::DuelCommander => quick_commander_check(
             db,
             request,
-            format.legality_format().unwrap(),
-            &format.label(),
             match format {
                 GameFormat::PauperCommander => CommanderVariantRules::pauper_commander(),
                 GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
                 _ => unreachable!("commander variant branch only handles PDH and Duel"),
             },
-            100,
+            format,
+        ),
+        // CR 903.13f: Commander Draft deck construction follows CR 903.5 with
+        // three exceptions, so it routes through the SHARED commander
+        // validator rather than a second one. The exceptions arrive as format
+        // axes (CR 903.13f(1) `DeckSizeRule::Minimum(60)`, CR 903.13f(2)
+        // `DeckCopyLimit::Unlimited`, no legality table) plus the CR 903.13f(3)
+        // grant below.
+        GameFormat::CommanderDraft => quick_commander_check(
+            db,
+            request,
+            CommanderVariantRules::commander_draft(commander_draft_partner_grant(request)),
             format,
         ),
         GameFormat::TinyLeaders => quick_tiny_leaders_check(db, request),
@@ -1989,13 +2097,9 @@ fn evaluate_selected_format_summary(
         GameFormat::Momir => quick_momir_check(db, request),
         GameFormat::Planechase => quick_planechase_check(db, request),
         GameFormat::Archenemy => quick_archenemy_check(db, request),
-        GameFormat::Brawl | GameFormat::HistoricBrawl => quick_brawl_check(
-            db,
-            request,
-            format.legality_format().unwrap(),
-            &format.label(),
-            format,
-        ),
+        GameFormat::Brawl | GameFormat::HistoricBrawl => {
+            quick_brawl_check(db, request, &format.label(), format)
+        }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
             QuickCheckResult::compatible()
         }
@@ -2101,7 +2205,10 @@ fn quick_constructed_check(
         }
     }
 
-    if let Some(reason) = copy_limit_violations(db, &counts, 4).into_iter().next() {
+    if let Some(reason) = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4))
+        .into_iter()
+        .next()
+    {
         return QuickCheckResult::incompatible(format!(
             "More than 4 copies (main + sideboard combined): {reason}"
         ));
@@ -2118,15 +2225,24 @@ fn quick_constructed_check(
     QuickCheckResult::compatible()
 }
 
+/// Summary-path twin of [`evaluate_commander_with_format`], and bound by the
+/// same invariant: a fact one twin derives from `game_format` and the other
+/// hard-codes is a divergence between the full and summary verdicts for the
+/// same deck. The two must state the same answer for the same request.
 fn quick_commander_check(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
-    legality_format: LegalityFormat,
-    format_label: &str,
     rules: CommanderVariantRules,
-    expected_total: usize,
     game_format: GameFormat,
 ) -> QuickCheckResult {
+    let legality_format = game_format.legality_format();
+    let format_label = game_format.label();
+    let expected = FormatConfig::for_format(game_format)
+        .expect("quick_commander_check is only dispatched for a built-in commander format")
+        .deck_size;
+    // CR 702.124g: at most two commanders. Pre-existing and unchanged by this
+    // phase; named here so a later reader does not mistake draft-core's two
+    // authorities for the complete set.
     if request.commander.is_empty() || request.commander.len() > 2 {
         return QuickCheckResult::incompatible(format!(
             "{format_label} decks require 1 or 2 commanders (found {})",
@@ -2166,9 +2282,12 @@ fn quick_commander_check(
         })
         .count();
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
-    if total_cards != expected_total {
+    // CR 903.5a: the format's `DeckSizeRule` is the single authority for
+    // min-vs-exact; this seam must not re-derive it with `!=`.
+    if !expected.accepts(total_cards) {
         return QuickCheckResult::incompatible(format!(
-            "{format_label} deck must have exactly {expected_total} cards (found {total_cards})"
+            "{format_label} deck must have {} cards (found {total_cards})",
+            expected.requirement_phrase()
         ));
     }
 
@@ -2186,7 +2305,9 @@ fn quick_commander_check(
         let face_a = db.get_face_by_name(resolve_card_name(db, &request.commander[0]));
         let face_b = db.get_face_by_name(resolve_card_name(db, &request.commander[1]));
         if let (Some(a), Some(b)) = (face_a, face_b) {
-            if !are_valid_partners(a, b) {
+            // CR 903.13f(3): the summary-path twin of the full validator's
+            // pairing check; same per-variant axis, same source.
+            if !are_valid_partners(a, b, rules.partner_grant) {
                 return QuickCheckResult::incompatible(format!(
                     "Invalid partner pairing: {} and {} do not have compatible partner keywords",
                     request.commander[0], request.commander[1]
@@ -2204,24 +2325,28 @@ fn quick_commander_check(
         *counts
             .entry(canonical_deck_count_key(db, name))
             .or_insert(0) += 1;
-        if !rules.skip_commander_legality
-            || !request
-                .commander
-                .iter()
-                .any(|commander| commander.eq_ignore_ascii_case(name))
-        {
-            match db.legality_status(resolved, legality_format) {
-                Some(status) if status.is_legal() => {}
-                Some(status) => {
-                    return QuickCheckResult::incompatible(format!(
-                        "Not {format_label} legal: {name} ({})",
-                        status_label(status)
-                    ));
-                }
-                None => {
-                    return QuickCheckResult::incompatible(format!(
-                        "Not {format_label} legal: {name} (not legal in {format_label})"
-                    ));
+        // CR 903.13e: `None` means the format has no constructed legality
+        // table, so there is nothing to check.
+        if let Some(legality_format) = legality_format {
+            if !rules.skip_commander_legality
+                || !request
+                    .commander
+                    .iter()
+                    .any(|commander| commander.eq_ignore_ascii_case(name))
+            {
+                match db.legality_status(resolved, legality_format) {
+                    Some(status) if status.is_legal() => {}
+                    Some(status) => {
+                        return QuickCheckResult::incompatible(format!(
+                            "Not {format_label} legal: {name} ({})",
+                            status_label(status)
+                        ));
+                    }
+                    None => {
+                        return QuickCheckResult::incompatible(format!(
+                            "Not {format_label} legal: {name} (not legal in {format_label})"
+                        ));
+                    }
                 }
             }
         }
@@ -2246,6 +2371,10 @@ fn quick_commander_check(
     // deck's size or singleton count.
     for name in &request.companion {
         let resolved = resolve_card_name(db, name);
+        // CR 903.13e: as above — no legality table, nothing to check.
+        let Some(legality_format) = legality_format else {
+            break;
+        };
         match db.legality_status(resolved, legality_format) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
@@ -2262,17 +2391,26 @@ fn quick_commander_check(
         }
     }
 
-    if let Some(reason) = copy_limit_violations(db, &counts, 1).into_iter().next() {
+    // CR 903.5b: other than basic lands, each card in a Commander deck must
+    // have a different English name — but CR 903.13f(2) disapplies that for
+    // Commander Draft. The limit is a format axis, so this asks `game_format`
+    // the same question the full validator asks and the two cannot disagree.
+    if let Some(reason) = copy_limit_violations(db, &counts, game_format.default_deck_copy_limit())
+        .into_iter()
+        .next()
+    {
         return QuickCheckResult::incompatible(format!("Singleton violations: {reason}"));
     }
 
     QuickCheckResult::compatible()
 }
 
+/// `legality_format` is no longer a parameter: `quick_commander_check` derives
+/// it from `game_format`, and nothing else in this function consulted it. That
+/// also removes an `unwrap()` on `legality_format()` at the call site.
 fn quick_brawl_check(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
-    legality_format: LegalityFormat,
     format_label: &str,
     game_format: GameFormat,
 ) -> QuickCheckResult {
@@ -2295,19 +2433,14 @@ fn quick_brawl_check(
     quick_commander_check(
         db,
         request,
-        legality_format,
-        format_label,
         CommanderVariantRules {
             eligible: is_brawl_commander_eligible,
             eligibility_error:
                 "Brawl commander must be a legendary creature or legendary planeswalker",
             skip_commander_legality: false,
+            // CR 903.13f(3) is scoped to Commander Draft; Brawl never grants.
+            partner_grant: None,
         },
-        usize::from(
-            FormatConfig::for_format(game_format)
-                .expect("quick_brawl_check is only dispatched for a Brawl-family GameFormat")
-                .deck_size,
-        ),
         game_format,
     )
 }
@@ -2396,8 +2529,6 @@ fn evaluate_selected_format(
                 db,
                 request,
                 unknown_cards,
-                format.legality_format().unwrap(),
-                &format.label(),
                 match format {
                     GameFormat::PauperCommander => CommanderVariantRules::pauper_commander(),
                     GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
@@ -2454,6 +2585,21 @@ fn evaluate_selected_format(
         }
         GameFormat::Archenemy => {
             let check = evaluate_archenemy(db, request, unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        // CR 903.13f: routes through the shared commander validator — see the
+        // matching arm in the quick-check dispatch.
+        GameFormat::CommanderDraft => {
+            let check = evaluate_commander_with_format(
+                db,
+                request,
+                unknown_cards,
+                CommanderVariantRules::commander_draft(commander_draft_partner_grant(request)),
+                format,
+            );
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -2588,7 +2734,6 @@ fn collect_unknown_cards(
     unknown
 }
 
-/// CR 903.4: Compute color identity of a single card from mana cost + color indicator.
 /// CR 903.5c: collect every main-deck card whose color identity is not a
 /// subset of `identity`. Shared by the command-zone formats so the
 /// color-identity-subset loop lives in one place instead of being copied per
@@ -2619,7 +2764,14 @@ fn color_identity_violations(
     violations
 }
 
-fn card_color_identity(face: &CardFace) -> HashSet<ManaColor> {
+/// CR 903.4: Compute color identity of a single card from mana cost + color indicator.
+///
+/// Public because the Commander Draft bot deck-builder (`draft-wasm`) must reach
+/// the same CR 903.5c verdict this module's `color_identity_violations` reaches
+/// for the human deck-builder. Reading `CardFace::color_identity` directly is
+/// not equivalent: this function also falls back to the mana cost's shards and
+/// `color_override` when the field is empty.
+pub fn card_color_identity(face: &CardFace) -> HashSet<ManaColor> {
     if !face.color_identity.is_empty() {
         return face.color_identity.iter().copied().collect();
     }
@@ -2718,14 +2870,24 @@ fn combined_copy_counts(
 ///
 /// Input counts must be keyed by canonical (DFC-resolved, lowercased) names —
 /// use `combined_copy_counts`.
+/// `format_default` is a `DeckCopyLimit` rather than a `u32` because a `u32`
+/// cannot express `Unlimited`, which is precisely CR 903.13f(2)'s value. The
+/// function already wrapped its argument in `DeckCopyLimit::UpTo(..)`
+/// internally, so this REMOVES a conversion rather than adding one.
+///
+/// Note the default is a default: `effective_copy_limit` ends
+/// `deck_copy_limit_for(..).unwrap_or(format_default)`, so a card's PRINTED
+/// deck-construction limit still binds under `Unlimited`. That is
+/// rules-correct — CR 903.13f's exception is to CR 903.5, not to a card's own
+/// deck-construction ability — so do not skip the ladder for Commander Draft.
 fn copy_limit_violations(
     db: &CardDatabase,
     counts: &HashMap<String, u32>,
-    max_copies: u32,
+    format_default: DeckCopyLimit,
 ) -> BTreeSet<String> {
     let mut violations = BTreeSet::new();
     for (canonical_name, count) in counts {
-        match effective_copy_limit(db, canonical_name, DeckCopyLimit::UpTo(max_copies)) {
+        match effective_copy_limit(db, canonical_name, format_default) {
             DeckCopyLimit::Unlimited => continue,
             DeckCopyLimit::UpTo(n) if *count <= n => continue,
             DeckCopyLimit::UpTo(_) => {} // cap exceeded — flag
@@ -2851,6 +3013,108 @@ pub fn deck_copy_limit_for(db: &CardDatabase, canonical_name: &str) -> Option<De
     compute_deck_copy_limit_from_text(face.oracle_text.as_deref()?)
 }
 
+/// CR 903.13e: a commander filler card that a Commander Draft's booster set
+/// lets a player ADD to their card pool, and CR 903.13e's cap on how many.
+///
+/// The cap applies to the ADDED copies only. The filler cards are themselves
+/// printed in the granting sets' own draft boosters, so a player can draft one
+/// like any other card; a drafted copy is an ordinary pool card and is neither
+/// capped nor required to be a commander.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantableCommanderFiller {
+    pub card_name: String,
+    /// CR 903.13e: "each player may add up to two cards named ...".
+    pub max_copies: u32,
+}
+
+/// CR 903.13f(3): a deckbuilding-only extension of the partner ability
+/// (CR 702.124h, and per CR 702.124n *only* the partner family -- never
+/// "choose a Background" and never "Doctor's companion") to every card that
+/// can be a commander by itself and whose colour identity is within
+/// `max_colors`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartnerGrant {
+    /// CR 903.13f(3): "whose color identity includes one or fewer colors".
+    pub max_colors: u8,
+}
+
+/// CR 903.13e + CR 903.13f(3): the deck-construction concessions a Commander
+/// Draft's booster set makes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftSetConcessions {
+    pub filler: Option<GrantableCommanderFiller>,
+    pub partner_grant: Option<PartnerGrant>,
+}
+
+/// CR 903.13e + CR 903.13f(3): the complete set of booster sets the
+/// Comprehensive Rules name, and what each concedes at deck construction.
+///
+/// Keyed by SET CODE because both rules condition the concession on what the
+/// DRAFT CONTAINED ("If the draft contained draft boosters from ..."), never on
+/// a card's own printing. Deriving either concession from a card's printings
+/// would grant partner to any Commander-Masters-printed mono-colour legend in
+/// constructed Commander, a format CR 903.13f(3) says nothing about -- so
+/// `CardDatabase::printings_for` is deliberately NOT consulted here.
+///
+/// A future CR-named set is one row here and one line in the table test.
+///
+/// Columns: set code, granted filler card name, CR 903.13f(3) colour bound.
+const DRAFT_SET_CONCESSIONS: &[(&str, &str, Option<u8>)] = &[
+    // CR 903.13e: "draft boosters from Commander Legends or Commander Masters
+    // ... up to two cards named The Prismatic Piper".
+    ("CMR", "The Prismatic Piper", None),
+    // CR 903.13f(3) names Commander Masters and nothing else, so only this row
+    // carries a partner grant.
+    ("CMM", "The Prismatic Piper", Some(1)),
+    // CR 903.13e: "draft boosters from Commander Legends: Battle for Baldur's
+    // Gate ... up to two cards named Faceless One".
+    ("CLB", "Faceless One", None),
+];
+
+/// CR 903.13e: "each player may add up to two ...".
+const GRANTABLE_FILLER_MAX_COPIES: u32 = 2;
+
+/// CR 903.13f(3): the partner grant in force for a Commander Draft request.
+///
+/// The grant is a property of WHAT THE DRAFT CONTAINED, so it is read from the
+/// request's latched set code and never from a card's printing. `None` — which
+/// is constructed play and the server-hosted path — yields
+/// `DraftSetConcessions::default()`, i.e. no grant, which is the rules-correct
+/// answer for a deck with no draft behind it, and the same value the
+/// `DraftSource::Cube` arm of draft-core's latch produces.
+fn commander_draft_partner_grant(request: &DeckCompatibilityRequest) -> Option<PartnerGrant> {
+    request
+        .draft_set_code
+        .as_deref()
+        .map(draft_set_concessions)
+        .unwrap_or_default()
+        .partner_grant
+}
+
+/// CR 903.13e / CR 903.13f(3): what a draft from `set_code` concedes at deck
+/// construction. Returns the empty concession for every set the CR does not
+/// name, which is the rules-correct answer for a draft the rules say nothing
+/// about.
+///
+/// Matched case-insensitively: `DraftConfig.set_code` is caller-supplied while
+/// MTGJSON set codes are uppercase, the same convention
+/// `set_gating::parse_gated_sets` already uses.
+pub fn draft_set_concessions(set_code: &str) -> DraftSetConcessions {
+    DRAFT_SET_CONCESSIONS
+        .iter()
+        .find(|(code, _, _)| code.eq_ignore_ascii_case(set_code))
+        .map_or_else(
+            DraftSetConcessions::default,
+            |(_, card_name, max_colors)| DraftSetConcessions {
+                filler: Some(GrantableCommanderFiller {
+                    card_name: (*card_name).to_string(),
+                    max_copies: GRANTABLE_FILLER_MAX_COPIES,
+                }),
+                partner_grant: max_colors.map(|max_colors| PartnerGrant { max_colors }),
+            },
+        )
+}
+
 /// Resolves a card name to the key used in the database. For DFC names like "Front // Back",
 /// returns the front face name if that's how it's indexed.
 fn resolve_card_name<'a>(db: &CardDatabase, name: &'a str) -> &'a str {
@@ -2942,35 +3206,86 @@ fn is_pauper_commander_eligible(face: &CardFace) -> bool {
 /// This is the single authority for partner-pairing legality. Deck-builder UIs
 /// consume it through the WASM bridge rather than re-implementing the rules, so
 /// the engine and frontend can never disagree about a pairing.
-pub fn can_pair_commanders(db: &CardDatabase, name_a: &str, name_b: &str) -> bool {
+/// `grant` is the CR 903.13f(3) deckbuilding partner grant this deck is being
+/// built under, or `None` for constructed play. It is passed EXPLICITLY rather
+/// than derived from either card, because CR 903.13f(3) conditions the grant on
+/// what the DRAFT contained — a property of the session, not of a card.
+pub fn can_pair_commanders(
+    db: &CardDatabase,
+    name_a: &str,
+    name_b: &str,
+    grant: Option<PartnerGrant>,
+) -> bool {
     match (db.get_face_by_name(name_a), db.get_face_by_name(name_b)) {
-        (Some(a), Some(b)) => are_valid_partners(a, b),
+        (Some(a), Some(b)) => are_valid_partners(a, b, grant),
         _ => false,
     }
+}
+
+/// CR 903.13f(3) + CR 702.124h + CR 702.124n: the partner abilities a card has
+/// for the purposes of deckbuilding, which under a granting draft is its
+/// printed set plus a synthesised generic Partner.
+///
+/// CR 903.13f(3): "any card which can be a player's commander BY ITSELF and
+/// whose color identity includes ONE OR FEWER COLORS is considered to have the
+/// partner ability for the purposes of deckbuilding." CR 702.124n bounds an
+/// unqualified "the partner ability" to the partner family — partner,
+/// partner—[text], and partner with [name] — so the grant is never "choose a
+/// Background" and never "Doctor's companion", which CR 702.124f says could not
+/// combine with it anyway. Choosing `PartnerType::Generic` from within that
+/// family is this engine's decision rather than something CR 702.124n compels:
+/// the other two members are parameterised by a [text] or a [name] that
+/// CR 903.13f(3) never supplies.
+///
+/// Expressing the grant as a SYNTHESISED KEYWORD rather than as a special case
+/// inside the pairing check is what makes a granted mono-colour legend pair
+/// correctly with a card carrying PRINTED generic Partner: a naive
+/// `granted(a) && granted(b)` conjunction gets that case wrong.
+///
+/// Deckbuilding only — nothing is written to the `CardFace`, so no in-game
+/// keyword, trigger, or static ability is affected.
+fn partner_types_for(face: &CardFace, grant: Option<PartnerGrant>) -> Vec<PartnerType> {
+    let mut types: Vec<PartnerType> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Partner(pt) => Some(pt.clone()),
+            _ => None,
+        })
+        .collect();
+
+    if let Some(grant) = grant {
+        // CR 903.3 + CR 702.124k: CR 903.3 admits a legendary creature,
+        // Vehicle, or Spacecraft card as a commander; CR 702.124k adds that a
+        // legendary Background enchantment "can't be your commander unless you
+        // have also designated a commander with 'choose a Background'". A
+        // Background therefore fails CR 903.13f(3)'s "by itself" condition.
+        let by_itself = matches!(
+            crate::database::synthesis::commander_qualification(face),
+            crate::database::synthesis::CommanderQualification::ByItself
+        );
+        // CR 903.4 + CR 903.13f(3): CR 903.4 defines the colour identity that
+        // CR 903.13f(3)'s "whose color identity includes one or fewer colors"
+        // bound is measured against.
+        let within_color_bound = card_color_identity(face).len() <= usize::from(grant.max_colors);
+        if by_itself && within_color_bound && !types.contains(&PartnerType::Generic) {
+            types.push(PartnerType::Generic);
+        }
+    }
+
+    types
 }
 
 /// CR 702.124: Check if two cards form a valid partner pair for co-commanders.
 /// Handles the full partner family: Generic Partner, Partner with [Name],
 /// Friends Forever, Character Select, Doctor's Companion, and Choose a Background.
-fn are_valid_partners(face_a: &CardFace, face_b: &CardFace) -> bool {
-    use crate::types::keywords::PartnerType;
-
-    let partners_a: Vec<&PartnerType> = face_a
-        .keywords
-        .iter()
-        .filter_map(|kw| match kw {
-            Keyword::Partner(pt) => Some(pt),
-            _ => None,
-        })
-        .collect();
-    let partners_b: Vec<&PartnerType> = face_b
-        .keywords
-        .iter()
-        .filter_map(|kw| match kw {
-            Keyword::Partner(pt) => Some(pt),
-            _ => None,
-        })
-        .collect();
+///
+/// `grant` carries CR 903.13f(3); see [`partner_types_for`].
+fn are_valid_partners(face_a: &CardFace, face_b: &CardFace, grant: Option<PartnerGrant>) -> bool {
+    let owned_a = partner_types_for(face_a, grant);
+    let owned_b = partner_types_for(face_b, grant);
+    let partners_a: Vec<&PartnerType> = owned_a.iter().collect();
+    let partners_b: Vec<&PartnerType> = owned_b.iter().collect();
 
     // Any compatible combination across both cards' partner keywords is valid
     partners_a
@@ -3562,6 +3877,7 @@ mod tests {
             selected_match_type: None,
             player_count,
             summary_only: false,
+            draft_set_code: None,
         }
     }
 
@@ -3610,6 +3926,7 @@ mod tests {
             selected_match_type: None,
             player_count: 4,
             summary_only: false,
+            draft_set_code: None,
         }
     }
 
@@ -3924,6 +4241,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3951,6 +4269,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3984,21 +4303,48 @@ mod tests {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
 
         // Seven Dwarves: UpTo(7) — 7 legal, 8 illegal.
-        assert!(copy_limit_violations(&db, &counts_of(&[("Seven Dwarves", 7)]), 4).is_empty());
-        assert!(!copy_limit_violations(&db, &counts_of(&[("Seven Dwarves", 8)]), 4).is_empty());
+        assert!(copy_limit_violations(
+            &db,
+            &counts_of(&[("Seven Dwarves", 7)]),
+            DeckCopyLimit::UpTo(4)
+        )
+        .is_empty());
+        assert!(!copy_limit_violations(
+            &db,
+            &counts_of(&[("Seven Dwarves", 8)]),
+            DeckCopyLimit::UpTo(4)
+        )
+        .is_empty());
 
         // Nazgûl: UpTo(9) — 8 legal, 10 illegal.
-        assert!(copy_limit_violations(&db, &counts_of(&[("Nazgûl", 8)]), 4).is_empty());
-        assert!(!copy_limit_violations(&db, &counts_of(&[("Nazgûl", 10)]), 4).is_empty());
+        assert!(
+            copy_limit_violations(&db, &counts_of(&[("Nazgûl", 8)]), DeckCopyLimit::UpTo(4))
+                .is_empty()
+        );
+        assert!(
+            !copy_limit_violations(&db, &counts_of(&[("Nazgûl", 10)]), DeckCopyLimit::UpTo(4))
+                .is_empty()
+        );
 
         // Relentless Rats: Unlimited — 5 legal.
-        assert!(copy_limit_violations(&db, &counts_of(&[("Relentless Rats", 5)]), 4).is_empty());
+        assert!(copy_limit_violations(
+            &db,
+            &counts_of(&[("Relentless Rats", 5)]),
+            DeckCopyLimit::UpTo(4)
+        )
+        .is_empty());
 
         // Mountain: basic-land exemption — 30 legal.
-        assert!(copy_limit_violations(&db, &counts_of(&[("Mountain", 30)]), 4).is_empty());
+        assert!(copy_limit_violations(
+            &db,
+            &counts_of(&[("Mountain", 30)]),
+            DeckCopyLimit::UpTo(4)
+        )
+        .is_empty());
 
         // A normal card with no override is still flagged at 5.
-        let violations = copy_limit_violations(&db, &counts_of(&[("Red Card", 5)]), 4);
+        let violations =
+            copy_limit_violations(&db, &counts_of(&[("Red Card", 5)]), DeckCopyLimit::UpTo(4));
         assert!(violations.iter().any(|v| v.contains("Red Card")));
     }
 
@@ -4007,9 +4353,17 @@ mod tests {
         // CR 903.5b: in a singleton (Commander) context max_copies = 1, but
         // Nazgûl's UpTo(9) override must raise the cap so 9 copies are legal.
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        assert!(copy_limit_violations(&db, &counts_of(&[("Nazgûl", 9)]), 1).is_empty());
+        assert!(
+            copy_limit_violations(&db, &counts_of(&[("Nazgûl", 9)]), DeckCopyLimit::UpTo(1))
+                .is_empty()
+        );
         // A normal card is still singleton-restricted to 1.
-        assert!(!copy_limit_violations(&db, &counts_of(&[("Red Card", 2)]), 1).is_empty());
+        assert!(!copy_limit_violations(
+            &db,
+            &counts_of(&[("Red Card", 2)]),
+            DeckCopyLimit::UpTo(1)
+        )
+        .is_empty());
     }
 
     /// CR 100.2a / CR 100.2b / CR 903.5b: `max_deck_copies` is the query-shaped
@@ -4125,11 +4479,12 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let counts = combined_copy_counts(&db, &request);
         assert_eq!(counts.get("nazgûl"), Some(&10));
-        assert!(!copy_limit_violations(&db, &counts, 1).is_empty());
+        assert!(!copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(1)).is_empty());
     }
 
     #[test]
@@ -4149,6 +4504,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4176,6 +4532,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: true,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4197,6 +4554,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4239,6 +4597,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4284,6 +4643,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4315,6 +4675,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let with_sideboard = DeckCompatibilityRequest {
             sideboard: vec!["Legal Standard".to_string()],
@@ -4348,6 +4709,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4376,6 +4738,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4450,6 +4813,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4525,6 +4889,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4599,6 +4964,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4628,6 +4994,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4654,6 +5021,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let thg_request = DeckCompatibilityRequest {
             signature_spell: Vec::new(),
@@ -4686,6 +5054,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let commander_request = DeckCompatibilityRequest {
             main_deck: expand("Legal Standard", 99),
@@ -4699,6 +5068,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let standard_result = evaluate_deck_compatibility(&db, &standard_request);
@@ -4737,6 +5107,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -4757,6 +5128,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4779,6 +5151,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4805,6 +5178,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4832,6 +5206,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -4852,6 +5227,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -4874,6 +5250,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -4910,6 +5287,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -4936,6 +5314,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let check = evaluate_constructed(
             &db,
@@ -4968,6 +5347,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -4988,6 +5368,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5008,6 +5389,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5035,6 +5417,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5059,6 +5442,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5083,6 +5467,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5107,6 +5492,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5147,6 +5533,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5177,6 +5564,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5208,6 +5596,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5247,7 +5636,7 @@ mod tests {
         use crate::types::keywords::PartnerType;
         let a = partner_face("A", vec![Keyword::Partner(PartnerType::Generic)], vec![]);
         let b = partner_face("B", vec![Keyword::Partner(PartnerType::Generic)], vec![]);
-        assert!(are_valid_partners(&a, &b));
+        assert!(are_valid_partners(&a, &b, None));
     }
 
     #[test]
@@ -5267,7 +5656,7 @@ mod tests {
             ))],
             vec![],
         );
-        assert!(are_valid_partners(&a, &b));
+        assert!(are_valid_partners(&a, &b, None));
     }
 
     #[test]
@@ -5283,7 +5672,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::With("D".to_string()))],
             vec![],
         );
-        assert!(!are_valid_partners(&a, &b));
+        assert!(!are_valid_partners(&a, &b, None));
     }
 
     #[test]
@@ -5299,7 +5688,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::FriendsForever)],
             vec![],
         );
-        assert!(are_valid_partners(&a, &b));
+        assert!(are_valid_partners(&a, &b, None));
     }
 
     #[test]
@@ -5315,7 +5704,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::CharacterSelect)],
             vec![],
         );
-        assert!(are_valid_partners(&a, &b));
+        assert!(are_valid_partners(&a, &b, None));
     }
 
     #[test]
@@ -5327,9 +5716,9 @@ mod tests {
             vec![],
         );
         let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Doctor", "Time Lord"]);
-        assert!(are_valid_partners(&companion, &doctor));
+        assert!(are_valid_partners(&companion, &doctor, None));
         // Reversed order also works
-        assert!(are_valid_partners(&doctor, &companion));
+        assert!(are_valid_partners(&doctor, &companion, None));
     }
 
     #[test]
@@ -5350,13 +5739,13 @@ mod tests {
             },
             ..CardFace::default()
         };
-        assert!(are_valid_partners(&commander, &bg));
+        assert!(are_valid_partners(&commander, &bg, None));
         // Background enchantment is commander-eligible
         assert!(is_commander_eligible(&bg));
 
         // Non-Background enchantment is not a valid partner
         bg.card_type.subtypes = vec!["Aura".to_string()];
-        assert!(!are_valid_partners(&commander, &bg));
+        assert!(!are_valid_partners(&commander, &bg, None));
     }
 
     #[test]
@@ -5479,7 +5868,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::FriendsForever)],
             vec![],
         );
-        assert!(!are_valid_partners(&a, &b));
+        assert!(!are_valid_partners(&a, &b, None));
 
         // Generic + CharacterSelect = invalid
         let c = partner_face(
@@ -5487,10 +5876,10 @@ mod tests {
             vec![Keyword::Partner(PartnerType::CharacterSelect)],
             vec![],
         );
-        assert!(!are_valid_partners(&a, &c));
+        assert!(!are_valid_partners(&a, &c, None));
 
         // FriendsForever + CharacterSelect = invalid
-        assert!(!are_valid_partners(&b, &c));
+        assert!(!are_valid_partners(&b, &c, None));
     }
 
     #[test]
@@ -5507,7 +5896,7 @@ mod tests {
         );
         // Can pair with a Doctor
         let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Time Lord", "Doctor"]);
-        assert!(are_valid_partners(&amy, &doctor));
+        assert!(are_valid_partners(&amy, &doctor, None));
 
         // Can pair with Rory Williams
         let rory = partner_face(
@@ -5515,7 +5904,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::With("Amy Pond".to_string()))],
             vec![],
         );
-        assert!(are_valid_partners(&amy, &rory));
+        assert!(are_valid_partners(&amy, &rory, None));
 
         // Cannot pair with a random generic partner
         let random = partner_face(
@@ -5523,7 +5912,7 @@ mod tests {
             vec![Keyword::Partner(PartnerType::Generic)],
             vec![],
         );
-        assert!(!are_valid_partners(&amy, &random));
+        assert!(!are_valid_partners(&amy, &random, None));
     }
 
     // CR 702.124: the public `can_pair_commanders` seam (consumed by the WASM
@@ -5555,10 +5944,25 @@ mod tests {
         .to_string();
         let db = CardDatabase::from_json_str(&db_json).unwrap();
 
-        assert!(can_pair_commanders(&db, "Amy Pond", "The Eleventh Doctor"));
-        assert!(can_pair_commanders(&db, "The Eleventh Doctor", "Amy Pond"));
+        assert!(can_pair_commanders(
+            &db,
+            "Amy Pond",
+            "The Eleventh Doctor",
+            None
+        ));
+        assert!(can_pair_commanders(
+            &db,
+            "The Eleventh Doctor",
+            "Amy Pond",
+            None
+        ));
         // Unknown names resolve to no pairing rather than panicking.
-        assert!(!can_pair_commanders(&db, "Amy Pond", "Nonexistent Card"));
+        assert!(!can_pair_commanders(
+            &db,
+            "Amy Pond",
+            "Nonexistent Card",
+            None
+        ));
     }
 
     #[test]
@@ -5569,7 +5973,7 @@ mod tests {
             vec![],
         );
         let human_doctor = partner_face("Not A Real Doctor", vec![], vec!["Human", "Doctor"]);
-        assert!(!are_valid_partners(&companion, &human_doctor));
+        assert!(!are_valid_partners(&companion, &human_doctor, None));
 
         let non_creature_doctor = CardFace {
             name: "Noncreature Doctor".to_string(),
@@ -5581,17 +5985,17 @@ mod tests {
             },
             ..CardFace::default()
         };
-        assert!(!are_valid_partners(&companion, &non_creature_doctor));
+        assert!(!are_valid_partners(&companion, &non_creature_doctor, None));
 
         let unified = partner_face("The Eleventh Doctor", vec![], vec!["Time Lord Doctor"]);
-        assert!(are_valid_partners(&companion, &unified));
+        assert!(are_valid_partners(&companion, &unified, None));
     }
 
     #[test]
     fn no_partner_keywords_rejected() {
         let a = partner_face("A", vec![], vec![]);
         let b = partner_face("B", vec![], vec![]);
-        assert!(!are_valid_partners(&a, &b));
+        assert!(!are_valid_partners(&a, &b, None));
     }
 
     // --- validate_deck_for_format tests ---
@@ -5611,6 +6015,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -5644,6 +6049,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -5663,6 +6069,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -5701,6 +6108,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -5720,6 +6128,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5754,6 +6163,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -5775,6 +6185,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -5800,6 +6211,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5827,6 +6239,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5852,6 +6265,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5877,6 +6291,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5930,6 +6345,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5956,6 +6372,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(!result.commander.compatible);
@@ -5983,6 +6400,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -6047,6 +6465,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6110,6 +6529,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6138,6 +6558,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6166,6 +6587,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let err = validate_deck_for_format(&db, &request)
             .expect_err("16-card sideboard must be rejected at registration");
@@ -6190,6 +6612,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6221,6 +6644,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -6325,6 +6749,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6351,6 +6776,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6377,6 +6803,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6407,6 +6834,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6468,6 +6896,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6498,6 +6927,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6533,6 +6963,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
+            draft_set_code: None,
         }
     }
 

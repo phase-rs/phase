@@ -7,7 +7,13 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
 
   if (!view) return null;
 
-  const { current_pack_number, pick_number, cards_per_pack, pack_count, pass_direction } = view;
+  // CR 903.13b: `pick_number` counts pick STEPS, not cards, so the bar's
+  // denominator is the engine's published step count and never
+  // `cards_per_pack` — a 14-card Commander pack is 7 steps, and 14 is a
+  // denominator the session can never reach. This component computes nothing:
+  // it reads one engine value instead of another.
+  const { current_pack_number, pick_number, pick_steps_per_pack, pack_count, pass_direction } =
+    view;
   const directionArrow = pass_direction === "Left" ? "←" : "→";
 
   return (
@@ -23,8 +29,8 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
                 <span className="shrink-0 text-[10px] text-white/20">{directionArrow}</span>
               )}
               <PackSegment
-                pickCount={cards_per_pack}
-                filledPicks={isComplete ? cards_per_pack : isCurrent ? pick_number : 0}
+                pickCount={pick_steps_per_pack}
+                filledPicks={isComplete ? pick_steps_per_pack : isCurrent ? pick_number : 0}
                 isCurrent={isCurrent}
               />
             </div>
@@ -34,7 +40,7 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
 
       <div className="shrink-0 text-xs tabular-nums text-white/45">
         <span className="font-semibold text-white">{pick_number + 1}</span>
-        <span>/{cards_per_pack}</span>
+        <span>/{pick_steps_per_pack}</span>
       </div>
     </div>
   );

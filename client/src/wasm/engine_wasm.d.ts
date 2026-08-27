@@ -46,8 +46,19 @@ export function clear_replay_playback(): void;
  * Background) via the engine's single-authority `can_pair_commanders`. The
  * frontend must not re-derive partner-pairing rules — it filters its candidate
  * list through this. Returns an empty array if the database isn't loaded.
+ *
+ * `draft_set_code` is the set code of the draft boosters this deck is being
+ * built from, or `null` for constructed play. CR 903.13f(3) conditions its
+ * partner grant on what the DRAFT contained, which is a session property no
+ * pair of card names can express — so the caller supplies the set code and the
+ * ENGINE maps it to a grant. The client never learns which sets grant what.
+ *
+ * It is a REQUIRED third parameter, and `JsValue` rather than
+ * `Option<String>`, on purpose: that matches this file's existing convention
+ * for engine-typed arguments and makes a stale caller a compile error rather
+ * than a silent `undefined`.
  */
-export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
+export function commanderPartnerCandidates(first_commander: string, candidates: any, draft_set_code: any): any;
 
 /**
  * Returns legal Commander-family companion candidates from the main deck.
@@ -561,7 +572,7 @@ export interface InitOutput {
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
-    readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];

@@ -93,7 +93,7 @@ describe("P2P draft guest handshake attempts", () => {
     });
     await handshake;
 
-    const submitted = guest.submitDeck(["Island"]);
+    const submitted = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledOnce());
     const sent = sessionState.sessions[0]!.send.mock.calls.find(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
@@ -145,8 +145,8 @@ describe("P2P draft guest handshake attempts", () => {
       releaseLoad = () => resolve(null);
     }));
 
-    const first = guest.submitDeck(["Island"]);
-    const second = guest.submitDeck(["Island"]);
+    const first = guest.submitDeck(["Island"], []);
+    const second = guest.submitDeck(["Island"], []);
     expect(second).toBe(first);
     expect(persistenceState.loadDraftDeckSubmission).toHaveBeenCalledTimes(1);
     releaseLoad();
@@ -184,7 +184,7 @@ describe("P2P draft guest handshake attempts", () => {
       view: { status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
-    const first = guest.submitDeck(["Island"]);
+    const first = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));
@@ -220,7 +220,7 @@ describe("P2P draft guest handshake attempts", () => {
       view: { status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
-    const submitted = guest.submitDeck(["Island"]);
+    const submitted = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));
@@ -255,7 +255,7 @@ describe("P2P draft guest handshake attempts", () => {
       view: { status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await initialHandshake;
-    const submitted = guest.submitDeck(["Island"]);
+    const submitted = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));

@@ -151,7 +151,7 @@ describe("P2PDraftHost persistence disposal", () => {
       };
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
-      handleDeckSubmission: (seat: number, cards: string[], submissionId: string) => Promise<unknown>;
+      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
     };
     const view = {
       status: "Deckbuilding",
@@ -164,7 +164,7 @@ describe("P2PDraftHost persistence disposal", () => {
     const session = { send: vi.fn(async () => {}) };
     privateHost.guestSessions.set(1, session);
 
-    await privateHost.handleDeckSubmission(1, ["Island"], "submission-1");
+    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
     expect(saveDraftHostSession).toHaveBeenCalledWith("shared-recovery", expect.objectContaining({
       deckSubmissionReceipts: [{ seat: 1, submissionId: "submission-1", payloadFingerprint: expect.any(String) }],
     }));
@@ -174,7 +174,7 @@ describe("P2PDraftHost persistence disposal", () => {
       submissionId: "submission-1",
     }));
 
-    await privateHost.handleDeckSubmission(1, ["Island"], "submission-1");
+    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
   });
 
@@ -200,8 +200,8 @@ describe("P2PDraftHost persistence disposal", () => {
       .mockRejectedValueOnce(new Error("IDB unavailable"))
       .mockResolvedValue(undefined);
 
-    await expect(host.submitHostDeck(["Island"])).rejects.toThrow("IDB unavailable");
-    await host.submitHostDeck(["Island"]);
+    await expect(host.submitHostDeck(["Island"], [])).rejects.toThrow("IDB unavailable");
+    await host.submitHostDeck(["Island"], []);
 
     // Retrying invokes the durable receipt path and flushes its captured
     // snapshot; it does not invoke the deck reducer twice.
@@ -224,7 +224,7 @@ describe("P2PDraftHost persistence disposal", () => {
     privateHost.adapter.getViewForSeat = vi.fn(async () => view);
     privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Deckbuilding\"}");
 
-    await Promise.all([host.submitHostDeck(["Island"]), host.submitHostDeck(["Island"])]);
+    await Promise.all([host.submitHostDeck(["Island"], []), host.submitHostDeck(["Island"], [])]);
 
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
     expect(saveDraftHostSession).toHaveBeenCalledWith("shared-recovery", expect.objectContaining({
@@ -239,7 +239,7 @@ describe("P2PDraftHost persistence disposal", () => {
     };
     privateHost.adapter.submitDeckForSeat = vi.fn();
 
-    await expect(host.submitHostDeck(["Island"])).rejects.toThrow("Draft not started");
+    await expect(host.submitHostDeck(["Island"], [])).rejects.toThrow("Draft not started");
 
     expect(privateHost.adapter.submitDeckForSeat).not.toHaveBeenCalled();
   });
@@ -255,7 +255,7 @@ describe("P2PDraftHost persistence disposal", () => {
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
       generatePairingsInner: ReturnType<typeof vi.fn>;
-      handleDeckSubmission: (seat: number, cards: string[], submissionId: string) => Promise<unknown>;
+      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
     };
     const view = { status: "Pairing", seats: [{ has_submitted_deck: true, is_bot: false }] };
     privateHost.draftStarted = true;
@@ -267,13 +267,13 @@ describe("P2PDraftHost persistence disposal", () => {
     privateHost.guestSessions.set(1, session);
     saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
 
-    await expect(privateHost.handleDeckSubmission(1, ["Island"], "submission-1"))
+    await expect(privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1"))
       .rejects.toThrow("IDB unavailable");
     expect(session.send).toHaveBeenCalledWith(expect.objectContaining({
       type: "draft_error", submissionId: "submission-1", submissionDisposition: "Retryable",
     }));
 
-    await privateHost.handleDeckSubmission(1, ["Island"], "submission-1");
+    await privateHost.handleDeckSubmission(1, ["Island"], [], "submission-1");
     expect(privateHost.generatePairingsInner).toHaveBeenCalledOnce();
     const recoveredSnapshot = saveDraftHostSession.mock.calls[
       saveDraftHostSession.mock.calls.length - 1
@@ -289,14 +289,14 @@ describe("P2PDraftHost persistence disposal", () => {
       draftStarted: boolean;
       guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
       generatePairingsInner: ReturnType<typeof vi.fn>;
-      handleDeckSubmission: (seat: number, cards: string[], submissionId: string) => Promise<unknown>;
+      handleDeckSubmission: (seat: number, cards: string[], commanders: string[], submissionId: string) => Promise<unknown>;
     };
     recoveredPrivate.adapter.submitDeckForSeat = vi.fn(async () => view);
     recoveredPrivate.adapter.getViewForSeat = vi.fn(async () => ({ ...view, status: "MatchInProgress" }));
     recoveredPrivate.adapter.exportSession = vi.fn(async () => "{\"status\":\"Deckbuilding\"}");
     recoveredPrivate.generatePairingsInner = vi.fn(async () => {});
     recoveredPrivate.guestSessions.set(1, { send: vi.fn(async () => {}) });
-    await recoveredPrivate.handleDeckSubmission(1, ["Island"], "submission-1");
+    await recoveredPrivate.handleDeckSubmission(1, ["Island"], [], "submission-1");
 
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
     expect(recoveredPrivate.adapter.submitDeckForSeat).not.toHaveBeenCalled();
@@ -321,7 +321,7 @@ describe("P2PDraftHost persistence disposal", () => {
     privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Pairing\"}");
     privateHost.generatePairingsInner = vi.fn(async () => {});
 
-    await host.submitHostDeck(["Island"]);
+    await host.submitHostDeck(["Island"], []);
 
     expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledOnce();
     expect(privateHost.generatePairingsInner).toHaveBeenCalledOnce();

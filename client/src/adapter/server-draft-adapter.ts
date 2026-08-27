@@ -355,7 +355,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           draft_code: this.draftCode,
           action: {
             type: "Pick",
-            data: { seat: this.seatIndex, card_instance_id: cardInstanceId },
+            data: { seat: this.seatIndex, card_instance_ids: [cardInstanceId] },
           },
         },
       });
@@ -367,7 +367,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
-  async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
@@ -380,7 +380,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           draft_code: this.draftCode,
           action: {
             type: "SubmitDeck",
-            data: { seat: this.seatIndex, main_deck: mainDeck },
+            // Key order mirrors the Rust struct's field order (`seat`,
+            // `main_deck`, `commanders`). `private send(msg: unknown)` means
+            // no typechecker sees this payload, so the byte-exact
+            // `JSON.stringify` assertion in the suite is what pins it.
+            data: { seat: this.seatIndex, main_deck: mainDeck, commanders },
           },
         },
       });

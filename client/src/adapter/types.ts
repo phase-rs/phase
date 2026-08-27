@@ -87,7 +87,8 @@ export type GameFormat =
   | "Archenemy"
   | "Planechase"
   | "Limited"
-  | "Momir";
+  | "Momir"
+  | "CommanderDraft";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
@@ -99,6 +100,16 @@ export type SideboardPolicy =
   | { type: "Forbidden" }
   | { type: "Limited"; data: number }
   | { type: "Unlimited" };
+
+/**
+ * CR 100.5 / CR 903.5a: a format's deck-size rule as a discriminated union,
+ * mirroring the engine's `DeckSizeRule`. Serde tag/content format matches the
+ * engine. Always exhaustive-switch on `type` — never assume a minimum.
+ */
+export type DeckSizeRule =
+  | { type: "Minimum"; data: number }
+  | { type: "Exactly"; data: number };
+
 export interface RangeOfInfluenceConfig {
   default_range: number;
   player_overrides: Record<string, number>;
@@ -109,7 +120,7 @@ export interface FormatConfig {
   starting_life: number;
   min_players: number;
   max_players: number;
-  deck_size: number;
+  deck_size: DeckSizeRule;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
@@ -121,7 +132,7 @@ export interface FormatConfig {
   sideboard_policy: SideboardPolicy;
   /**
    * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */

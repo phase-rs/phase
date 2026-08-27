@@ -50,8 +50,39 @@ import type {
  *       host returns an explicit durable receipt.  This makes a reloaded
  *       participant's deck outbox idempotent instead of relying on a
  *       best-effort state update.
+ *  15 — two-card pick steps: `draft_pick` carries `cardInstanceIds` (CR 903.13b)
+ *  16 — commander-designation inputs on the player view, shipped together:
+ *       `grantable_commander_filler` (CR 903.13e) and `draft_set_code`
+ *       (CR 903.13f(3)). Both are capability, not parseability: a v15 host
+ *       omits `draft_set_code`, and a v16 guest reading it as absent asks the
+ *       engine for partners under the DEFAULT grant. Under that grant an
+ *       ordinary mono-colored Commander Masters legend is not pairable, so a
+ *       legal pairing silently REPLACES the player's first commander instead.
+ *       Only this version number can refuse that pairing — the guest gate in
+ *       `p2p-draft-guest.ts` is exact-equality.
+ *  17 — `draft_submit_deck` carries the CR 903.3 commander designation:
+ *       `commanders: string[]`, required, bounded 0..2 by `validateSubmitDeck`.
+ *       A PARSEABILITY break, not a capability one — a v16 producer's payload
+ *       is now REFUSED by the validator rather than silently accepted with the
+ *       designation absent.
+ *
+ *       This is the SECOND required field added to this one message, and it is
+ *       independent of v14's `submissionId`: v14 made the submission idempotent
+ *       across reconnect, v17 makes it carry the designation. They compose
+ *       rather than supersede — `validateSubmitDeck` is the single authority
+ *       for the message and enforces `submissionId`, `mainDeck`, and
+ *       `commanders` together, so neither refusal can be dropped by satisfying
+ *       the other.
+ *  18 — `pick_steps_per_pack` on the player and spectator views (CR 903.13b):
+ *       the engine-derived count of pick STEPS a pack contains,
+ *       `cards_per_pack.div_ceil(cards_per_pick)`. A CAPABILITY addition, not
+ *       a parseability break — a v17 host simply omits the field, and a v18
+ *       guest reading it as absent renders a progress bar whose denominator
+ *       the session can never reach (14 pips for a Commander pack that drains
+ *       in 7 steps), which is precisely the defect this field fixes. Only this
+ *       version number refuses that pairing.
  */
-export const DRAFT_PROTOCOL_VERSION = 14 as const;
+export const DRAFT_PROTOCOL_VERSION = 18 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -98,6 +129,16 @@ export interface DraftMatchDeckPayload {
   player: DraftDeckPayload;
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
+  /**
+   * Set code of the draft these decks were built from, supplied verbatim from
+   * `DraftPlayerView.draft_set_code` (draft-core/src/view.rs:302, populated by
+   * `filter_for_player` at :569).  CR 903.13f(3): a draft that contained
+   * Commander Masters boosters grants the partner ability, for deckbuilding
+   * purposes, to any card that can be a commander by itself whose color
+   * identity is one or fewer colors.  Optional: absent means no draft set code
+   * is known, which the engine reads as constructed play (no grant).
+   */
+  draft_set_code?: string | null;
 }
 
 /**
@@ -189,7 +230,8 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_pick";
-      cardInstanceId: string;
+      /** One whole CR 903.13b pick step: every card this seat drafts now. */
+      cardInstanceIds: string[];
     }
   | {
       type: "draft_pick_with_draft_effect";
@@ -201,6 +243,13 @@ export type DraftP2PMessage =
       /** Stable across reconnect/reload retries of this exact payload. */
       submissionId: string;
       mainDeck: string[];
+      /**
+       * CR 903.3: the card names this seat designates as its commander(s).
+       * CR 903.1 scopes the designation to the Commander variant, so `[]` is
+       * the correct and meaningful value for every non-Commander kind, not a
+       * missing field.
+       */
+      commanders: string[];
     }
   // ── Host → Guest ───────────────────────────────────────────────────
   | {
@@ -436,11 +485,31 @@ const VALID_DRAFT_TYPES = new Set([
 
 const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
 
-function requireDraftCardInstanceId(
-  value: unknown,
-  field: string,
-  context = "draft-effect pick",
-): string {
+/**
+ * The largest `DraftProcedure.cards_per_pick` over every kind — the
+ * session-free half of a `Pick` payload's bound. The EXACT per-session count is
+ * owned by the engine's `apply_pick_inner`; what is bounded here is what a
+ * message alone can state.
+ */
+// @sync-with: crates/draft-core/src/types.rs
+const MAX_CARDS_PER_PICK = 2;
+
+/**
+ * CR 702.124g: "no partner ability or combination of partner abilities can
+ * ever let a player have more than two commanders." The session-free half of
+ * a `SubmitDeck` payload's bound — what is bounded here is what a message
+ * ALONE can state. Whether a designation is REQUIRED (CR 903.3) and whether
+ * the named cards are actually in the deck (CR 702.124h) are session-dependent
+ * and belong to the engine's `validate_limited_deck`, never here.
+ *
+ * The floor is 0: CR 903.1 puts the commander designation inside the Commander
+ * variant, so a deck outside it has none and an empty designation is the
+ * correct, meaningful value for every non-Commander draft kind.
+ */
+// @sync-with: crates/draft-core/src/types.rs
+const MAX_COMMANDER_DESIGNATIONS = 2;
+
+function requireDraftCardInstanceId(value: unknown, field: string, context: string): string {
   if (
     typeof value !== "string"
     || value.length === 0
@@ -451,16 +520,85 @@ function requireDraftCardInstanceId(
   return value;
 }
 
+function validatePick(raw: Record<string, unknown>): DraftP2PMessage {
+  // A `Pick` is legitimately length 1 — for all four CR 905.1a kinds, and for
+  // a Commander pod's odd-pack final step (CR 903.13b) — so the bound is a
+  // RANGE. Do not copy `validateDraftEffectPick`'s `[0] === [1]` distinctness
+  // check: that form is correct only under its `length !== 2` early return.
+  if (
+    !Array.isArray(raw.cardInstanceIds)
+    || raw.cardInstanceIds.length === 0
+    || raw.cardInstanceIds.length > MAX_CARDS_PER_PICK
+  ) {
+    throw new Error(
+      `Invalid draft pick: cardInstanceIds must hold 1..${MAX_CARDS_PER_PICK} cards`,
+    );
+  }
+  const cardInstanceIds = raw.cardInstanceIds.map((cardId, index) =>
+    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`, "draft pick"),
+  );
+  if (new Set(cardInstanceIds).size !== cardInstanceIds.length) {
+    throw new Error("Invalid draft pick: cardInstanceIds must be distinct");
+  }
+  return { ...raw, type: "draft_pick", cardInstanceIds } as DraftP2PMessage;
+}
+
+function validateSubmitDeck(raw: Record<string, unknown>): DraftP2PMessage {
+  // v14 (idempotency) and v17 (CR 903.3 designation) both added a REQUIRED
+  // field to this one message, blind to each other. They are orthogonal, so
+  // this validator enforces both rather than either superseding the other:
+  // dropping the `submissionId` guard would let a reconnect retry lose its
+  // durable receipt, and dropping the `commanders` guard would let a
+  // pre-v17 payload through with the designation absent.
+  requireDraftCardInstanceId(raw.submissionId, "submissionId", "deck submission");
+  if (
+    !Array.isArray(raw.mainDeck)
+    || !raw.mainDeck.every((card) => typeof card === "string")
+  ) {
+    throw new Error("Invalid draft deck submission");
+  }
+  // The bound is a RANGE with a floor of ZERO, and the floor is the part that
+  // must not be copied from `validatePick`: a pick step always takes at least
+  // one card, but CR 903.1 puts the commander designation inside the Commander
+  // variant, so a Premier / Traditional / Sealed pod legitimately designates
+  // none. `[].map(...)` never invokes its callback, so this condition is the
+  // ONLY thing that decides the empty case.
+  if (
+    !Array.isArray(raw.commanders)
+    || raw.commanders.length > MAX_COMMANDER_DESIGNATIONS
+  ) {
+    throw new Error(
+      `Invalid deck submission: commanders must hold 0..${MAX_COMMANDER_DESIGNATIONS} cards`,
+    );
+  }
+  const commanders = raw.commanders.map((name, index) =>
+    requireDraftCardInstanceId(name, `commanders[${index}]`, "deck submission"),
+  );
+  // NO distinctness check, in EITHER landed form. CR 702.124h designates two
+  // legendary CARDS, and `validate_limited_deck`'s step-5 multiset guard exists
+  // precisely because two copies of one name can be legal input — the
+  // CR 903.13e filler case is exactly that. Copy neither
+  // `validateDraftEffectPick`'s `[0] === [1]` nor `validatePick`'s `new Set(...)`.
+  //
+  // `mainDeck`'s guard above is deliberately a TYPE guard only (an array of
+  // strings), with no entry-count cap. A deck-SIZE refusal stays with the
+  // engine: `draftPeerSession`'s decode `.catch` drops a validator throw, so
+  // raising a size refusal here would convert an engine-loud refusal (which
+  // reaches the guest as `draft_error`) into a wire-silent one.
+  return { ...raw, type: "draft_submit_deck", commanders } as DraftP2PMessage;
+}
+
 function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {
   const effectCardInstanceId = requireDraftCardInstanceId(
     raw.effectCardInstanceId,
     "effectCardInstanceId",
+    "draft-effect pick",
   );
   if (!Array.isArray(raw.cardInstanceIds) || raw.cardInstanceIds.length !== 2) {
     throw new Error("Invalid draft-effect pick: cardInstanceIds must contain exactly two cards");
   }
   const cardInstanceIds = raw.cardInstanceIds.map((cardId, index) =>
-    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`),
+    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`, "draft-effect pick"),
   );
   if (cardInstanceIds[0] === cardInstanceIds[1]) {
     throw new Error("Invalid draft-effect pick: cardInstanceIds must be distinct");
@@ -569,14 +707,11 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   if (msg.type === "draft_pick_with_draft_effect") {
     return validateDraftEffectPick(raw as Record<string, unknown>);
   }
+  if (msg.type === "draft_pick") {
+    return validatePick(raw as Record<string, unknown>);
+  }
   if (msg.type === "draft_submit_deck") {
-    const submission = raw as Record<string, unknown>;
-    requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission");
-    if (!Array.isArray(submission.mainDeck)
-      || !submission.mainDeck.every((card) => typeof card === "string")) {
-      throw new Error("Invalid draft deck submission");
-    }
-    return submission as DraftP2PMessage;
+    return validateSubmitDeck(raw as Record<string, unknown>);
   }
   if (msg.type === "draft_deck_submit_ack") {
     const acknowledgement = raw as Record<string, unknown>;

@@ -9,7 +9,10 @@ use engine::types::player::PlayerId;
 use crate::pack_source::PackSource;
 use crate::pick_pass;
 use crate::types::*;
-use crate::validation::validate_limited_deck;
+use crate::validation::{validate_limited_deck, LimitedDeckError};
+// Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
+// public surface, but this phase must not edit that file.
+use engine::game::deck_validation::{draft_set_concessions, DraftSetConcessions};
 
 impl DraftSession {
     /// The round that pairings may next be generated for.
@@ -65,8 +68,10 @@ impl DraftSession {
                 reason: "session kind does not match configuration".to_string(),
             });
         }
-        if self.kind != DraftKind::Sealed {
-            return Ok(());
+        let procedure = self.kind.procedure();
+        match procedure.distribution {
+            PackDistribution::PickAndPass => return Ok(()),
+            PackDistribution::AllAtOnce => {}
         }
         let DraftSource::Set { code } = &self.config.source else {
             return Err(DraftError::SealedRequiresSetSource);
@@ -76,7 +81,9 @@ impl DraftSession {
                 reason: "set source and session codes must match".to_string(),
             });
         }
-        if self.config.pack_count != 6 || self.config.min_deck_size != 40 {
+        if self.config.pack_count != procedure.packs_per_player
+            || self.config.min_deck_size != procedure.min_deck_size
+        {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
             });
@@ -144,8 +151,8 @@ pub fn apply(
         DraftAction::StartDraft => apply_start_draft(session, pack_source),
         DraftAction::Pick {
             seat,
-            card_instance_id,
-        } => pick_pass::apply_pick(session, seat, card_instance_id),
+            card_instance_ids,
+        } => pick_pass::apply_pick(session, seat, card_instance_ids),
         DraftAction::PickWithDraftEffect {
             seat,
             effect_card_instance_id,
@@ -156,7 +163,11 @@ pub fn apply(
             effect_card_instance_id,
             card_instance_ids,
         ),
-        DraftAction::SubmitDeck { seat, main_deck } => apply_submit_deck(session, seat, main_deck),
+        DraftAction::SubmitDeck {
+            seat,
+            main_deck,
+            commanders,
+        } => apply_submit_deck(session, seat, main_deck, commanders),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -210,10 +221,8 @@ fn apply_generate_pairings(session: &mut DraftSession) -> Result<Vec<DraftDelta>
             action: "GeneratePairings".to_string(),
         });
     }
-    if matches!(
-        session.kind,
-        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
-    ) && session.config.tournament_format == TournamentFormat::SingleElimination
+    if session.kind.procedure().post_draft_play == PostDraftPlay::TournamentPairings
+        && session.config.tournament_format == TournamentFormat::SingleElimination
         && session.seats.len() != 8
     {
         return Err(DraftError::UnsupportedTournamentSize {
@@ -691,10 +700,24 @@ fn apply_start_draft(
     }
 
     let seat_count = session.seats.len() as u8;
-    if matches!(
-        session.kind,
-        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
-    ) {
+    let procedure = session.kind.procedure();
+
+    // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
+    // multiplayer game this kind is defined as. Kind-general: the floor is the
+    // procedure table's, never a literal — a kind-blind constant is the exact
+    // defect this guard replaces. Ordered before the tournament-size rule
+    // because the floor is a precondition of every kind, while that rule is
+    // scoped to `PostDraftPlay::TournamentPairings`; the two coexist rather
+    // than alternate (a 9-seat Premier pod passes this and trips that one).
+    if seat_count < procedure.min_pod_size {
+        return Err(DraftError::PodBelowMinimumSize {
+            kind: session.kind,
+            required: procedure.min_pod_size,
+            actual: seat_count,
+        });
+    }
+
+    if procedure.post_draft_play == PostDraftPlay::TournamentPairings {
         let valid_size = match session.config.tournament_format {
             TournamentFormat::Swiss => (2..=8).contains(&seat_count),
             TournamentFormat::SingleElimination => seat_count == 8,
@@ -712,25 +735,38 @@ fn apply_start_draft(
             });
         }
     }
-    if session.kind == DraftKind::Sealed || session.config.kind == DraftKind::Sealed {
-        if session.kind != DraftKind::Sealed || session.config.kind != DraftKind::Sealed {
-            return Err(DraftError::InvalidSealedConfiguration {
-                reason: "session kind does not match configuration".to_string(),
-            });
+    // The session's kind and its configuration's kind must agree on how packs
+    // reach the seats; a mismatched pair is a corrupt configuration. Testing the
+    // two distributions for disagreement is equivalent to the previous pair of
+    // `== DraftKind::Sealed` tests *because* Sealed is currently the only
+    // `AllAtOnce` kind, so "exactly one is Sealed" is "the distributions differ".
+    // Stating the invariant once, rather than enumerating the pairs that violate
+    // it, leaves the match below exhaustive over a single axis: a new
+    // `PackDistribution` is an `E0004` here with exactly one arm to decide.
+    if procedure.distribution != session.config.kind.procedure().distribution {
+        return Err(DraftError::InvalidSealedConfiguration {
+            reason: "session kind does not match configuration".to_string(),
+        });
+    }
+    match procedure.distribution {
+        PackDistribution::AllAtOnce => {
+            let DraftSource::Set { code } = &session.config.source else {
+                return Err(DraftError::SealedRequiresSetSource);
+            };
+            if code != &session.config.set_code || session.set_code != session.config.set_code {
+                return Err(DraftError::InvalidSealedConfiguration {
+                    reason: "set source and session codes must match".to_string(),
+                });
+            }
+            if session.config.pack_count != procedure.packs_per_player
+                || session.config.min_deck_size != procedure.min_deck_size
+            {
+                return Err(DraftError::InvalidSealedConfiguration {
+                    reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+                });
+            }
         }
-        let DraftSource::Set { code } = &session.config.source else {
-            return Err(DraftError::SealedRequiresSetSource);
-        };
-        if code != &session.config.set_code || session.set_code != session.config.set_code {
-            return Err(DraftError::InvalidSealedConfiguration {
-                reason: "set source and session codes must match".to_string(),
-            });
-        }
-        if session.config.pack_count != 6 || session.config.min_deck_size != 40 {
-            return Err(DraftError::InvalidSealedConfiguration {
-                reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
-            });
-        }
+        PackDistribution::PickAndPass => {}
     }
 
     let pack_source = pack_source.expect("StartDraft requires a PackSource");
@@ -738,27 +774,34 @@ fn apply_start_draft(
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
     let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
-    if session.kind == DraftKind::Sealed {
-        if all_packs.len() != session.seats.len() || all_packs.iter().any(|packs| packs.len() != 6)
-        {
-            return Err(DraftError::InvalidSealedConfiguration {
-                reason: "pack source did not generate six packs per seat".to_string(),
-            });
+    match procedure.distribution {
+        // Every pack goes straight to its own seat; there is no pick step, so
+        // the event opens directly in deckbuilding.
+        PackDistribution::AllAtOnce => {
+            let packs_per_seat = usize::from(procedure.packs_per_player);
+            if all_packs.len() != session.seats.len()
+                || all_packs.iter().any(|packs| packs.len() != packs_per_seat)
+            {
+                return Err(DraftError::InvalidSealedConfiguration {
+                    reason: "pack source did not generate six packs per seat".to_string(),
+                });
+            }
+            let pools = all_packs
+                .into_iter()
+                .map(|packs| packs.into_iter().flat_map(|pack| pack.0).collect())
+                .collect();
+            session.pools = pools;
+            session.current_pack.fill(None);
+            session.packs_by_seat.iter_mut().for_each(Vec::clear);
+            session.status = DraftStatus::Deckbuilding;
+            return Ok(vec![
+                DraftDelta::DraftStarted,
+                DraftDelta::TransitionedTo {
+                    status: DraftStatus::Deckbuilding,
+                },
+            ]);
         }
-        let pools = all_packs
-            .into_iter()
-            .map(|packs| packs.into_iter().flat_map(|pack| pack.0).collect())
-            .collect();
-        session.pools = pools;
-        session.current_pack.fill(None);
-        session.packs_by_seat.iter_mut().for_each(Vec::clear);
-        session.status = DraftStatus::Deckbuilding;
-        return Ok(vec![
-            DraftDelta::DraftStarted,
-            DraftDelta::TransitionedTo {
-                status: DraftStatus::Deckbuilding,
-            },
-        ]);
+        PackDistribution::PickAndPass => {}
     }
 
     for (seat, mut seat_packs) in all_packs.into_iter().enumerate() {
@@ -778,10 +821,53 @@ fn apply_start_draft(
     Ok(vec![DraftDelta::DraftStarted])
 }
 
+/// CR 903.13e + CR 903.13f(3): the deck-construction concessions this session's
+/// booster set makes, LATCHED from `config.source` at session creation and
+/// never re-derived from pool contents.
+///
+/// Pool contents are not evidence of the grant IN EITHER DIRECTION: the
+/// CR 903.13e filler cards are themselves PRINTED in the granting sets' draft
+/// boosters, so a drafted copy does not prove a grant, and a pool without one
+/// does not disprove it. `config.source` carries the only authority
+/// CR 903.13e names -- what the DRAFT CONTAINED.
+///
+/// `pub(crate)`, NOT private: `view.rs`'s two builders call it. It must not
+/// become `pub` -- outside draft-core the concessions are consumed from the
+/// published view field, never re-derived.
+pub(crate) fn session_concessions(session: &DraftSession) -> DraftSetConcessions {
+    concession_set_code(session)
+        .map(draft_set_concessions)
+        .unwrap_or_default()
+}
+
+/// CR 903.13e + CR 903.13f(3): the set code whose concessions this session
+/// carries, LATCHED from `config.source` at session creation. `None` when the
+/// rules concede nothing -- a cube (which contains no draft boosters from any
+/// set) and every kind outside CR 903.13's scope.
+///
+/// The single authority for "which set did this draft contain". Both
+/// `session_concessions` above and `view::filter_for_player`'s published
+/// `draft_set_code` read it, so the two can never disagree about a cube.
+///
+/// Both rules live in CR 903.13, which scopes them to Commander Draft, so every
+/// other kind concedes nothing. Both `match`es are wildcard-free: a sixth
+/// `DraftKind`, or a third `DraftSource`, must state its answer.
+pub(crate) fn concession_set_code(session: &DraftSession) -> Option<&str> {
+    match session.kind {
+        DraftKind::CommanderDraft => match &session.config.source {
+            DraftSource::Set { code } => Some(code.as_str()),
+            // A cube contains no draft boosters from any set.
+            DraftSource::Cube { .. } => None,
+        },
+        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => None,
+    }
+}
+
 fn apply_submit_deck(
     session: &mut DraftSession,
     seat: u8,
     main_deck: Vec<String>,
+    commanders: Vec<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Deckbuilding {
         return Err(DraftError::InvalidTransition {
@@ -795,17 +881,42 @@ fn apply_submit_deck(
         return Err(DraftError::SeatOutOfRange { seat, pod_size });
     }
 
+    // CR 702.124g: "no partner ability or combination of partner abilities can
+    // ever let a player have more than two commanders." Pure arithmetic on the
+    // payload -- it needs neither the deck nor the pool, so it belongs here
+    // rather than in the pool validator. This is a second, independent
+    // authority to the server's wire guard: a payload arriving by any other
+    // route (draft-wasm's local/P2P submit, a future transport) is still bound.
+    if commanders.len() > MAX_COMMANDER_DESIGNATIONS {
+        return Err(DraftError::ValidationFailed {
+            errors: vec![LimitedDeckError::TooManyCommanders {
+                designated: commanders.len(),
+                maximum: MAX_COMMANDER_DESIGNATIONS,
+            }],
+        });
+    }
+
     // Collect pool card names for validation
     let pool_names: Vec<String> = session.pools[seat as usize]
         .iter()
         .map(|c| c.name.clone())
         .collect();
 
+    // CR 903.13e: the grant is latched from what the draft contained, never
+    // re-derived from what the pool happens to hold.
+    let concessions = session_concessions(session);
+
     if let Err(errors) = validate_limited_deck(
         &main_deck,
         &pool_names,
         &session.config.addable_cards,
         session.config.min_deck_size,
+        concessions.filler.as_ref(),
+        &commanders,
+        // CR 903.3: the floor is the kind's, read from the procedure table.
+        // This is the line that makes the value kind-derived rather than
+        // assumed -- `0` for the four CR 905.1a kinds, `1` for CommanderDraft.
+        usize::from(session.kind.procedure().commanders_required),
     ) {
         return Err(DraftError::ValidationFailed { errors });
     }
@@ -816,9 +927,16 @@ fn apply_submit_deck(
         DraftSeat::Bot { .. } => PlayerId(seat),
     };
 
-    session
-        .submitted_decks
-        .insert(player_id, DraftDeckSubmission { seat, main_deck });
+    session.submitted_decks.insert(
+        player_id,
+        DraftDeckSubmission {
+            seat,
+            main_deck,
+            // CR 903.3: snapshotted, not re-derived. A later pool change
+            // must never silently re-designate this seat's commander(s).
+            commanders,
+        },
+    );
 
     let mut deltas = vec![DraftDelta::DeckSubmitted { seat }];
 
@@ -844,11 +962,14 @@ fn apply_submit_deck(
         .count();
 
     if submitted_human_count >= human_count {
-        // Premier/Traditional drafts transition to Pairing for tournament play.
-        // Quick Draft (1 human) completes directly.
-        let next_status = match session.kind {
-            DraftKind::Quick => DraftStatus::Complete,
-            DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => DraftStatus::Pairing,
+        // Tournament-shaped events transition to Pairing for in-session play.
+        // Quick Draft (1 human) completes directly, and CR 903.13a puts
+        // Commander Draft in the same shape: "a draft ... followed by a
+        // multiplayer game" — the game is arranged outside the draft session,
+        // not as a bracket inside it.
+        let next_status = match session.kind.procedure().post_draft_play {
+            PostDraftPlay::CompleteImmediately => DraftStatus::Complete,
+            PostDraftPlay::TournamentPairings => DraftStatus::Pairing,
         };
         session.status = next_status;
         deltas.push(DraftDelta::TransitionedTo {
@@ -1136,7 +1257,11 @@ mod tests {
 
         let deltas = apply(
             &mut session,
-            DraftAction::SubmitDeck { seat: 0, main_deck },
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: Vec::new(),
+            },
             None,
         )
         .unwrap();
@@ -1166,7 +1291,11 @@ mod tests {
         let main_deck: Vec<String> = (0..10).map(|i| format!("Card {i}")).collect();
         let result = apply(
             &mut session,
-            DraftAction::SubmitDeck { seat: 0, main_deck },
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: Vec::new(),
+            },
             None,
         );
 
@@ -1222,7 +1351,11 @@ mod tests {
 
         let deltas = apply(
             &mut session,
-            DraftAction::SubmitDeck { seat: 0, main_deck },
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: Vec::new(),
+            },
             None,
         )
         .unwrap();
@@ -1265,6 +1398,7 @@ mod tests {
             DraftAction::SubmitDeck {
                 seat: 0,
                 main_deck: make_deck(),
+                commanders: Vec::new(),
             },
             None,
         )
@@ -1276,6 +1410,7 @@ mod tests {
             DraftAction::SubmitDeck {
                 seat: 1,
                 main_deck: make_deck(),
+                commanders: Vec::new(),
             },
             None,
         )
@@ -1286,6 +1421,291 @@ mod tests {
         assert_eq!(session.status, DraftStatus::Pairing);
     }
 
+    /// CR 903.13a: Commander Draft is "a draft ... followed by a multiplayer
+    /// game", so the session ends at `Complete` and the game is arranged
+    /// outside it — it must NOT enter an in-session tournament bracket.
+    ///
+    /// The sibling case (a Premier pod reaching `Pairing`) is
+    /// `submit_deck_all_submitted_premier_transitions_to_pairing` above; the
+    /// two together are what show this reads `post_draft_play` rather than
+    /// having replaced one hardcoded status with another.
+    #[test]
+    fn commander_draft_completes_without_tournament_pairings() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        // CR 903.13f(1): the Commander Draft pool floor.
+        session.config.min_deck_size = 60;
+        // 1 human + 3 bots, the kind's default seat shape.
+        session.seats = vec![
+            DraftSeat::Human {
+                player_id: PlayerId(0),
+                display_name: "Player 0".to_string(),
+            },
+            DraftSeat::Bot {
+                name: "Bot 1".to_string(),
+            },
+            DraftSeat::Bot {
+                name: "Bot 2".to_string(),
+            },
+            DraftSeat::Bot {
+                name: "Bot 3".to_string(),
+            },
+        ];
+        session.status = DraftStatus::Deckbuilding;
+        session.pools[0] = (0..42)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: "TST".to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect();
+
+        // Positive reach-guard: the session really is in the state that makes
+        // the terminal-status branch reachable, so `Complete` below cannot be
+        // an artifact of a branch that never ran.
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert!(session.submitted_decks.is_empty());
+
+        let mut main_deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
+        main_deck.extend(std::iter::repeat_n("Plains".to_string(), 20));
+
+        let deltas = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                // CR 903.3: a Commander deck designates a commander. `Card 0`
+                // is in both `main_deck` (0..40) and this seat's pool (0..42),
+                // so `CommanderNotInDeck` cannot fire. The row's subject is
+                // unchanged -- only what makes a Commander deck legal is.
+                commanders: vec!["Card 0".to_string()],
+            },
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !session.submitted_decks.is_empty(),
+            "reach-guard: the deck submission itself must have landed"
+        );
+        assert!(deltas.contains(&DraftDelta::TransitionedTo {
+            status: DraftStatus::Complete,
+        }));
+        assert_eq!(session.status, DraftStatus::Complete);
+        assert_ne!(session.status, DraftStatus::Pairing);
+    }
+
+    /// PF2 row 3c — the premise pin for the client's two-clock adapter stub.
+    ///
+    /// This is a PREMISE PIN, not a discriminating test: it asserts current,
+    /// correct reducer behaviour and its value is identical on the fixed and
+    /// unfixed client trees. Its job is to RED if a future edit changes the
+    /// reducer out from under
+    /// `client/src/adapter/__tests__/p2pDraftPodComplete.test.ts` and
+    /// `client/src/pages/__tests__/DraftPodPage.podComplete.test.tsx`, whose
+    /// stubs assert these transitions rather than measure them. Without it the
+    /// stub's premise would be invented, and every row above it green against a
+    /// fiction.
+    ///
+    /// Three of the four pinned halves are here; the fourth (the
+    /// `TournamentPairings` split and the `MatchInProgress` transition) is
+    /// `premier_pod_reaches_pairing_then_match_in_progress` below.
+    ///
+    /// Half (a) — `:895`'s outstanding-human gate: no transition while a human
+    ///            seat has not submitted. This is what makes the client stub's
+    ///            ACCUMULATING submitted-seat set a measured premise.
+    /// Half (b) — `:902`: `PostDraftPlay::CompleteImmediately` yields
+    ///            `Complete` (CR 903.13a — the game is arranged outside the
+    ///            session, not as a bracket inside it).
+    /// Half (c) — `:214-217`/`:218-223`: generating pairings for a `Complete`
+    ///            session is REFUSED. This is the premise the client row
+    ///            "emits a viewUpdated carrying Complete" rests its PRIMARY
+    ///            assertion on: widen this admit set to include `Complete` and
+    ///            that row silently stops discriminating, with nothing red.
+    ///            `test_generate_pairings_wrong_status` above pins
+    ///            `from: Lobby`, not `from: Complete`.
+    #[test]
+    fn commander_pod_reaches_complete_and_generate_pairings_is_refused() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        // CR 903.13f(1): the Commander Draft deck floor.
+        session.config.min_deck_size = 60;
+        // TWO humans, so the outstanding-human gate has something to gate on.
+        session.seats = vec![
+            DraftSeat::Human {
+                player_id: PlayerId(0),
+                display_name: "Player 0".to_string(),
+            },
+            DraftSeat::Human {
+                player_id: PlayerId(1),
+                display_name: "Player 1".to_string(),
+            },
+            DraftSeat::Bot {
+                name: "Bot 2".to_string(),
+            },
+            DraftSeat::Bot {
+                name: "Bot 3".to_string(),
+            },
+        ];
+        session.status = DraftStatus::Deckbuilding;
+        for seat in 0..2 {
+            session.pools[seat] = (0..42)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("s{seat}-card-{i}"),
+                    name: format!("Card {i}"),
+                    set_code: "TST".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+        }
+
+        let make_deck = || {
+            let mut deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
+            deck.extend(std::iter::repeat_n("Plains".to_string(), 20));
+            deck
+        };
+
+        // Reach guard: the terminal branch is reachable at all.
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: make_deck(),
+                // CR 903.3: a Commander deck designates a commander. `Card 0`
+                // is in both `main_deck` (0..40) and this seat's pool (0..42),
+                // so `CommanderNotInDeck` cannot fire. The row's subject is
+                // unchanged -- only what makes a Commander deck legal is.
+                commanders: vec!["Card 0".to_string()],
+            },
+            None,
+        )
+        .unwrap();
+
+        // HALF (a) — session.rs:895. Seat 1 is still outstanding, so nothing
+        // transitions. The client stub projects exactly this.
+        assert!(
+            session.submitted_decks.contains_key(&PlayerId(0)),
+            "reach-guard: seat 0's submission must have landed"
+        );
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+
+        let deltas = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 1,
+                main_deck: make_deck(),
+                // CR 903.3: a Commander deck designates a commander. `Card 0`
+                // is in both `main_deck` (0..40) and this seat's pool (0..42),
+                // so `CommanderNotInDeck` cannot fire. The row's subject is
+                // unchanged -- only what makes a Commander deck legal is.
+                commanders: vec!["Card 0".to_string()],
+            },
+            None,
+        )
+        .unwrap();
+
+        // HALF (b) — session.rs:902, assigned at :905.
+        assert!(deltas.contains(&DraftDelta::TransitionedTo {
+            status: DraftStatus::Complete,
+        }));
+        assert_eq!(session.status, DraftStatus::Complete);
+        assert_ne!(session.status, DraftStatus::Pairing);
+
+        // HALF (c) — session.rs:214-217 admits only
+        // Deckbuilding | Pairing | RoundComplete, so :218-223 refuses this.
+        let result = apply(&mut session, DraftAction::GeneratePairings, None);
+        assert!(matches!(
+            result,
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Complete,
+                ..
+            })
+        ));
+    }
+
+    /// PF2 row 3c, half (d) — the `TournamentPairings` arm of the same pin.
+    ///
+    /// Also a PREMISE PIN: (1) = (2) on both client trees. It pins the two
+    /// reducer facts the client stub's clock (b) encodes — `session.rs:903`'s
+    /// `Pairing` and `:254`'s overwrite to `MatchInProgress` — which is what
+    /// makes "the FIRST viewUpdated after allDecksSubmitted carries Pairing" a
+    /// measured claim rather than an invented one.
+    #[test]
+    fn premier_pod_reaches_pairing_then_match_in_progress() {
+        let (mut session, _) = test_session(2);
+        session.status = DraftStatus::Deckbuilding;
+        for seat in 0..2 {
+            session.pools[seat] = (0..42)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("s{seat}-card-{i}"),
+                    name: format!("Card {i}"),
+                    set_code: "TST".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+        }
+
+        let make_deck = || {
+            let mut deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
+            deck.extend(std::iter::repeat_n("Plains".to_string(), 17));
+            deck
+        };
+
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: make_deck(),
+                commanders: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+        // The same outstanding-human gate (:895), on the other arm.
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 1,
+                main_deck: make_deck(),
+                commanders: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+        // session.rs:903, assigned at :905.
+        assert_eq!(session.status, DraftStatus::Pairing);
+
+        // session.rs:254 — generating OVERWRITES Pairing with MatchInProgress,
+        // and nothing else republishes Pairing. That is why the host must
+        // broadcast BEFORE it generates.
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
+        assert_eq!(session.status, DraftStatus::MatchInProgress);
+    }
+
     #[test]
     fn submit_deck_on_non_deckbuilding_returns_error() {
         let (mut session, _) = test_session(8);
@@ -1294,6 +1714,7 @@ mod tests {
             DraftAction::SubmitDeck {
                 seat: 0,
                 main_deck: vec![],
+                commanders: Vec::new(),
             },
             None,
         );
@@ -2261,6 +2682,519 @@ mod tests {
                 .map(|record| record.match_wins),
             Some(1),
             "the round-one bye is not re-credited by round-two generation",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 903.13e / CR 903.13f(3): the concession LATCH, and the reducer
+    // wiring that consumes it.
+    // ---------------------------------------------------------------------
+
+    /// A Commander Draft session whose packs came from `set_code`.
+    fn commander_draft_session(set_code: &str) -> DraftSession {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        session.config.source = DraftSource::Set {
+            code: set_code.to_string(),
+        };
+        session
+    }
+
+    /// U7 row 10 -- set gating, asserted as a pair on one axis. Only the set
+    /// code differs between the two halves, and the `Some` half is the reach
+    /// guard: without it, "grants nothing" would be satisfied by a latch that
+    /// hard-codes the default.
+    #[test]
+    fn commander_draft_latches_concessions_from_the_granting_set_only() {
+        assert_eq!(
+            session_concessions(&commander_draft_session("CMM")),
+            draft_set_concessions("CMM"),
+            "a CMM Commander Draft must concede exactly what CR 903.13e/f say CMM concedes"
+        );
+        assert!(
+            session_concessions(&commander_draft_session("CMM"))
+                .filler
+                .is_some(),
+            "reach guard: CR 903.13e names Commander Masters as a granting set"
+        );
+        assert_eq!(
+            session_concessions(&commander_draft_session("NEO")),
+            DraftSetConcessions::default(),
+            "CR 903.13e names no set outside its own list"
+        );
+    }
+
+    /// U7 row 11 -- wrong draft kind. CR 903.13e lives in CR 903.13, which
+    /// scopes it to Commander Draft; the same set code under a Premier draft
+    /// concedes nothing.
+    #[test]
+    fn a_premier_draft_of_a_granting_set_concedes_nothing() {
+        let mut session = commander_draft_session("CMM");
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            session_concessions(&session),
+            DraftSetConcessions::default()
+        );
+    }
+
+    /// U7 row 12 -- cube source. A cube contains no draft boosters from any
+    /// set, so it exercises the `None`-shaped arm of the latch's inner match.
+    #[test]
+    fn a_cube_commander_draft_concedes_nothing() {
+        let mut session = commander_draft_session("CMM");
+        session.config.source = DraftSource::Cube {
+            id: "CMM".to_string(),
+            name: "A cube that happens to be named for the set".to_string(),
+        };
+        assert_eq!(
+            session_concessions(&session),
+            DraftSetConcessions::default(),
+            "the authority is what the DRAFT CONTAINED, not what the source is called"
+        );
+    }
+
+    /// Seat a Commander Draft in deckbuilding with a `pool_size`-card pool for
+    /// seat 0, none of which is the filler.
+    fn deckbuilding_commander_draft(set_code: &str, pool_size: usize) -> DraftSession {
+        let mut session = commander_draft_session(set_code);
+        session.status = DraftStatus::Deckbuilding;
+        session.config.min_deck_size = 60;
+        session.pools[0] = (0..pool_size)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: set_code.to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect();
+        session
+    }
+
+    /// U7 row 13 -- end to end through the reducer. This is the assertion that
+    /// proves the latch is WIRED into `apply_submit_deck` and not merely
+    /// defined: the accept and the reject differ only in the filler count, and
+    /// a latch that never reached the validator would accept both.
+    #[test]
+    fn submit_deck_applies_the_latched_filler_grant() {
+        let filler = draft_set_concessions("CMM").filler.unwrap();
+
+        let deck_with = |copies: usize| {
+            let mut deck: Vec<String> = (0..60 - copies).map(|i| format!("Card {i}")).collect();
+            deck.extend(std::iter::repeat_n(filler.card_name.clone(), copies));
+            deck
+        };
+        let designations = vec![filler.card_name.clone(), filler.card_name.clone()];
+
+        // Two added copies, both designated -> accepted.
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let deltas = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck_with(2),
+                commanders: designations.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+
+        // Three -> rejected by CR 903.13e's cap.
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let result = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck_with(3),
+                commanders: designations,
+            },
+            None,
+        );
+        assert!(
+            matches!(result, Err(DraftError::ValidationFailed { .. })),
+            "expected ValidationFailed, got {result:?}"
+        );
+    }
+
+    /// The designation is SNAPSHOTTED onto the submission record, not dropped
+    /// at the reducer seam. Without this, everything above could pass while
+    /// the P9 handoff received an empty list.
+    #[test]
+    fn submit_deck_snapshots_the_designation_onto_the_submission() {
+        let filler = draft_set_concessions("CMM").filler.unwrap();
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let mut main_deck: Vec<String> = (0..59).map(|i| format!("Card {i}")).collect();
+        main_deck.push(filler.card_name.clone());
+
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: vec![filler.card_name.clone()],
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.submitted_decks[&PlayerId(0)].commanders,
+            vec![filler.card_name],
+            "the designation must survive the reducer, not be dropped at it"
+        );
+    }
+
+    /// U9 row 8b -- the REDUCER bound (CR 702.124g), independent of any wire
+    /// guard. This is the half that proves a payload arriving by a route the
+    /// server never sees -- draft-wasm's local/P2P submit, a future transport
+    /// -- is still bounded. Written off the constant, never the literal 3.
+    #[test]
+    fn submit_deck_rejects_more_than_max_commander_designations() {
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let main_deck: Vec<String> = (0..60).map(|i| format!("Card {i}")).collect();
+        let over_bound: Vec<String> = (0..=MAX_COMMANDER_DESIGNATIONS)
+            .map(|i| format!("Card {i}"))
+            .collect();
+
+        let result = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: main_deck.clone(),
+                commanders: over_bound,
+            },
+            None,
+        );
+        let Err(DraftError::ValidationFailed { errors }) = result else {
+            panic!("expected ValidationFailed, got {result:?}");
+        };
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                LimitedDeckError::TooManyCommanders { maximum, .. }
+                    if *maximum == MAX_COMMANDER_DESIGNATIONS
+            )),
+            "expected TooManyCommanders, got {errors:?}"
+        );
+
+        // Paired positive reach-guard: exactly the bound is accepted, so the
+        // rejection above cannot pass by the whole path being closed.
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let at_bound: Vec<String> = (0..MAX_COMMANDER_DESIGNATIONS)
+            .map(|i| format!("Card {i}"))
+            .collect();
+        assert!(apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: at_bound,
+            },
+            None,
+        )
+        .is_ok());
+    }
+
+    /// U9 row 9 -- the WIRING of the CR 702.124h multiset guard: that
+    /// `apply_submit_deck` surfaces it as `DraftError::ValidationFailed`
+    /// rather than swallowing it. The RULE itself (that the comparison is a
+    /// multiset and not a membership test) is asserted one layer down, in
+    /// `validation.rs`, where `validate_limited_deck` is directly callable and
+    /// the `(0,2,2)`/`(0,1,2)` pair isolates the single axis. Neither
+    /// substitutes for the other: this test passes under a membership
+    /// implementation, and that one passes with the guard unwired from here.
+    #[test]
+    fn submit_deck_rejects_a_designation_the_deck_does_not_contain() {
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        let main_deck: Vec<String> = (0..60).map(|i| format!("Card {i}")).collect();
+
+        let result = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: main_deck.clone(),
+                commanders: vec!["Card 999".to_string()],
+            },
+            None,
+        );
+        let Err(DraftError::ValidationFailed { errors }) = result else {
+            panic!("expected ValidationFailed, got {result:?}");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, LimitedDeckError::CommanderNotInDeck { .. })),
+            "expected CommanderNotInDeck, got {errors:?}"
+        );
+
+        // Paired positive: the same shape with a name the deck does contain.
+        let mut session = deckbuilding_commander_draft("CMM", 60);
+        assert!(apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: vec!["Card 0".to_string()],
+            },
+            None,
+        )
+        .is_ok());
+    }
+    // -------------------------------------------------------------------
+    // PF3 / U23 — CR 903.13a + CR 800.1: the kind's seat floor, enforced in
+    // the reducer, which is the path every entry point actually takes.
+    // -------------------------------------------------------------------
+
+    /// A `CommanderDraft` session with `pod_size` seats, still in `Lobby`.
+    fn commander_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
+        let (mut session, source) = test_session(pod_size);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        // CR 903.13f(1): the Commander Draft deck floor.
+        session.config.min_deck_size = 60;
+        (session, source)
+    }
+
+    /// VM row 1 — the floor is READ FROM THE PROCEDURE TABLE, not hard-coded.
+    ///
+    /// Revert the `seat_count < procedure.min_pod_size` guard in
+    /// `apply_start_draft` and the 2-seat Commander pod below starts happily.
+    #[test]
+    fn start_draft_refuses_a_pod_below_the_kinds_seat_floor() {
+        let (mut session, source) = commander_session(2);
+        let result = apply(&mut session, DraftAction::StartDraft, Some(&source));
+
+        assert!(
+            matches!(result, Err(DraftError::PodBelowMinimumSize { .. })),
+            "CR 903.13a + CR 800.1: a 2-seat Commander pod is below the floor: {result:?}"
+        );
+        assert_eq!(
+            session.status,
+            DraftStatus::Lobby,
+            "the refusal must leave the session un-started"
+        );
+
+        // Paired positive reach-guard: AT the floor the same session starts.
+        // Without this, a guard that refused every pod would pass the negative.
+        let (mut session, source) = commander_session(3);
+        apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect("a 3-seat Commander pod is exactly at its floor");
+        assert_ne!(session.status, DraftStatus::Lobby);
+
+        // Hostile sibling — THE KIND AXIS. Premier's floor is 2 and Swiss
+        // admits 2..=8, so a floor written as a kind-blind `>= 3` reds here.
+        // This is the fixture that distinguishes "reads the procedure" from
+        // "hard-codes 3".
+        let (mut session, source) = test_session(2);
+        apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect("a 2-seat Premier pod is at ITS floor and must still start");
+    }
+
+    /// VM row 2 — the error names the KIND, and the two size guards COEXIST.
+    ///
+    /// Reverting to `UnsupportedTournamentSize` reds the first assertion:
+    /// a `TournamentFormat` payload is exactly the kind-blindness this guard
+    /// exists to remove.
+    #[test]
+    fn the_seat_floor_error_names_the_kind_not_a_tournament_format() {
+        let (mut session, source) = commander_session(2);
+        let err = apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect_err("below the floor");
+        assert!(
+            matches!(
+                err,
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::CommanderDraft,
+                    required: 3,
+                    actual: 2,
+                }
+            ),
+            "the error must carry the kind and both counts: {err:?}"
+        );
+
+        // Multi-authority: a 1-seat Premier pod violates BOTH the kind floor
+        // (min_pod_size 2) and Swiss's 2..=8 bracket. This pins the guard
+        // ORDER this phase chose — the floor is the more fundamental
+        // precondition, and it is kind-general where the bracket is scoped to
+        // `PostDraftPlay::TournamentPairings`.
+        let (mut session, source) = test_session(1);
+        let err = apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect_err("below Premier's floor");
+        assert!(
+            matches!(
+                err,
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::Premier,
+                    required: 2,
+                    actual: 1,
+                }
+            ),
+            "{err:?}"
+        );
+
+        // Sibling that must NOT change: 9 seats PASSES the floor and trips the
+        // bracket. The two guards coexist rather than alternate, which is what
+        // makes them two rules and not two spellings of one.
+        let (mut session, source) = test_session(9);
+        let err = apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect_err("above Swiss's bracket");
+        assert!(
+            matches!(
+                err,
+                DraftError::UnsupportedTournamentSize {
+                    format: TournamentFormat::Swiss,
+                    actual: 9,
+                    ..
+                }
+            ),
+            "a 9-seat Premier pod must still report the BRACKET rule: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // PF3 / U26 — CR 903.3's designation floor, on the PRODUCTION path.
+    // -------------------------------------------------------------------
+
+    /// A session of `kind` parked in `Deckbuilding` with seat 0's pool seeded.
+    fn deckbuilding_session(kind: DraftKind) -> DraftSession {
+        let (mut session, _) = test_session(4);
+        session.kind = kind;
+        session.config.kind = kind;
+        session.config.min_deck_size = kind.procedure().min_deck_size;
+        session.status = DraftStatus::Deckbuilding;
+        session.pools[0] = (0..42)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: "TST".to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect();
+        session
+    }
+
+    /// A deck of exactly `min_deck_size` cards drawn from that seeded pool,
+    /// padded with basic lands (available in unlimited quantity).
+    fn pooled_deck(min_deck_size: usize) -> Vec<String> {
+        let mut deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
+        deck.extend(std::iter::repeat_n(
+            "Plains".to_string(),
+            min_deck_size - 40,
+        ));
+        deck
+    }
+
+    /// VM row 9 — the PRODUCTION-PATH row for CR 903.3's floor.
+    ///
+    /// `validation.rs`'s rows enter at `validate_limited_deck` directly and so
+    /// cannot see `session.rs`'s 7th argument at all: revert that argument to a
+    /// literal `0` and every one of them stays green while real submissions
+    /// silently accept an undesignated Commander deck. This row enters through
+    /// `apply`, which is the entry real submissions use.
+    #[test]
+    fn apply_submit_deck_enforces_the_kinds_designation_floor() {
+        let mut session = deckbuilding_session(DraftKind::CommanderDraft);
+        let deck = pooled_deck(60);
+
+        let err = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck.clone(),
+                commanders: Vec::new(),
+            },
+            None,
+        )
+        .expect_err("CR 903.3: a Commander deck must designate a commander");
+        let DraftError::ValidationFailed { errors } = &err else {
+            panic!("expected ValidationFailed, got {err:?}");
+        };
+        assert!(
+            errors.contains(&LimitedDeckError::TooFewCommanders {
+                designated: 0,
+                minimum: 1,
+            }),
+            "{errors:?}"
+        );
+        assert!(
+            session.submitted_decks.is_empty(),
+            "the refusal must land before `submitted_decks.insert`"
+        );
+
+        // Paired positive reach-guard: one BACKED designation is accepted and
+        // reaches the insert. Without it, a reducer that refused every
+        // Commander submission would satisfy the negative above.
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck,
+                commanders: vec!["Card 0".to_string()],
+            },
+            None,
+        )
+        .expect("one backed designation satisfies the floor");
+        assert_eq!(session.submitted_decks.len(), 1);
+    }
+
+    /// VM row 9's hostile siblings — the KIND axis and the CAP axis.
+    #[test]
+    fn the_designation_floor_is_the_kinds_and_does_not_displace_the_cap() {
+        // KIND axis: Premier's `commanders_required` is 0, so an empty
+        // designation must still be accepted. This is what proves the value is
+        // read from `session.kind.procedure()` rather than hardcoded to 1.
+        let mut session = deckbuilding_session(DraftKind::Premier);
+        apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: pooled_deck(40),
+                commanders: Vec::new(),
+            },
+            None,
+        )
+        .expect("CR 905.1a kinds designate no commander");
+        assert_eq!(session.submitted_decks.len(), 1);
+
+        // CAP axis: CR 702.124g's cap is raised by `apply_submit_deck`'s own
+        // early `return`, upstream of the validator. Adding the floor must not
+        // displace it.
+        let mut session = deckbuilding_session(DraftKind::CommanderDraft);
+        let err = apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: pooled_deck(60),
+                commanders: vec![
+                    "Card 0".to_string(),
+                    "Card 1".to_string(),
+                    "Card 2".to_string(),
+                ],
+            },
+            None,
+        )
+        .expect_err("CR 702.124g: at most two commanders");
+        let DraftError::ValidationFailed { errors } = &err else {
+            panic!("expected ValidationFailed, got {err:?}");
+        };
+        assert!(
+            errors.contains(&LimitedDeckError::TooManyCommanders {
+                designated: 3,
+                maximum: MAX_COMMANDER_DESIGNATIONS,
+            }),
+            "{errors:?}"
         );
     }
 }

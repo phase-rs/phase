@@ -4,7 +4,7 @@ import { menuButtonClass } from "../menu/buttonStyles";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-type DraftMode = "quick" | "pod";
+type DraftMode = "quick" | "pod" | "commander";
 
 interface DraftIntroProps {
   mode: DraftMode;
@@ -44,9 +44,31 @@ export function DraftIntro({
     { icon: "3", text: t("intro.pod.step3") },
     { icon: "4", text: t("intro.pod.step4") },
   ];
+  // CR 903.13a/b. Steps 1 and 3 are identical to the pod procedure, so they REUSE the
+  // pod keys rather than duplicating two sentences into seven locales — the same reuse
+  // the draft landing page makes for the menu-namespace "Enter" CTA. It also keeps
+  // `{{count}}` on a key whose seven translations already interpolate it correctly.
+  const commanderSteps: Step[] = [
+    { icon: "1", text: t("intro.pod.step1", { count: podSize }) },
+    { icon: "2", text: t("intro.commander.step2") },
+    { icon: "3", text: t("intro.pod.step3") },
+    { icon: "4", text: t("intro.commander.step4") },
+  ];
 
-  const steps = mode === "quick" ? quickSteps : podStepList;
-  const title = mode === "quick" ? t("intro.quickTitle") : t("intro.podTitle");
+  // Total over `DraftMode`: a future mode is a compile error here rather than a
+  // silent fall-through to the pod copy.
+  const stepsByMode: Record<DraftMode, Step[]> = {
+    quick: quickSteps,
+    pod: podStepList,
+    commander: commanderSteps,
+  };
+  const titleByMode: Record<DraftMode, string> = {
+    quick: t("intro.quickTitle"),
+    pod: t("intro.podTitle"),
+    commander: t("intro.commanderTitle"),
+  };
+  const steps = stepsByMode[mode];
+  const title = titleByMode[mode];
 
   return (
     <div className="mx-auto flex w-full max-w-lg flex-col items-center gap-8 py-12">

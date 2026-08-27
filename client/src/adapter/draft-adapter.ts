@@ -134,7 +134,48 @@ export type DraftStatus =
   | "Complete"
   | "Abandoned";
 
-export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed";
+export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed" | "CommanderDraft";
+
+/**
+ * The numeric kind the wasm bridge expects. Mirrors `draft_kind_wire_number`
+ * in `crates/draft-wasm/src/lib.rs`, which is the single authority.
+ *
+ * The TOTALITY of this Record is the compile-time half of the kind boundary's
+ * loudness guarantee: `Record<K, V>` requires every member of
+ * `Exclude<DraftKind, "Quick">`, so widening the union without adding a wire
+ * number here is a TS2741 before any bytes move. Never relax this to
+ * `Partial<Record<…>>`, never `?? 0`, and never assert on the index — that
+ * would trade a compile error for a draft created as the WRONG kind.
+ */
+// @sync-with: crates/draft-wasm/src/lib.rs
+const DRAFT_KIND_WIRE_NUMBER: Record<Exclude<DraftKind, "Quick">, number> = {
+  Premier: 1,
+  Traditional: 2,
+  Sealed: 3,
+  CommanderDraft: 4,
+};
+
+/**
+ * The engine-owned per-kind procedure axes, mirroring `DraftProcedureDto` in
+ * `crates/draft-wasm/src/lib.rs`. Read these; never re-derive them.
+ */
+// @sync-with: crates/draft-wasm/src/lib.rs
+export interface DraftProcedure {
+  pod_size: number;
+  human_seats: number;
+  min_pod_size: number;
+  packs_per_player: number;
+  cards_per_pick: number;
+  min_deck_size: number;
+  /**
+   * CR 903.3: how many commanders a deck built from this kind's pool must
+   * designate. `0` for the four CR 905.1a kinds, `1` for CommanderDraft.
+   * Required, not optional: a literal that forgets it must be a `tsc` error
+   * rather than a silent `undefined`, which is the whole point of a mirror.
+   */
+  commanders_required: number;
+  match_config: MatchConfig;
+}
 
 export type TournamentFormat = "Swiss" | "SingleElimination";
 
@@ -147,6 +188,15 @@ export interface DraftProgressFields {
   current_pack_number: number;
   pick_number: number;
   cards_per_pack: number;
+  /**
+   * CR 903.13b: how many pick STEPS this session's pack contains —
+   * `cards_per_pack.div_ceil(cards_per_pick)`, computed by the engine's
+   * `DraftProcedure::pick_steps_per_pack`. `pick_number` counts steps, not
+   * cards, so this is the denominator a progress bar can actually reach: a
+   * 14-card Commander pack is 7 steps, not 14. Read it; never re-derive it
+   * from `cards_per_pack`.
+   */
+  pick_steps_per_pack: number;
   pack_count: number;
   pass_direction: "Left" | "Right";
 }
@@ -187,6 +237,8 @@ export interface SpectatorDraftView {
   pass_direction: "Left" | "Right";
   seats: SeatPublicView[];
   cards_per_pack: number;
+  /** CR 903.13b: mirrors `DraftPlayerView.pick_steps_per_pack`; see that one. */
+  pick_steps_per_pack: number;
   pack_count: number;
   min_deck_size: number;
   addable_cards: string[];
@@ -201,6 +253,17 @@ export interface SpectatorDraftView {
   current_packs?: (DraftCardInstance[] | null)[];
 }
 
+// @sync-with: crates/engine/src/game/deck_validation.rs
+/**
+ * CR 903.13e: the commander filler this draft's booster set lets a player add
+ * to their card pool, and the cap on the ADDED copies. Engine-derived; the
+ * client never learns which sets grant what.
+ */
+export interface GrantableCommanderFiller {
+  card_name: string;
+  max_copies: number;
+}
+
 // @sync-with: crates/draft-core/src/view.rs
 export interface DraftPlayerView {
   status: DraftStatus;
@@ -209,6 +272,13 @@ export interface DraftPlayerView {
   pick_number: number;
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
+  /**
+   * CR 903.13b: how many cards this seat's next pick step takes —
+   * `min(cards_per_pick, remaining pack size)`, computed by the engine's
+   * `pick_pass::required_pick_count` and enforced by `apply_pick_inner`.
+   * 0 when there is no pending pack. Read it; never re-derive it from `kind`.
+   */
+  required_pick_count: number;
   pool: DraftCardInstance[];
   draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
@@ -217,9 +287,32 @@ export interface DraftPlayerView {
   sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];
   cards_per_pack: number;
+  /**
+   * CR 903.13b: how many pick STEPS this session's pack contains —
+   * `cards_per_pack.div_ceil(cards_per_pick)`, computed by the engine's
+   * `DraftProcedure::pick_steps_per_pack`. `pick_number` counts steps, not
+   * cards, so this is the denominator a progress bar can actually reach: a
+   * 14-card Commander pack is 7 steps, not 14. Read it; never re-derive it
+   * from `cards_per_pack`.
+   */
+  pick_steps_per_pack: number;
   pack_count: number;
   min_deck_size: number;
   addable_cards: string[];
+  /**
+   * CR 903.13e: the granted commander filler, or absent/null when the draft's
+   * set grants none. Deliberately NOT folded into `addable_cards`, whose
+   * contract is *unlimited quantity* — the exact property CR 903.13e denies.
+   * The cap and the commander-only condition are enforced by the engine at
+   * submission, never here.
+   */
+  grantable_commander_filler?: GrantableCommanderFiller | null;
+  /**
+   * CR 903.13f(3): an OPAQUE courier token for `commanderPartnerCandidates`.
+   * Pass it through; never interpret it, and never reconstruct it from a pool
+   * card's `set_code`.
+   */
+  draft_set_code?: string | null;
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;
@@ -258,6 +351,12 @@ export type PoolInput =
 export interface SuggestedDeck {
   main_deck: string[];
   lands: Record<string, number>;
+  /**
+   * CR 903.3 + CR 903.5a: the designated commander(s). Every name here is also
+   * a member of `main_deck` — a designation is a label on a deck card, never an
+   * extra card beside the deck. Empty for the four CR 905.1a kinds.
+   */
+  commander: string[];
 }
 
 export type DeckAddableCardPolicy =
@@ -389,9 +488,12 @@ export class DraftAdapter {
     return wasm.get_view() as DraftPlayerView;
   }
 
-  async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.submit_deck(JSON.stringify(mainDeck)) as DraftPlayerView;
+    return wasm.submit_deck(
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+    ) as DraftPlayerView;
   }
 
   async suggestDeck(): Promise<SuggestedDeck> {
@@ -426,15 +528,10 @@ export class DraftAdapter {
     podPolicy: PodPolicy,
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    const kindId: Record<Exclude<DraftKind, "Quick">, number> = {
-      Premier: 1,
-      Traditional: 2,
-      Sealed: 3,
-    };
     return wasm.create_multiplayer_draft(
       JSON.stringify(poolInput),
       JSON.stringify(seats),
-      kindId[kind],
+      DRAFT_KIND_WIRE_NUMBER[kind],
       seed,
       draftCode,
       tournamentFormat,
@@ -442,9 +539,31 @@ export class DraftAdapter {
     ) as DraftPlayerView;
   }
 
-  async submitPickForSeat(seat: number, cardInstanceId: string): Promise<DraftPlayerView> {
+  /**
+   * Submit one whole CR 903.13b pick step for a seat — every card that seat
+   * drafts this step. One id for the four CR 905.1a kinds, two for
+   * CommanderDraft; the engine's `apply_pick_inner` owns the count.
+   *
+   * The JSON encoding mirrors `submitPickWithDraftEffectForSeat` below. Both
+   * sides of this boundary are `string` and the call is positional, so `tsc`
+   * cannot catch a half-applied change here — see the paired assertions in
+   * `draft-wasm`'s `submit_pick_for_seat_refuses_a_bare_id` and in
+   * `__tests__/p2pDraftEffectPick.test.ts`.
+   */
+  async submitPickForSeat(seat: number, cardInstanceIds: string[]): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.submit_pick_for_seat(seat, cardInstanceId) as DraftPlayerView;
+    return wasm.submit_pick_for_seat(seat, JSON.stringify(cardInstanceIds)) as DraftPlayerView;
+  }
+
+  /**
+   * The engine-owned per-kind axes for a draft kind. The display layer reads
+   * these; it never re-derives them (CLAUDE.md: the frontend is a display
+   * layer, not a logic layer).
+   */
+  // @sync-with: crates/draft-wasm/src/lib.rs
+  async draftProcedure(kind: Exclude<DraftKind, "Quick">): Promise<DraftProcedure> {
+    const wasm = await ensureDraftWasm();
+    return wasm.draft_procedure(DRAFT_KIND_WIRE_NUMBER[kind]) as DraftProcedure;
   }
 
   async submitPickWithDraftEffectForSeat(
@@ -460,9 +579,17 @@ export class DraftAdapter {
     ) as DraftPlayerView;
   }
 
-  async submitDeckForSeat(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {
+  async submitDeckForSeat(
+    seat: number,
+    mainDeck: string[],
+    commanders: string[],
+  ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.submit_deck_for_seat(seat, JSON.stringify(mainDeck)) as DraftPlayerView;
+    return wasm.submit_deck_for_seat(
+      seat,
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+    ) as DraftPlayerView;
   }
 
   async getViewForSeat(seat: number): Promise<DraftPlayerView> {

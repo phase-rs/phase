@@ -3934,9 +3934,10 @@ fn partition_choice_ids(
     candidates.iter().map(|choice| choice.id.clone()).collect()
 }
 
-/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size` is a *minimum* and non-Commander
-/// decks have no maximum, so the between-games schema must publish the interval
-/// the engine will accept — `[minimum, whole pool]` — not one exact size. A
+/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size.min_cards()` is the floor of the
+/// format's `DeckSizeRule` and non-Commander decks have no maximum, so the
+/// between-games schema must publish the interval the engine will accept —
+/// `[minimum, whole pool]` — not one exact size. A
 /// player who registered 60/15 may legally present anything from 60 up to all
 /// 75 cards; the sideboard cap is what pins the floor at 60.
 ///

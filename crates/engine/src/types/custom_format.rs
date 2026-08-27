@@ -146,9 +146,13 @@ impl CommanderEligibilityRule {
     /// `None` a caller would otherwise have to disambiguate from context.
     pub fn from_source_format(format: GameFormat) -> Result<Option<Self>, FormatConfigError> {
         match format {
-            GameFormat::Commander | GameFormat::DuelCommander | GameFormat::PauperCommander => {
-                Ok(Some(Self::Standard))
-            }
+            // CR 903.13g: Commander Draft games follow Commander's rules, and
+            // CR 903.13f routes its deck construction through CR 903.5 — so
+            // CR 903.3's commander eligibility test applies unchanged.
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),
             GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
             GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
             GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),

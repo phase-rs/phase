@@ -26,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   },
   podState: {
     botFillEnabled: true,
+    // CR 903.13a + CR 800.1: the engine-published per-kind seat floor the
+    // lobby's Start gate reads. `2` matches the base `Premier` config below.
+    minPodSize: 2 as number | null,
     config: {
       setCode: "dft",
       setName: "Draft Set",
@@ -54,7 +57,12 @@ vi.mock("../../../stores/multiplayerDraftStore", () => ({
     }),
 }));
 
-vi.mock("../../../stores/draftPodStore", () => ({
+// Only the hook is stubbed. `draftKindLabels` — the single authority for rendering
+// a `DraftKind` as prose — lives in the leaf module `components/draft/draftKind`
+// and is not mocked: a stub would be a second copy of the map and could not catch
+// it drifting.
+vi.mock("../../../stores/draftPodStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../stores/draftPodStore")>()),
   useDraftPodStore: (selector: (state: PodMockState) => unknown) =>
     selector({
       ...mocks.podState,
@@ -90,5 +98,104 @@ describe("DraftPodLobby", () => {
     fireEvent.click(startButton);
 
     expect(mocks.startDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the draft kind in prose rather than as a raw enum", () => {
+    mocks.podState.config.kind = "CommanderDraft";
+    render(<DraftPodLobby onLeave={vi.fn()} />);
+
+    // Reach guard: the header rendered, so the string below is a real reading.
+    expect(screen.getByText("Draft Pod Lobby")).toBeInTheDocument();
+    // REVERT-FAILING: BASE interpolates `config.kind` directly, producing
+    // "CommanderDraft Draft" once Commander Draft is selectable.
+    expect(screen.getByText(/Commander Draft/)).toBeInTheDocument();
+    expect(screen.queryByText(/CommanderDraft/)).toBeNull();
+  });
+
+  it("still names the pre-existing kinds from the same map", () => {
+    mocks.podState.config.kind = "Premier";
+    render(<DraftPodLobby onLeave={vi.fn()} />);
+
+    expect(screen.getByText(/Premier Draft/)).toBeInTheDocument();
+  });
+  /**
+   * VM row 6 — CR 903.13a + CR 800.1. `canStart` reads the ENGINE-published
+   * per-kind floor from the store; the kind-blind literal `2` is deleted, not
+   * relocated, and there is deliberately no `?? 2` fallback.
+   */
+  describe("the Start gate reads the kind's engine-published seat floor", () => {
+    const baseSeats = mocks.multiplayerState.seats;
+    const baseJoined = mocks.multiplayerState.joined;
+    const baseBotFill = mocks.podState.botFillEnabled;
+    const baseMinPodSize = mocks.podState.minPodSize;
+
+    /** `filled` occupied seats out of four. `DraftPodLobby` counts a seat as
+     *  filled by its `display_name`, so the empties carry none. */
+    function seatsFilled(filled: number) {
+      return Array.from({ length: 4 }, (_, i) => ({
+        seat_index: i,
+        display_name: i < filled ? `P${i}` : "",
+        is_bot: false,
+        connected: true,
+        has_submitted_deck: false,
+        pick_status: "NotDrafting",
+      }));
+    }
+
+    function startButton() {
+      return screen.getByRole("button", { name: "Start Draft" });
+    }
+
+    beforeEach(() => {
+      mocks.multiplayerState.seats = seatsFilled(2);
+      mocks.multiplayerState.joined = 2;
+      mocks.podState.botFillEnabled = false;
+    });
+
+    afterEach(() => {
+      mocks.multiplayerState.seats = baseSeats;
+      mocks.multiplayerState.joined = baseJoined;
+      mocks.podState.botFillEnabled = baseBotFill;
+      mocks.podState.minPodSize = baseMinPodSize;
+    });
+
+    it("disables Start below a Commander pod's floor of three", () => {
+      mocks.podState.minPodSize = 3;
+      render(<DraftPodLobby onLeave={vi.fn()} />);
+
+      // Reach guard: the lobby really rendered these two seats, so the
+      // disabled state below is a reading of THIS fixture.
+      expect(screen.getByText("2 / 4 seats filled")).toBeInTheDocument();
+      // REVERT-FAILING: the base `filledSeats >= 2` literal makes this enabled.
+      expect(startButton()).toBeDisabled();
+    });
+
+    it("enables Start at a Premier pod's floor of two", () => {
+      mocks.podState.minPodSize = 2;
+      render(<DraftPodLobby onLeave={vi.fn()} />);
+
+      // The paired positive reach-guard: without it the negative above is
+      // satisfiable by a button that is never enabled at all.
+      expect(startButton()).toBeEnabled();
+    });
+
+    it("lets bot-fill enable Start below the floor", () => {
+      mocks.podState.minPodSize = 3;
+      mocks.podState.botFillEnabled = true;
+      render(<DraftPodLobby onLeave={vi.fn()} />);
+
+      // Multi-authority: bot-fill pads the pod to `procedure.pod_size`, which
+      // is above every kind's floor, so its short-circuit is preserved.
+      expect(startButton()).toBeEnabled();
+    });
+
+    it("disables Start while the engine has not answered", () => {
+      mocks.podState.minPodSize = null;
+      render(<DraftPodLobby onLeave={vi.fn()} />);
+
+      // Fail-CLOSED, pinning that no `?? 2` fallback was reinstated under a
+      // different name.
+      expect(startButton()).toBeDisabled();
+    });
   });
 });

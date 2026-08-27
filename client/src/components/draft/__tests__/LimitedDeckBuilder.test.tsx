@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 
@@ -119,6 +119,38 @@ vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
   };
 });
 
+// CR 903.3 / CR 702.124: the ENGINE is the eligibility and pairing authority.
+// It cannot load under vitest, so both published surfaces are replaced with
+// per-test controllable fakes. Every other engineRuntime export stays real.
+const engineEligible = vi.fn(async (_name: string, _format: string) => false);
+const enginePartnerCandidates = vi.fn(
+  async (_first: string, _candidates: string[], _draftSetCode: string | null) =>
+    [] as string[],
+);
+vi.mock("../../../services/engineRuntime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../services/engineRuntime")>();
+  return {
+    ...actual,
+    isCardCommanderEligibleForFormat: (name: string, format: string) =>
+      engineEligible(name, format),
+    commanderPartnerCandidates: (
+      first: string,
+      candidates: string[],
+      draftSetCode: string | null,
+    ) => enginePartnerCandidates(first, candidates, draftSetCode),
+  };
+});
+
+// The colour-identity pips are not what these rows assert, and the real hook
+// would reach Scryfall. A stable empty cache keeps the render deterministic.
+const EMPTY_CARD_DATA_CACHE = new Map();
+vi.mock("../../../hooks/useDeckCardData", () => ({
+  useDeckCardData: () => ({
+    cardDataCache: EMPTY_CARD_DATA_CACHE,
+    cacheCards: () => {},
+  }),
+}));
+
 vi.mock("../../card/HoverCardPreview", () => ({
   HoverCardPreview: ({ card }: { card: { name: string } | null }) => (
     <div data-testid="hover-preview">{card?.name}</div>
@@ -134,6 +166,7 @@ const TEST_VIEW: BuilderView = {
   pick_number: 1,
   pass_direction: "Left",
   current_pack: null,
+  required_pick_count: 0,
   pool: [
     {
       instance_id: "card-1",
@@ -158,6 +191,7 @@ const TEST_VIEW: BuilderView = {
   },
   seats: [],
   cards_per_pack: 14,
+  pick_steps_per_pack: 14,
   pack_count: 3,
   min_deck_size: 40,
   addable_cards: ["Plains", "Island", "Academy Ruins"],
@@ -652,5 +686,683 @@ describe("LimitedDeckBuilder pool filters", () => {
     } finally {
       failFilterCalls = false;
     }
+  });
+});
+
+// ── P8: CR 903.3 commander designation ──────────────────────────────────
+
+const NO_LANDS: Record<string, number> = {};
+
+const VEHICLE_COMMANDER = {
+  instance_id: "cmd-1",
+  name: "Vehicle Commander",
+  // CR 903.3 admits Vehicles. A `type_line.includes("Legendary Creature")`
+  // client-side check would wrongly refuse this card.
+  type_line: "Legendary Artifact — Vehicle",
+  set_code: "dmu",
+  collector_number: "1",
+  rarity: "rare",
+  colors: ["W"],
+  cmc: 4,
+};
+
+const DECOY_LEGEND = {
+  instance_id: "cmd-2",
+  name: "Decoy Legend",
+  // Reads as a commander to a substring check; the engine says no.
+  type_line: "Legendary Creature — Human",
+  set_code: "dmu",
+  collector_number: "2",
+  rarity: "rare",
+  colors: ["W"],
+  cmc: 2,
+};
+
+const SECOND_COMMANDER = {
+  instance_id: "cmd-3",
+  name: "Second Commander",
+  type_line: "Legendary Creature — Elf",
+  set_code: "dmu",
+  collector_number: "3",
+  rarity: "rare",
+  colors: ["G"],
+  cmc: 3,
+};
+
+const PRISMATIC_PIPER = {
+  instance_id: "cmd-4",
+  // The OTHER CR 903.13e filler. Present in the pool so a pool-derived
+  // implementation offers the wrong filler name (V9).
+  name: "The Prismatic Piper",
+  type_line: "Legendary Creature — Shapeshifter",
+  set_code: "dmu",
+  collector_number: "4",
+  rarity: "common",
+  colors: [],
+  cmc: 3,
+};
+
+const COMMANDER_VIEW: BuilderView = {
+  ...TEST_VIEW,
+  kind: "CommanderDraft",
+  min_deck_size: 60,
+  // CR 903.13f(3): the ENGINE-latched token. Every pool card below is printed
+  // in "dmu", so an implementation reading a card's printing gets "dmu" here.
+  draft_set_code: "CMM",
+  pool: [
+    ...TEST_VIEW.pool,
+    VEHICLE_COMMANDER,
+    DECOY_LEGEND,
+    SECOND_COMMANDER,
+    PRISMATIC_PIPER,
+  ],
+};
+
+// 60 cards: 59 spells plus one designatable card, all backed by the pool.
+const SIXTY_CARD_DECK = [
+  ...Array.from({ length: 59 }, () => "Wind Drake"),
+  "Vehicle Commander",
+];
+
+function commanderPanelScope() {
+  return within(
+    screen.getByRole("heading", { name: "Commander", level: 4 })
+      .parentElement as HTMLElement,
+  );
+}
+
+function candidateScope() {
+  return within(screen.getByText("Set as commander:").parentElement as HTMLElement);
+}
+
+function sectionScope(headingName: string) {
+  return within(
+    screen.getByRole("heading", { name: headingName }).parentElement as HTMLElement,
+  );
+}
+
+describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
+  afterEach(() => {
+    cleanup();
+    engineEligible.mockReset();
+    engineEligible.mockResolvedValue(false);
+    enginePartnerCandidates.mockReset();
+    enginePartnerCandidates.mockResolvedValue([]);
+  });
+
+  function onlyVehicleIsEligible() {
+    engineEligible.mockImplementation(async (name: string) => name === "Vehicle Commander");
+  }
+
+  /**
+   * V1 — CR 903.3: submission is blocked until a commander is designated, even
+   * though the card count already satisfies `min_deck_size`.
+   *
+   * The "ready to submit" marker is the positive reach-guard: `DeckStatus`
+   * paints it purely on `spells + lands >= min`, so its presence proves the
+   * SIZE gate is already satisfied and it is the DESIGNATION gate refusing.
+   * Without it, `toBeDisabled()` would also pass on a builder whose size gate
+   * simply had not been met.
+   */
+  it("blocks submission of a Commander Draft deck until a commander is designated", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.getByText(/ready to submit/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+    expect(
+      screen.getByText("Designate a commander from your pool to submit."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Vehicle Commander" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled(),
+    );
+  });
+
+  /**
+   * V2 — CR 903.3 eligibility is the ENGINE's predicate, asked per name, per
+   * format. Reds in BOTH directions on a `type_line.includes("Legendary
+   * Creature")` implementation: it would offer the decoy and hide the Vehicle.
+   */
+  it("offers only the commanders the engine says are eligible", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander", "Decoy Legend"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    // Positive half — the Vehicle IS offered.
+    expect(
+      await screen.findByRole("button", { name: "Vehicle Commander" }),
+    ).toBeInTheDocument();
+    // Negative half, reach-guarded by the positive half in the same render.
+    expect(
+      candidateScope().queryByRole("button", { name: "Decoy Legend" }),
+    ).toBeNull();
+    // The format is passed through, not assumed: "Commander" would be wrong.
+    expect(engineEligible).toHaveBeenCalledWith("Vehicle Commander", "CommanderDraft");
+  });
+
+  /**
+   * V3 — CR 702.124b / CR 903.5a: the designated card stays IN the main deck
+   * (the opposite of the constructed builder, which filters it out of `main`),
+   * and a designation whose last backing copy leaves the deck is dropped.
+   */
+  it("keeps a designated commander inside the main deck and drops it when its last copy leaves", async () => {
+    onlyVehicleIsEligible();
+    const removeSpy = vi.fn();
+
+    function CommanderHarness() {
+      const [mainDeck, setMainDeck] = useState<string[]>(SIXTY_CARD_DECK);
+      return (
+        <LimitedDeckBuilder
+          view={COMMANDER_VIEW}
+          mainDeck={mainDeck}
+          landCounts={NO_LANDS}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={(cardName) => {
+            removeSpy(cardName);
+            setMainDeck((prev) => {
+              const idx = prev.indexOf(cardName);
+              if (idx < 0) return prev;
+              const next = prev.slice();
+              next.splice(idx, 1);
+              return next;
+            });
+          }}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />
+      );
+    }
+
+    render(<CommanderHarness />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Vehicle Commander" }),
+    );
+    await waitFor(() =>
+      expect(commanderPanelScope().getByText("Vehicle Commander")).toBeInTheDocument(),
+    );
+
+    // (a) The designation did not remove the card from the deck.
+    expect(removeSpy).not.toHaveBeenCalled();
+    const deckTile = sectionScope("Main Deck").getByRole("button", {
+      name: /vehicle commander/i,
+    });
+    expect(deckTile).toBeInTheDocument();
+
+    // (b) Removing its last copy drops the designation and re-blocks submit.
+    fireEvent.click(deckTile);
+    await waitFor(() =>
+      expect(screen.getByText("No commander selected")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+  });
+
+  /**
+   * V5 — CR 903.13f(3): the partner query receives the VIEW's latched set code,
+   * never a pool card's printing. Every pool card is printed in "dmu" while the
+   * view says "CMM", so the two authorities disagree on purpose.
+   */
+  it("pairs a second commander under the drafted set's CR 903.13f(3) grant", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
+    );
+    enginePartnerCandidates.mockImplementation(
+      async (_first: string, candidates: string[], draftSetCode: string | null) =>
+        draftSetCode === "CMM" ? candidates : [],
+    );
+
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander", "Second Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Second Commander" }));
+
+    await waitFor(() =>
+      expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2),
+    );
+    expect(enginePartnerCandidates).toHaveBeenCalledWith(
+      "Vehicle Commander",
+      ["Second Commander"],
+      "CMM",
+    );
+  });
+
+  /**
+   * V5's paired sibling. With no latched set code the engine grants no partner,
+   * so the second designation SWAPS. Neither row discriminates alone: without
+   * this one a hard-coded "CMM" passes the row above.
+   */
+  it("swaps rather than pairs when the draft grants no partner ability", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
+    );
+    enginePartnerCandidates.mockImplementation(
+      async (_first: string, candidates: string[], draftSetCode: string | null) =>
+        draftSetCode === "CMM" ? candidates : [],
+    );
+
+    render(
+      <LimitedDeckBuilder
+        view={{ ...COMMANDER_VIEW, draft_set_code: null }}
+        mainDeck={["Vehicle Commander", "Second Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Second Commander" }));
+
+    await waitFor(() =>
+      expect(commanderPanelScope().getByText("Second Commander")).toBeInTheDocument(),
+    );
+    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+    expect(enginePartnerCandidates).toHaveBeenCalledWith(
+      "Vehicle Commander",
+      ["Second Commander"],
+      null,
+    );
+  });
+
+  /**
+   * V6 — green tree: the four non-Commander `DraftKind`s render exactly as
+   * before, because `DECK_FORMAT_FOR_KIND` maps each to `null`. Reach-guarded
+   * by asserting the pool tile still renders, so a component that crashed
+   * could not satisfy the negative.
+   *
+   * No CR is cited here on purpose. The repo's "four CR 905.1a kinds" idiom is
+   * about cards-per-pick (CR 905.1a: "drafts one card"), which is not what this
+   * row asserts, and CR 905 is the Conspiracy Draft section.
+   */
+  it("shows no commander section for a non-Commander draft", () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={TEST_VIEW}
+        mainDeck={Array.from({ length: 40 }, () => "Wind Drake")}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Commander", level: 4 })).toBeNull();
+    expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled();
+    expect(engineEligible).not.toHaveBeenCalled();
+  });
+
+  /**
+   * V9 — CR 903.13e: the filler is offered by the name the ENGINE published.
+   * The pool holds the OTHER filler, so a pool-derived implementation offers
+   * the wrong name and a hard-coded one offers a name the engine did not grant.
+   */
+  it("offers the granted commander filler the engine names", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={{
+          ...COMMANDER_VIEW,
+          grantable_commander_filler: { card_name: "Faceless One", max_copies: 2 },
+        }}
+        mainDeck={["Vehicle Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add Faceless One" })).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Your pool also includes up to 2 × Faceless One, usable only as your commander.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no filler when the draft's set grants none", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    // Reach-guard: the addable list itself is rendering.
+    expect(screen.getByRole("button", { name: "Add Plains" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add Faceless One/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add The Prismatic Piper/ })).toBeNull();
+  });
+
+  /**
+   * V11 — the designation is PASSED to the submit handler.
+   *
+   * This proves the seam exists at THIS surface; it does not itself prove the
+   * value is consumed downstream. It now is: `multiplayerDraftStore.submitDeck`
+   * forwards it to `DraftAction::SubmitDeck.commanders`, which
+   * `submit_deck_inner_carries_the_designation_to_the_session` asserts at the
+   * `draft-wasm` seam.
+   */
+  it("passes the designated commanders to the submit handler", async () => {
+    onlyVehicleIsEligible();
+    const submitSpy = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={submitSpy}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Submit Deck" })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Submit Deck" }));
+
+    await waitFor(() =>
+      expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]),
+    );
+  });
+
+  /**
+   * V13 — CR 903.5a, the composition contract THROUGH the real caller. A
+   * drafted Commander deck is commanders-INSIDE, so a designated card is a
+   * label on a deck card and must be counted ONCE.
+   *
+   * V7 cannot reach this: it renders `CommanderPanel` with literal props in its
+   * own file and never exercises the caller's declared composition.
+   */
+  it("counts a designated commander once, not twice, in the deck-size indicator", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    // Reach-guard: the indicator exists and already reads 60/60 undesignated,
+    // so a render with no panel at all cannot pass the assertion below.
+    expect(screen.getByText("60/60 cards")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() =>
+      expect(commanderPanelScope().getByText("Vehicle Commander")).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText("60/60 cards")).toHaveClass("text-green-400");
+    expect(screen.queryByText("61/60 cards")).toBeNull();
+  });
+
+  /**
+   * V13's false-green sibling. With 59 real cards plus one designation, the
+   * commanders-OUTSIDE arithmetic paints the indicator GREEN at "60/60" while
+   * `deckValid` (59 < 60) keeps Submit disabled — two adjacent indicators
+   * contradicting each other, with the green one wrong.
+   */
+  it("does not let a designation paint an under-sized deck as complete", async () => {
+    onlyVehicleIsEligible();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK.slice(1)}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() =>
+      expect(commanderPanelScope().getByText("Vehicle Commander")).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText("59/60 cards")).toHaveClass("text-yellow-400");
+    expect(screen.queryByText("60/60 cards")).toBeNull();
+    expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+  });
+
+  /**
+   * The engine-unavailable path. A silent empty candidate list would leave
+   * Submit permanently un-satisfiable with no explanation — a dead end, which
+   * is worse than a degraded surface. Same standard as the pool filter's
+   * `limitedDeck.filterUnavailable`.
+   */
+  it("announces that commander designation is unavailable when the engine rejects", async () => {
+    engineEligible.mockRejectedValue(new Error("engine unavailable"));
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Commander designation is unavailable right now — the card database could not be loaded.",
+    );
+    // Reach-guard: the panel itself rendered; it simply offers nothing.
+    expect(screen.getByText("No commander selected")).toBeInTheDocument();
+  });
+
+  /**
+   * V12 — CR 702.124g: no partner ability or combination of them can ever let a
+   * player have more than two commanders, INCLUDING when two designations race
+   * inside one in-flight partner query.
+   *
+   * Both clicks land while the first query is still unresolved, so both read
+   * the same captured `commanders` and both are answered "pairs". The gate that
+   * runs BEFORE the await cannot see the other click; only a re-check against
+   * live state at commit time can.
+   *
+   * Reach-guarded positively, in the same render, twice over: the query is
+   * asked TWICE (so neither click was swallowed by an eligibility or
+   * already-designated filter), and the first answer genuinely PAIRS to two
+   * commanders (so the append path is the one under test, not a click that
+   * quietly did nothing). A pre-fix build satisfies both guards and then shows
+   * three commanders with Submit enabled.
+   */
+  it("cannot stack a third commander when two designations race one query", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) =>
+        name === "Vehicle Commander" ||
+        name === "Second Commander" ||
+        name === "The Prismatic Piper",
+    );
+    // Hold every partner query open, so both clicks land before either answer.
+    const answer: Array<() => void> = [];
+    enginePartnerCandidates.mockImplementation(
+      (_first: string, candidates: string[]) =>
+        new Promise<string[]>((resolve) => {
+          answer.push(() => resolve(candidates));
+        }),
+    );
+
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander", "Second Commander", "The Prismatic Piper"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    // The first designation takes the free slot: no partner query, no await.
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() =>
+      expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1),
+    );
+    expect(enginePartnerCandidates).not.toHaveBeenCalled();
+
+    // Two clicks inside ONE in-flight query. Neither re-renders the panel, so
+    // both handlers close over the same single-commander value.
+    fireEvent.click(screen.getByRole("button", { name: "Second Commander" }));
+    fireEvent.click(screen.getByRole("button", { name: "The Prismatic Piper" }));
+    await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledTimes(2));
+
+    // Reach-guard: the first answer really does pair. If this is 1, the row
+    // below would pass on a builder where designation never worked at all.
+    await act(async () => {
+      answer[0]();
+    });
+    await waitFor(() =>
+      expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2),
+    );
+
+    // The second answer's premise — a SINGLE commander, the one it was asked
+    // about — no longer holds, so it may not append. It replaces instead, which
+    // is exactly what these two clicks do when they resolve one after the other.
+    await act(async () => {
+      answer[1]();
+    });
+    await waitFor(() =>
+      expect(commanderPanelScope().getByText("The Prismatic Piper")).toBeInTheDocument(),
+    );
+    expect(
+      commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+    ).toHaveLength(1);
+  });
+
+  /**
+   * V13 — one deck card, one candidate, when two disjoint SOURCES name it.
+   *
+   * The phase's headline case: the CR 903.13e grant offers *The Prismatic
+   * Piper* as an addable row while the player also drafted a copy into the main
+   * deck. The designation candidates are drawn from `deckGroups` (pool → main
+   * deck) and from the addable rows, which cannot overlap as sources but can
+   * collide by NAME. Unmerged, the same candidate renders twice under one React
+   * key, and the prune effect's name-keyed Map sees only the last of the two.
+   *
+   * Reach-guard, positive and in the same render: a zero would THROW at
+   * `getAllByRole` rather than pass, and the single-source commander beside it
+   * is still offered exactly once — so this cannot go green on a panel that
+   * stopped offering candidates.
+   */
+  it("offers one candidate for a name the deck and the granted filler both hold", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) =>
+        name === "Vehicle Commander" || name === "The Prismatic Piper",
+    );
+
+    render(
+      <LimitedDeckBuilder
+        view={{
+          ...COMMANDER_VIEW,
+          grantable_commander_filler: { card_name: "The Prismatic Piper", max_copies: 1 },
+        }}
+        mainDeck={["Vehicle Commander", "The Prismatic Piper"]}
+        // The granted copy, taken: the same name from the OTHER source.
+        landCounts={{ "The Prismatic Piper": 1 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        candidateScope().getAllByRole("button", { name: "The Prismatic Piper" }),
+      ).toHaveLength(1),
+    );
+    expect(
+      candidateScope().getAllByRole("button", { name: "Vehicle Commander" }),
+    ).toHaveLength(1);
+
+    // The merge must SUM across the two sources, not merely dedupe across them,
+    // and that is a separate property from the one above -- measured, not
+    // asserted: making the land loop overwrite (`byName.set(name, count)`)
+    // instead of add reds THIS line alone, with the two candidate assertions
+    // above still green and the other 26 rows in this file untouched. No other
+    // test here fixes a name held by BOTH sources, so nothing else can see it.
+    //
+    // What it protects is `in_deck` -- the quantity draft-core's
+    // `validate_limited_deck` step 5 compares `designated` against. A merge
+    // that dedupes without summing halves it for every collided name and
+    // submits a deck the engine reads as short of copies. The panel renders
+    // that sum directly (`commanders-inside`, so no designation is added on
+    // top): a faithful merge reads 3 -- two main-deck cards plus the one
+    // granted copy of a name the deck already holds -- and a non-summing one
+    // reads 2.
+    expect(screen.getByText("3/60 cards")).toBeInTheDocument();
   });
 });

@@ -4,6 +4,7 @@ import type { TFunction } from "i18next";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { COMMANDER_DRAFT_ENTRY, draftKindLabels } from "../components/draft/draftKind";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MenuActionTile } from "../components/menu/MenuActionTile";
 import {
@@ -135,6 +136,15 @@ export function DraftLandingPage() {
                 renderIcon={(cls) => <PodIcon className={cls} />}
                 onClick={() => navigate("/draft-pod")}
               />
+              <MenuActionTile
+                tone="arcane"
+                motif="network"
+                title={t("landing.commanderDraft.title")}
+                description={t("landing.commanderDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <CrownIcon className={cls} />}
+                onClick={() => navigate(`/draft-pod?kind=${COMMANDER_DRAFT_ENTRY}`)}
+              />
             </div>
           </div>
         </div>
@@ -146,6 +156,10 @@ export function DraftLandingPage() {
 function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
+  // `landing.podLabel` interpolates the kind into a sentence, so a raw enum reads
+  // "CommanderDraft Pod". `draftKindLabels` is the single authority for that
+  // rendering, shared with the pod lobby header.
+  const kindLabel = draftKindLabels(t);
 
   function getPhaseLabel(): string {
     switch (meta.phase) {
@@ -174,7 +188,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 
         <div className="min-w-0 flex-1">
           <div className="text-lg font-semibold text-white">
-            {t("landing.podLabel", { kind: meta.kind })}
+            {t("landing.podLabel", { kind: kindLabel[meta.kind] })}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
@@ -346,6 +360,14 @@ function BotIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M17.753 14a2.25 2.25 0 0 1 2.25 2.25v.904A3.75 3.75 0 0 1 18.696 20H5.304a3.75 3.75 0 0 1-1.307-2.846v-.904A2.25 2.25 0 0 1 6.247 14h11.506ZM11 15.5H8a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5Zm5 0h-1.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5H16a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5ZM12 2a4 4 0 0 1 4 4v4a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4Zm-1.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm3 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z" />
+    </svg>
+  );
+}
+
+function CrownIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M5 18h14l1.6-9.5-4.6 3.2L12 4.5 7.99 11.7 3.4 8.5 5 18Zm0 1.5h14V21H5v-1.5Z" />
     </svg>
   );
 }

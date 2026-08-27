@@ -77,7 +77,7 @@ describe("PlayerArea", () => {
           starting_life: 20,
           min_players: 2,
           max_players: 2,
-          deck_size: 50,
+          deck_size: { type: "Exactly", data: 50 },
           singleton: true,
           command_zone: true,
           commander_damage_threshold: null,

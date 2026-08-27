@@ -94,6 +94,11 @@ function mockView(status: string): DraftPlayerView {
     pick_number: 1,
     pass_direction: "Left",
     current_pack: null,
+    // `filter_for_player` derives both fields from the same
+    // `session.current_pack`, so a null pack publishes 0 — the engine cannot
+    // produce a null pack alongside a positive count. The one test that
+    // supplies a real pack overrides this field alongside it.
+    required_pick_count: 0,
     pool: [],
     draft_effects: [],
     pool_groups: {
@@ -107,6 +112,7 @@ function mockView(status: string): DraftPlayerView {
     },
     seats: [],
     cards_per_pack: 14,
+    pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
@@ -771,6 +777,27 @@ describe("multiplayerDraftStore", () => {
       );
     });
 
+    it("forwards the commander designation through the host adapter", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      // CR 903.3. The designation is deliberately NOT derivable from anything
+      // else this test sets — the deck is empty here — so a body that dropped
+      // the argument, or re-derived it from the deck, cannot satisfy this.
+      await useMultiplayerDraftStore.getState().submitDeck(["Kenrith, the Returned King"]);
+
+      expect(mockHostAdapter.submitDeck).toHaveBeenCalledWith(
+        [],
+        ["Kenrith, the Returned King"],
+      );
+    });
+
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
@@ -784,7 +811,12 @@ describe("multiplayerDraftStore", () => {
       useMultiplayerDraftStore.getState().selectCard("card-123");
       expect(useMultiplayerDraftStore.getState().selectedCard).toBe("card-123");
 
-      await useMultiplayerDraftStore.getState().confirmPick();
+      // NOT "card-123": that is what `selectCard` above set, and passing it back
+      // in would let the UNWIDENED body (`if (!selectedCard) return;
+      // await submitPick([selectedCard]);`) satisfy every assertion here. A
+      // different id is what makes this a revert-probe rather than a tautology.
+      await useMultiplayerDraftStore.getState().confirmPick(["card-456"]);
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-456"]);
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
@@ -813,12 +845,15 @@ describe("multiplayerDraftStore", () => {
               type_line: "Instant",
             },
           ],
+          // Premier (CR 905.1a): one card per pick step. Paired with the real
+          // pack above, exactly as `filter_for_player` publishes the two.
+          required_pick_count: 1,
         },
       });
 
       await useMultiplayerDraftStore.getState().autoPickCard();
 
-      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith("card-123");
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-123"]);
     });
 
     it("addToDeck and removeFromDeck manage mainDeck", () => {

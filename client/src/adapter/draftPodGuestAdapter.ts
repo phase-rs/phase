@@ -415,9 +415,9 @@ export class DraftPodGuestAdapter {
 
   // ── Draft actions ──────────────────────────────────────────────────
 
-  async submitPick(cardInstanceId: string): Promise<void> {
+  async submitPick(cardInstanceIds: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
-    await this.guest.submitPick(cardInstanceId);
+    await this.guest.submitPick(cardInstanceIds);
   }
 
   async submitPickWithDraftEffect(
@@ -428,9 +428,9 @@ export class DraftPodGuestAdapter {
     await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
   }
 
-  async submitDeck(mainDeck: string[]): Promise<void> {
+  async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
-    await this.guest.submitDeck(mainDeck);
+    await this.guest.submitDeck(mainDeck, commanders);
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {

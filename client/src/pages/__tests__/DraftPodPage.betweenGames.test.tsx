@@ -73,7 +73,12 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
   useMultiplayerDraftStore: (selector: (state: typeof draftState) => unknown) => selector(draftState),
 }));
 
-vi.mock("../../stores/draftPodStore", () => ({
+// Only the hook is stubbed; every other export of the module stays real. The
+// `?kind=` slug the page's entry effect reads is `COMMANDER_DRAFT_ENTRY` in the
+// leaf module `components/draft/draftKind`, which is not mocked anywhere — a
+// literal here would be a second copy of the same fact.
+vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/draftPodStore")>()),
   useDraftPodStore: (selector: (state: { reset: () => void; resumeHostedPod: () => void }) => unknown) => selector({
     reset: vi.fn(),
     resumeHostedPod: vi.fn(),

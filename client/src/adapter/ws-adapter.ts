@@ -203,6 +203,22 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 42 — FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *      tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
+ *      CR 903.13f(1) makes Commander Draft a command-zone format with a
+ *      minimum rather than an exact size, and GameFormat gained a
+ *      CommanderDraft variant (CR 903.13a). A PARSE bump like 23 and 36, not a
+ *      capability bump like 24: FormatConfig::deck_size carries neither a
+ *      serde default nor a deserialize_with, so a v41 peer's "deck_size": 60
+ *      fails against the adjacently tagged enum and a v42 peer's
+ *      {"type":"Minimum","data":60} fails against a v41 u16 — the break is
+ *      unconditional and runs in BOTH directions, for every format.
+ *      GameState.format_config's serde default does NOT rescue it: a
+ *      field-level default applies only when the key is ABSENT, and an old
+ *      peer sends the key present with the old inner shape, so the default
+ *      never runs. The GameFormat::CommanderDraft variant is the second and
+ *      narrower half — it breaks only when that variant is actually
+ *      serialized.
  * 41 — Operational failure responses are correlated to their pending action.
  * 40 — Action rejection responses carry engine-owned structured context.
  * 39 — ManaRestriction.CannotCastSpellFromZone adds a serialized
@@ -242,6 +258,13 @@ export class NativeEngineVersionMismatchError extends Error {
  *      leave this client naming no target at all — silently, with no parse
  *      error to catch it. The handshake is the only place that pairing is
  *      refusable.
+ * 34 — DraftKind.CommanderDraft (CR 903.13a) is serialized by draft WebSocket
+ *      messages, and DraftAction::Pick renamed card_instance_id to
+ *      card_instance_ids: Vec<String> for a whole CR 903.13b pick step. A
+ *      PARSE bump, not a capability bump — the renamed field carries no serde
+ *      default. See PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs
+ *      for the full entry, including what it does and does not gate on the
+ *      lobby.
  * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
  *      not publish an affirmative original/copy identity.
  * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
@@ -301,7 +324,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 41;
+export const PROTOCOL_VERSION = 42;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -331,10 +354,14 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
+ *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
+ *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
+ *     crates/lobby-broker/src/protocol.rs for what the floor move evicts.
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 1;
+export const LOBBY_PROTOCOL_VERSION = 2;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -346,7 +373,7 @@ export const LOBBY_PROTOCOL_VERSION = 1;
  * new variant it may never need — which is precisely how a protocol-bumping
  * release used to strand every older desktop build.
  */
-export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 1;
+export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {

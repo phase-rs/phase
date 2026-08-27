@@ -69,7 +69,7 @@ export function DeckBuilder({
     setListPickerCard,
     currentDeck,
     isCommander,
-    expectedDeckSize,
+    deckSizeRule,
     estimate,
     auditEmptyReason,
     cmcValues,
@@ -476,8 +476,9 @@ export function DeckBuilder({
               <CommanderPanel
                 commanders={commanders}
                 deck={deck.main}
+                deckComposition="commanders-outside"
                 cardDataCache={cardDataCache}
-                expectedDeckSize={expectedDeckSize}
+                deckSizeRule={deckSizeRule}
                 isCommanderEligible={isCommanderEligible}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}

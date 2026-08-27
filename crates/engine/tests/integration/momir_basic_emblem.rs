@@ -18,7 +18,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::format::FormatConfig;
+use engine::types::format::{DeckSizeRule, FormatConfig};
 use engine::types::game_state::{GameState, PayCostKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -464,7 +464,7 @@ fn create_token_copy_from_pool_empty_candidates_is_noop() {
 fn momir_format_config_values() {
     let config = FormatConfig::momir();
     assert_eq!(config.starting_life, 20);
-    assert_eq!(config.deck_size, 60);
+    assert_eq!(config.deck_size, DeckSizeRule::Exactly(60));
     assert!(config.command_zone, "Momir needs the command zone enabled");
     assert!(!config.uses_commander);
 }

@@ -4,12 +4,42 @@
 #
 # WHY IN PLACE AND NOT A PRISTINE REGENERATION. `migrate-dump-fixture.sh`
 # regenerates from the read-only pristine root, which is the stronger provenance
-# and is preferred where it applies. It does NOT apply to every fixture in this
-# corpus: measured, `dina_conqueror_4p` and `witherbloom_sprout_lumaret_simple_4p`
-# differ from their pristine regeneration in exactly one object each (Priest of
+# and is preferred where it applies. IT DOES NOT CURRENTLY APPLY TO ANY FIXTURE
+# THAT CARRIES A `deck_size`: that script's deck-size gate refuses any regeneration
+# whose output still holds the pre-U5 bare `N`, and on the committed side that
+# population is 16 of the 22 `*.json.gz` under crates/engine/tests/fixtures/
+# (measured here — the pristine side could NOT be, that root being external to this
+# checkout). So the two fixtures named next are NOT the exception list; they are
+# simply the two whose parser-state divergence was separately measured:
+# `dina_conqueror_4p` and `witherbloom_sprout_lumaret_simple_4p`
+# differed from their pristine regeneration in exactly one object each (Priest of
 # Forgotten Gods' `abilities` / `base_abilities` AST), because the committed
 # fixture carries a LATER parser state than the 2026-07-22/25 capture. Rerunning
-# those from pristine would silently REVERT that. Stamping in place is additive
+# those from pristine would silently REVERT that.
+#
+# ⚠ THAT "EXACTLY ONE OBJECT" COUNT IS STALE — it predates the U5 deck-size
+# typing and no longer holds. Both fixtures named above are among the containers
+# rewritten by 42d43f3077 ("type the deck-size rule"): their committed
+# `format_config.deck_size` is now `{"type":"Exactly","data":100}`, where before
+# that commit it was a bare `100` (both shapes verified from git). The
+# 2026-07-22/25 pristine captures predate the change and still hold the bare
+# form, which `migrate-dump-fixture.sh` has no stage to convert. So a
+# regeneration would now differ in at least TWO places — and the second is not
+# even a silent revert: the deck-size gate in that script REFUSES to emit an
+# untagged artifact, so the comparison cannot be re-run at all until the pristine
+# root itself is migrated. Re-measure the exact object count only against a
+# migrated pristine; the count above must not be quoted before then. (The
+# pristine root is external to this checkout, so the residual difference could
+# not be re-measured here — only the committed side and the regenerator's
+# behaviour were.)
+#
+# None of this weakens the WHY — it strengthens it, over a WIDER population than
+# this paragraph first claimed: pristine regeneration is now less applicable to all
+# 16 `deck_size`-carrying containers, not merely to these two. That 16 counts
+# COMMITTED carriers, so read the claim as ranging over the subset of them that has
+# a reachable pristine source at all.
+#
+# Stamping in place is additive
 # and cannot revert anything, and its arm-1 control is strictly stronger: the
 # stamped artifact minus the five stamped keys (three firing carriers plus the
 # two delayed-trigger allocators — the exact `del()` list below) must be

@@ -1623,11 +1623,63 @@ pub fn compute_deck_copy_limit(face: &CardFace) -> Option<DeckCopyLimit> {
         .and_then(compute_deck_copy_limit_from_text)
 }
 
-/// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
-/// the deck-validation predicate, which reads the precomputed `face.is_commander`
-/// at runtime but exposes this helper for callers that only have a `CardFace`.
-pub fn type_line_commander_eligible(face: &CardFace) -> bool {
+/// CR 903.3 / CR 702.124k: how a card qualifies to be designated a commander.
+///
+/// This is the decomposition of [`type_line_commander_eligible`], not a sibling
+/// of it: the general predicate is *defined in terms of* this one, so every
+/// existing caller of the general predicate is unaffected. The distinction
+/// exists because CR 903.13f(3) grants the partner ability only to a card that
+/// "can be a player's commander **by itself**" — a condition no predicate in
+/// the tree previously drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommanderQualification {
+    /// CR 903.3 (a)–(c) + CR 903.3a: designatable as the sole commander.
+    ByItself,
+    /// CR 702.124k: a legendary Background enchantment card, which "can't be
+    /// your commander unless you have also designated a commander with 'choose
+    /// a Background'".
+    OnlyAlongsideChooseABackground,
+    /// Not commander-eligible by type line.
+    No,
+}
+
+/// CR 903.3 type-line analysis, resolved to the "by itself" distinction
+/// CR 903.13f(3) needs. Excludes MTGJSON skill data.
+///
+/// LABELLED LIMITATION, stated rather than hidden: this reads the TYPE LINE
+/// only. `is_commander_eligible` prefers the pre-computed `face.is_commander`,
+/// which is the *union* of MTGJSON `leadershipSkills.commander` and this
+/// analysis — so a card MTGJSON marks a commander but whose type line does not
+/// would not receive the CR 903.13f(3) grant. The alternative, treating the
+/// MTGJSON union as "by itself", would grant partner to Backgrounds, which
+/// CR 702.124k forbids. The type-line reading is the conservative and
+/// rules-correct one.
+pub fn commander_qualification(face: &CardFace) -> CommanderQualification {
+    // CR 903.3a: explicit "can be your commander" override.
+    //
+    // BRANCH ORDER IS LOAD-BEARING and must not be "tidied" into type-line
+    // order. A card could in principle match both this override and the
+    // CR 702.124k Background branch below. CR 101.1: "Whenever a card's text
+    // directly contradicts these rules, the card takes precedence. The card
+    // overrides only the rule that applies to that specific situation."
+    // CR 702.124k's restriction is a RULE, so a printed ability saying the card
+    // can be your commander overrides it for that card, and such a card is
+    // `ByItself`. (CR 101.2's "'can't' takes precedence" does NOT govern here:
+    // it resolves a rule or effect against another EFFECT, and CR 702.124k is
+    // neither.) No printed card matches both today, so this specifies a
+    // currently-empty case rather than changing a live verdict.
+    let explicitly_allowed = face
+        .oracle_text
+        .as_ref()
+        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
+    if explicitly_allowed {
+        return CommanderQualification::ByItself;
+    }
+
     let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
+    if !is_legendary {
+        return CommanderQualification::No;
+    }
     let subtypes = &face.card_type.subtypes;
 
     // CR 903.3(a): legendary creature.
@@ -1642,18 +1694,30 @@ pub fn type_line_commander_eligible(face: &CardFace) -> bool {
         .any(|s| s.eq_ignore_ascii_case("Spacecraft"))
         && face.power.is_some()
         && face.toughness.is_some();
-    // CR 702.124: legendary Background enchantment (paired with a partner).
-    let is_background = subtypes
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case("Background"));
-    // CR 903.3a: explicit "can be your commander" override.
-    let explicitly_allowed = face
-        .oracle_text
-        .as_ref()
-        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
+    if is_creature || is_vehicle || is_spacecraft_with_pt {
+        return CommanderQualification::ByItself;
+    }
 
-    (is_legendary && (is_creature || is_vehicle || is_spacecraft_with_pt || is_background))
-        || explicitly_allowed
+    // CR 702.124k: a legendary Background enchantment is commander-eligible,
+    // but never on its own.
+    if subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Background"))
+    {
+        return CommanderQualification::OnlyAlongsideChooseABackground;
+    }
+
+    CommanderQualification::No
+}
+
+/// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
+/// the deck-validation predicate, which reads the precomputed `face.is_commander`
+/// at runtime but exposes this helper for callers that only have a `CardFace`.
+///
+/// Defined in terms of [`commander_qualification`], so the two can never
+/// disagree about who is eligible.
+pub fn type_line_commander_eligible(face: &CardFace) -> bool {
+    !matches!(commander_qualification(face), CommanderQualification::No)
 }
 
 /// Brawl variant of CR 903.3: determine if a card can be a Brawl commander.

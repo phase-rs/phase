@@ -134,7 +134,7 @@ const mocks = vi.hoisted(() => {
           starting_life: 20,
           min_players: 2,
           max_players: 2,
-          deck_size: 60,
+          deck_size: { type: "Minimum", data: 60 },
           singleton: false,
           command_zone: false,
           commander_damage_threshold: null,
@@ -399,7 +399,7 @@ function twoHeadedGiantConfig(): FormatConfig {
     starting_life: 30,
     min_players: 4,
     max_players: 4,
-    deck_size: 60,
+    deck_size: { type: "Minimum", data: 60 },
     singleton: false,
     command_zone: false,
     commander_damage_threshold: null,
@@ -417,7 +417,7 @@ function commanderConfig(): FormatConfig {
     starting_life: 40,
     min_players: 2,
     max_players: 6,
-    deck_size: 100,
+    deck_size: { type: "Exactly", data: 100 },
     singleton: true,
     command_zone: true,
     commander_damage_threshold: 21,
@@ -3370,14 +3370,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 31 → 30 and BOTH halves red: the v30 frame stops being
-  // refused, and the v31 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v30" is also satisfied by a client
+  // bump. Revert 32 → 31 and BOTH halves red: the v31 frame stops being
+  // refused, and the v32 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v31" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v30) and admits its own (v31)", async () => {
+  it("refuses the previous wire protocol (v31) and admits its own (v32)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(30));
+    await refusing.conn.simulateData(setupFrameAt(31));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3389,7 +3389,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(31));
+    await admitting.conn.simulateData(setupFrameAt(32));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

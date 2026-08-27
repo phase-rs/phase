@@ -287,6 +287,7 @@ describe("draftPersistence", () => {
         draftToken: "token-abc",
         submissionId: "submission-1",
         mainDeck: ["Island"],
+        commanders: ["Kenrith, the Returned King"],
       });
 
       await expect(loadDraftDeckSubmission("phase2-HOST1", {

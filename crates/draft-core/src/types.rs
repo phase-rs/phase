@@ -62,34 +62,282 @@ pub enum DraftKind {
     Traditional,
     /// Sealed: each player receives six unopened packs directly, Bo1 matches.
     Sealed,
+    /// Commander Draft (CR 903.13a): a 4-seat pod drafts three Commander
+    /// Legends-style packs two cards at a time, then plays one multiplayer
+    /// Commander game. 1 human + 3 bots by default.
+    CommanderDraft,
 }
 
+/// How a draft kind's packs reach the seats.
+///
+/// This is the axis the `kind == DraftKind::Sealed` equality tests were really
+/// testing. Consumers match on it exhaustively, so a new kind must *declare*
+/// which shape it uses instead of silently falling into an `else` branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackDistribution {
+    /// Packs are opened one at a time and passed around the pod.
+    /// CR 905.1a describes this shape (one card per step, pass the remainder).
+    PickAndPass,
+    /// Every pack is handed to its own seat unopened; there is no pick step.
+    AllAtOnce,
+}
+
+/// What happens to the draft session once every seat has submitted a deck.
+///
+/// The axis behind three compiler-invisible kind-identity predicates: two
+/// `matches!(kind, Premier | Traditional | Sealed)` whitelists in the reducer
+/// and one `kind != DraftKind::Quick` blacklist at the `CreateDraft` wire.
+/// Those spellings agreed on the four kinds that existed when they were
+/// written and disagree on any fifth, so the axis is named here instead.
+/// Not serialized: `DraftProcedure` is computed from `kind`, never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostDraftPlay {
+    /// The draft session ends at `DraftStatus::Complete`; play is arranged
+    /// outside it. CR 903.13a: Commander Draft is "a draft ... followed by a
+    /// multiplayer game" — not an in-session Swiss/single-elimination bracket.
+    CompleteImmediately,
+    /// Swiss / single-elimination pairings run inside the draft session.
+    /// Tournament structure is MTR policy, not Comprehensive Rules — there is
+    /// deliberately no CR citation on this variant.
+    TournamentPairings,
+}
+
+/// The per-kind draft procedure: the single authority for every axis that
+/// previously leaked to call sites as a literal.
+///
+/// Every field below replaces at least one live literal measured in the tree.
+/// `cards_per_pick` is the CR 903.13b axis ("drafts two cards"), and it has two
+/// consumers: `pick_pass::required_pick_count` reads it per seat to size one
+/// pick step, and [`DraftProcedure::pick_steps_per_pack`] reads it to count how
+/// many such steps a pack contains. [`MAX_CARDS_PER_PICK`] is derived from it by
+/// `max_cards_per_pick_matches_procedure_table`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DraftProcedure {
+    /// Seats at the table. Was: `default_pod_size()`'s unconditional `8`.
+    pub pod_size: u8,
+    /// Seats occupied by humans; the remainder are bots. Was: `human_seats()`.
+    pub human_seats: u8,
+    /// Smallest pod a client may request for this kind.
+    pub min_pod_size: u8,
+    /// Packs each seat consumes over the whole event.
+    pub packs_per_player: u8,
+    /// Cards taken per pick step. The per-kind value is this table's, never a
+    /// literal at a call site: CR 905.1a drafts "one card" per step, and
+    /// CR 903.13b drafts "two cards" per step for Commander Draft. Only
+    /// meaningful under [`PackDistribution::PickAndPass`]; fixed at `1` under
+    /// [`PackDistribution::AllAtOnce`], which has no pick step at all.
+    /// [`MAX_CARDS_PER_PICK`] is derived from this axis by
+    /// `max_cards_per_pick_matches_procedure_table`.
+    pub cards_per_pick: u8,
+    /// How packs reach the seats.
+    pub distribution: PackDistribution,
+    /// CR 100.2b: limited decks have a 40-card minimum deck size.
+    pub min_deck_size: usize,
+    /// CR 903.3: how many commanders each deck built from this kind's pool must
+    /// designate. `0` for the four CR 905.1a kinds; `1` for CommanderDraft, whose
+    /// decks are Commander decks (CR 903.13f routes deck construction through
+    /// CR 903.5). Not a bool: CR 903.13f(3) + CR 702.124 admit a second commander,
+    /// so the count is the axis, not the presence.
+    pub commanders_required: u8,
+    /// What the session does once every seat has submitted a deck: end at
+    /// `Complete`, or run in-session tournament pairings.
+    pub post_draft_play: PostDraftPlay,
+    /// Match configuration for this draft kind. Was: `match_config()`.
+    pub match_config: MatchConfig,
+}
+
+impl DraftProcedure {
+    /// CR 903.13b: how many pick steps a pack of `cards_per_pack` contains for
+    /// this kind. `pick_number` counts STEPS, not cards, so this is the
+    /// denominator a progress display can actually reach. Rounds up: an odd
+    /// pack's final step takes the remainder, which is the same boundary
+    /// `pick_pass::required_pick_count` reports per step.
+    ///
+    /// `cards_per_pack` is a parameter rather than a field because it is a
+    /// [`DraftConfig`] value while `cards_per_pick` is a procedure axis — the
+    /// method joins the two without either owning the other.
+    pub fn pick_steps_per_pack(self, cards_per_pack: u8) -> u8 {
+        cards_per_pack.div_ceil(self.cards_per_pick)
+    }
+}
+
+/// The largest `DraftProcedure::cards_per_pick` over every `DraftKind`.
+///
+/// The session-independent half of the `DraftAction::Pick` payload bound in
+/// `server-core`'s `guard_draft_action_payload`, which receives only the action
+/// and can never consult the session (so it cannot check the exact per-kind
+/// count — `apply_pick_inner` owns that). Derived from the procedure table, not
+/// chosen: `max_cards_per_pick_matches_procedure_table` folds over
+/// [`DraftKind::ALL`] and fails if this drifts.
+pub const MAX_CARDS_PER_PICK: usize = 2; // CR 903.13b, the CommanderDraft row
+
+/// CR 702.124g: "no partner ability or combination of partner abilities can
+/// ever let a player have more than two commanders."
+///
+/// The session-independent bound on `DraftAction::SubmitDeck.commanders`, which
+/// `server-core`'s `guard_draft_action_payload` can check without consulting a
+/// session -- exactly the role [`MAX_CARDS_PER_PICK`] plays for
+/// `DraftAction::Pick`. It is NOT the lobby transport's
+/// `MAX_COMMANDER_ENTRIES`, which is a different (larger) bound on a different
+/// list; the two coexist with different values on purpose.
+pub const MAX_COMMANDER_DESIGNATIONS: usize = 2;
+
 impl DraftKind {
+    /// Every `DraftKind`, in declaration order.
+    ///
+    /// Folded over by `max_cards_per_pick_matches_procedure_table` (to derive
+    /// [`MAX_CARDS_PER_PICK`]) and by `procedure_matches_legacy_accessors`.
+    ///
+    /// Hand-written, and the guarantees are worth stating precisely because
+    /// they are narrower than "compiler-enforced": the wildcard-free `match` in
+    /// `draft_kind_all_lists_every_variant` makes a sixth variant an `E0004`
+    /// **there**, which enforces the *arm set*; the array type `[DraftKind; 5]`
+    /// enforces the *length*; and the sorted-index assertion catches
+    /// *duplication*. A future variant's **membership in this array** is
+    /// enforced by nothing — a sixth variant that adds its `index_of` arm but
+    /// is left out of `ALL` compiles and passes. The `E0004` lands the author
+    /// beside this array, and that proximity is the actual guarantee.
+    pub const ALL: [DraftKind; 5] = [
+        DraftKind::Quick,
+        DraftKind::Premier,
+        DraftKind::Traditional,
+        DraftKind::Sealed,
+        DraftKind::CommanderDraft,
+    ];
+
+    /// The single authority for this kind's procedure.
+    ///
+    /// One exhaustive `match` with no wildcard and no `..Default::default()`
+    /// spread: adding a variant is an `E0004` here, and the author must state
+    /// a value for every axis rather than inheriting one silently.
+    pub fn procedure(self) -> DraftProcedure {
+        match self {
+            DraftKind::Quick => DraftProcedure {
+                pod_size: 8,
+                human_seats: 1,
+                min_pod_size: 1,
+                packs_per_player: 3,
+                cards_per_pick: 1,
+                distribution: PackDistribution::PickAndPass,
+                min_deck_size: 40,
+                commanders_required: 0,
+                // A local single-player event: the session ends when the deck
+                // is submitted and the client starts a game from it. No CR —
+                // a local event is not a Comprehensive Rules concept.
+                post_draft_play: PostDraftPlay::CompleteImmediately,
+                match_config: MatchConfig {
+                    match_type: MatchType::Bo1,
+                    ..MatchConfig::default()
+                },
+            },
+            DraftKind::Premier => DraftProcedure {
+                pod_size: 8,
+                human_seats: 8,
+                min_pod_size: 2,
+                packs_per_player: 3,
+                cards_per_pick: 1,
+                distribution: PackDistribution::PickAndPass,
+                min_deck_size: 40,
+                commanders_required: 0,
+                post_draft_play: PostDraftPlay::TournamentPairings,
+                match_config: MatchConfig {
+                    match_type: MatchType::Bo1,
+                    ..MatchConfig::default()
+                },
+            },
+            DraftKind::Traditional => DraftProcedure {
+                pod_size: 8,
+                human_seats: 8,
+                min_pod_size: 2,
+                packs_per_player: 3,
+                cards_per_pick: 1,
+                distribution: PackDistribution::PickAndPass,
+                min_deck_size: 40,
+                commanders_required: 0,
+                post_draft_play: PostDraftPlay::TournamentPairings,
+                match_config: MatchConfig {
+                    match_type: MatchType::Bo3,
+                    ..MatchConfig::default()
+                },
+            },
+            DraftKind::Sealed => DraftProcedure {
+                pod_size: 8,
+                human_seats: 8,
+                min_pod_size: 2,
+                packs_per_player: 6,
+                cards_per_pick: 1,
+                distribution: PackDistribution::AllAtOnce,
+                min_deck_size: 40,
+                commanders_required: 0,
+                post_draft_play: PostDraftPlay::TournamentPairings,
+                match_config: MatchConfig {
+                    match_type: MatchType::Bo1,
+                    ..MatchConfig::default()
+                },
+            },
+            // CR 903.13a: "a draft ... followed by a multiplayer game." WotC's
+            // Commander Limited product page gives the 4-player pod as the
+            // format's default increment; CR 903.13 does not fix a pod size, so
+            // 4 is a product default, not an invariant. 1 human + 3 bots
+            // mirrors DraftKind::Quick's bot-filled shape and likewise carries
+            // no CR.
+            DraftKind::CommanderDraft => DraftProcedure {
+                pod_size: 4,
+                human_seats: 1,
+                // CR 903.13a + CR 800.1: Commander Draft is "a draft ...
+                // followed by a multiplayer game", and "a multiplayer game is a
+                // game that begins with more than two players" — so three seats
+                // is the smallest pod that can still deliver the game the
+                // format is defined as. This field is the floor below which a
+                // client's requested pod is rejected, not the table default:
+                // the 4-player pod is `pod_size` above.
+                min_pod_size: 3,
+                // CR 903.13b: three draft rounds.
+                packs_per_player: 3,
+                // CR 903.13b: "drafts two cards".
+                cards_per_pick: 2,
+                // CR 903.13b: "passes the remaining cards".
+                distribution: PackDistribution::PickAndPass,
+                // CR 903.13f(1): "at least 60 cards" — the limited-pool floor
+                // for `validate_limited_deck`. Format LEGALITY is
+                // `GameFormat::CommanderDraft`'s job, not this field's.
+                min_deck_size: 60,
+                // CR 903.3 as routed by CR 903.13f: a Commander Draft deck is a
+                // Commander deck, so it designates a commander. `1` rather than
+                // `2`: CR 903.13f(3)'s partner grant needs the draft to have
+                // contained Commander Masters boosters, which the session does
+                // not model.
+                commanders_required: 1,
+                // CR 903.13a: the pod plays one multiplayer game; the draft
+                // session itself runs no bracket.
+                post_draft_play: PostDraftPlay::CompleteImmediately,
+                match_config: MatchConfig {
+                    match_type: MatchType::Bo1,
+                    ..MatchConfig::default()
+                },
+            },
+        }
+    }
+
     /// Default pod size for Arena-style drafts.
     pub fn default_pod_size(self) -> u8 {
-        8
+        self.procedure().pod_size
     }
 
     /// Number of human seats. Quick Draft has 1 human + 7 bots.
     pub fn human_seats(self) -> u8 {
-        match self {
-            DraftKind::Quick => 1,
-            DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => 8,
-        }
+        self.procedure().human_seats
+    }
+
+    /// CR 903.3: how many commanders a deck built from this kind's pool must
+    /// designate. `0` for the four CR 905.1a kinds.
+    pub fn commanders_required(self) -> u8 {
+        self.procedure().commanders_required
     }
 
     /// Match configuration for this draft kind.
     pub fn match_config(self) -> MatchConfig {
-        match self {
-            DraftKind::Quick | DraftKind::Premier | DraftKind::Sealed => MatchConfig {
-                match_type: MatchType::Bo1,
-                ..MatchConfig::default()
-            },
-            DraftKind::Traditional => MatchConfig {
-                match_type: MatchType::Bo3,
-                ..MatchConfig::default()
-            },
-        }
+        self.procedure().match_config
     }
 }
 
@@ -343,9 +591,17 @@ pub enum DraftPauseReason {
 #[serde(tag = "type", content = "data")]
 pub enum DraftAction {
     StartDraft,
+    /// One whole CR 903.13b pick step: a seat takes every card it drafts this
+    /// step in a single action.
+    ///
+    /// The count is not free — `apply_pick_inner` requires exactly
+    /// `min(kind.procedure().cards_per_pick, remaining_pack_len)` ids, which is
+    /// `1` for the four CR 905.1a kinds and `2` for CommanderDraft, dropping to
+    /// the remainder on an odd final pick. `DraftDelta::CardPicked` stays
+    /// singular: one delta per card.
     Pick {
         seat: u8,
-        card_instance_id: String,
+        card_instance_ids: Vec<String>,
     },
     PickWithDraftEffect {
         seat: u8,
@@ -355,6 +611,21 @@ pub enum DraftAction {
     SubmitDeck {
         seat: u8,
         main_deck: Vec<String>,
+        /// CR 903.3 + CR 903.13e: the card names this seat designates as its
+        /// commander(s). `main_deck` is the COMPLETE submitted list and every
+        /// designated name is a member of it (CR 903.5a: "including its
+        /// commander"), so a designation is a label on a deck card and never
+        /// an extra card beside the deck.
+        ///
+        /// Empty for every non-commander draft kind, which is why
+        /// `#[serde(default)]` here is semantics rather than a compatibility
+        /// shim: an empty designation list is the correct and meaningful value
+        /// for a Quick/Premier/Traditional/Sealed submission.
+        ///
+        /// CR 702.124g caps the list at
+        /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
+        #[serde(default)]
+        commanders: Vec<String>,
     },
     /// Generate the next round's pairings. Carries no round: the reducer is the
     /// single authority for which round that is (`DraftSession::next_pairing_round`).
@@ -453,6 +724,14 @@ pub enum DraftError {
     },
     #[error("draft source has {available} cards, but {required} cards are required")]
     InsufficientCards { available: usize, required: usize },
+    #[error("seat {seat} must pick {expected} card(s) from the current pack, got {actual}")]
+    WrongPickCardCount {
+        seat: u8,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("seat {seat} picked card {card_instance_id} more than once")]
+    DuplicatePickCardId { seat: u8, card_instance_id: String },
     #[error("seat {seat} has already picked this round")]
     SeatAlreadyPickedThisRound { seat: u8 },
     #[error("seat {seat} is a bot — operation not applicable")]
@@ -463,6 +742,19 @@ pub enum DraftError {
     InvalidSealedConfiguration { reason: String },
     #[error("invalid sealed snapshot: {reason}")]
     InvalidSealedSnapshot { reason: String },
+    /// CR 903.13a + CR 800.1: Commander Draft is "a draft ... followed by a
+    /// multiplayer game", and "a multiplayer game is a game that begins with
+    /// more than two players" — so a kind's `min_pod_size` is the smallest pod
+    /// that can still deliver the game that kind is defined as. Carries the
+    /// `kind`, never a `TournamentFormat`: the floor is a per-kind rule, and
+    /// reporting it through `UnsupportedTournamentSize` would re-introduce the
+    /// kind-blindness this guard exists to remove.
+    #[error("{kind:?} pods require at least {required} seats, got {actual}")]
+    PodBelowMinimumSize {
+        kind: DraftKind,
+        required: u8,
+        actual: u8,
+    },
 }
 
 /// Configuration for a draft session.
@@ -489,10 +781,37 @@ pub struct DraftConfig {
     pub spectator_visibility: SpectatorVisibility,
 }
 
+// The two `serde` defaults below are a second authority for axes that
+// `DraftKind::procedure()` now owns, and neither can see `kind`. They agree with
+// every kind that exists today (all four are pod 8 / 40 cards), so nothing is
+// wrong now; they are recorded because a kind whose procedure states a different
+// value silently resolves to the literal here whenever serde fills the field.
+// `procedure()` is the authority — read it, do not copy these numbers.
+
+/// Not `DraftKind::default_pod_size`, which correctly delegates to
+/// `procedure()`. This is the `serde` fallback for a `DraftConfig` that omits
+/// `pod_size`, and it cannot consult `kind`. `DraftKind::CommanderDraft` now
+/// exists and specifies a 4-seat pod, so a payload naming it while omitting
+/// this field lands on `8`.
+///
+/// That is unreachable from any in-tree producer: `DraftConfig` derives
+/// `Serialize` with no `skip_serializing_if` on any field, so every serializer
+/// in this repo emits `pod_size`, and a pre-`CommanderDraft` save — the case
+/// this fallback exists for — cannot name a kind that did not exist when it was
+/// written. The residual is a hand-crafted payload at a system boundary, which
+/// is not worth a kind-aware custom `Deserialize`.
 fn default_pod_size() -> u8 {
     8
 }
 
+/// The `serde` fallback for a `DraftConfig` that omits `min_deck_size`; it
+/// cannot consult `kind`. CR 100.2b's 40-card limited minimum is correct for
+/// four of the five kinds, but CR 903.13f(1) requires *at least 60* for
+/// Commander Draft, which now exists and lands on `40` through this path.
+///
+/// Unreachable for the same measured reason as `default_pod_size` above: no
+/// in-tree producer can emit a `DraftConfig` missing this field, and no save
+/// old enough to rely on the fallback can name `CommanderDraft`.
 fn default_min_deck_size() -> usize {
     40
 }
@@ -502,6 +821,14 @@ fn default_min_deck_size() -> usize {
 pub struct DraftDeckSubmission {
     pub seat: u8,
     pub main_deck: Vec<String>,
+    /// CR 903.3 + CR 903.13e: the commander designation, SNAPSHOTTED at
+    /// submission. A later pool change must never silently re-designate, so
+    /// this is stored beside `main_deck` rather than re-derived; it is
+    /// invalidated only by resubmission. Every name here is a member of
+    /// `main_deck` as a multiset (CR 702.124h), enforced at submission by
+    /// `validate_limited_deck`.
+    #[serde(default)]
+    pub commanders: Vec<String>,
 }
 
 /// Win/loss record for a player in the draft event.
@@ -625,12 +952,287 @@ mod tests {
         assert_eq!(DraftKind::Sealed.match_config().match_type, MatchType::Bo1);
     }
 
+    /// `procedure()` is the single authority for the per-kind draft axes.
+    ///
+    /// The structural half is this phase's only genuinely discriminating
+    /// assertion: a pure refactor has no observable behavior delta, so the
+    /// witness that the duplicated literal is gone must be structural. Measured
+    /// before the refactor, the scan below matched exactly two sites.
+    #[test]
+    fn draft_procedure_is_single_authority() {
+        assert_eq!(DraftKind::Sealed.procedure().packs_per_player, 6);
+        // Non-vacuity sibling: without this, the assertion above also passes
+        // against a `procedure()` that ignores `self` and returns one record.
+        assert_ne!(
+            DraftKind::Sealed.procedure().packs_per_player,
+            DraftKind::Premier.procedure().packs_per_player
+        );
+
+        // Needle assembly, modelled on `crates/engine/src/source_census.rs:273`:
+        // a real character moves into the `format!` argument, so no line of this
+        // file's own source contains either assembled needle contiguously.
+        let needle_ternary = format!("pack_count: i{}", 'f');
+        let needle_kind = format!("DraftKind::{}", "Sealed");
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/draft-core sits two levels under the workspace root");
+
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut stack = vec![root.join("crates")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+
+        let mut total_bytes = 0usize;
+        let mut saw_wasm_bridge = false;
+        let mut saw_server = false;
+        let mut offenders: Vec<String> = Vec::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(root)
+                .expect("under the workspace root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Self-exclusion, modelled on `source_census.rs:291-293`: this file
+            // defines the predicate and never legitimately carries the ternary.
+            if rel == "crates/draft-core/src/types.rs" {
+                continue;
+            }
+            saw_wasm_bridge |= rel == "crates/draft-wasm/src/lib.rs";
+            saw_server |= rel == "crates/phase-server/src/main.rs";
+            let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            total_bytes += text.len();
+            for (index, line) in text.lines().enumerate() {
+                if line.contains(&needle_ternary) && line.contains(&needle_kind) {
+                    offenders.push(format!("{rel}:{}", index + 1));
+                }
+            }
+        }
+
+        // Paired positive reach-guard: a path walk that silently resolved to
+        // nothing would make the scan pass vacuously. This answers a walk that
+        // finds NOTHING; the two mitigations above answer one that finds ITSELF.
+        assert!(
+            total_bytes > 0,
+            "reach-guard: the walk read no source at all"
+        );
+        assert!(
+            saw_wasm_bridge && saw_server,
+            "reach-guard: the walk missed the two files that carried the ternary \
+             (draft-wasm seen: {saw_wasm_bridge}, phase-server seen: {saw_server})"
+        );
+
+        assert!(
+            offenders.is_empty(),
+            "the per-kind pack total must be read from DraftKind::procedure(), \
+             but a duplicated ternary survives at: {offenders:?}"
+        );
+    }
+
+    /// Every `procedure()` arm reproduces the values previously duplicated at
+    /// call sites — the refactor's actual behavior-preservation claim.
+    ///
+    /// That claim is carried by the per-kind **literal** assertions below, not
+    /// by the loop. Stated honestly: since the accessors became one-line
+    /// delegations to `procedure()`, each loop assertion compares
+    /// `procedure().f` against `procedure().f`, so it cannot fail for any kind
+    /// and it does **not** catch a mistyped arm. What it still pins is the
+    /// *delegation* — that no accessor has reacquired an independent authority
+    /// for a per-kind number. It starts discriminating again only if someone
+    /// re-introduces a second `match`, which is exactly the regression the
+    /// procedure table removed and this test is named for.
+    #[test]
+    fn procedure_matches_legacy_accessors() {
+        // Tautological by construction today (see the doc above): pins that
+        // each accessor below remains a delegation, not that its value is right.
+        for kind in DraftKind::ALL {
+            let procedure = kind.procedure();
+            assert_eq!(procedure.pod_size, kind.default_pod_size(), "{kind:?}");
+            assert_eq!(procedure.human_seats, kind.human_seats(), "{kind:?}");
+            assert_eq!(procedure.match_config, kind.match_config(), "{kind:?}");
+            assert_eq!(
+                procedure.commanders_required,
+                kind.commanders_required(),
+                "{kind:?}"
+            );
+        }
+
+        // CR 100.2b: the 40-card limited minimum the four deleted `DraftConfig`
+        // literals each hardcoded. CR 903.13f(1) puts CommanderDraft at 60, so
+        // these are per-kind rather than loop-invariant.
+        assert_eq!(DraftKind::Quick.procedure().min_deck_size, 40);
+        assert_eq!(DraftKind::Premier.procedure().min_deck_size, 40);
+        assert_eq!(DraftKind::Traditional.procedure().min_deck_size, 40);
+        assert_eq!(DraftKind::Sealed.procedure().min_deck_size, 40);
+        assert_eq!(DraftKind::CommanderDraft.procedure().min_deck_size, 60);
+
+        // CR 905.1a: one card per pick step for the four Arena-style kinds.
+        // CR 903.13b: two for CommanderDraft.
+        assert_eq!(DraftKind::Quick.procedure().cards_per_pick, 1);
+        assert_eq!(DraftKind::Premier.procedure().cards_per_pick, 1);
+        assert_eq!(DraftKind::Traditional.procedure().cards_per_pick, 1);
+        assert_eq!(DraftKind::Sealed.procedure().cards_per_pick, 1);
+        assert_eq!(DraftKind::CommanderDraft.procedure().cards_per_pick, 2);
+
+        // The values the deleted `pack_count` ternaries produced.
+        assert_eq!(DraftKind::Quick.procedure().packs_per_player, 3);
+        assert_eq!(DraftKind::Premier.procedure().packs_per_player, 3);
+        assert_eq!(DraftKind::Traditional.procedure().packs_per_player, 3);
+        assert_eq!(DraftKind::Sealed.procedure().packs_per_player, 6);
+
+        // The values `draft_wire_guard`'s `if kind == Quick { 1 } else { 2 }`
+        // produced.
+        assert_eq!(DraftKind::Quick.procedure().min_pod_size, 1);
+        assert_eq!(DraftKind::Premier.procedure().min_pod_size, 2);
+        assert_eq!(DraftKind::Traditional.procedure().min_pod_size, 2);
+        assert_eq!(DraftKind::Sealed.procedure().min_pod_size, 2);
+
+        // Sealed is the sole `AllAtOnce` kind — the fact every converted
+        // equality test against `DraftKind::Sealed` silently depended on.
+        assert_eq!(
+            DraftKind::Sealed.procedure().distribution,
+            PackDistribution::AllAtOnce
+        );
+        assert_eq!(
+            DraftKind::Quick.procedure().distribution,
+            PackDistribution::PickAndPass
+        );
+        assert_eq!(
+            DraftKind::Premier.procedure().distribution,
+            PackDistribution::PickAndPass
+        );
+        assert_eq!(
+            DraftKind::Traditional.procedure().distribution,
+            PackDistribution::PickAndPass
+        );
+    }
+
+    /// Every field of the Commander Draft procedure, against CR 903.13.
+    ///
+    /// One assertion per field of `DraftProcedure`, because a preset row is
+    /// data: the only way to pin it is to state every value.
+    #[test]
+    fn commander_draft_procedure_matches_cr_903_13() {
+        let procedure = DraftKind::CommanderDraft.procedure();
+
+        // Product defaults, deliberately carrying no CR citation.
+        assert_eq!(procedure.pod_size, 4);
+        assert_eq!(procedure.human_seats, 1);
+        assert_eq!(procedure.match_config.match_type, MatchType::Bo1);
+
+        // CR 903.13a + CR 800.1: three seats is the smallest pod that still
+        // delivers the multiplayer game the format is defined as. This is the
+        // wire rejection floor, NOT the 4-seat product default above.
+        assert_eq!(procedure.min_pod_size, 3);
+
+        // CR 903.13b.
+        assert_eq!(procedure.packs_per_player, 3);
+        assert_eq!(procedure.cards_per_pick, 2);
+        assert_eq!(procedure.distribution, PackDistribution::PickAndPass);
+
+        // CR 903.13f(1): the limited-pool floor, not format legality.
+        assert_eq!(procedure.min_deck_size, 60);
+
+        // CR 903.3 as routed by CR 903.13f: a Commander Draft deck is a
+        // Commander deck and designates a commander. `1`, not `2` — the
+        // CR 903.13f(3) partner grant is conditioned on the draft having
+        // contained Commander Masters boosters, which is not modelled.
+        assert_eq!(procedure.commanders_required, 1);
+
+        // CR 903.13a: one multiplayer game, not an in-session bracket.
+        assert_eq!(
+            procedure.post_draft_play,
+            PostDraftPlay::CompleteImmediately
+        );
+    }
+
+    /// [`MAX_CARDS_PER_PICK`] is derived from the procedure table, not chosen.
+    ///
+    /// `server-core`'s payload guard cannot consult a session, so it bounds a
+    /// `Pick` by this constant. If a future kind raised `cards_per_pick`
+    /// without updating it, the wire would reject that kind's legitimate picks.
+    #[test]
+    fn max_cards_per_pick_matches_procedure_table() {
+        let derived = DraftKind::ALL
+            .into_iter()
+            .map(|kind| usize::from(kind.procedure().cards_per_pick))
+            .max()
+            .expect("DraftKind::ALL is never empty");
+        assert_eq!(
+            derived, MAX_CARDS_PER_PICK,
+            "MAX_CARDS_PER_PICK must equal the largest cards_per_pick in the procedure table"
+        );
+    }
+
+    /// `DraftKind::ALL` must list every variant exactly once.
+    ///
+    /// What this actually enforces, stated narrowly: the `match` below is
+    /// wildcard-free, so a sixth `DraftKind` is an `E0004` **here**, which
+    /// lands the author beside the array that must list it; the array type
+    /// `[DraftKind; 5]` enforces the length; and the sorted-index equality
+    /// catches a duplicated entry. It does **not** enforce that a sixth variant
+    /// is added to `ALL` — a variant that adds its arm below and is omitted
+    /// from the array still compiles and still passes. The `E0004`'s proximity
+    /// is the guarantee, not the assertion.
+    #[test]
+    fn draft_kind_all_lists_every_variant() {
+        fn index_of(kind: DraftKind) -> usize {
+            match kind {
+                DraftKind::Quick => 0,
+                DraftKind::Premier => 1,
+                DraftKind::Traditional => 2,
+                DraftKind::Sealed => 3,
+                DraftKind::CommanderDraft => 4,
+            }
+        }
+        let mut indices: Vec<usize> = DraftKind::ALL.into_iter().map(index_of).collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            [0, 1, 2, 3, 4],
+            "DraftKind::ALL must list every variant exactly once"
+        );
+    }
+
     #[test]
     fn pass_direction_for_pack() {
         assert_eq!(PassDirection::for_pack(0), PassDirection::Left);
         assert_eq!(PassDirection::for_pack(1), PassDirection::Right);
         assert_eq!(PassDirection::for_pack(2), PassDirection::Left);
         assert_eq!(PassDirection::for_pack(3), PassDirection::Right);
+    }
+
+    /// CR 903.13c: "In the first and third draft rounds, booster packs are
+    /// passed to each player's left. In the second draft round ... right."
+    ///
+    /// Assert-only: `PassDirection::for_pack` is already correct and this phase
+    /// does not modify it, so this pins existing behavior for a pod of 4 (which
+    /// no prior test exercised — every existing rotation test uses pod 8)
+    /// rather than discriminating any change of P2's.
+    #[test]
+    fn commander_draft_passes_left_right_left() {
+        assert_eq!(PassDirection::for_pack(0), PassDirection::Left);
+        assert_eq!(PassDirection::for_pack(1), PassDirection::Right);
+        assert_eq!(PassDirection::for_pack(2), PassDirection::Left);
+
+        // Pod-4 wraparound in both directions.
+        let pod_size = DraftKind::CommanderDraft.procedure().pod_size;
+        assert_eq!(pod_size, 4);
+        assert_eq!(PassDirection::Left.next_seat(3, pod_size), 0);
+        assert_eq!(PassDirection::Right.next_seat(0, pod_size), 3);
     }
 
     #[test]

@@ -22,11 +22,12 @@ import type {
   StandingEntry,
 } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
-import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
 import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
+import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
@@ -244,16 +245,16 @@ interface MultiplayerDraftActions {
   resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
-  /** Both: submit a pick. */
-  submitPick: (cardInstanceId: string) => Promise<void>;
+  /** Both: submit one whole CR 903.13b pick step — every card this seat drafts now. */
+  submitPick: (cardInstanceIds: string[]) => Promise<void>;
   /** Both: submit a pick using a drafted card's draft-time effect. */
   submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
   /** Both: dismiss the current error banner. */
   clearError: () => void;
-  /** Both: confirm the currently selected card as pick. */
-  confirmPick: () => Promise<void>;
+  /** Both: confirm one whole CR 903.13b pick step — every card the player selected. */
+  confirmPick: (cardInstanceIds: string[]) => Promise<void>;
   /** Both: pick a card from the current pack using a deterministic draft heuristic. */
   autoPickCard: () => Promise<void>;
   /** Both: add a card to the deck during deckbuilding. */
@@ -262,8 +263,12 @@ interface MultiplayerDraftActions {
   removeFromDeck: (cardName: string) => void;
   /** Both: set land count for a specific basic land. */
   setLandCount: (landName: string, count: number) => void;
-  /** Both: submit the built deck. */
-  submitDeck: () => Promise<void>;
+  /**
+   * Both: submit the built deck, with the CR 903.3 commander designation(s).
+   * CR 903.1 scopes the designation to the Commander variant, so `[]` is the
+   * correct value for every other kind.
+   */
+  submitDeck: (commanders: string[]) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -276,6 +281,15 @@ interface MultiplayerDraftActions {
   reset: () => void;
   /** Both: start the match for the current pairing. */
   startMatch: () => Promise<string | null>;
+  /**
+   * CR 903.13a: launch the completed Commander pod's multiplayer game.
+   *
+   * Stages the N-seat deck blob and navigates; it computes no game state. The
+   * seat count comes from `view.seats`, never from the literal 4 — CR 903.13
+   * fixes no pod size (CR 800.1 only requires more than two), so the pod's own
+   * seat list is the authority.
+   */
+  launchCommanderGame: (navigate: (path: string) => void) => Promise<void>;
   /** Both: report a match result back to the pod host. */
   reportMatchResult: (matchId: string, winnerSeat: number | null) => Promise<void>;
   /** Both: report the active game result using the current draft match pairing. */
@@ -467,23 +481,32 @@ function scoreDraftCard(card: DraftCardInstance, colors: Set<string>, poolSize: 
   return rarityScore + colorScore + curveScore(card.cmc, poolSize);
 }
 
-function chooseAutoPickCard(view: DraftPlayerView | null): string | null {
+/**
+ * One whole CR 903.13b pick step: the top `view.required_pick_count` cards of
+ * the current pack by the existing `scoreDraftCard` heuristic.
+ *
+ * The count is the engine's — never re-derived from `view.kind`, which cannot
+ * see an odd pack's final one-card step. `Array.prototype.sort` is stable in
+ * ES2019+ and sorts a COPY, so ties keep pack order and the N = 1 result is
+ * identical to the previous first-best-wins linear scan. `preferredColors` and
+ * the pool size are computed once, outside the comparator, exactly as before.
+ *
+ * Pick *quality* for a multi-card step is out of scope: these are the top N
+ * independently scored cards, not a good pair.
+ */
+function chooseAutoPickCards(view: DraftPlayerView | null): string[] {
   const pack = view?.current_pack;
-  if (!pack || pack.length === 0) return null;
+  if (!pack || pack.length === 0) return [];
 
   const colors = preferredColors(view.pool);
-  let bestCard = pack[0];
-  let bestScore = scoreDraftCard(bestCard, colors, view.pool.length);
+  const poolSize = view.pool.length;
+  const scored = pack.map((card) => ({
+    instanceId: card.instance_id,
+    score: scoreDraftCard(card, colors, poolSize),
+  }));
+  scored.sort((a, b) => b.score - a.score);
 
-  for (const card of pack.slice(1)) {
-    const score = scoreDraftCard(card, colors, view.pool.length);
-    if (score > bestScore) {
-      bestCard = card;
-      bestScore = score;
-    }
-  }
-
-  return bestCard.instance_id;
+  return scored.slice(0, view.required_pick_count).map((entry) => entry.instanceId);
 }
 
 function seatForLaunchGamePlayer(launch: DraftMatchLaunch, gamePlayer: number): number {
@@ -994,13 +1017,13 @@ export const useMultiplayerDraftStore = create<
     await activeHostAdapter.startDraft(botFillEmptySeats);
   },
 
-  submitPick: async (cardInstanceId) => {
+  submitPick: async (cardInstanceIds) => {
     const { role } = get();
     if (role === "host" && activeHostAdapter) {
-      const view = await activeHostAdapter.submitPick(cardInstanceId);
+      const view = await activeHostAdapter.submitPick(cardInstanceIds);
       set({ view, selectedCard: null });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitPick(cardInstanceId);
+      await activeGuestAdapter.submitPick(cardInstanceIds);
       set({ selectedCard: null });
     }
   },
@@ -1025,17 +1048,21 @@ export const useMultiplayerDraftStore = create<
 
   clearError: () => set({ error: null }),
 
-  confirmPick: async () => {
-    const { selectedCard, submitPick } = get();
-    if (!selectedCard) return;
-    await submitPick(selectedCard);
+  confirmPick: async (cardInstanceIds) => {
+    // The caller owns the whole step. `selectedCard` is only the PRIMARY
+    // selection (it drives the seat-ring highlight); the additional slots live
+    // in PackDisplay, which is why the ids arrive as an argument rather than
+    // being read back out of the store.
+    if (cardInstanceIds.length === 0) return;
+    const { submitPick } = get();
+    await submitPick(cardInstanceIds);
   },
 
   autoPickCard: async () => {
     const { view, submitPick } = get();
-    const cardInstanceId = chooseAutoPickCard(view);
-    if (!cardInstanceId) return;
-    await submitPick(cardInstanceId);
+    const cardInstanceIds = chooseAutoPickCards(view);
+    if (cardInstanceIds.length === 0) return;
+    await submitPick(cardInstanceIds);
   },
 
   addToDeck: (cardName) => {
@@ -1058,7 +1085,7 @@ export const useMultiplayerDraftStore = create<
     }));
   },
 
-  submitDeck: async () => {
+  submitDeck: async (commanders) => {
     const { role, mainDeck, landCounts } = get();
     const landCards: string[] = [];
     for (const [name, count] of Object.entries(landCounts)) {
@@ -1069,10 +1096,10 @@ export const useMultiplayerDraftStore = create<
     const fullDeck = [...mainDeck, ...landCards];
 
     if (role === "host" && activeHostAdapter) {
-      const view = await activeHostAdapter.submitDeck(fullDeck);
+      const view = await activeHostAdapter.submitDeck(fullDeck, commanders);
       set({ view, submittedDeck: fullDeck });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(fullDeck);
+      await activeGuestAdapter.submitDeck(fullDeck, commanders);
       // The guest adapter resolves only on `draft_deck_submit_ack`, not after
       // a DataChannel write.  This keeps the deck builder honest across a
       // reload between submit and host durability.
@@ -1093,6 +1120,45 @@ export const useMultiplayerDraftStore = create<
   requestResume: () => {
     if (!activeHostAdapter) return;
     activeHostAdapter.requestResume();
+  },
+
+  launchCommanderGame: async (navigate) => {
+    const { role, view, seatIndex } = get();
+    if (
+      role !== "host" ||
+      !view ||
+      view.kind !== "CommanderDraft" ||
+      view.status !== "Complete" ||
+      seatIndex === null ||
+      !activeHostAdapter
+    ) {
+      return;
+    }
+
+    let payload: DraftMatchDeckPayload;
+    try {
+      payload = await activeHostAdapter.podCommanderDeckPayload(view, seatIndex);
+    } catch (err) {
+      // A refusal from draft-wasm reaches here: `get_bot_deck_inner` returns
+      // `Err` when it cannot judge a bot deck's legality (no card database) or
+      // when the deck it built is under the session's floor. Surface it and do
+      // NOT navigate — the same shape `startMatch`'s own catch uses.
+      console.error("[multiplayerDraftStore] launchCommanderGame failed:", err);
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+
+    const gameId = crypto.randomUUID();
+    sessionStorage.setItem(`${DRAFT_DECK_SESSION_KEY}:${gameId}`, JSON.stringify(payload));
+    useGameStore.setState({ gameId });
+    // No `source=draft`/`draftId=`: those bind a game to a LOCAL Quick-Draft
+    // run's bookkeeping, and a pod has neither a `DraftRun` nor active-quick-
+    // draft meta. The pod is already `Complete`, so there is nothing to report
+    // back to it.
+    navigate(
+      `/game/${gameId}?mode=ai&difficulty=${DRAFT_BOT_AI_SEAT.difficulty}` +
+        `&format=CommanderDraft&players=${view.seats.length}&match=bo1`,
+    );
   },
 
   startMatch: async () => {
@@ -1554,8 +1620,17 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       saveDraftPodProgress("deckbuilding");
       break;
     case "allDecksSubmitted":
-      set({ phase: "pairing" });
-      saveDraftPodProgress("pairing");
+      // Shape B: a documented no-op. This event fires for EVERY pod kind, so it
+      // cannot know where the pod went — a `PostDraftPlay::CompleteImmediately`
+      // pod is already `Complete` (draft-core session.rs:902), and writing
+      // "pairing" here overwrote the reducer's own answer. The `viewUpdated`
+      // that follows establishes BOTH: the phase via `phaseForDraftViewStatus`
+      // and the persisted record via `activePhaseForDraftViewStatus`.
+      //
+      // The arm itself stays for the reader, not for the compiler: this
+      // `switch` returns `void` and has no `default`/`assertNever`, so dropping
+      // the case would still compile. Written out, the no-op is a decision on
+      // the record; deleted, it reads as an event nobody considered.
       break;
     case "draftPaused":
       set({ paused: true, pauseReason: event.reason });

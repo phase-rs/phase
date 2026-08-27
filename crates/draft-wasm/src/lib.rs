@@ -66,6 +66,36 @@ fn with_draft_mut<R>(
     })
 }
 
+/// `with_draft_mut` for the pure-Rust `_inner` cores: identical take/run/put
+/// dance, but `String` errors so the core is callable from `cargo test` on a
+/// native target, where every `JsValue` operation is unavailable.
+fn with_draft_mut_inner<R>(
+    f: impl FnOnce(&mut DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    DRAFT_SESSION.with(|cell| {
+        let mut session = cell.take().ok_or("Draft not initialized")?;
+        let result = f(&mut session);
+        cell.set(Some(session));
+        result
+    })
+}
+
+/// `with_draft` for the pure-Rust `_inner` cores: identical take/run/put dance
+/// over a SHARED borrow, but `String` errors so the core is callable from
+/// `cargo test` on a native target.
+///
+/// The shared sibling of `with_draft_mut_inner`. A read-only `_inner` core must
+/// not reach for the `&mut` helper instead: taking `&mut` for a body that only
+/// reads is the kind of borrow the type system is there to state honestly.
+fn with_draft_inner<R>(f: impl FnOnce(&DraftSession) -> Result<R, String>) -> Result<R, String> {
+    DRAFT_SESSION.with(|cell| {
+        let session = cell.take().ok_or("Draft not initialized")?;
+        let result = f(&session);
+        cell.set(Some(session));
+        result
+    })
+}
+
 /// Preserve Limited-deck validation details across the WASM boundary so the
 /// deck builder can tell the player what needs correction.
 fn deck_submission_message(error: DraftError) -> String {
@@ -77,10 +107,6 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
-}
-
-fn deck_submission_error(error: DraftError) -> JsValue {
-    JsValue::from_str(&deck_submission_message(error))
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -177,6 +203,7 @@ pub fn start_quick_draft(
     let ai_difficulty = map_difficulty(difficulty);
     let set_code = set_pool.code.clone();
     let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
+    let quick_procedure = DraftKind::Quick.procedure();
 
     let config = DraftConfig {
         source: DraftSource::Set {
@@ -184,10 +211,10 @@ pub fn start_quick_draft(
         },
         set_code,
         kind: DraftKind::Quick,
-        pod_size: 8,
+        pod_size: quick_procedure.pod_size,
         cards_per_pack,
-        pack_count: 3,
-        min_deck_size: 40,
+        pack_count: quick_procedure.packs_per_player,
+        min_deck_size: quick_procedure.min_deck_size,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::Swiss,
@@ -235,16 +262,17 @@ pub fn start_sealed_draft(
         .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
     let set_code = set_pool.code.clone();
     let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
+    let sealed_procedure = DraftKind::Sealed.procedure();
     let config = DraftConfig {
         source: DraftSource::Set {
             code: set_code.clone(),
         },
         set_code,
         kind: DraftKind::Sealed,
-        pod_size: 8,
+        pod_size: sealed_procedure.pod_size,
         cards_per_pack,
-        pack_count: 6,
-        min_deck_size: 40,
+        pack_count: sealed_procedure.packs_per_player,
+        min_deck_size: sealed_procedure.min_deck_size,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::Swiss,
@@ -391,7 +419,7 @@ fn apply_human_pick_and_resolve_bots(
         draft_session,
         DraftAction::Pick {
             seat: 0,
-            card_instance_id: human_card_id,
+            card_instance_ids: vec![human_card_id],
         },
     )
 }
@@ -426,20 +454,32 @@ fn apply_human_pick_and_resolve_bots_with_action(
                 continue;
             }
 
-            let pick_idx = bot_ai::bot_pick(
+            // CR 903.13b: a bot owes its kind's whole pick step. This loop is
+            // `Quick`-gated above, so `cards_per_pick` is 1 here today; reading
+            // it from the procedure is what keeps that true by construction
+            // rather than by coincidence.
+            let cards_per_pick =
+                usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
+            let pick_indices = bot_ai::bot_picks(
                 &pack.0,
+                cards_per_pick,
                 difficulty,
                 &draft_session.pools[seat as usize],
                 card_db,
                 &mut rng,
             );
-            let pick_id = pack.0[pick_idx].instance_id.clone();
+            // Map indices to ids BEFORE applying — the apply mutates the pack
+            // the indices refer to.
+            let card_instance_ids: Vec<String> = pick_indices
+                .into_iter()
+                .map(|index| pack.0[index].instance_id.clone())
+                .collect();
 
             session::apply(
                 draft_session,
                 DraftAction::Pick {
                     seat,
-                    card_instance_id: pick_id,
+                    card_instance_ids,
                 },
                 None,
             )
@@ -561,22 +601,48 @@ pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
 
 /// Submit the human player's deck for limited play.
 ///
-/// `main_deck_json`: JSON array of card instance ID strings.
+/// `main_deck_json`: JSON array of card name strings.
+/// `commanders_json`: JSON array of the card names this seat designates as its
+/// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
+/// the Commander variant, so `[]` is the correct and meaningful value for every
+/// non-Commander kind.
 /// The deck is validated against the pool via LimitedDeckValidator.
 #[wasm_bindgen]
-pub fn submit_deck(main_deck_json: &str) -> Result<JsValue, JsValue> {
-    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {}", e)))?;
+pub fn submit_deck(main_deck_json: &str, commanders_json: &str) -> Result<JsValue, JsValue> {
+    let view =
+        submit_deck_inner(main_deck_json, commanders_json).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|session| {
+/// Pure-Rust core for `submit_deck`, so both halves of the payload boundary are
+/// reachable from `cargo test` without `js_sys::JSON::parse` -- the same reason
+/// `submit_pick_for_seat_inner` exists.
+///
+/// Both `serde_json::from_str` calls deliberately precede `with_draft_mut_inner`:
+/// a malformed payload fails before any session is mutated. The two parse
+/// failures carry DISTINCT texts so a caller can tell which payload was bad.
+fn submit_deck_inner(
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let main_deck: Vec<String> =
+        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
+    let commanders: Vec<String> = serde_json::from_str(commanders_json)
+        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
+
+    with_draft_mut_inner(|session| {
         session::apply(
             session,
-            DraftAction::SubmitDeck { seat: 0, main_deck },
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders,
+            },
             None,
         )
-        .map_err(deck_submission_error)?;
+        .map_err(deck_submission_message)?;
 
-        Ok(to_js(&filter_for_player(session, 0)))
+        Ok(filter_for_player(session, 0))
     })
 }
 
@@ -593,11 +659,15 @@ pub fn suggest_deck() -> Result<JsValue, JsValue> {
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
+            // `0`: the HUMAN designates their commander in the deck builder, so
+            // the suggester must not pre-empt that choice. A decision, not a
+            // default.
             let result = suggest::suggest_deck(
                 pool,
                 difficulty,
                 card_db,
                 session.config.min_deck_size,
+                0,
                 &session.config.addable_cards,
             );
             to_js(&result)
@@ -630,25 +700,50 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
 // then proxies picks/decks per-seat as guests submit them over the
 // DataChannel.
 
-/// Submit a pick for any seat (host proxies guest picks).
+/// Submit one whole CR 903.13b pick step for any seat (host proxies guest
+/// picks): every card the seat drafts this step, as a JSON array of instance
+/// ids. `apply_pick_inner` owns the count contract — one id for the four CR
+/// 905.1a kinds, two for CommanderDraft, dropping to the remainder on an odd
+/// final pick.
+///
+/// The JSON encoding mirrors `submit_pick_with_draft_effect_for_seat` below
+/// byte for byte. It is deliberately NOT tolerant of a bare id: a bare string
+/// is a parse `Err` here, which is what keeps a half-applied caller loud
+/// instead of silently picking one card.
 ///
 /// Returns the DraftPlayerView for the specified seat after the pick.
 #[wasm_bindgen]
-pub fn submit_pick_for_seat(seat: u8, card_instance_id: &str) -> Result<JsValue, JsValue> {
-    let card_id = card_instance_id.to_string();
+pub fn submit_pick_for_seat(seat: u8, card_instance_ids_json: &str) -> Result<JsValue, JsValue> {
+    let view = submit_pick_for_seat_inner(seat, card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|draft_session| {
+/// Pure-Rust core for `submit_pick_for_seat`, so both halves of the payload
+/// boundary are reachable from `cargo test` without `js_sys::JSON::parse` —
+/// the same reason `create_multiplayer_draft_inner` exists.
+///
+/// The `serde_json::from_str` deliberately precedes `with_draft_mut`: a
+/// malformed payload fails before any session is mutated.
+fn submit_pick_for_seat_inner(
+    seat: u8,
+    card_instance_ids_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| format!("Failed to parse pick cards: {e}"))?;
+
+    with_draft_mut_inner(|draft_session| {
         session::apply(
             draft_session,
             DraftAction::Pick {
                 seat,
-                card_instance_id: card_id,
+                card_instance_ids,
             },
             None,
         )
-        .map_err(|e| JsValue::from_str(&format!("Pick failed for seat {seat}: {e}")))?;
+        .map_err(|e| format!("Pick failed for seat {seat}: {e}"))?;
 
-        Ok(to_js(&filter_for_player(draft_session, seat)))
+        Ok(filter_for_player(draft_session, seat))
     })
 }
 
@@ -705,17 +800,48 @@ pub fn set_seat_connected(seat: u8, connected: bool) -> Result<JsValue, JsValue>
 /// Submit a deck for any seat.
 ///
 /// `main_deck_json`: JSON array of card name strings.
+/// `commanders_json`: JSON array of the card names this seat designates as its
+/// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
+/// the Commander variant, so `[]` is the correct and meaningful value for every
+/// non-Commander kind.
 /// Returns the DraftPlayerView for the specified seat.
 #[wasm_bindgen]
-pub fn submit_deck_for_seat(seat: u8, main_deck_json: &str) -> Result<JsValue, JsValue> {
-    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {e}")))?;
+pub fn submit_deck_for_seat(
+    seat: u8,
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<JsValue, JsValue> {
+    let view = submit_deck_for_seat_inner(seat, main_deck_json, commanders_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    with_draft_mut(|session| {
-        session::apply(session, DraftAction::SubmitDeck { seat, main_deck }, None)
-            .map_err(deck_submission_error)?;
+/// Pure-Rust core for `submit_deck_for_seat`, mirroring `submit_deck_inner`:
+/// both parses precede `with_draft_mut_inner`, so a malformed payload fails
+/// before any session is mutated.
+fn submit_deck_for_seat_inner(
+    seat: u8,
+    main_deck_json: &str,
+    commanders_json: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let main_deck: Vec<String> =
+        serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
+    let commanders: Vec<String> = serde_json::from_str(commanders_json)
+        .map_err(|e| format!("Failed to parse commanders: {e}"))?;
 
-        Ok(to_js(&filter_for_player(session, seat)))
+    with_draft_mut_inner(|session| {
+        session::apply(
+            session,
+            DraftAction::SubmitDeck {
+                seat,
+                main_deck,
+                commanders,
+            },
+            None,
+        )
+        .map_err(deck_submission_message)?;
+
+        Ok(filter_for_player(session, seat))
     })
 }
 
@@ -787,9 +913,19 @@ pub fn all_picks_submitted() -> Result<bool, JsValue> {
 /// Returns a SuggestedDeck built from the bot's drafted pool.
 #[wasm_bindgen]
 pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
-    with_draft(|session| {
+    get_bot_deck_inner(bot_seat)
+        .map(|deck| to_js(&deck))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Pure-Rust core for `get_bot_deck`, so the CR 903.3 designation argument is
+/// reachable from `cargo test` without `js_sys` — the same reason
+/// `create_multiplayer_draft_inner`, `submit_pick_for_seat_inner` and
+/// `draft_procedure_dto` exist.
+fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
+    with_draft_inner(|session| {
         if bot_seat == 0 || bot_seat as usize >= session.seats.len() {
-            return Err(JsValue::from_str("bot_seat is out of range"));
+            return Err("bot_seat is out of range".to_string());
         }
         let pool = &session.pools[bot_seat as usize];
         let difficulty = DIFFICULTY.with(|cell| cell.get());
@@ -797,16 +933,77 @@ pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
-            let result = suggest::suggest_deck(
+
+            // CR 903.3 + CR 903.6: eligibility and colour identity are both read
+            // off a `CardFace`, so with no card database this crate cannot
+            // designate a commander -- and a 60-card pile with no commander is
+            // not a Commander deck. Refuse rather than return a deck whose
+            // legality was never judged: the caller loads the database at host
+            // setup, and a silent empty designation would put three of four seats
+            // into a game CR 903.6 cannot start. The four CR 905.1a kinds report
+            // `0` here and are unaffected.
+            if session.config.kind.commanders_required() > 0 && card_db.is_none() {
+                return Err(
+                    "Card database must be loaded before a Commander Draft bot deck".to_string(),
+                );
+            }
+
+            let deck = suggest::suggest_deck(
                 pool,
                 difficulty,
                 card_db,
                 session.config.min_deck_size,
+                session.config.kind.commanders_required(),
                 &session.config.addable_cards,
             );
-            Ok(to_js(&result))
+
+            // CR 903.13f(1): "A player's deck must contain at least 60 cards".
+            // This check enforces THIS SESSION'S configured floor,
+            // `min_deck_size`, not that literal 60 -- and on the only pod shape
+            // that can reach it, the two are not the same number.
+            // `DeckAddableCardPolicy::CustomOnly` is written only by
+            // `create_multiplayer_draft_inner`'s Cube arm, which also takes
+            // `min_deck_size` from the host's cube settings, where the Set arm
+            // takes it from the procedure table and hardcodes
+            // `standard_basics()`. The host's control is
+            // `client/src/components/draft/CubeSetupPanel.tsx`, range 1..=100,
+            // default 40. So on a cube-hosted Commander pod this refuses a deck
+            // short of the SESSION's floor; a 40..=59-card deck at the default
+            // floor is still short of CR 903.13f(1) and is NOT caught here.
+            // Making the floor itself CR-correct is a separate, pre-existing gap
+            // and is deliberately out of this phase's scope.
+            //
+            // `min_deck_size` is also the same value `apply_submit_deck` hands
+            // `validate_limited_deck` for the human on this pod
+            // (`draft-core/src/session.rs`), which is what makes the two
+            // authorities on this session agree. That validator rejects a short
+            // deck with `LimitedDeckError::TooFewCards`
+            // (`draft-core/src/validation.rs`, CR 100.2b); a bot deck reaches no
+            // such gate, so the postcondition is asserted here instead. It fires
+            // when `suggest_addable_cards`'s CustomOnly arm finds no addable card
+            // inside the commander's colour identity (CR 903.5c) and returns
+            // nothing to fill the land slots with. Refuse rather than ship a deck
+            // this engine would refuse from a human on the same session: the
+            // alternative is a CR 903.13f(1) violation nobody can see without
+            // counting the bot's cards. The four CR 905.1a kinds report `0` here
+            // and are unaffected -- without that gate this would change their
+            // behaviour, which is outside this phase's scope; the general case
+            // belongs to `validate_limited_deck`, which already owns it on every
+            // path a human deck takes.
+            let deck_total: usize =
+                deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
+            if session.config.kind.commanders_required() > 0
+                && deck_total < session.config.min_deck_size
+            {
+                return Err(format!(
+                    "Commander Draft bot deck reached {deck_total} cards, minimum is {}",
+                    session.config.min_deck_size
+                ));
+            }
+
+            Ok(deck)
         })
-    })?
+    })
 }
 
 // ── Host-role exports for multiplayer (P2P) draft coordination ─────────
@@ -843,16 +1040,103 @@ enum PoolInput {
     },
 }
 
+/// Boundary mirror of `draft_core::types::DraftProcedure` for the JS bridge.
+///
+/// A DTO rather than `#[derive(Serialize)]` on `DraftProcedure` itself:
+/// `DraftProcedure`, `PackDistribution` and `PostDraftPlay` derive no
+/// `Serialize`, and adding it would edit `draft-core` — a scope path this phase
+/// cannot afford. Same idiom as `lobby_broker_wasm::OutboundDto`. Only the axes
+/// a caller outside the reducer can act on are published; the reducer remains
+/// the authority for everything else.
+#[derive(Serialize)]
+struct DraftProcedureDto {
+    pod_size: u8,
+    human_seats: u8,
+    min_pod_size: u8,
+    packs_per_player: u8,
+    cards_per_pick: u8,
+    min_deck_size: usize,
+    commanders_required: u8,
+    match_config: engine::types::match_config::MatchConfig,
+}
+
+/// The engine-owned per-kind axes for a numeric draft kind. The display layer
+/// reads these; it never re-derives them (CLAUDE.md: the frontend is a display
+/// layer, not a logic layer).
+#[wasm_bindgen]
+pub fn draft_procedure(kind: u8) -> Result<JsValue, JsValue> {
+    let dto = draft_procedure_dto(kind).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&dto))
+}
+
+/// Pure-Rust core for `draft_procedure`, so the field mapping is reachable from
+/// `cargo test` without `js_sys::JSON::parse` — the same reason
+/// `create_multiplayer_draft_inner` and `submit_pick_for_seat_inner` exist.
+///
+/// The mapping is hand-written and its `u8` columns are interchangeable to the
+/// compiler, so transposing any two of them compiles clean and passes clippy.
+/// Nothing in the type system catches that;
+/// `draft_procedure_dto_copies_every_axis_unmoved` is the substitute for the
+/// missing type error.
+fn draft_procedure_dto(kind: u8) -> Result<DraftProcedureDto, String> {
+    let procedure = draft_kind_from_wire(kind)?.procedure();
+    Ok(DraftProcedureDto {
+        pod_size: procedure.pod_size,
+        human_seats: procedure.human_seats,
+        min_pod_size: procedure.min_pod_size,
+        packs_per_player: procedure.packs_per_player,
+        cards_per_pick: procedure.cards_per_pick,
+        min_deck_size: procedure.min_deck_size,
+        commanders_required: procedure.commanders_required,
+        match_config: procedure.match_config,
+    })
+}
+
+/// The numeric `kind` the JS bridge sends, and the single authority for it.
+///
+/// Wildcard-free on the ENUM side: a sixth `DraftKind` is an `E0004` HERE, so a
+/// new kind cannot reach the bridge without a wire number. The base's
+/// `match kind: u8` could not do that — `DraftKind::CommanderDraft` existed for
+/// two phases while this decode still stopped at 3.
+fn draft_kind_wire_number(kind: DraftKind) -> u8 {
+    match kind {
+        DraftKind::Quick => 0,
+        DraftKind::Premier => 1,
+        DraftKind::Traditional => 2,
+        DraftKind::Sealed => 3,
+        // CR 903.13a: the fifth kind.
+        DraftKind::CommanderDraft => 4,
+    }
+}
+
+/// Decode, derived from the encode over `DraftKind::ALL` — one numeric table,
+/// not two. There is deliberately no arm that yields a `DraftKind` from an
+/// unmapped input: an unknown number is an `Err`, never a default.
+fn draft_kind_from_wire(kind: u8) -> Result<DraftKind, String> {
+    DraftKind::ALL
+        .into_iter()
+        .find(|k| draft_kind_wire_number(*k) == kind)
+        .ok_or_else(|| {
+            let known = DraftKind::ALL
+                .into_iter()
+                .map(|k| format!("{} ({k:?})", draft_kind_wire_number(k)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown draft kind {kind}; expected one of {known}")
+        })
+}
+
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
-/// Premier, Traditional, or Sealed draft with human + bot seats from either a Set pool
-/// or a custom Cube list.
+/// Premier, Traditional, Sealed, or Commander draft with human + bot seats from
+/// either a Set pool or a custom Cube list.
 ///
 /// - `pool_input_json`: serialized `PoolInput` discriminated union
 ///   (`{ "type": "Set" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
-/// - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed.
-///   flows through to `DraftConfig.kind` unchanged. Tournament match format
-///   (Bo1 for Premier and Sealed, Bo3 for Traditional) is identical to set drafts.
+/// - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed, 4=CommanderDraft
+///   (CR 903.13a). The mapping's single authority is `draft_kind_wire_number`.
+///   Flows through to `DraftConfig.kind` unchanged. Tournament match format is
+///   identical to set drafts.
 /// - `seed`: RNG seed for deterministic pack generation
 /// - `draft_code`: unique room identifier
 ///
@@ -901,17 +1185,7 @@ fn create_multiplayer_draft_inner(
     let seat_descriptors: Vec<SeatDescriptor> =
         serde_json::from_str(seats_json).map_err(|e| format!("Failed to parse seats: {}", e))?;
 
-    let draft_kind = match kind {
-        0 => DraftKind::Quick,
-        1 => DraftKind::Premier,
-        2 => DraftKind::Traditional,
-        3 => DraftKind::Sealed,
-        _ => {
-            return Err(
-                "kind must be 0 (Quick), 1 (Premier), 2 (Traditional), or 3 (Sealed)".to_string(),
-            );
-        }
-    };
+    let draft_kind = draft_kind_from_wire(kind)?;
 
     let tournament_format = match tournament_format {
         "Swiss" => TournamentFormat::Swiss,
@@ -949,6 +1223,7 @@ fn create_multiplayer_draft_inner(
                 .map_err(|e| format!("Failed to parse set pool: {}", e))?;
             let set_code = set_pool.code.clone();
             let cards_per_pack = set_cards_per_pack(&set_pool)?;
+            let procedure = draft_kind.procedure();
 
             let config = DraftConfig {
                 source: DraftSource::Set {
@@ -958,12 +1233,8 @@ fn create_multiplayer_draft_inner(
                 kind: draft_kind,
                 pod_size: seats.len() as u8,
                 cards_per_pack,
-                pack_count: if draft_kind == DraftKind::Sealed {
-                    6
-                } else {
-                    3
-                },
-                min_deck_size: 40,
+                pack_count: procedure.packs_per_player,
+                min_deck_size: procedure.min_deck_size,
                 addable_cards: DeckAddableCards::standard_basics(),
                 rng_seed: seed as u64,
                 tournament_format,
@@ -990,8 +1261,13 @@ fn create_multiplayer_draft_inner(
             cube_name,
             cube_draft_settings: settings,
         } => {
-            if draft_kind == DraftKind::Sealed {
-                return Err("Sealed events require a Set pool".to_string());
+            // A cube pool has no unopened-pack distribution, so an all-at-once
+            // kind cannot be run from one.
+            match draft_kind.procedure().distribution {
+                PackDistribution::AllAtOnce => {
+                    return Err("Sealed events require a Set pool".to_string());
+                }
+                PackDistribution::PickAndPass => {}
             }
             let entries = parse_cube_list(&cube_list_text).map_err(|errors| {
                 format!(
@@ -1066,7 +1342,7 @@ fn create_multiplayer_draft_inner(
 /// picks from connected guests.
 ///
 /// `action_json`: serialized DraftAction, e.g.:
-///   `{ "type": "Pick", "data": { "seat": 2, "card_instance_id": "abc-123" } }`
+///   `{ "type": "Pick", "data": { "seat": 2, "card_instance_ids": ["abc-123"] } }`
 ///
 /// Returns the list of DraftDeltas produced (serialized as a JS array).
 #[wasm_bindgen]
@@ -1272,7 +1548,7 @@ mod create_multiplayer_draft_tests {
         let picked = pack[0].instance_id.clone();
         let action = DraftAction::Pick {
             seat: 0,
-            card_instance_id: picked.clone(),
+            card_instance_ids: vec![picked.clone()],
         };
         DRAFT_SESSION.with(|cell| {
             let mut session = cell.take().expect("session populated");
@@ -1413,6 +1689,982 @@ mod create_multiplayer_draft_tests {
             .expect("sealed pack boundaries")
             .iter()
             .all(|pack| pack.len() == 3));
+
+        clear_state();
+    }
+
+    /// A 4-seat Commander pod over a Set pool. Packs are deliberately large
+    /// enough that a CR 903.13b two-card step is not the whole pack.
+    fn commander_pool_input_json() -> String {
+        let set_pool_json = r#"{
+            "code": "TST",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 4, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "TST", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "TST", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "TST", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "Delta", "set_code": "TST", "collector_number": "4", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 4,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string()
+    }
+
+    const COMMANDER_SEATS_JSON: &str = r#"[
+        { "type": "Human", "player_id": 0, "display_name": "Host" },
+        { "type": "Human", "player_id": 1, "display_name": "G1" },
+        { "type": "Human", "player_id": 2, "display_name": "G2" },
+        { "type": "Human", "player_id": 3, "display_name": "G3" }
+    ]"#;
+
+    /// U10's discriminating test.
+    ///
+    /// The NEGATIVE half is the point: assert the resulting session's KIND,
+    /// never merely that the call returned `Ok`. A decode that silently
+    /// resolved 4 to `Quick` would satisfy an `is_ok()` assertion perfectly.
+    #[test]
+    fn create_multiplayer_draft_inner_accepts_commander_kind() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("commander draft should start");
+
+        assert!(matches!(view.kind, DraftKind::CommanderDraft));
+        // CR 903.13f(1) and CR 903.13b reach the view through the procedure, so
+        // this also proves the config was built from `DraftProcedure` and not
+        // from the 40-card/3-pack literals the four older kinds share.
+        assert_eq!(view.min_deck_size, 60);
+        assert_eq!(view.pack_count, 3);
+
+        clear_state();
+    }
+
+    /// Hostile fixture, paired with the positive above so it cannot pass
+    /// vacuously: an id BEYOND the table must be an `Err`, never a default.
+    #[test]
+    fn create_multiplayer_draft_inner_refuses_an_unmapped_kind() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            5,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect_err("kind 5 is unmapped");
+        assert!(
+            err.contains("unknown draft kind 5"),
+            "unexpected error: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// The numeric table is total and injective over every kind, and the decode
+    /// is the encode's inverse. Folds `DraftKind::ALL`, so it moves with the
+    /// enum.
+    #[test]
+    fn draft_kind_wire_numbers_round_trip() {
+        for kind in DraftKind::ALL {
+            assert_eq!(
+                draft_kind_from_wire(draft_kind_wire_number(kind)).unwrap(),
+                kind
+            );
+        }
+        let mut numbers: Vec<u8> = DraftKind::ALL
+            .into_iter()
+            .map(draft_kind_wire_number)
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        assert_eq!(
+            numbers.len(),
+            DraftKind::ALL.len(),
+            "wire numbers must be distinct"
+        );
+    }
+
+    /// Boundary D, positive half: the multi-seat pick export carries one WHOLE
+    /// CR 903.13b step, and a Commander pod's step is two cards.
+    ///
+    /// This is also the paired reach-guard for the two negatives below — it
+    /// proves the export works on a live session, so their `Err`s cannot be
+    /// satisfied by a wholesale failure of the call.
+    #[test]
+    fn submit_pick_for_seat_takes_a_whole_commander_pick_step() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("commander draft should start");
+        let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
+        let two = serde_json::json!([pack[0].instance_id, pack[1].instance_id]).to_string();
+
+        let after = submit_pick_for_seat_inner(0, &two).expect("a two-card step applies");
+        assert_eq!(
+            after.pool.len(),
+            2,
+            "CR 903.13b: a Commander pick step drafts two cards"
+        );
+
+        clear_state();
+    }
+
+    /// The count negative: a ONE-id payload is not a whole Commander step, so
+    /// the reducer refuses it (CR 903.13b). This is the assertion that would
+    /// flip if `submit_pick_for_seat` went back to wrapping a single id, and
+    /// its paired positive reach-guard is the two-id test above.
+    #[test]
+    fn submit_pick_for_seat_refuses_a_one_card_commander_step() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("commander draft should start");
+        let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
+        let one = serde_json::json!([pack[0].instance_id]).to_string();
+
+        let err =
+            submit_pick_for_seat_inner(0, &one).expect_err("one id is not a whole CR 903.13b step");
+        assert!(
+            err.contains("Pick failed for seat 0"),
+            "unexpected error: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// Boundary D, negative half: a BARE id is not a payload.
+    ///
+    /// Nothing in the compiler catches a half-applied caller here — both sides
+    /// of the boundary are `string` and the call is positional — so this
+    /// assertion is the substitute for the missing type error. It also pins the
+    /// ordering: the parse fails BEFORE any session is entered.
+    #[test]
+    fn submit_pick_for_seat_refuses_a_bare_id() {
+        clear_state();
+        let err =
+            submit_pick_for_seat_inner(0, "card-abc").expect_err("a bare id is not a JSON array");
+        assert!(
+            err.contains("Failed to parse pick cards"),
+            "unexpected error: {err}"
+        );
+        // Reached the parse, not the session: no draft is initialized here, so
+        // a decoder that ran AFTER `with_draft_mut_inner` would have reported
+        // "Draft not initialized" instead.
+        assert!(
+            !err.contains("Draft not initialized"),
+            "parse must precede the session: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// The `DraftProcedureDto` mapping is a hand-written copy whose `u8` columns
+    /// are interchangeable to the compiler, so transposing any two of them
+    /// compiles clean and passes clippy while publishing a wrong axis to the
+    /// display layer. Nothing in the type system catches that; this is the
+    /// substitute for the missing type error.
+    ///
+    /// Folded over `DraftKind::ALL` rather than asserted on `CommanderDraft`
+    /// alone, and that is load-bearing: in the Commander row `min_pod_size` and
+    /// `packs_per_player` are BOTH `3`, so a single-kind test — field by field
+    /// or not — stays green with exactly those two swapped. Over the whole
+    /// table the `u8` columns are pairwise distinct AS COLUMNS, so every
+    /// transposition reddens here. `commanders_required` is `[0, 0, 0, 0, 1]`
+    /// over `DraftKind::ALL` and equals no other column (`pod_size`
+    /// `[8, 8, 8, 8, 4]`, `human_seats` `[1, 8, 8, 8, 1]`, `min_pod_size`
+    /// `[1, 2, 2, 2, 3]`, `packs_per_player` `[3, 3, 3, 6, 3]`, `cards_per_pick`
+    /// `[1, 1, 1, 1, 2]`), so the argument survives its addition.
+    #[test]
+    fn draft_procedure_dto_copies_every_axis_unmoved() {
+        for kind in DraftKind::ALL {
+            let procedure = kind.procedure();
+            let dto = draft_procedure_dto(draft_kind_wire_number(kind))
+                .unwrap_or_else(|e| panic!("{kind:?} has a wire number: {e}"));
+
+            assert_eq!(dto.pod_size, procedure.pod_size, "pod_size ({kind:?})");
+            assert_eq!(
+                dto.human_seats, procedure.human_seats,
+                "human_seats ({kind:?})"
+            );
+            assert_eq!(
+                dto.min_pod_size, procedure.min_pod_size,
+                "min_pod_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.packs_per_player, procedure.packs_per_player,
+                "packs_per_player ({kind:?})"
+            );
+            assert_eq!(
+                dto.cards_per_pick, procedure.cards_per_pick,
+                "cards_per_pick ({kind:?})"
+            );
+            assert_eq!(
+                dto.min_deck_size, procedure.min_deck_size,
+                "min_deck_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.commanders_required, procedure.commanders_required,
+                "commanders_required ({kind:?})"
+            );
+            assert_eq!(
+                dto.match_config, procedure.match_config,
+                "match_config ({kind:?})"
+            );
+        }
+    }
+
+    // ── V-RS: the CR 903.3 designation's channel, seat by seat ─────────────
+    //
+    // Seam: `submit_deck_inner` / `submit_deck_for_seat_inner` -> `session::apply`
+    // -> `apply_submit_deck` -> `validate_limited_deck`.
+    //
+    // Every row asserts on `session.submitted_decks[..].commanders`, NEVER on
+    // the returned view: the stored value is what
+    // `crates/server-core/src/draft_session.rs`'s phase-9 deferral promises
+    // that phase it will find, and a view assertion would not see it. (The
+    // marker itself is deliberately NOT reproduced here -- this phase's
+    // completion gate is a census of those literals, and a cross-reference
+    // that reproduced one would move a count it does not own.)
+
+    /// The CR 903.13e granting twin of `commander_pool_input_json()`.
+    ///
+    /// Identical but for the set code, which is the only thing that makes the
+    /// grant fire: `session_concessions` latches `DraftSource::Set { code }`
+    /// and matches it case-insensitively against the engine's
+    /// `DRAFT_SET_CONCESSIONS` table, where "CMM" grants up to two copies of
+    /// The Prismatic Piper. The grant is therefore LATCHED from what the draft
+    /// contained rather than hand-set on the session, which is what makes the
+    /// rows below channel tests instead of validator tests.
+    ///
+    /// `commander_pool_input_json()` is deliberately left alone --
+    /// `create_multiplayer_draft_inner_accepts_commander_kind` and
+    /// `create_multiplayer_draft_inner_refuses_an_unmapped_kind` consume it.
+    fn granting_commander_pool_input_json() -> String {
+        let set_pool_json = r#"{
+            "code": "CMM",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 4, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "CMM", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "CMM", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "CMM", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "Delta", "set_code": "CMM", "collector_number": "4", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 4,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string()
+    }
+
+    /// Put the installed session into Deckbuilding and seed ONE seat's pool.
+    ///
+    /// The wasm-seam mirror of draft-core's landed `deckbuilding_commander_draft`,
+    /// PARAMETERIZED ON THE SEAT -- and the parameter is required, not a
+    /// generalisation for its own sake. `apply_submit_deck` validates against
+    /// the SUBMITTING seat's own pool (`session.pools[seat as usize]`), and
+    /// `DraftSession::new` builds `pools: vec![vec![]; pod_size]`, so a
+    /// seat-0-only helper leaves `pools[2]` present and EMPTY: a seat-2
+    /// submission then dies at `validate_limited_deck` step 4 with a
+    /// `NotInPool` per deck name, `apply_submit_deck` returns `Err` before its
+    /// `insert`, and the routing the seat-routing row asserts is never reached.
+    ///
+    /// The names are per-seat distinct for the same reason: seat 2's deck must
+    /// not be validatable against seat 0's pool, so a wrong-pool read is a hard
+    /// `Err` rather than a silent pass.
+    fn seat_into_deckbuilding(seat: u8, pool_size: usize) {
+        DRAFT_SESSION.with(|cell| {
+            let mut session = cell.take().expect("a draft session is installed");
+            session.status = DraftStatus::Deckbuilding;
+            session.pools[seat as usize] = (0..pool_size)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("seat-{seat}-card-{i}"),
+                    name: format!("Seat {seat} Card {i}"),
+                    set_code: "CMM".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+            cell.set(Some(session));
+        });
+    }
+
+    /// Read the installed session without disturbing it -- the same take/put
+    /// dance `with_draft_mut_inner` runs.
+    fn with_installed_session<R>(f: impl FnOnce(&DraftSession) -> R) -> R {
+        DRAFT_SESSION.with(|cell| {
+            let session = cell.take().expect("a draft session is installed");
+            let out = f(&session);
+            cell.set(Some(session));
+            out
+        })
+    }
+
+    /// Start a granting 4-seat Commander pod and put `seat` into deckbuilding.
+    fn granting_commander_pod(seat: u8, pool_size: usize) {
+        create_multiplayer_draft_inner(
+            &granting_commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("commander draft should start");
+        seat_into_deckbuilding(seat, pool_size);
+    }
+
+    /// Start a 4-seat PREMIER pod and put `seat` into deckbuilding.
+    ///
+    /// The non-Commander sibling of `granting_commander_pod`, for rows whose
+    /// subject is a deck OUTSIDE the Commander variant. CR 903.3's designation
+    /// floor is `0` for the four CR 905.1a kinds, so an empty designation is
+    /// legal here and illegal in a Commander pod -- which is the whole reason
+    /// this helper exists rather than the Commander one being edited (four
+    /// other rows depend on that helper's kind).
+    ///
+    /// Premier reaches `StartDraft`: `min_pod_size` is 2 and Swiss admits
+    /// `2..=8`, so a 4-seat pod passes both guards.
+    fn premier_pod(seat: u8, pool_size: usize) {
+        create_multiplayer_draft_inner(
+            &granting_commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            1, // Premier
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("premier draft should start");
+        seat_into_deckbuilding(seat, pool_size);
+    }
+
+    /// The `pool_size`-card deck a seat can legally submit from its own pool.
+    fn seat_deck(seat: u8, size: usize) -> Vec<String> {
+        (0..size).map(|i| format!("Seat {seat} Card {i}")).collect()
+    }
+
+    fn json(value: &[String]) -> String {
+        serde_json::to_string(value).expect("a Vec<String> serializes")
+    }
+
+    /// V-RS (i) -- DELIVERY. The designation reaches the session, IN ORDER.
+    ///
+    /// Discriminates against a channel that drops the designation or delivers
+    /// it reordered. Revert the threading of the parsed `commanders` into the
+    /// `DraftAction::SubmitDeck` literal (back to `Vec::new()`) and the stored
+    /// value is `[]` against an assertion naming an ordered, non-empty list.
+    ///
+    /// The designation is deliberately NOT in the deck's own order: a channel
+    /// that sorted, deduped or re-derived it from the deck would red here.
+    #[test]
+    fn submit_deck_inner_carries_the_designation_to_the_session() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        let commanders = vec!["Seat 0 Card 7".to_string(), "Seat 0 Card 3".to_string()];
+        submit_deck_inner(&json(&deck), &json(&commanders)).expect("a legal deck submits");
+
+        with_installed_session(|session| {
+            // Paired positive reach-guard: the submission INSERTED. A refusal
+            // cannot satisfy the assertion below vacuously.
+            assert_eq!(
+                session.submitted_decks.len(),
+                1,
+                "the submission must have reached `submitted_decks.insert`"
+            );
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission is keyed by its player id");
+            assert_eq!(
+                submission.commanders, commanders,
+                "CR 903.3: the designation arrives verbatim and in order"
+            );
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (ii) -- ANTI-FABRICATION. An empty designation is STORED empty.
+    ///
+    /// Discriminates against a world in which something on the empty path
+    /// synthesises a designation -- the core defaulting an empty parse,
+    /// `session::apply` substituting, or `apply_submit_deck` inventing an entry
+    /// rather than storing the empty one.
+    ///
+    /// This row is NOT revert-failing, and that is deliberate rather than an
+    /// oversight: the value-level reversion (`commanders: Vec::new()` in the
+    /// `SubmitDeck` literal) hands `apply_submit_deck` an empty `Vec` either
+    /// way, so the assertion holds identically. What it buys is a pin on the
+    /// empty path -- it is the only row that carries an empty designation
+    /// through to a SUCCESSFUL insert and then reads what was stored. Do NOT
+    /// "strengthen" it with a non-empty input: that converts it into (i) and
+    /// deletes this seam's only empty-path row.
+    #[test]
+    fn submit_deck_inner_stores_an_empty_designation_without_synthesising_one() {
+        clear_state();
+        // A PREMIER pod, not a Commander one: CR 903.3's floor is `0` outside
+        // the Commander variant, so an empty designation is legal here. The
+        // row's own assertion message already reads "a deck outside the
+        // Commander variant designates none" -- it was always about this case
+        // and was merely borrowing the Commander pod helper. The INPUT stays
+        // `"[]"`, exactly as the docstring above requires.
+        premier_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        submit_deck_inner(&json(&deck), "[]").expect("an undesignated deck submits");
+
+        with_installed_session(|session| {
+            assert_eq!(
+                session.submitted_decks.len(),
+                1,
+                "the submission must have reached `submitted_decks.insert`"
+            );
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission is keyed by its player id");
+            assert!(
+                submission.commanders.is_empty(),
+                "CR 903.1: a deck outside the Commander variant designates none, and \
+                 the empty list must be stored rather than filled in: {:?}",
+                submission.commanders
+            );
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (iii) -- LOUD REFUSAL. A designation the deck does not back is
+    /// refused, and the ENGINE'S OWN `CommanderNotInDeck` text reaches the
+    /// caller.
+    ///
+    /// Discriminates against a generic `format!` wrapper in place of
+    /// `deck_submission_message`: `DraftError::ValidationFailed`'s own
+    /// `#[error]` is the bare "deck validation failed", so a wrapper's string
+    /// would carry NONE of the text asserted here.
+    ///
+    /// Revert-failing against two distinct lines -- revert the threading and no
+    /// name is designated at all, so `*designated > in_deck` never fires and
+    /// the call SUCCEEDS where this row demands `expect_err`; revert
+    /// `.map_err(deck_submission_message)` to a generic wrapper and the text
+    /// half fails. Its paired positive is the same call with the name IN the
+    /// deck, immediately below.
+    #[test]
+    fn submit_deck_inner_carries_the_engines_refusal_text() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let deck = seat_deck(0, 60);
+        let absent = vec!["Seat 0 Card 99".to_string()];
+        let err = submit_deck_inner(&json(&deck), &json(&absent))
+            .expect_err("CR 702.124h: a designation must be backed by a copy in the deck");
+        assert!(
+            err.contains("is designated as commander"),
+            "the engine's own CommanderNotInDeck text must survive the boundary: {err}"
+        );
+        assert!(
+            !err.contains("deck validation failed"),
+            "a generic DraftError wrapper would have replaced the details: {err}"
+        );
+
+        // Paired positive: the same call with a name the deck DOES back
+        // succeeds, so this row cannot pass because everything is refused.
+        let present = vec!["Seat 0 Card 4".to_string()];
+        submit_deck_inner(&json(&deck), &json(&present)).expect("a backed designation submits");
+
+        clear_state();
+    }
+
+    /// V-RS (iv) -- PARSE ORDER. Both decodes precede the session.
+    ///
+    /// The landed `submit_pick_for_seat_refuses_a_bare_id` shape, verbatim: run
+    /// after `clear_state()` with NO session installed, so the two candidate
+    /// orderings produce DIFFERENT strings. `main_deck_json` is well-formed, so
+    /// only the `commanders` decode can fire.
+    ///
+    /// This row is insensitive to the threading reversion the other rows catch;
+    /// what it protects is the parse ORDERING and the distinct
+    /// "Failed to parse commanders" text. Seeding a session here would destroy
+    /// its discrimination -- against a seeded session BOTH orderings produce
+    /// the same string.
+    #[test]
+    fn submit_deck_inner_parses_the_designation_before_the_session() {
+        clear_state();
+        let err = submit_deck_inner("[]", "kenrith").expect_err("a bare word is not a JSON array");
+        assert!(
+            err.contains("Failed to parse commanders"),
+            "the commanders decode is the one that fired: {err}"
+        );
+        // Reached the parse, not the session: no draft is initialized here, so
+        // a decoder that ran AFTER `with_draft_mut_inner` would have reported
+        // "Draft not initialized" instead.
+        assert!(
+            !err.contains("Draft not initialized"),
+            "parse must precede the session: {err}"
+        );
+
+        // Paired positive reach-guard: the same core against a seeded session
+        // DOES reach `submitted_decks.insert`, so a core that refused
+        // everything cannot satisfy the negative above.
+        granting_commander_pod(0, 60);
+        let deck = seat_deck(0, 60);
+        // CR 903.3: a Commander pod requires a designation, and this guard's
+        // job is only to show the insert IS reached. `Seat 0 Card 0` is backed
+        // by the deck and the pool, so nothing but the floor changes.
+        submit_deck_inner(&json(&deck), &json(&["Seat 0 Card 0".to_string()]))
+            .expect("a well-formed payload applies");
+        with_installed_session(|session| {
+            assert_eq!(session.submitted_decks.len(), 1);
+        });
+
+        clear_state();
+    }
+
+    /// V-RS (v-a) -- CR 903.13e, the commanders-DEPENDENT arm.
+    ///
+    /// "each player may add up to two cards named The Prismatic Piper to their
+    /// card pool, but only if those cards are used as the player's
+    /// commander(s)". The two halves differ in EXACTLY ONE input: the same deck
+    /// submits cleanly when the added copies are designated and is refused by
+    /// `FillerNotUsedAsCommander` when they are not.
+    ///
+    /// Revert-failing: under the threading reversion the accepted half receives
+    /// `designated = 0`, `added > designated` fires, and the submission this
+    /// row asserts is clean is refused.
+    #[test]
+    fn submit_deck_inner_feeds_the_filler_designation_arm() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let filler = "The Prismatic Piper".to_string();
+        let mut deck = seat_deck(0, 58);
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        let designated = vec![filler.clone(), filler.clone()];
+
+        // Accepted: two added copies, both designated.
+        submit_deck_inner(&json(&deck), &json(&designated))
+            .expect("CR 903.13e: added filler copies designated as commanders are legal");
+        with_installed_session(|session| {
+            let submission = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("the accepted submission inserted");
+            assert_eq!(submission.commanders, designated);
+        });
+
+        // Refused: the SAME deck with no designation.
+        let err = submit_deck_inner(&json(&deck), "[]")
+            .expect_err("CR 903.13e: undesignated added filler is not legal");
+        assert!(
+            err.contains("designated as commander(s)"),
+            "expected the engine's FillerNotUsedAsCommander text: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// V-RS (v-b) -- CR 903.13e, the commanders-INDEPENDENT arm.
+    ///
+    /// Three added copies exceed the grant of two, and `FillerExceedsGrant`
+    /// is the error that fires, with the engine's own text through
+    /// `deck_submission_message`.
+    ///
+    /// This row is NOT revert-failing and is not padding: `added >
+    /// filler.max_copies` reads `commanders` not at all, so no line this phase
+    /// writes sits under it. It is here because phase 8 routed the filler's cap
+    /// affordance forward in prose, and the refusal must be shown REACHABLE
+    /// through this channel and SPECIFIC to this error rather than merely
+    /// asserted. Its paired positive is (v-a)'s accepted two-copy half.
+    #[test]
+    fn submit_deck_inner_reaches_the_filler_cap() {
+        clear_state();
+        granting_commander_pod(0, 60);
+
+        let filler = "The Prismatic Piper".to_string();
+        let mut deck = seat_deck(0, 57);
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        deck.push(filler.clone());
+        // Two designations, not three: CR 702.124g caps the designation at two,
+        // and `apply_submit_deck` would return TooManyCommanders BEFORE the
+        // validator on a third -- which would test the wrong arm.
+        let designated = vec![filler.clone(), filler.clone()];
+
+        let err = submit_deck_inner(&json(&deck), &json(&designated))
+            .expect_err("CR 903.13e: at most two copies may be added");
+        assert!(
+            err.contains("but at most 2 may be added"),
+            "expected the engine's FillerExceedsGrant text: {err}"
+        );
+
+        clear_state();
+    }
+
+    /// V-RS (vi) -- SEAT ROUTING, with a prior producer.
+    ///
+    /// There is no separate routing path to test: both submissions enter the
+    /// SAME function, so nothing but the `seat` argument can carry the routing.
+    /// The fixture seeds TWO seats and submits from both, because attribution
+    /// needs a first producer -- a one-seat fixture would catch "the seat
+    /// parameter is ignored" only by refusal, and would catch neither a
+    /// submission attributed to the wrong player nor a `submitted_decks`
+    /// replaced rather than inserted into.
+    ///
+    /// Per-seat-distinct pool names make `pools[seat]`'s index load-bearing,
+    /// and per-seat-distinct DESIGNATIONS make a wrong-keyed submission visible
+    /// in the value and not only in the count.
+    ///
+    /// Revert-failing: under the threading reversion BOTH entries store `[]`
+    /// and both `.commanders` assertions fail, independently of anything this
+    /// row claims about seats.
+    #[test]
+    fn submit_deck_for_seat_inner_routes_each_seat_to_its_own_submission() {
+        clear_state();
+        granting_commander_pod(0, 60);
+        seat_into_deckbuilding(2, 60);
+
+        let seat0_deck = seat_deck(0, 60);
+        let seat0_commanders = vec!["Seat 0 Card 0".to_string()];
+        submit_deck_for_seat_inner(0, &json(&seat0_deck), &json(&seat0_commanders))
+            .expect("seat 0 submits from its own pool");
+
+        let seat2_deck = seat_deck(2, 60);
+        let seat2_commanders = vec!["Seat 2 Card 1".to_string()];
+        submit_deck_for_seat_inner(2, &json(&seat2_deck), &json(&seat2_commanders))
+            .expect("seat 2 submits from its own pool");
+
+        with_installed_session(|session| {
+            // Paired positive reach-guard: BOTH submissions inserted. A refused
+            // seat-2 call cannot satisfy the assertions below.
+            assert_eq!(
+                session.submitted_decks.len(),
+                2,
+                "`submitted_decks` is inserted into, never replaced"
+            );
+
+            let seat2 = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(2))
+                .expect("seat 2's submission is keyed by its own player id");
+            assert_eq!(seat2.seat, 2);
+            assert_eq!(seat2.commanders, seat2_commanders);
+
+            let seat0 = session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(0))
+                .expect("seat 0's submission survives seat 2's");
+            assert_eq!(seat0.seat, 0);
+            assert_eq!(
+                seat0.commanders, seat0_commanders,
+                "a later seat's designation must not be attributed to an earlier one"
+            );
+        });
+
+        clear_state();
+    }
+
+    // ── U21: the PRODUCTION seam for the CR 903.3 designation ──────────────
+    //
+    // These three rows sit together and read as one argument about
+    // `get_bot_deck_inner`: VM-4c is the argument (`Ok` with a designation),
+    // VM-4e is the PRECONDITION refusal (before `suggest_deck`), VM-4h is the
+    // POSTCONDITION refusal (after it). They must not be folded into each
+    // other: VM-4c needs a database and VM-4e needs none, and VM-4e's fixture
+    // would never reach the postcondition VM-4h asserts.
+
+    /// A card database whose `commander_pool_input_json` cards are commander-
+    /// judgeable: `Alpha` is a Legendary Creature, all four are mono-white, and
+    /// the basics are present so a containment check never measures a missing
+    /// row (PROBE C'').
+    ///
+    /// The module's `fixture_card_db_json` makes all four NON-legendary, so a
+    /// designation test needs its own variant rather than reusing it.
+    fn commander_fixture_db_json() -> String {
+        let card = |name: &str, supertypes: &str, core: &str, identity: &str| {
+            format!(
+                r#""{}": {{ "name": "{name}", "mana_cost": {{ "type": "NoCost" }},
+                "card_type": {{ "supertypes": [{supertypes}], "core_types": ["{core}"], "subtypes": [] }},
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "color_identity": [{identity}],
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "legalities": {{ "commander": "legal" }} }}"#,
+                name.to_lowercase()
+            )
+        };
+        format!(
+            "{{ {} }}",
+            [
+                card("Alpha", "\"Legendary\"", "Creature", "\"White\""),
+                card("Beta", "", "Creature", "\"White\""),
+                card("Gamma", "", "Creature", "\"White\""),
+                card("Delta", "", "Creature", "\"White\""),
+                card("Blue Addable", "", "Creature", "\"Blue\""),
+                card("White Addable", "", "Creature", "\"White\""),
+                card("Plains", "\"Basic\"", "Land", "\"White\""),
+                card("Island", "\"Basic\"", "Land", "\"Blue\""),
+            ]
+            .join(", ")
+        )
+    }
+
+    fn install_commander_fixture_db() {
+        let db = CardDatabase::from_json_str(&commander_fixture_db_json()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    /// `DraftSession.pools` is `pub`, and seeding a bot seat's pool directly is
+    /// the same shape `draft-core`'s own session tests use.
+    fn seed_bot_pool(seat: usize, pool: Vec<DraftCardInstance>) {
+        DRAFT_SESSION.with(|cell| {
+            let mut session = cell.take().expect("a session must be installed");
+            session.pools[seat] = pool;
+            cell.set(Some(session));
+        });
+    }
+
+    /// `DraftConfig.addable_cards` is `pub`. In PRODUCTION this field is written
+    /// only by `create_multiplayer_draft_inner`'s Cube arm, from the host's cube
+    /// settings; the Set arm hardcodes `DeckAddableCards::standard_basics()` and
+    /// cannot reach a `CustomOnly` policy at all. The fixture below sets it
+    /// directly on a Set session, so it must not be read as implying the Set
+    /// path can produce this configuration.
+    fn set_addable_cards(addable: DeckAddableCards) {
+        DRAFT_SESSION.with(|cell| {
+            let mut session = cell.take().expect("a session must be installed");
+            session.config.addable_cards = addable;
+            cell.set(Some(session));
+        });
+    }
+
+    fn mono_white_bot_pool() -> Vec<DraftCardInstance> {
+        ["Alpha", "Beta", "Gamma", "Delta"]
+            .into_iter()
+            .map(|name| DraftCardInstance {
+                instance_id: format!("id-{name}"),
+                name: name.to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "1".to_string(),
+                rarity: "common".to_string(),
+                colors: vec!["W".to_string()],
+                cmc: 2,
+                type_line: if name == "Alpha" {
+                    "Legendary Creature — Human".to_string()
+                } else {
+                    "Creature — Human".to_string()
+                },
+                draft_effect: None,
+            })
+            .collect()
+    }
+
+    fn start_commander_pod(kind_wire: u8) {
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            kind_wire,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("the pod should start");
+        seed_bot_pool(1, mono_white_bot_pool());
+    }
+
+    /// VM-4c — the PRODUCTION argument at `get_bot_deck_inner`'s `suggest_deck`
+    /// call: `session.config.kind.commanders_required()`, not a literal.
+    ///
+    /// This row is BLIND to database ABSENCE, and that is disclosed rather than
+    /// worked around: it installs its own fixture database, so it constructs the
+    /// input whose absence is the production failure mode. VM-4e is its
+    /// complement.
+    #[test]
+    fn get_bot_deck_inner_designates_a_commander_for_a_commander_pod() {
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+
+        let deck = get_bot_deck_inner(1).expect("a Commander bot deck should build");
+        // Reach guard first: an empty deck cannot satisfy the claim below.
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert_eq!(deck.commander.len(), 1, "commander = {:?}", deck.commander);
+
+        // Paired control: the same pool and pod under `Premier` designates
+        // nothing, so the argument is provably read from the kind.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(1);
+
+        let deck = get_bot_deck_inner(1).expect("a Premier bot deck should build");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert!(
+            deck.commander.is_empty(),
+            "commander = {:?}",
+            deck.commander
+        );
+
+        clear_state();
+    }
+
+    /// VM-4e — [B1] the PRECONDITION refusal: a Commander pod whose host never
+    /// loaded `CARD_DB`.
+    ///
+    /// `install_commander_fixture_db()` is deliberately NOT called. Do not add
+    /// it back as an oversight — the whole subject of this row is the database's
+    /// absence, and installing one silences it. `commander_pool_input_json()` is
+    /// a SET pool, so session creation itself needs no database, which is what
+    /// makes the fixture constructible.
+    #[test]
+    fn get_bot_deck_inner_refuses_a_commander_pod_with_no_card_database() {
+        clear_state();
+        start_commander_pod(4);
+
+        let err = get_bot_deck_inner(1).expect_err("CR 903.3 cannot be judged with no database");
+        assert!(
+            err.contains("Card database"),
+            "the message must name the card database: {err}"
+        );
+
+        // Paired control ON THE SAME no-database state: `Premier` still builds a
+        // deck. This is the reach guard — it proves the fixture reaches
+        // `suggest_deck` at all — and it isolates the `commanders_required() > 0`
+        // conjunct, so the four CR 905.1a kinds provably keep today's behaviour.
+        clear_state();
+        start_commander_pod(1);
+
+        let deck = get_bot_deck_inner(1).expect("Premier needs no designation");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+
+        clear_state();
+    }
+
+    /// VM-4h — [M2] the POSTCONDITION refusal: a Commander bot deck that did not
+    /// reach `min_deck_size` is not shipped.
+    ///
+    /// CR 903.13f(1). The cause lives in `suggest.rs`
+    /// (`custom_only_with_no_in_identity_entry_yields_a_short_deck`, which pins
+    /// that the CR 903.5c filter reached the shortfall deliberately); this row
+    /// pins the DISPOSITION at the seam, and each would still pass if the
+    /// other's subject regressed.
+    #[test]
+    fn get_bot_deck_inner_refuses_a_commander_bot_deck_under_the_floor() {
+        // An off-identity custom list: the CR 903.5c filter admits nothing, so
+        // `lands` is empty and the deck is short of the session's floor.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Blue Addable".to_string()],
+        });
+
+        let err = get_bot_deck_inner(1).expect_err("a deck under the floor must be refused");
+        assert!(
+            err.contains("minimum is 60") && err.contains("reached 4 cards"),
+            "the message must name the reached count and the minimum: {err}"
+        );
+
+        // Control (i) — the reach guard, one field varied. An IN-identity custom
+        // name builds a full deck, so the `Err` above is the postcondition
+        // refusing rather than a broken fixture. This is also the row that reds
+        // if the comparison is inverted or the `lands` term is dropped from the
+        // sum.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["White Addable".to_string()],
+        });
+
+        let deck = get_bot_deck_inner(1).expect("an in-identity custom card fills the deck");
+        assert_eq!(deck.commander.len(), 1, "commander = {:?}", deck.commander);
+        let land_total: usize = deck.lands.values().map(|&n| n as usize).sum();
+        assert_eq!(
+            deck.main_deck.len() + land_total,
+            60,
+            "lands = {:?}",
+            deck.lands
+        );
+
+        // Control (ii) — isolates the `commanders_required() > 0` conjunct: the
+        // identical off-identity `CustomOnly` list under `Premier` returns `Ok`.
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(1);
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Blue Addable".to_string()],
+        });
+
+        let deck = get_bot_deck_inner(1).expect("the four CR 905.1a kinds are unaffected");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
         clear_state();
     }

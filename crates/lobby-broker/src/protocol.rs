@@ -43,6 +43,22 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 42 — `FormatConfig.deck_size` changed from a bare `u16` to the adjacently
+///      tagged `DeckSizeRule` enum (`Minimum(u16)` / `Exactly(u16)`), because
+///      CR 903.13f(1) makes Commander Draft a command-zone format with a
+///      minimum rather than an exact size, and `GameFormat` gained a
+///      `CommanderDraft` variant (CR 903.13a). A PARSE bump like 23 and 36,
+///      not a capability bump like 24: `FormatConfig::deck_size` carries
+///      neither `#[serde(default)]` nor `deserialize_with`, so a v41 peer's
+///      `"deck_size": 60` fails against the adjacently tagged enum and a v42
+///      peer's `{"type":"Minimum","data":60}` fails against a v41 `u16` — the
+///      break is unconditional and runs in BOTH directions, for every format.
+///      `GameState::format_config`'s `#[serde(default = "FormatConfig::standard")]`
+///      does NOT rescue it: a field-level default applies only when the key is
+///      ABSENT, and an old peer sends the key present with the old inner shape,
+///      so the default never runs. The `GameFormat::CommanderDraft` variant is
+///      the second and narrower half — it breaks only when that variant is
+///      actually serialized.
 /// 41 — Operational failure responses are correlated to their pending action.
 /// 40 — Action rejection responses carry engine-owned structured context.
 /// 39 — `ManaRestriction::CannotCastSpellFromZone` adds a serialized
@@ -85,6 +101,31 @@ pub enum ServerErrorCode {
 ///      `skip_serializing_if`, but the client deleted `inferTargetNoun`, so a
 ///      v34 server that omits it would leave a new client naming no target at
 ///      all — silently, with no parse error to catch it.
+/// 34 — `DraftKind::CommanderDraft` (CR 903.13a) is serialized by draft
+///      WebSocket messages, and `DraftAction::Pick` renamed
+///      `card_instance_id: String` to `card_instance_ids: Vec<String>` to carry
+///      a whole CR 903.13b pick step. The rename is a PARSE bump, not a
+///      capability bump: `card_instance_ids` carries no `#[serde(default)]`, so
+///      a v33 `Pick` frame fails deserialization on a v34 peer and vice versa.
+///      `DraftAction::SubmitDeck::commanders` is additive and `#[serde(default)]`
+///      — exempt on its own; it is listed because 34 carries it, not because it
+///      forces 34.
+///      For a client that advertises `lobby_protocol_version`, this number
+///      does not gate lobby admission: both ends compare the LOBBY number
+///      instead, and the client echoes the broker's own `protocol_version`
+///      back (`openPhaseSocket.ts`) so the legacy window compares a value to
+///      itself. On the LEGACY path it DOES gate, at both ends — the
+///      `MIN_SUPPORTED_PROTOCOL ..= PROTOCOL_VERSION` window here, and a
+///      client-side ceiling in `ws-adapter.ts` that runs BEFORE that echo —
+///      so a client built in the window between the previous bump and the
+///      lobby-owned version is evicted by this move. No RELEASED tag sits on
+///      the legacy path with a `protocol_version` inside the post-bump
+///      window; every released build still on that path is already below its
+///      own ceiling and stays refused. Lobby gating lives in
+///      `LOBBY_PROTOCOL_VERSION` / `MIN_SUPPORTED_LOBBY_PROTOCOL`, which
+///      move to 2 alongside this bump for the `FormatConfig.deck_size`
+///      retype — that pair is what evicts a released cohort; see its own
+///      changelog entry for who and for what is lost.
 /// 33 — `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
 ///      from publishing an affirmative original/copy identity.
 /// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
@@ -143,7 +184,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -170,9 +211,33 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 2 — `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
+///     tagged `DeckSizeRule` — a field TYPE change, one of the four triggers
+///     listed above.
+///
+///     Three lobby carriers hold a `FormatConfig`, in both directions:
+///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
+///     and `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`]
+///     (broker → client). The client → broker one fails LOUDLY: serde refuses
+///     a bare integer for an adjacently tagged enum, so the frame is reported
+///     as [`ParsedFrame::Malformed`]. The two broker → client carriers cannot
+///     fail at all — the browser deserializes them with `JSON.parse`, which
+///     validates nothing, and the TypeScript declaration is erased at
+///     runtime. That asymmetry is WHY a version number is the only available
+///     signal here: on the broker → client half no per-frame check exists to
+///     reject a stale shape.
+///
+///     What the paired floor move evicts: the entire lobby session of every
+///     client built against lobby version 1 — hosting, browsing and joining
+///     alike — even though exactly one `LobbyClientMessage` variant actually
+///     carries a `FormatConfig` and the rest would still have parsed. It
+///     migrates nothing and does not make such a client work; it converts a
+///     mid-session create-game failure — and, on the join path, a `deck_size`
+///     in a shape that build cannot interpret and that no per-frame check on
+///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 1;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 2;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -182,7 +247,22 @@ pub const LOBBY_PROTOCOL_VERSION: u32 = 1;
 /// [`ParsedFrame::UnknownTag`] rejection scoped to the offending frame. That is
 /// a loud, per-feature failure; refusing the whole connection instead evicts a
 /// client over a variant it may never send.
-pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 1;
+///
+/// The LOWER bound exists for the opposite reason, and the cohort the sentence
+/// above names is exactly the one it evicts. A client that only browses and
+/// joins never sends `CreateGameWithSettings`, and every other
+/// [`LobbyClientMessage`] variant it uses still parses — so on the client →
+/// broker direction there is indeed little to refuse it over. But every
+/// `JoinTargetInfo` and `PeerInfo` that cohort RECEIVES carries the same
+/// [`FormatConfig`], on the direction where the deserializer is the browser's
+/// `JSON.parse`. It is handed a `deck_size` whose shape its build cannot
+/// interpret, nothing in that build reads the field, and a stale shape cannot
+/// fail there — no per-frame rejection is possible on that half at all. That
+/// absence of any other voice is the ground for the floor: the handshake is
+/// the only place the mismatch can be said out loud. The upper bound stays
+/// absent because [`ParsedFrame::UnknownTag`] is available there; the lower
+/// bound exists because on the broker → client half nothing equivalent is.
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 2;
 
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
@@ -245,7 +325,10 @@ pub struct DraftLobbyMetadata {
     /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
     /// human-readable cube name.
     pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", "Traditional", or "Sealed".
+    /// Draft kind label: "Quick", "Premier", "Traditional", "Sealed", or
+    /// "CommanderDraft". The field is a `String`, so adding a label is
+    /// documentation only — the wire shape is transparent to it and no
+    /// deserialization changes.
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
     /// set drafts. Backward-compatible: `#[serde(default)]` accepts
@@ -531,8 +614,8 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 1);
-        assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 1);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 2);
+        assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
             LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
             "the lobby must version its own message set, not alias the full-game one"
@@ -551,12 +634,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 41);
+        assert_eq!(PROTOCOL_VERSION, 42);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 40);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 41);
     }
 
     #[test]

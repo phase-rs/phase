@@ -23,6 +23,9 @@ use engine::game::interaction::{bind_interaction_authority, submit_interaction_w
 use engine::game::preview::{
     preview_action_with_rejection, preview_auto_payment_sources_with_rejection,
 };
+// Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
+// public surface, but this phase must not edit that file.
+use engine::game::deck_validation::draft_set_concessions;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -38,7 +41,7 @@ use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, Wa
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::{
     ActionRejection, ActionRejectionCode, GameAction, GameState, PlayerId, ReplayHeader, ReplayLog,
 };
@@ -848,13 +851,41 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         let Some(face) = db.get_face_by_name(name) else {
             return false;
         };
+        // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
+        // `GameFormat::CommanderDraft` silently answer "no card can be your
+        // commander" the moment the format became selectable. A wildcard here
+        // re-arms that for the next format, so every arm is named.
         match format {
             GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
             GameFormat::PauperCommander => is_commander_eligible(face),
+            // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
+            // affects PAIRING, not eligibility, so Commander Draft uses
+            // Commander's own predicate.
+            GameFormat::CommanderDraft => is_commander_eligible(face),
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
-            _ => false,
+            // Formats with no command zone: nothing can be designated.
+            GameFormat::Standard
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::Momir
+            | GameFormat::Planechase
+            | GameFormat::Archenemy
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Limited => false,
+            // Matches `evaluate_selected_format_summary`'s Custom arm: no
+            // CustomFormatRules resolver exists yet, so eligibility cannot be
+            // answered here. `false` is the fail-closed reading — a permissive
+            // `true` would offer an unvalidated card as a commander.
+            GameFormat::Custom(_) => false,
         }
     })
 }
@@ -865,13 +896,33 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
 /// Background) via the engine's single-authority `can_pair_commanders`. The
 /// frontend must not re-derive partner-pairing rules — it filters its candidate
 /// list through this. Returns an empty array if the database isn't loaded.
+///
+/// `draft_set_code` is the set code of the draft boosters this deck is being
+/// built from, or `null` for constructed play. CR 903.13f(3) conditions its
+/// partner grant on what the DRAFT contained, which is a session property no
+/// pair of card names can express — so the caller supplies the set code and the
+/// ENGINE maps it to a grant. The client never learns which sets grant what.
+///
+/// It is a REQUIRED third parameter, and `JsValue` rather than
+/// `Option<String>`, on purpose: that matches this file's existing convention
+/// for engine-typed arguments and makes a stale caller a compile error rather
+/// than a silent `undefined`.
 #[wasm_bindgen(js_name = commanderPartnerCandidates)]
 pub fn commander_partner_candidates(
     first_commander: String,
     candidates: JsValue,
+    draft_set_code: JsValue,
 ) -> Result<JsValue, JsValue> {
     let candidates: Vec<String> = serde_wasm_bindgen::from_value(candidates)
         .map_err(|e| JsValue::from_str(&format!("Invalid candidate list: {e}")))?;
+    let draft_set_code: Option<String> = serde_wasm_bindgen::from_value(draft_set_code)
+        .map_err(|e| JsValue::from_str(&format!("Invalid draft set code: {e}")))?;
+    // CR 903.13f(3): `None` means constructed play, which grants nothing.
+    let grant = draft_set_code
+        .as_deref()
+        .map(draft_set_concessions)
+        .unwrap_or_default()
+        .partner_grant;
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
@@ -879,7 +930,7 @@ pub fn commander_partner_candidates(
         };
         let eligible: Vec<String> = candidates
             .into_iter()
-            .filter(|name| can_pair_commanders(db, &first_commander, name))
+            .filter(|name| can_pair_commanders(db, &first_commander, name, grant))
             .collect();
         Ok(to_js(&eligible))
     })
@@ -1209,6 +1260,83 @@ pub fn initialize_multiplayer_host_game(
     )
 }
 
+/// Validate every seat's deck in a `DeckList` against the selected format,
+/// returning `Some(reasons)` at the first refusal and `None` when every seat
+/// passes. Each reason is labelled with the seat it came from, because the
+/// caller returns them in a JS error envelope.
+///
+/// Extracted out of `initialize_game_impl`'s `CARD_DB` closure so it can be
+/// driven from a native `#[cfg(test)]` module — the shells around it take
+/// `JsValue`s and return through `to_js`, which calls the real `JSON.parse`
+/// binding and panics outside a wasm32 runtime (see the note at the
+/// `ai_scoring_rng_bridge_tests` module). Pure extraction: no behaviour change.
+fn validate_deck_list_seats(
+    db: &CardDatabase,
+    deck_list: &DeckList,
+    game_format: GameFormat,
+    match_type: Option<MatchType>,
+    player_count: usize,
+) -> Option<Vec<String>> {
+    // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
+    // every seat, so the client submits empty decks — there is nothing
+    // client-side to validate. `load_and_hydrate_decks` fills each seat's
+    // library with the engine-owned fixed deck. Gate on the engine predicate,
+    // never a format literal.
+    if !game_format.supplies_fixed_deck() {
+        for (seat, deck) in [
+            ("Player".to_string(), &deck_list.player),
+            ("AI opponent".to_string(), &deck_list.opponent),
+        ] {
+            if let Err(reasons) = validate_name_deck_for_format_full(
+                db,
+                &deck.main_deck,
+                &deck.sideboard,
+                &deck.commander,
+                &deck.companion,
+                &deck.planar_deck,
+                &deck.scheme_deck,
+                &deck.signature_spell,
+                deck_list.draft_set_code.as_deref(),
+                game_format,
+                match_type,
+                player_count,
+            ) {
+                return Some(
+                    reasons
+                        .into_iter()
+                        .map(|reason| format!("{seat} deck: {reason}"))
+                        .collect(),
+                );
+            }
+        }
+        for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
+            let seat = format!("AI player {}", idx + 2);
+            if let Err(reasons) = validate_name_deck_for_format_full(
+                db,
+                &deck.main_deck,
+                &deck.sideboard,
+                &deck.commander,
+                &deck.companion,
+                &deck.planar_deck,
+                &deck.scheme_deck,
+                &deck.signature_spell,
+                deck_list.draft_set_code.as_deref(),
+                game_format,
+                match_type,
+                player_count,
+            ) {
+                return Some(
+                    reasons
+                        .into_iter()
+                        .map(|reason| format!("{seat} deck: {reason}"))
+                        .collect(),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Shared body of both initialize entry points. The guard lives in the shells
 /// (they are where `JsValue` envelopes are produced); this function assumes it
 /// has already passed and installs unconditionally.
@@ -1304,60 +1432,14 @@ fn initialize_game_impl(
             let borrow = cell.borrow();
             let db = borrow.as_ref().expect("CARD_DB presence checked above");
 
-            // Fixed-deck formats (Momir's Madness) supply the deck from the
-            // engine for every seat, so the client submits empty decks — there
-            // is nothing client-side to validate. `load_and_hydrate_decks` below
-            // fills each seat's library with the engine-owned fixed deck. Gate on
-            // the engine predicate, never a format literal.
-            if !game_format.supplies_fixed_deck() {
-                for (seat, deck) in [
-                    ("Player".to_string(), &deck_list.player),
-                    ("AI opponent".to_string(), &deck_list.opponent),
-                ] {
-                    if let Err(reasons) = validate_name_deck_for_format_full(
-                        db,
-                        &deck.main_deck,
-                        &deck.sideboard,
-                        &deck.commander,
-                        &deck.companion,
-                        &deck.planar_deck,
-                        &deck.scheme_deck,
-                        &deck.signature_spell,
-                        game_format,
-                        Some(state.match_config.match_type),
-                        count as usize,
-                    ) {
-                        return Some(
-                            reasons
-                                .into_iter()
-                                .map(|reason| format!("{seat} deck: {reason}"))
-                                .collect(),
-                        );
-                    }
-                }
-                for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
-                    let seat = format!("AI player {}", idx + 2);
-                    if let Err(reasons) = validate_name_deck_for_format_full(
-                        db,
-                        &deck.main_deck,
-                        &deck.sideboard,
-                        &deck.commander,
-                        &deck.companion,
-                        &deck.planar_deck,
-                        &deck.scheme_deck,
-                        &deck.signature_spell,
-                        game_format,
-                        Some(state.match_config.match_type),
-                        count as usize,
-                    ) {
-                        return Some(
-                            reasons
-                                .into_iter()
-                                .map(|reason| format!("{seat} deck: {reason}"))
-                                .collect(),
-                        );
-                    }
-                }
+            if let Some(reasons) = validate_deck_list_seats(
+                db,
+                &deck_list,
+                game_format,
+                Some(state.match_config.match_type),
+                count as usize,
+            ) {
+                return Some(reasons);
             }
 
             // Resolve the JS-supplied deck list against the card database.
@@ -5722,5 +5804,168 @@ mod engine_claim_guard_tests {
         );
 
         set_multiplayer_mode(false);
+    }
+}
+
+/// PF2 row 8 — the bridge's per-seat validation loop passes the draft set code
+/// at EVERY seat, not only the first two.
+///
+/// `#[cfg(test)]`, deliberately NOT
+/// `#[cfg(all(test, target_arch = "wasm32"))]`: the `wasm32`-gated `mod tests`
+/// in this file never executes in the native suite and no CI job runs
+/// `wasm-pack test`, so a row placed there would never run at all. These drive
+/// `validate_deck_list_seats` — extracted for exactly this reason — rather than
+/// `initialize_game_impl`, whose `JsValue` shell returns through `to_js` and
+/// panics outside a wasm32 runtime.
+///
+/// The card database here is fully SYNTHETIC: no name below is a real card, so
+/// there is no real-card premise to fabricate and no drift when card data is
+/// regenerated. What each face must satisfy is the PRODUCTION predicate
+/// `partner_types_for` reads for CR 903.13f(3): legendary creature ("can be a
+/// player's commander by itself"), colour identity of one or fewer colours, and
+/// no PRINTED partner keyword.
+#[cfg(test)]
+mod deck_list_seat_validation_tests {
+    use super::*;
+    use engine::database::CardDatabase;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::mana::ManaColor;
+    use std::collections::BTreeMap;
+
+    const LEGEND_A: &str = "Mono Legend A";
+    const LEGEND_B: &str = "Mono Legend B";
+
+    fn legendary_creature(name: &str) -> CardFace {
+        CardFace {
+            name: name.to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+            },
+            color_identity: vec![ManaColor::White],
+            ..CardFace::default()
+        }
+    }
+
+    fn plains() -> CardFace {
+        CardFace {
+            name: "Plains".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Plains".to_string()],
+            },
+            color_identity: vec![ManaColor::White],
+            ..CardFace::default()
+        }
+    }
+
+    fn test_db() -> CardDatabase {
+        let faces = vec![
+            legendary_creature(LEGEND_A),
+            legendary_creature(LEGEND_B),
+            plains(),
+        ];
+        let mut entries = BTreeMap::new();
+        for f in faces {
+            let mut obj = serde_json::to_value(&f).unwrap();
+            obj.as_object_mut().unwrap().insert(
+                "legalities".to_string(),
+                serde_json::json!({ "commander": "legal" }),
+            );
+            entries.insert(f.name.to_lowercase(), obj);
+        }
+        CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap()).unwrap()
+    }
+
+    /// CR 903.13f(1): at least 60 cards. Commanders-INSIDE, so
+    /// `total_cards == main_deck.len()`.
+    fn grant_dependent_seat() -> PlayerDeckList {
+        let mut main_deck = vec![LEGEND_A.to_string(), LEGEND_B.to_string()];
+        main_deck.extend(std::iter::repeat_n("Plains".to_string(), 58));
+        PlayerDeckList {
+            main_deck,
+            commander: vec![LEGEND_A.to_string(), LEGEND_B.to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// Three seats — `player`, `opponent` and one `ai_decks` entry — all
+    /// carrying the SAME grant-dependent pair, so a seat the loop skips is a
+    /// seat that reds.
+    fn three_seat_list(draft_set_code: Option<&str>) -> DeckList {
+        DeckList {
+            player: grant_dependent_seat(),
+            opponent: grant_dependent_seat(),
+            ai_decks: vec![grant_dependent_seat()],
+            draft_set_code: draft_set_code.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// REVERT-PROBE for this row: pass `deck_list.draft_set_code.as_deref()` in
+    /// the `player`/`opponent` loop of `validate_deck_list_seats` but leave the
+    /// `ai_decks` loop on `None` — the realistic partial-implementation defect.
+    /// The first two seats are then accepted and `ai_decks[0]` is refused, so
+    /// the returned value is `Some(["AI player 2 deck: Invalid partner
+    /// pairing: …"])` instead of `None`.
+    #[test]
+    fn every_seat_gets_the_draft_set_code_not_just_the_first_two() {
+        let db = test_db();
+
+        // NEGATIVE CONTROL FIRST, and it is the reach guard: without the set
+        // code this pair is grant-dependent at EVERY seat, so the fixture is
+        // not trivially legal and the `None` below is a real acceptance rather
+        // than a loop that never ran. The FIRST reason names the `"Player"`
+        // seat, which also pins that the extraction preserved the
+        // short-circuit-at-first-refusal shape.
+        let refused = validate_deck_list_seats(
+            &db,
+            &three_seat_list(None),
+            GameFormat::CommanderDraft,
+            None,
+            4,
+        )
+        .expect("no draft set code: the pair does not pair (CR 702.124)");
+        assert!(
+            refused[0].starts_with("Player deck:"),
+            "expected the Player seat to refuse first, got {refused:?}"
+        );
+        assert!(
+            refused[0].contains("partner"),
+            "expected the pairing reason specifically, got {refused:?}"
+        );
+
+        // REVERT-FAILING. Asserted as the whole `Option` being `None`: a bare
+        // "the ai seat is fine" cannot distinguish "the loop passed the code"
+        // from "the loop never ran".
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &three_seat_list(Some("CMM")),
+                GameFormat::CommanderDraft,
+                None,
+                4,
+            ),
+            None,
+            "CR 903.13f(3): every seat validates under the same grant"
+        );
+    }
+
+    /// Second hostile fixture — the paired negative for the one branch the
+    /// extraction moves. `supplies_fixed_deck()` is `matches!(self,
+    /// GameFormat::Momir)`, so `CommanderDraft` enters the block (proven by the
+    /// row above) and `Momir` skips it entirely: a fixed-deck format supplies
+    /// every seat's deck from the engine, so there is nothing client-side to
+    /// validate.
+    #[test]
+    fn a_fixed_deck_format_skips_seat_validation_entirely() {
+        let db = test_db();
+        assert_eq!(
+            validate_deck_list_seats(&db, &three_seat_list(None), GameFormat::Momir, None, 4),
+            None,
+        );
     }
 }

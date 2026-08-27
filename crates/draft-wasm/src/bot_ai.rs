@@ -41,6 +41,43 @@ pub fn bot_pick(
     }
 }
 
+/// Select `count` distinct card indices for a bot's pick step, or every index
+/// when the pack holds fewer than `count`.
+///
+/// CR 903.13b: a Commander Draft seat drafts two cards per step, so a bot in
+/// such a pod must return two indices or the round never completes. Composed
+/// from [`bot_pick`] applied to the shrinking remainder; *which* cards a bot
+/// takes for a multi-card step is deliberately untuned (out of scope).
+///
+/// Returns indices into the original `pack` slice, in selection order.
+pub fn bot_picks(
+    pack: &[DraftCardInstance],
+    count: usize,
+    difficulty: AiDifficulty,
+    prior_picks: &[DraftCardInstance],
+    card_db: Option<&CardDatabase>,
+    rng: &mut impl Rng,
+) -> Vec<usize> {
+    // Candidates carry their original index so the caller can map back to
+    // `instance_id`s before mutating anything. Held as two parallel vectors
+    // rather than a `Vec<(usize, _)>` so that `bot_pick` can borrow the cards as
+    // the contiguous slice it takes, without rebuilding one per iteration:
+    // `swap_remove(position)` applies the same permutation to both, so they stay
+    // aligned, and the whole walk costs one clone of the pack instead of
+    // `count + 1`.
+    let mut candidates: Vec<DraftCardInstance> = pack.to_vec();
+    let mut original_indices: Vec<usize> = (0..pack.len()).collect();
+    let mut picked = Vec::with_capacity(count.min(candidates.len()));
+
+    for _ in 0..count.min(pack.len()) {
+        let position = bot_pick(&candidates, difficulty, prior_picks, card_db, rng);
+        candidates.swap_remove(position);
+        picked.push(original_indices.swap_remove(position));
+    }
+
+    picked
+}
+
 /// Pick the highest-rarity card. Ties broken by first occurrence.
 fn pick_by_rarity(pack: &[DraftCardInstance]) -> usize {
     pack.iter()
@@ -238,5 +275,69 @@ fn curve_bonus(cmc: u8, pick_number: u8) -> i8 {
                 0
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    fn pack(size: usize) -> Vec<DraftCardInstance> {
+        (0..size)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: "TST".to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect()
+    }
+
+    /// CR 903.13b: a bot in a two-card pod must return two usable indices.
+    ///
+    /// A direct unit test of a pre-wired helper: `count > 1` is not reachable
+    /// from any production path in this phase, because the wasm bot loop is
+    /// `Quick`-gated and `Quick` has `cards_per_pick == 1`. Saying so is more
+    /// useful than implying production coverage.
+    #[test]
+    fn bot_picks_returns_n_distinct_indices() {
+        let cards = pack(14);
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+
+        let picked = bot_picks(&cards, 2, AiDifficulty::Medium, &[], None, &mut rng);
+        assert_eq!(picked.len(), 2);
+        assert_ne!(picked[0], picked[1], "a bot cannot draft one card twice");
+        assert!(picked.iter().all(|index| *index < cards.len()));
+
+        // Clamped: a count larger than the pack yields every index exactly once.
+        let small = pack(1);
+        let clamped = bot_picks(&small, 2, AiDifficulty::Medium, &[], None, &mut rng);
+        assert_eq!(clamped, vec![0]);
+
+        // Degenerate counts.
+        assert!(bot_picks(&cards, 0, AiDifficulty::Medium, &[], None, &mut rng).is_empty());
+        assert!(bot_picks(&[], 2, AiDifficulty::Medium, &[], None, &mut rng).is_empty());
+
+        // The single-card case must still agree with `bot_pick` itself, since
+        // that is the path every existing kind takes.
+        let mut rng_a = ChaCha20Rng::seed_from_u64(7);
+        let mut rng_b = ChaCha20Rng::seed_from_u64(7);
+        assert_eq!(
+            bot_picks(&cards, 1, AiDifficulty::Medium, &[], None, &mut rng_a),
+            vec![bot_pick(
+                &cards,
+                AiDifficulty::Medium,
+                &[],
+                None,
+                &mut rng_b
+            )]
+        );
     }
 }

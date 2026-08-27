@@ -1466,6 +1466,11 @@ export function GameProvider({
           player: ExpandedDeck;
           opponent: ExpandedDeck;
           ai_decks: ExpandedDeck[];
+          // CR 903.13f(3): the draft's set code, written by
+          // `podCommanderDeckPayload`.  Stated here because the payload
+          // carries it; it is passed through opaquely to the engine, so this
+          // annotation documents the contract rather than changing behaviour.
+          draft_set_code?: string | null;
         };
         try {
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);

@@ -3,6 +3,26 @@
 # its READ-ONLY pristine dump, stamping the `effect_kind` field that upstream
 # #6718 (0468df1f4) added to `TargetSelectionSlot` without `#[serde(default)]`.
 #
+# ⚠ THIS SCRIPT PREDATES UPSTREAM U5 AND HAS NO `deck_size` STAGE.
+# U5 typed `FormatConfig::deck_size` as `DeckSizeRule`, an adjacently-tagged enum
+# (`#[serde(tag = "type", content = "data")]`, crates/engine/src/types/format.rs)
+# carrying no `#[serde(default)]` and no untagged fallback. Every pristine dump in
+# this corpus predates that change and holds a bare `"deck_size": N`, which the
+# strict decoder REJECTS. Regeneration from pristine is therefore NECESSARY BUT NOT
+# SUFFICIENT: the bare `N` must additionally become `{"type":"<Minimum|Exactly>",
+# "data":N}`, with the variant taken from the sibling `format` field.
+#
+# That mapping belongs to the ENGINE and is not recoverable from the dump's shape:
+# CR 903.13f(1) makes Commander Draft a command-zone format with a MINIMUM deck
+# size, so `command_zone` does not predict exactness. Rather than guess, this
+# script REFUSES to emit an untagged artifact -- see `deck_size_gate` below.
+#
+# THERE IS NO IN-REPO REMEDY, and the refusal now says so instead of sending the
+# reader in a circle. The pristine root is external to this checkout and READ-ONLY
+# (below), and `--expect-sha256` pins its digest: "migrate it" means editing a dump
+# this repo does not contain, then re-pinning that argument to the new digest.
+# Out-of-repo work this script can neither perform nor verify.
+#
 # WHY A REGENERATION AND NOT A SERDE SHIM. The maintainer publicly declined both
 # `#[serde(default)]` and an upstream save migration for this field
 # (https://github.com/phase-rs/phase/pull/6718#issuecomment-5111207689 — "alpha
@@ -68,7 +88,8 @@ OUT=""
 CONTROL_MODE=0
 
 usage() {
-  sed -n '2,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Range tracks the header block, which now ends at the TOOLCHAIN paragraph.
+  sed -n '2,77p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-1}"
 }
 
@@ -200,6 +221,113 @@ cleanup_stage_files() {
 }
 trap cleanup_stage_files EXIT INT TERM
 
+# DECK-SIZE GATE. The one field this recipe does NOT migrate, refused rather than
+# emitted. Without it the script exits 0 and prints its `MIGRATED` banner over an
+# artifact the strict decoder cannot load (measured on genuine pre-U5 dump content:
+# exit 0, `deck_size` still a bare `100`). A silent success is the worst failure
+# shape here, because the artifact it blesses is a committed fixture.
+#
+# A REFUSAL, NOT A MIGRATION, deliberately. Repairing the value would mean choosing
+# `Minimum` vs `Exactly` from the sibling `format` field, and that table is the
+# ENGINE's (`crates/engine/src/types/format.rs`). Nothing in the dump's shape
+# predicts it — CR 903.13f(1) makes Commander Draft a command-zone format with a
+# MINIMUM deck size — so a jq `format`->variant table would re-derive an engine
+# mapping in jq, which is the one thing the header's `EffectKind` rule forbids too.
+#
+# THE `EffectKind` PRECEDENT IS CITED FOR THAT PRINCIPLE, NOT FOR THIS REMEDY — the
+# two share the principle and DIVERGE on the remedy, so reading it as authority for
+# refusing gets it backwards. `EffectKind` resolved the same tension by
+# PARAMETERIZING: an explicit `--effect-kind`, precisely so the ENGINE stays the
+# authority. The symmetric third route here is therefore a `--deck-size Exactly:100`
+# operator argument, and it is declined for a reason that does NOT hold there: the
+# OPERATOR'S ERROR WOULD BE UNCAUGHT. A wrong `--effect-kind` fails a tracked row —
+# the reading test beside `load_dellian_dump` in `game/engine.rs` compares the WHOLE
+# slot (`TargetSelectionSlot` derives `PartialEq`/`Eq`, and `effect_kind` is one of
+# its fields) against `ability_utils::build_target_slots`. A wrong `--deck-size`
+# fails nothing, measured: both variants deserialize; NO test in this tree asserts
+# which variant a LOADED fixture carries (every `deck_size` assertion in the tree
+# runs against a `FormatConfig` constructor or a registry
+# default — none against a fixture); the only production read of a PERSISTED value
+# (`match_flow.rs`) goes through `min_cards()`, which returns the payload for BOTH
+# variants and so cannot discriminate them at equal payloads; and
+# `deck_validation.rs` re-derives the rule from the format enum, never reading the
+# persisted field at all. The client's mirror of the enum (`adapter/types.ts`) is
+# likewise keyed off the format registry, not off a loaded save, and today reads
+# only `.data`. An operator typo would therefore ship silently. Refusing is the
+# weaker remedy, and the safe one until a reading test exists that can hold an
+# operator to `--deck-size` the way that row holds one to `--effect-kind`.
+#
+# One authority, guarded here.
+#
+# GUARDS THE AUTHORITY, NOT THE CALL SITES. Every write in this script — the
+# production `regenerate patched "$OUT"`, both control arms, and any caller added
+# later — funnels through `regenerate`, which calls this, so one gate covers them
+# all. Patching the known callers instead would leave the next one unprotected.
+#
+# A FUNCTION, NOT AN INLINE BLOCK, so the self-test below can drive the SAME rule the
+# production path runs — the reason `transform` is one definition too. Inline, no
+# corpus fixture could witness a refusal (all 16 committed containers that carry a
+# `deck_size` are already tagged, and the pristine root is external to this
+# checkout), so nothing in the tree failed when the gate was deleted or inverted.
+# RESIDUAL of that arm, measured: neutering the RULE turns the self-test red every
+# way tried (refusal dropped, comparison inverted, probe blinded, shape validation
+# removed, whole function deleted), but removing ONLY the call below leaves it green.
+# Arm (c″) is what makes the "shape validation removed" case true. With only (c)/(c′)
+# — bare `N` against fully-tagged — the two shape clauses were unreachable from the
+# self-test: dropping both still reported DECK_SIZE_REFUSED=true while the gate began
+# accepting `{"type":"Exactly"}`, `{}` and `{"type":123,"data":"x"}`.
+#
+# THE CALL-SITE RESIDUAL IS UNANSWERED, and the `stage_path` precedent does NOT cover
+# it. `stage_path`'s call-site blind spot IS answered, by a RUNTIME GUARD in
+# `regenerate` (the `dirname` comparison below): reverting that one binding to
+# `mktemp -t` aborts with "stage not beside destination" — measured. `deck_size_gate`
+# has no analogue. Deleting its call leaves every self-test green (measured), and no
+# test or CI job in this tree invokes this script at all, so nothing else fails either.
+# Adjacency to the write it guards is a convention, not a check.
+#
+# CLOSING IT COSTS A `zip` DEPENDENCY, not a pristine archive. An arm that points
+# `regenerate`'s `$PRISTINE` global at a SYNTHETIC zip built in the self-test's own
+# `$tmp` closes it in a dozen-odd lines — measured green with the call below, red
+# without it, and no real dump is required. But `zip` is absent from the required-tool
+# preflight above, so that arm would make every run of this script depend on a tool it
+# does not otherwise need. The option is recorded here rather than taken.
+#
+# Keyed on SHAPE AT EVERY DEPTH rather than a fixed path: this corpus carries
+# `format_config` under both envelopes (top level and beneath `gameState`).
+# ABSENCE IS LEGAL and passes: measured over the 22 `*.json.gz` under
+# crates/engine/tests/fixtures/, 6 carry no `deck_size` at any depth (the four under
+# cr733/, plus combo_infinite_pile_decklist_4p and integration_cards) and the other
+# 16 all carry it, so keying on presence would fail those 6 spuriously. The bare
+# "two" this line used to quote counted only the 18 TOP-LEVEL archives, which is why
+# the population is named here rather than left to the reader.
+#
+# RESIDUAL, so this is not read as more than it is: it checks the tagged SHAPE
+# (`type` a string, `data` a number), not that the tag names a live variant.
+# Pinning `Minimum|Exactly` here would re-copy an engine enum into bash and rot
+# silently when a variant is added; a bogus tag is the decoder's business. Over the
+# only input this corpus produces — bare `N` from a pre-U5 dump — the shape check
+# is fully discriminating.
+deck_size_gate() {   # deck_size_gate <staged> <dest> — refuse, and reap the stage
+  local staged="$1" dest="$2" bad
+  bad="$(gzip -dc "$staged" | jq -c '
+    [ paths as $p | select($p[-1] == "deck_size") | getpath($p) as $v
+      | select(($v | type) != "object"
+               or ($v.type | type) != "string"
+               or ($v.data | type) != "number")
+      | {at: ($p | join(".")), value: $v} ]')"
+  [ "$bad" != "[]" ] || return 0
+  echo "REFUSING TO EMIT $dest — untagged deck_size (this script has no deck_size stage; see the header)" >&2
+  echo "  offending: $bad" >&2
+  echo "  required:  {\"type\":\"<Minimum|Exactly>\",\"data\":N} — DeckSizeRule, serde tag=\"type\" content=\"data\"" >&2
+  echo "  the variant follows from the sibling \`format\` field; the ENGINE owns that mapping" >&2
+  echo "  (crates/engine/src/types/format.rs) and this script will not infer it." >&2
+  echo "  NO IN-REPO REMEDY: the pristine dump is external to this checkout, read-only, and" >&2
+  echo "  digest-pinned by --expect-sha256; migrating it and re-pinning that digest is" >&2
+  echo "  out-of-repo work this script can neither perform nor verify." >&2
+  rm -f "$staged"
+  return 1
+}
+
 regenerate() {   # regenerate <patched|unpatched> <destination>
   local mode="$1" dest="$2" staged
   mkdir -p "$(dirname "$dest")"
@@ -220,12 +348,13 @@ regenerate() {   # regenerate <patched|unpatched> <destination>
     echo "REGENERATION FAILED (fail-closed, $dest left untouched)" >&2
     return 1
   fi
+  deck_size_gate "$staged" "$dest" || return 1
   # A failed `mv` leaves `$staged` in place; the trap reaps it on exit.
   mv "$staged" "$dest" || return 1
 }
 
-# PRE-FLIGHT SELF-TESTS for the two properties that no corpus fixture can witness,
-# because both are about what happens to inputs this corpus does not contain.
+# PRE-FLIGHT SELF-TESTS for the three properties that no corpus fixture can witness,
+# because each is about what happens to inputs this corpus does not contain.
 #
 # They run before anything is written, on synthetic inputs, through the SAME
 # `transform` the migration uses — a self-test that re-spelled the recipe would be
@@ -236,11 +365,15 @@ regenerate() {   # regenerate <patched|unpatched> <destination>
 #                  exists" is not the claim; "the file is unchanged" is.
 #   (b) PASS-THROUGH — a non-`gameState` envelope must survive the projection
 #                  unchanged, not become `{"gameState":null}`.
+#   (c) DECK-SIZE GATE — a bare `deck_size` must be REFUSED, and so must a MALFORMED
+#                  tagged one, which is what reaches the shape clauses. Every committed
+#                  fixture is already tagged and the pristine dumps are external, so this
+#                  is the only thing in the tree that fails if the gate stops refusing.
 #
 # Each has a paired POSITIVE control, or it would pass against a transform that did
 # nothing at all.
 selftests() {
-  local tmp sentinel out rc probe_stage
+  local tmp sentinel out rc probe_stage shape
   tmp="$(mktemp -d -t migrate-dump-selftest-XXXXXX)"
 
   # (a0) THE MECHANISM ITSELF: the stage file must be minted in the destination's OWN
@@ -318,7 +451,41 @@ selftests() {
     rm -rf "$tmp"; return 1
   fi
 
-  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true (both with positive controls)"
+  # (c) DECK-SIZE GATE refuses the pre-U5 shape, driven through `deck_size_gate` —
+  # the same function `regenerate` calls, not a re-spelling of its rule.
+  printf '%s\n' '{"format_config":{"deck_size":100}}' | gzip -9 -n > "$tmp/bare.json.gz"
+  if deck_size_gate "$tmp/bare.json.gz" "$tmp/never" 2>/dev/null; then
+    echo "SELFTEST DECK_SIZE_REFUSED=false — a bare deck_size was accepted; the script would" >&2
+    echo "  print MIGRATED over an artifact the strict decoder cannot load" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  # (c′) POSITIVE control — the tagged shape must PASS, or (c) is equally satisfied by
+  # a gate that refuses everything, which would block the whole corpus instead.
+  printf '%s\n' '{"gameState":{"format_config":{"deck_size":{"type":"Exactly","data":100}}}}' \
+    | gzip -9 -n > "$tmp/tagged.json.gz"
+  if ! deck_size_gate "$tmp/tagged.json.gz" "$tmp/never"; then
+    echo "SELFTEST DECK_SIZE_REFUSED=vacuous — the gate also refuses a correctly tagged value" >&2
+    rm -rf "$tmp"; return 1
+  fi
+
+  # (c″) The SHAPE clauses, which neither (c) nor (c′) can reach: those two span bare
+  # `N` against fully-tagged, so dropping `($v.type|type) != "string"` and
+  # `($v.data|type) != "number"` left both of them green while the gate started
+  # accepting `{"type":"Exactly"}`, `{}` and `{"type":123,"data":"x"}`. ONE SHAPE PER
+  # CLAUSE, because a single malformed value only proves the OR fired, not which arm of
+  # it: `{"type":"Exactly"}` is refused by the `data` clause ALONE and
+  # `{"type":123,"data":100}` by the `type` clause ALONE (measured, dropping each in
+  # turn). Driven through `deck_size_gate` itself, like (c), on the same in-memory path.
+  for shape in '{"type":"Exactly"}' '{"type":123,"data":100}'; do
+    printf '%s\n' "{\"format_config\":{\"deck_size\":$shape}}" | gzip -9 -n > "$tmp/shape.json.gz"
+    if deck_size_gate "$tmp/shape.json.gz" "$tmp/never" 2>/dev/null; then
+      echo "SELFTEST DECK_SIZE_REFUSED=shape-blind — deck_size $shape was accepted; the" >&2
+      echo "  shape clauses no longer discriminate, so a malformed tag reaches the fixture" >&2
+      rm -rf "$tmp"; return 1
+    fi
+  done
+
+  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true (each with a positive control)"
   rm -rf "$tmp"
 }
 

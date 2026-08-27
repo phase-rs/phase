@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
     "quick": {
@@ -15,6 +16,10 @@
       "step2": "Open 3 packs of 14 cards — pick one, pass the rest",
       "step3": "Packs alternate direction each round — left, right, left",
       "step4": "After drafting, build a 40-card deck and play tournament matches"
+    },
+    "commander": {
+      "step2": "Pick two cards from each pack, then pass the rest",
+      "step4": "After drafting, build a 60-card Commander deck and play one multiplayer game"
     }
   },
   "steps": {
@@ -82,7 +87,8 @@
     "waitingNext": "Waiting for next pack...",
     "cardsInPack": "{{count}} cards in pack",
     "picking": "Picking…",
-    "autoPick": "Auto-pick"
+    "autoPick": "Auto-pick",
+    "selectionProgress": "{{selected}} of {{required}} selected"
   },
   "sealedOpening": {
     "title": "Open your sealed pool",
@@ -103,6 +109,7 @@
     "sortColor": "Color",
     "sortType": "Type",
     "sortCmc": "CMC",
+    "grantedFiller": "+ up to {{maximum}} × {{name}} (commander only)",
     "groups": {
       "white": "White",
       "blue": "Blue",
@@ -165,7 +172,10 @@
     "landCount_one": "{{count}} land",
     "landCount_other": "{{count}} lands",
     "readyToSubmit": "ready to submit",
-    "moreNeeded": "{{count}} more needed"
+    "moreNeeded": "{{count}} more needed",
+    "commanderRequired": "Designate a commander from your pool to submit.",
+    "commanderUnavailable": "Commander designation is unavailable right now — the card database could not be loaded.",
+    "grantedFiller": "Your pool also includes up to {{maximum}} × {{name}}, usable only as your commander."
   },
   "landing": {
     "title": "Draft",
@@ -187,6 +197,10 @@
     "podDraft": {
       "title": "Pod Draft",
       "description": "Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
+    },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draft two cards at a time in a pod, build a 60-card Commander deck, then play one multiplayer game."
     },
     "podInProgress": "Pod Draft in Progress",
     "guestPodInProgress": "Joined Pod Ready to Reconnect",
@@ -328,6 +342,8 @@
     "kindTraditionalDesc": "Best-of-three tournament matches after deckbuilding, with sideboarding between games.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Open six packs directly into each player's pool, then build a best-of-one tournament deck.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Each player drafts two cards at a time and builds a 60-card Commander deck, then the pod plays one multiplayer game.",
     "tournamentFormat": "Tournament Format",
     "tournamentSwiss": "Swiss",
     "tournamentSwissDesc": "Everyone keeps playing through three rounds, even after a loss.",
@@ -390,6 +406,7 @@
   },
   "podComplete": {
     "title": "Draft Complete",
+    "launchCommanderGame": "Start Commander Game",
     "returnToMenu": "Return to Menu"
   },
   "podError": {

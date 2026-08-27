@@ -1,7 +1,12 @@
 use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
+use crate::pick_pass::required_pick_count;
+use crate::session::{concession_set_code, session_concessions};
 use crate::types::*;
+// Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
+// public surface, but this phase must not edit that file.
+use engine::game::deck_validation::GrantableCommanderFiller;
 use engine::types::match_config::MatchConfig;
 
 /// A single entry in the standings table.
@@ -243,6 +248,15 @@ pub struct DraftPlayerView {
     pub pass_direction: PassDirection,
     /// The viewer's current pack (None if between packs or not their turn)
     pub current_pack: Option<Vec<DraftCardInstance>>,
+    /// CR 903.13b: how many cards the viewer's next pick step takes from
+    /// `current_pack` — `min(cards_per_pick, remaining pack size)`, the exact
+    /// count `pick_pass::apply_pick_inner` enforces. 0 when there is no
+    /// pending pack.
+    ///
+    /// Published so the display layer never re-derives it: the count is 1 for
+    /// the four CR 905.1a kinds, 2 for `CommanderDraft`, and drops to 1 on an
+    /// odd pack's final step — a distinction no per-kind lookup can make.
+    pub required_pick_count: usize,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
     /// Drafted cards whose effects can be activated during a later pick.
@@ -258,12 +272,44 @@ pub struct DraftPlayerView {
     pub seats: Vec<SeatPublicView>,
     /// Total cards per pack (for UI progress display)
     pub cards_per_pack: u8,
+    /// CR 903.13b: how many pick STEPS this session's pack contains for this
+    /// kind — `cards_per_pack.div_ceil(cards_per_pick)`. `pick_number` counts
+    /// steps, not cards, so this is the denominator a progress display can
+    /// actually reach: a 14-card Commander pack is 7 steps, not 14.
+    ///
+    /// Published so the display layer never re-derives it. A client that
+    /// divided `cards_per_pack` itself would be a second authority for
+    /// CR 903.13b's step rule, and it would be right for the four CR 905.1a
+    /// kinds and wrong by 2x for `CommanderDraft`.
+    pub pick_steps_per_pack: u8,
     /// Total pack count (for UI progress display)
     pub pack_count: u8,
     /// Minimum main deck size for this draft.
     pub min_deck_size: usize,
     /// Cards available in unlimited quantity during deck construction.
     pub addable_cards: Vec<String>,
+    /// CR 903.13e: the commander filler this draft's booster set grants, and
+    /// its cap. `None` when the set grants none.
+    ///
+    /// Deliberately NOT folded into `addable_cards`, whose contract is
+    /// *unlimited quantity* -- the exact property CR 903.13e denies. Engine-
+    /// derived: the client must never re-derive it from the set code.
+    /// Rendered by `PoolPanel` (the grant line) and by `LimitedDeckBuilder`
+    /// (the addable list); the cap and the CR 903.13e commander-condition stay
+    /// engine-enforced in `validate_limited_deck`.
+    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
+    /// CR 903.13f(3): the set code this draft was latched to, as an OPAQUE
+    /// courier token for the engine functions that map a set code to a
+    /// deck-construction concession (`commanderPartnerCandidates`). `None` for
+    /// a cube and for every kind outside CR 903.13's scope.
+    ///
+    /// The display layer passes it back to the engine and NEVER interprets it:
+    /// which sets grant what is engine knowledge, tabled once in
+    /// `deck_validation::DRAFT_SET_CONCESSIONS`. In particular it must never be
+    /// reconstructed from a pool card's `set_code` -- the filler cards are
+    /// printed in the granting sets' own boosters, so a card's printing is
+    /// evidence of the grant in neither direction.
+    pub draft_set_code: Option<String>,
     /// Milliseconds remaining on the pick timer. Always None from the reducer;
     /// the P2P host injects the authoritative value on the wire.
     pub timer_remaining_ms: Option<u32>,
@@ -304,9 +350,17 @@ pub struct SpectatorDraftView {
     pub pass_direction: PassDirection,
     pub seats: Vec<SeatPublicView>,
     pub cards_per_pack: u8,
+    /// CR 903.13b: mirrors `DraftPlayerView::pick_steps_per_pack`; see that
+    /// field. Present on both views because `DraftProgress` renders either
+    /// shape through one shared prop contract.
+    pub pick_steps_per_pack: u8,
     pub pack_count: u8,
     pub min_deck_size: usize,
     pub addable_cards: Vec<String>,
+    /// CR 903.13e: the commander filler this draft's booster set grants, and
+    /// its cap. Mirrors `DraftPlayerView`'s field; see that one for why it is
+    /// separate from `addable_cards`.
+    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
     pub standings: Vec<StandingEntry>,
     pub current_round: u8,
     pub tournament_format: TournamentFormat,
@@ -401,9 +455,15 @@ pub fn filter_for_spectator(
         pass_direction: session.pass_direction,
         seats,
         cards_per_pack: session.config.cards_per_pack,
+        pick_steps_per_pack: session
+            .kind
+            .procedure()
+            .pick_steps_per_pack(session.config.cards_per_pack),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
+        // CR 903.13e: read from the latch, never re-derived here.
+        grantable_commander_filler: session_concessions(session).filler,
         standings,
         current_round: session.current_round,
         tournament_format: session.config.tournament_format,
@@ -439,11 +499,16 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
     let draft_effects = face_up_draft_cards(&pool);
-    let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
-        pool.chunks(usize::from(session.config.cards_per_pack))
-            .map(ToOwned::to_owned)
-            .collect()
-    });
+    // Only an all-at-once kind has unopened packs to project onto the view; a
+    // pick-and-pass kind's pool is not chunked into packs.
+    let sealed_packs = match session.kind.procedure().distribution {
+        PackDistribution::AllAtOnce => Some(
+            pool.chunks(usize::from(session.config.cards_per_pack))
+                .map(ToOwned::to_owned)
+                .collect(),
+        ),
+        PackDistribution::PickAndPass => None,
+    };
     let pool_groups = DraftPoolGroups::from_pool(&pool);
 
     let is_drafting = session.status == DraftStatus::Drafting;
@@ -505,15 +570,25 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         current_pack,
+        required_pick_count: required_pick_count(session, seat_index),
         pool,
         draft_effects,
         pool_groups,
         sealed_packs,
         seats,
         cards_per_pack: session.config.cards_per_pack,
+        pick_steps_per_pack: session
+            .kind
+            .procedure()
+            .pick_steps_per_pack(session.config.cards_per_pack),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
+        // CR 903.13e: read from the latch, never re-derived here.
+        grantable_commander_filler: session_concessions(session).filler,
+        // CR 903.13f(3): the same latch, published for the engine's partner
+        // query. `map(str::to_string)` because the view is owned.
+        draft_set_code: concession_set_code(session).map(str::to_string),
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
@@ -974,7 +1049,7 @@ mod tests {
             session,
             DraftAction::Pick {
                 seat: 0,
-                card_instance_id: card_id,
+                card_instance_ids: vec![card_id],
             },
             None,
         )
@@ -1570,7 +1645,7 @@ mod tests {
             &mut session,
             DraftAction::Pick {
                 seat: 1,
-                card_instance_id: card_id,
+                card_instance_ids: vec![card_id],
             },
             None,
         )
@@ -1651,6 +1726,7 @@ mod tests {
             DraftAction::SubmitDeck {
                 seat: 0,
                 main_deck: main_deck.clone(),
+                commanders: Vec::new(),
             },
             None,
         )
@@ -1746,7 +1822,7 @@ mod tests {
             &mut session,
             DraftAction::Pick {
                 seat: 0,
-                card_instance_id: card_id,
+                card_instance_ids: vec![card_id],
             },
             None,
         )
@@ -2001,5 +2077,182 @@ mod tests {
         let view = filter_for_spectator(&session, SpectatorVisibility::Public);
         assert_eq!(view.pairings.len(), 4);
         assert!(view.pools.is_none());
+    }
+
+    /// U7 row 14 -- CR 903.13e: the grant is PUBLISHED on both views, on one
+    /// axis with opposite verdicts.
+    ///
+    /// Both builders are asserted because one correctly-wired builder must not
+    /// be able to vouch for the other. The `Some` half is the reach guard:
+    /// without it, "the field is `None`" is satisfied by a builder that
+    /// hard-codes `None`, which is exactly the mis-wiring this row exists to
+    /// catch. And the `Some` half asserts EQUALITY WITH THE TABLE rather than
+    /// naming a card, which additionally proves the builder reads the latch
+    /// instead of constructing its own value.
+    ///
+    /// Rendering landed in phase 8 -- `PoolPanel`'s grant line and
+    /// `LimitedDeckBuilder`'s addable list -- while this test still pins the
+    /// publishing half.
+    #[test]
+    fn both_views_publish_the_latched_commander_filler() {
+        fn commander_draft_session(set_code: &str) -> DraftSession {
+            let (mut session, _) = test_session(4);
+            session.kind = DraftKind::CommanderDraft;
+            session.config.kind = DraftKind::CommanderDraft;
+            session.config.source = DraftSource::Set {
+                code: set_code.to_string(),
+            };
+            session
+        }
+
+        let granting = commander_draft_session("CMM");
+        let expected = engine::game::deck_validation::draft_set_concessions("CMM").filler;
+        assert!(
+            expected.is_some(),
+            "reach guard: CR 903.13e names Commander Masters as a granting set"
+        );
+
+        assert_eq!(
+            filter_for_player(&granting, 0).grantable_commander_filler,
+            expected
+        );
+        assert_eq!(
+            filter_for_spectator(&granting, SpectatorVisibility::default())
+                .grantable_commander_filler,
+            expected
+        );
+
+        let non_granting = commander_draft_session("NEO");
+        assert_eq!(
+            filter_for_player(&non_granting, 0).grantable_commander_filler,
+            None
+        );
+        assert_eq!(
+            filter_for_spectator(&non_granting, SpectatorVisibility::default())
+                .grantable_commander_filler,
+            None
+        );
+    }
+
+    /// V4 -- CR 903.13f(3): `DraftPlayerView.draft_set_code` publishes the
+    /// LATCHED concession set code, and publishes it only for a Commander
+    /// Draft whose source is a set.
+    ///
+    /// Three rows on one axis, because a single `Some` row is satisfied by
+    /// `session.config.source.set_code()` -- which returns the CUBE ID for a
+    /// cube and a code for every kind -- and would publish a grant CR 903.13
+    /// does not make. Row (i) carries a reach guard (`grantable_commander_filler`
+    /// is `Some`) so the two `None` rows cannot be vacuous greens from a
+    /// fixture that concedes nothing in the first place.
+    #[test]
+    fn publishes_the_latched_concession_set_code_only_for_a_commander_draft_from_a_set() {
+        fn session_with(kind: DraftKind, source: DraftSource) -> DraftSession {
+            let (mut session, _) = test_session(4);
+            session.kind = kind;
+            session.config.kind = kind;
+            session.config.source = source;
+            session
+        }
+
+        // (i) Commander Draft from a granting set: the latch is published.
+        let from_set = session_with(
+            DraftKind::CommanderDraft,
+            DraftSource::Set {
+                code: "CMM".to_string(),
+            },
+        );
+        let from_set_view = filter_for_player(&from_set, 0);
+        assert!(
+            from_set_view.grantable_commander_filler.is_some(),
+            "reach guard: CR 903.13e names Commander Masters as a granting set, \
+             so this fixture really is a conceding session"
+        );
+        assert_eq!(from_set_view.draft_set_code, Some("CMM".to_string()));
+
+        // (ii) A cube contains no draft boosters from any set. `set_code()`
+        // would answer with the cube ID here, which is the wrong answer.
+        let from_cube = session_with(
+            DraftKind::CommanderDraft,
+            DraftSource::Cube {
+                id: "CMM".to_string(),
+                name: "Test Cube".to_string(),
+            },
+        );
+        assert_eq!(filter_for_player(&from_cube, 0).draft_set_code, None);
+
+        // (iii) CR 903.13 scopes both concessions to Commander Draft.
+        let sealed = session_with(
+            DraftKind::Sealed,
+            DraftSource::Set {
+                code: "CMM".to_string(),
+            },
+        );
+        assert_eq!(filter_for_player(&sealed, 0).draft_set_code, None);
+    }
+    /// VM row 3 — PF3 / U25. CR 903.13b: the published pick-step count, folded
+    /// over every kind in the procedure table.
+    ///
+    /// `pick_number` counts STEPS, not cards, so a 14-card Commander pack is
+    /// SEVEN steps. Revert the publication and the field is gone (a compile
+    /// error); publish `cards_per_pack` instead and the CommanderDraft row
+    /// reds at 14 against an expected 7.
+    ///
+    /// The fold is its own reach-guard: it asserts a nonzero, per-kind value
+    /// for all five kinds, so an all-zeros field cannot pass it. The four
+    /// CR 905.1a kinds are the reach-guard against a field that is only
+    /// correct for CommanderDraft — for them the value EQUALS `cards_per_pack`,
+    /// so a field that merely echoed `cards_per_pack` would pass 4/5 and fail
+    /// only on the fifth.
+    #[test]
+    fn the_published_pick_step_count_is_per_kind_and_matches_the_procedure_table() {
+        for kind in DraftKind::ALL {
+            let (mut session, _) = test_session(4);
+            session.kind = kind;
+            session.config.kind = kind;
+
+            let procedure = kind.procedure();
+            let cards_per_pack = session.config.cards_per_pack;
+
+            // The divisor invariant §Rust Idioms relies on, pinned rather than
+            // defended with a `.max(1)`: a future table row that set `0` here
+            // reds this assertion instead of dividing by zero.
+            assert!(
+                procedure.cards_per_pick >= 1,
+                "{kind:?}: every kind takes at least one card per pick step"
+            );
+
+            let expected = cards_per_pack.div_ceil(procedure.cards_per_pick);
+            assert!(expected >= 1, "{kind:?}: a pack is at least one step");
+
+            assert_eq!(
+                filter_for_player(&session, 0).pick_steps_per_pack,
+                expected,
+                "{kind:?}: the player view must publish the engine's own step count"
+            );
+            assert_eq!(
+                filter_for_spectator(&session, SpectatorVisibility::Public).pick_steps_per_pack,
+                expected,
+                "{kind:?}: the spectator view publishes the same count"
+            );
+        }
+
+        // The values the fold above computes, stated as literals so a reader
+        // can see WHAT is being asserted and not merely that two expressions
+        // agree. A 14-card pack is 14 steps at one card per step (CR 905.1a)
+        // and 7 at two (CR 903.13b).
+        assert_eq!(DraftKind::Premier.procedure().pick_steps_per_pack(14), 14);
+        assert_eq!(
+            DraftKind::CommanderDraft
+                .procedure()
+                .pick_steps_per_pack(14),
+            7
+        );
+        // Rounds UP: an odd pack's final step takes the remainder.
+        assert_eq!(
+            DraftKind::CommanderDraft
+                .procedure()
+                .pick_steps_per_pack(15),
+            8
+        );
     }
 }

@@ -66,11 +66,13 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pick_number: 0,
     pass_direction: "Left",
     current_pack: null,
+    required_pick_count: 0,
     pool: [],
     draft_effects: [],
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
+    pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
@@ -403,7 +405,7 @@ describe("ServerDraftAdapter", () => {
         type: "DraftAction",
         data: {
           draft_code: "ABCD12",
-          action: { type: "Pick", data: { seat: 0, card_instance_id: "card-001" } },
+          action: { type: "Pick", data: { seat: 0, card_instance_ids: ["card-001"] } },
         },
       }),
     );
@@ -419,6 +421,54 @@ describe("ServerDraftAdapter", () => {
 
     const result = await pickPromise;
     expect(result.pick_number).toBe(1);
+  });
+
+  it("submitDeck sends DraftAction carrying the commander designation", async () => {
+    // This file is the run's one TYPECHECK-BLIND payload: `private send(msg:
+    // unknown)` means neither `tsc` nor the adapter's own type can see a skew.
+    // `JSON.stringify` equality is what makes this discriminate — it reds if
+    // `commanders` is OMITTED, MISNAMED (`commander`, `commanderNames`), or
+    // MISORDERED relative to `main_deck`. The key order deliberately mirrors
+    // the Rust struct's field order (`seat`, `main_deck`, `commanders`); serde
+    // does not care, but pinning it makes a future reorder visible.
+    //
+    // Reach limitation, stated rather than softened: this row asserts the
+    // payload is EMITTED. It does not, and cannot, prove that any production
+    // path calls the emitter — measured, none does (D5). The row exists so the
+    // seam cannot rot silently.
+    ws.send.mockClear();
+    const deckPromise = adapter.submitDeck(
+      ["Plains", "Island"],
+      ["Kenrith, the Returned King"],
+    );
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "DraftAction",
+        data: {
+          draft_code: "ABCD12",
+          action: {
+            type: "SubmitDeck",
+            data: {
+              seat: 0,
+              main_deck: ["Plains", "Island"],
+              commanders: ["Kenrith, the Returned King"],
+            },
+          },
+        },
+      }),
+    );
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftStateUpdate",
+        data: { view: createMockDraftView({ pick_number: 2 }) },
+      }),
+    );
+
+    const result = await deckPromise;
+    expect(result.pick_number).toBe(2);
   });
 
   it("DraftStateUpdate resolves pending pick promise", async () => {

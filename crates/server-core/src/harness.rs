@@ -85,7 +85,7 @@ impl TournamentHarness {
                         &self.tokens[seat],
                         DraftAction::Pick {
                             seat: seat as u8,
-                            card_instance_id: card.instance_id.clone(),
+                            card_instance_ids: vec![card.instance_id.clone()],
                         },
                         Some(&self.source),
                     );
@@ -119,6 +119,7 @@ impl TournamentHarness {
                 DraftAction::SubmitDeck {
                     seat: seat as u8,
                     main_deck,
+                    commanders: Vec::new(),
                 },
                 Some(&self.source),
             );

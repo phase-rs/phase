@@ -95,6 +95,22 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  32 — FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *       tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
+ *       CR 903.13f(1) makes Commander Draft a command-zone format with a
+ *       minimum rather than an exact size, and GameFormat gained a
+ *       CommanderDraft variant (CR 903.13a). A PARSE bump like 16, not a
+ *       silent capability loss like 24: FormatConfig::deck_size carries
+ *       neither a serde default nor a deserialize_with, so a v31 peer's
+ *       "deck_size": 60 cannot deserialize against the adjacently tagged enum
+ *       and a v32 peer's {"type":"Minimum","data":60} cannot deserialize
+ *       against a v31 u16 — the break is unconditional, runs in BOTH
+ *       directions, and hits every format's snapshot, not just Commander
+ *       Draft's. GameState.format_config's serde default does NOT rescue it:
+ *       a field-level default applies only when the key is ABSENT, and an old
+ *       peer sends the key present with the old inner shape. The
+ *       GameFormat::CommanderDraft variant is the second and narrower half —
+ *       it breaks only when that variant is actually serialized.
  *  31 — Action and mana-payment-preview rejections carry engine-owned,
  *       viewer-filtered ActionRejection DTOs. First-contact versioning keeps
  *       legacy peers from treating a typed rejection as a transport string.
@@ -179,7 +195,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 31 as const;
+export const WIRE_PROTOCOL_VERSION = 32 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

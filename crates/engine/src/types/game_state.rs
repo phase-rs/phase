@@ -12092,8 +12092,9 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
         /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
-        /// when they submit. `deck_size` is a *minimum* — there is no maximum
-        /// deck size — so sideboarding need not be a one-for-one swap.
+        /// when they submit — `deck_size.min_cards()`, the floor of the
+        /// format's `DeckSizeRule`. Under a `Minimum` rule there is no maximum
+        /// deck size, so sideboarding need not be a one-for-one swap.
         ///
         /// Published here (rather than left for the UI to derive) so the
         /// submit gate is the engine's own acceptance predicate. Computed by

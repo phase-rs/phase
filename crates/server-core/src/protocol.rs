@@ -319,6 +319,13 @@ pub enum ClientMessage {
     CreateDraftWithSettings {
         display_name: String,
         set_code: String,
+        /// The string encoding of the draft kind. `DraftKind` carries no
+        /// `#[serde(other)]`, no `#[serde(default)]` and no `Default`, so an
+        /// unrecognized kind name fails deserialization of the WHOLE frame
+        /// rather than resolving to a fallback variant. That is what makes a
+        /// version-skewed peer loud instead of silently creating the wrong
+        /// kind of draft; do not add any of those three attributes to
+        /// `DraftKind`.
         kind: draft_core::types::DraftKind,
         public: bool,
         password: Option<String>,
@@ -2135,10 +2142,19 @@ mod tests {
             draft_code: "ABCD12".to_string(),
             action: draft_core::types::DraftAction::Pick {
                 seat: 3,
-                card_instance_id: "card-001".to_string(),
+                card_instance_ids: vec!["card-001".to_string()],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // Pin the wire KEY, not just the Rust round-trip: a round-trip alone
+        // passes for any field name, since both sides move together. The
+        // client emits this exact literal (`server-draft-adapter.test.ts`), and
+        // `DraftAction` carries no `serde(rename)`/`alias` on this field, so
+        // this assertion is what ties the two halves of the contract together.
+        assert!(
+            json.contains(r#""card_instance_ids":["card-001"]"#),
+            "unexpected wire shape: {json}"
+        );
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::DraftAction { draft_code, action } => {
@@ -2147,7 +2163,7 @@ mod tests {
                     action,
                     draft_core::types::DraftAction::Pick {
                         seat: 3,
-                        card_instance_id: "card-001".to_string(),
+                        card_instance_ids: vec!["card-001".to_string()],
                     }
                 );
             }
@@ -2234,15 +2250,22 @@ mod tests {
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
+            required_pick_count: 0,
             pool,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
+            // `cards_per_pack.div_ceil(cards_per_pick)` with Sealed's
+            // `cards_per_pick: 1` -- a degenerate axis value under
+            // `PackDistribution::AllAtOnce`, which has no pick step at all.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
+            draft_set_code: None,
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
@@ -2396,9 +2419,12 @@ mod tests {
             pass_direction: PassDirection::Right,
             seats: Vec::new(),
             cards_per_pack: 14,
+            // CR 905.1a: Premier takes one card per step.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
             standings: Vec::new(),
             current_round: 0,
             tournament_format: TournamentFormat::Swiss,
@@ -2422,8 +2448,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_41() {
-        assert_eq!(PROTOCOL_VERSION, 41);
+    fn protocol_version_is_42() {
+        assert_eq!(PROTOCOL_VERSION, 42);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2433,7 +2459,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_41` stays
+    /// this guards — and this test reds while `protocol_version_is_42` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

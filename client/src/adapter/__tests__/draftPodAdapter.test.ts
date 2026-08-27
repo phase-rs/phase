@@ -117,6 +117,8 @@ function mockView(status: string): DraftPlayerView {
     pick_number: 1,
     pass_direction: "Left",
     current_pack: null,
+    // Premier (CR 905.1a) with no pending pack.
+    required_pick_count: 0,
     pool: [],
     draft_effects: [],
     pool_groups: {
@@ -130,6 +132,7 @@ function mockView(status: string): DraftPlayerView {
     },
     seats: [],
     cards_per_pack: 14,
+    pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
@@ -182,7 +185,23 @@ describe("DraftPodHostAdapter", () => {
   afterEach(async () => {
     vi.useRealTimers();
     await adapter.dispose();
+    vi.unstubAllGlobals();
   });
+
+  /**
+   * `initialize()`'s card-data gate is
+   * `config.poolInput.type === "Cube" || config.kind === "CommanderDraft"`, and
+   * it performs a REAL `fetch(__CARD_DATA_URL__)` whose `!resp.ok` branch
+   * throws. This suite's own header notes its Set-mode tests never exercise
+   * that path — a `kind: "CommanderDraft"` row does, so it must stub the fetch
+   * or it reds on a network error rather than on its claim.
+   */
+  function stubCardDataFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, text: async () => "{}" })),
+    );
+  }
 
   it("starts in idle status", () => {
     expect(adapter.status).toBe("idle");
@@ -449,8 +468,8 @@ describe("DraftPodHostAdapter", () => {
       podPolicy: "Competitive",
     });
 
-    const view = await adapter.submitPick("card-123");
-    expect(mockHostSubmitHostPick).toHaveBeenCalledWith("card-123");
+    const view = await adapter.submitPick(["card-123"]);
+    expect(mockHostSubmitHostPick).toHaveBeenCalledWith(["card-123"]);
     expect(view.status).toBe("Drafting");
   });
 
@@ -479,8 +498,13 @@ describe("DraftPodHostAdapter", () => {
       podPolicy: "Competitive",
     });
 
-    const view = await adapter.submitDeck(["Plains", "Island"]);
-    expect(mockHostSubmitHostDeck).toHaveBeenCalledWith(["Plains", "Island"]);
+    // The designation is deliberately NOT derivable from the deck: a
+    // passthrough that forwarded the deck, or dropped the argument, reds here.
+    const view = await adapter.submitDeck(["Plains", "Island"], ["Kenrith, the Returned King"]);
+    expect(mockHostSubmitHostDeck).toHaveBeenCalledWith(
+      ["Plains", "Island"],
+      ["Kenrith, the Returned King"],
+    );
     expect(view.status).toBe("Deckbuilding");
   });
 
@@ -506,7 +530,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("throws when actions called before initialize", async () => {
     await expect(adapter.startDraft()).rejects.toThrow("Host not initialized");
-    await expect(adapter.submitPick("x")).rejects.toThrow("Host not initialized");
+    await expect(adapter.submitPick(["x"])).rejects.toThrow("Host not initialized");
     expect(() => adapter.kickPlayer(1)).toThrow("Host not initialized");
   });
 
@@ -539,7 +563,12 @@ describe("DraftPodHostAdapter", () => {
     hostEventHandler({ type: "draftComplete" });
     expect(adapter.status).toBe("deckbuilding");
 
+    // U21/Shape B: `allDecksSubmitted` no longer writes a status — the engine's
+    // own published view does, on the `viewUpdated` that follows it. REPAIRED
+    // rather than deleted, so this route still asserts the adapter reaches a
+    // status; the value now comes from `hostStatusForView` instead of a literal.
     hostEventHandler({ type: "allDecksSubmitted" });
+    hostEventHandler({ type: "viewUpdated", view: mockView("Pairing") });
     expect(adapter.status).toBe("pairing");
 
     hostEventHandler({
@@ -556,6 +585,89 @@ describe("DraftPodHostAdapter", () => {
       score: { p0_wins: 0, p1_wins: 1, draws: 0 },
       timerMs: 10_000,
     });
+  });
+
+  /**
+   * PF2 ROW 3a — the adapter's status comes from the engine-published view,
+   * not from the `allDecksSubmitted` event.
+   *
+   * The test supplies the two EVENTS; production computes the asserted status
+   * via `hostStatusForView`, which maps `Complete` -> `"complete"`. Hand-feeding
+   * events is sound HERE — this row's subject is the adapter's own mapping —
+   * and is NOT sound for the page-level rows, whose subject is that the event
+   * is emitted at all.
+   *
+   * REVERT-PROBE: restore `this.setStatus("pairing");` to
+   * `case "allDecksSubmitted":` and drop
+   * `this.setStatus(hostStatusForView(event.view));` from `case "viewUpdated":`.
+   * The recorded sequence is then `["pairing"]`.
+   */
+  it("never reports pairing for a Complete pod", async () => {
+    stubCardDataFetch();
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "CommanderDraft",
+      podSize: 4,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+    const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+    const statuses: string[] = [];
+    adapter.onEvent((e) => {
+      if (e.type === "statusChanged") statuses.push(e.status);
+    });
+
+    hostEventHandler({ type: "allDecksSubmitted" });
+    hostEventHandler({ type: "viewUpdated", view: mockView("Complete") });
+
+    // Paired positive reach-guard: a handler that was never captured emits
+    // nothing, and "does not contain pairing" is vacuously true of [].
+    expect(statuses.length).toBeGreaterThan(0);
+    // REVERT-FAILING: `["pairing"]` at base.
+    expect(statuses).not.toContain("pairing");
+    expect(statuses).toContain("complete");
+    expect(adapter.status).toBe("complete");
+  });
+
+  /**
+   * PF2 ROW 3a, second hostile sibling (must stay green). U21 does not touch
+   * the round-advance path, so `roundAdvanced` must STILL reach `"pairing"`.
+   */
+  it("still reaches pairing on roundAdvanced", async () => {
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+    const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+
+    hostEventHandler({ type: "roundAdvanced" });
+
+    expect(adapter.status).toBe("pairing");
+  });
+
+  /**
+   * PF2 ROW 3a, third hostile sibling (must stay green). U21 does not touch the
+   * `pairingsGenerated` arm either.
+   */
+  it("still reaches matchInProgress on pairingsGenerated", async () => {
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+    const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+
+    hostEventHandler({ type: "pairingsGenerated", round: 1, pairings: [] });
+
+    expect(adapter.status).toBe("matchInProgress");
   });
 
   it("cleans up on dispose", async () => {
@@ -762,8 +874,8 @@ describe("DraftPodGuestAdapter", () => {
   it("delegates submitPick to P2PDraftGuest", async () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
-    await adapter.submitPick("card-456");
-    expect(mockGuestSubmitPick).toHaveBeenCalledWith("card-456");
+    await adapter.submitPick(["card-456"]);
+    expect(mockGuestSubmitPick).toHaveBeenCalledWith(["card-456"]);
   });
 
   it("delegates draft-effect picks to P2PDraftGuest", async () => {
@@ -776,13 +888,16 @@ describe("DraftPodGuestAdapter", () => {
   it("delegates submitDeck to P2PDraftGuest", async () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
-    await adapter.submitDeck(["Swamp", "Mountain"]);
-    expect(mockGuestSubmitDeck).toHaveBeenCalledWith(["Swamp", "Mountain"]);
+    await adapter.submitDeck(["Swamp", "Mountain"], ["Gyruda, Doom of Depths"]);
+    expect(mockGuestSubmitDeck).toHaveBeenCalledWith(
+      ["Swamp", "Mountain"],
+      ["Gyruda, Doom of Depths"],
+    );
   });
 
   it("throws when actions called before initialize", async () => {
-    await expect(adapter.submitPick("x")).rejects.toThrow("Guest not initialized");
-    await expect(adapter.submitDeck([])).rejects.toThrow("Guest not initialized");
+    await expect(adapter.submitPick(["x"])).rejects.toThrow("Guest not initialized");
+    await expect(adapter.submitDeck([], [])).rejects.toThrow("Guest not initialized");
   });
 
   it("maps P2PDraftGuest events to DraftPodGuestEvents", async () => {

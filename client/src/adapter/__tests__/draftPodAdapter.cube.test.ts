@@ -6,7 +6,10 @@
  * This test verifies the host-side plumbing: when poolInput.type === "Cube",
  * initialize() fetches __CARD_DATA_URL__ and calls
  * DraftAdapter.loadCardDatabase before instantiating P2PDraftHost; when
- * poolInput.type === "Set", the CARD_DB fetch path is skipped.
+ * poolInput.type === "Set", the CARD_DB fetch path is skipped for the four
+ * CR 905.1a kinds — but NOT for a CommanderDraft pod, whose bot seats need the
+ * database to designate a commander (CR 903.3) and to judge that deck's colour
+ * identity (CR 903.5c).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -108,6 +111,27 @@ describe("DraftPodHostAdapter cube-mode initialize", () => {
     expect(adapter.status).toBe("lobby");
   });
 
+  it("populates CARD_DB for a Set-pool Commander pod", async () => {
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "CommanderDraft",
+      podSize: 2,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(mockLoadCardDatabase).toHaveBeenCalledOnce();
+    // The same terminal-state assertion both landed rows make, so a fixture
+    // that threw before reaching the branch cannot pass as a load.
+    expect(adapter.status).toBe("lobby");
+  });
+
+  // Its negative sibling, LANDED, and it must stay green: the fixture below
+  // differs from the one above in exactly one field, `kind`, so the pair
+  // isolates the gate and neither can pass for the other's reason. An
+  // unconditional widening to all Set pools would turn it red.
   it("skips the CARD_DB fetch for Set pods", async () => {
     await adapter.initialize({
       poolInput: { type: "Set", data: { set_pool_json: "{}" } },

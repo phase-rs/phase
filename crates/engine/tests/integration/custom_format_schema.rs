@@ -474,9 +474,9 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
     use engine::game::deck_validation::validate_name_deck_for_format_full;
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
-    // The real signature takes every deck slot explicitly, plus a match type
-    // and a player count — not the three-argument shape an earlier planning
-    // pass assumed.
+    // The real signature takes every deck slot explicitly, plus the
+    // CR 903.13f(3) draft set code, a match type and a player count — not the
+    // three-argument shape an earlier planning pass assumed.
     let result = validate_name_deck_for_format_full(
         &db,
         &[],
@@ -486,6 +486,7 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
         &[],
         &[],
         &[],
+        None,
         GameFormat::Custom(CustomFormatId(1)),
         None,
         2,

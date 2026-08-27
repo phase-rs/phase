@@ -560,8 +560,19 @@ fn restore_dump(json: &str) -> GameState {
 /// artifact's provenance rather than a claim about it:
 /// `unzip -p combofb-dumps-pristine/dina-conqueror-offers-no-ff.zip |
 ///  jq -c '{gameState}' | gzip -9 -n`
-/// → 844846 bytes, sha256
-/// `9843d5165cbbf7dd7bca4171c7888c190b7eba7e52a2ed095b44ff76fadd7886`.
+/// → 841475 bytes, sha256
+/// `12f91f38616bd90386fdb7a137371a9f9ec5c6adcb12dd1bbad04bde167ea2b2`.
+///
+/// That pipeline ALONE is no longer sufficient: this capture predates U5, so
+/// its bare `"deck_size": 100` must first become the adjacently-tagged
+/// `DeckSizeRule` form `{"type":"Exactly","data":100}` — the variant taken from
+/// the sibling `format` field, `Commander` here. Piping the raw member straight
+/// through does not merely miss the digest; it yields a fixture
+/// `PersistedGameState` cannot deserialize, so `restore_dump`'s
+/// `.expect("gameState deserializes through the production decoder")` aborts —
+/// a red test on a green engine. `dina_noff_turn5_loader.rs` carries the full
+/// provenance table for this same artifact.
+///
 /// `gzip -n` is a no-op from a pipe but load-bearing from a file (it strips the
 /// stored name and mtime), so KEEP it: a re-derivation that stages the 21 MB
 /// dump through an intermediate file — the natural thing to do at that size —

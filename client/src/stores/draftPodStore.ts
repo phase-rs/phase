@@ -16,7 +16,7 @@
 
 import { create } from "zustand";
 
-import type { CubeDraftSettings, TournamentFormat, PodPolicy, DraftKind as CoreDraftKind } from "../adapter/draft-adapter";
+import { DraftAdapter, type CubeDraftSettings, type DraftProcedure, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import {
@@ -26,10 +26,9 @@ import {
   persistedDraftHostSessionState,
 } from "../services/draftPersistence";
 import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
+import type { DraftKind } from "../components/draft/draftKind";
 
 // ── Types ──────────────────────────────────────────────────────────────
-
-export type DraftKind = Exclude<CoreDraftKind, "Quick">;
 
 export type PoolMode = "set" | "cube";
 
@@ -72,11 +71,27 @@ interface DraftPodState {
   loadingPool: boolean;
   /** Error from pool loading or pod creation. */
   configError: string | null;
+  /**
+   * CR 903.13a + CR 800.1: the kind's engine-published seat floor
+   * (`DraftProcedure.min_pod_size`), cached for the lobby's Start gate.
+   *
+   * A CACHE of an engine value, never a client derivation, and deliberately
+   * outside `PodConfig` — that is host INTENT, is persisted, and is rewritten
+   * by `normalizePodConfig`, none of which is true of a published floor.
+   * `null` until loaded and after `reset()`, and `null` is fail-CLOSED: the
+   * reducer is the authority, so a stale or absent client value can never
+   * admit an illegal pod, only refuse a legal one until the engine answers.
+   */
+  minPodSize: number | null;
 }
 
 interface DraftPodActions {
   /** Update pod configuration fields. */
   setConfig: (partial: Partial<PodConfig>) => void;
+  /** Enter pod setup for `kind`, adopting the ENGINE's per-kind table default for
+   *  pod size (`DraftProcedure.pod_size`) rather than re-deriving one in the client.
+   *  The host may still override it with the pod-size selector before creating. */
+  enterKind: (kind: DraftKind) => Promise<void>;
   /** Toggle bot-fill on/off. */
   toggleBotFill: () => void;
   /** Set host display name. */
@@ -121,6 +136,7 @@ const initialState: DraftPodState = {
   setPoolJson: null,
   loadingPool: false,
   configError: null,
+  minPodSize: null,
 };
 
 function normalizePodConfig(config: PodConfig): PodConfig {
@@ -138,6 +154,23 @@ interface HostedPodResumeAttempt {
 
 let resumeHostedPodAttempt: HostedPodResumeAttempt | null = null;
 
+/**
+ * Fetch `kind`'s engine-published procedure and cache the axes the lobby needs.
+ *
+ * CR 903.13a + CR 800.1: `min_pod_size` is the ENGINE's per-kind seat floor.
+ * The client holds a copy so `DraftPodLobby` can gate its Start button without
+ * a second wasm call; it never re-derives the value, and the reducer refuses a
+ * below-floor pod regardless of what this cache says.
+ */
+async function loadProcedure(
+  kind: DraftKind,
+  set: (partial: Partial<DraftPodState>) => void,
+): Promise<DraftProcedure> {
+  const procedure = await new DraftAdapter().draftProcedure(kind);
+  set({ minPodSize: procedure.min_pod_size });
+  return procedure;
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
@@ -150,6 +183,19 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         poolMode: (partial.kind ?? prev.config.kind) === "Sealed" ? "set" : prev.poolMode,
         configError: null,
       }));
+    },
+
+    enterKind: async (kind) => {
+      // Apply the kind first: it is the entry point's whole purpose and must not
+      // depend on the wasm load succeeding. `setConfig` is the single authority for
+      // normalization (`normalizePodConfig`) and the Sealed pool-mode rule.
+      get().setConfig({ kind });
+      try {
+        const procedure = await loadProcedure(kind, set);
+        get().setConfig({ podSize: procedure.pod_size });
+      } catch (err) {
+        set({ configError: err instanceof Error ? err.message : String(err) });
+      }
     },
 
     toggleBotFill: () => {
@@ -192,13 +238,24 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         return;
       }
 
+      // CR 903.13a + CR 800.1: cache the kind's seat floor for the lobby's
+      // Start gate. Once, before the poolMode branch, because the set branch
+      // returns before reaching the cube branch and both lead to the lobby.
+      try {
+        await loadProcedure(config.kind, set);
+      } catch (err) {
+        set({ configError: err instanceof Error ? err.message : String(err) });
+      }
+
       if (poolMode === "set") {
         if (!config.setCode) {
           set({ configError: "Select a set first" });
           return;
         }
 
-        set({ loadingPool: true, configError: null });
+        // No `configError: null`: every other writer above in this function
+        // returns, so clearing here would only erase `loadProcedure`'s catch.
+        set({ loadingPool: true });
 
         try {
           const resp = await fetch(__DRAFT_POOLS_URL__);
@@ -378,6 +435,13 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             loadingPool: false,
             configError: null,
           });
+        }
+
+        // CR 903.13a + CR 800.1: the resumed lobby needs the floor too.
+        try {
+          await loadProcedure(persisted.kind, set);
+        } catch (err) {
+          set({ configError: err instanceof Error ? err.message : String(err) });
         }
 
         const hostConfig: DraftPodHostConfig = {

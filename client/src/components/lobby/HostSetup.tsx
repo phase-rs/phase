@@ -284,7 +284,10 @@ export function HostSetup({
   };
 
   const handleDeckSizeChange = (deckSize: number) => {
-    setLocalFormatConfig((prev) => ({ ...prev, deck_size: deckSize }));
+    // Variant-preserving: the engine is the authority for whether the format's
+    // rule is a minimum or an exact count (CR 100.5 / CR 903.5a); this picker
+    // edits only the count.
+    setLocalFormatConfig((prev) => ({ ...prev, deck_size: { ...prev.deck_size, data: deckSize } }));
   };
 
   const toggleAiSeat = (seatIndex: number) => {
@@ -562,7 +565,7 @@ export function HostSetup({
             <Field label={t("hostSetup.deckSize")}>
               <div className={segWrap}>
                 {FFA_DECK_SIZE_OPTIONS.map((deckSize) => (
-                  <button type="button" key={deckSize} onClick={() => handleDeckSizeChange(deckSize)} className={seg(formatConfig.deck_size === deckSize)}>
+                  <button type="button" key={deckSize} onClick={() => handleDeckSizeChange(deckSize)} className={seg(formatConfig.deck_size.data === deckSize)}>
                     {deckSize}
                   </button>
                 ))}

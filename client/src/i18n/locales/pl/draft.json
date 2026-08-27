@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Szybki draft",
     "podTitle": "Draft w grupie",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Oto jak to działa",
     "startDrafting": "Rozpocznij draft",
     "quick": {
@@ -15,6 +16,10 @@
       "step2": "Otwórz 3 boostery po 14 kart — wybierz jedną, resztę przekaż dalej",
       "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
       "step4": "Po drafcie zbuduj talię z 40 kart i rozegraj mecze turniejowe"
+    },
+    "commander": {
+      "step2": "Wybierz dwie karty z każdego boostera, a resztę przekaż dalej",
+      "step4": "Po drafcie zbuduj talię Commander z 60 kart i rozegraj jedną grę wieloosobową"
     }
   },
   "steps": {
@@ -82,7 +87,8 @@
     "waitingNext": "Oczekiwanie na następny booster...",
     "cardsInPack": "{{count}} kart w boosterze",
     "picking": "Wybieranie…",
-    "autoPick": "Wybór automatyczny"
+    "autoPick": "Wybór automatyczny",
+    "selectionProgress": "Wybrano {{selected}} z {{required}}"
   },
   "sealedOpening": {
     "title": "Otwórz swoją pulę Sealed",
@@ -103,6 +109,7 @@
     "sortColor": "Kolor",
     "sortType": "Typ",
     "sortCmc": "CMC",
+    "grantedFiller": "+ do {{maximum}} × {{name}} (tylko jako dowódca)",
     "groups": {
       "white": "Biały",
       "blue": "Niebieski",
@@ -165,7 +172,10 @@
     "landCount_one": "{{count}} ziemia",
     "landCount_other": "{{count}} ziem",
     "readyToSubmit": "gotowe do zatwierdzenia",
-    "moreNeeded": "potrzeba jeszcze {{count}}"
+    "moreNeeded": "potrzeba jeszcze {{count}}",
+    "commanderRequired": "Wyznacz dowódcę ze swojej puli, aby przesłać talię.",
+    "commanderUnavailable": "Wyznaczanie dowódcy jest w tej chwili niedostępne — nie udało się wczytać bazy kart.",
+    "grantedFiller": "Twoja pula zawiera także do {{maximum}} × {{name}}, do użycia wyłącznie jako dowódca."
   },
   "landing": {
     "title": "Draft",
@@ -187,6 +197,10 @@
     "podDraft": {
       "title": "Draft w grupie",
       "description": "Załóż lub dołącz do grupy liczącej do 8 graczy, draftujcie razem na żywo, a potem rozegrajcie turniej szwajcarski lub na wylot."
+    },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draftuj po dwie karty naraz w grupie, zbuduj talię Commander z 60 kart, a potem rozegraj jedną grę wieloosobową."
     },
     "podInProgress": "Trwa draft w grupie",
     "guestPodInProgress": "Dołączony pod gotowy do ponownego połączenia",
@@ -328,6 +342,8 @@
     "kindTraditionalDesc": "Mecze turniejowe do dwóch wygranych po budowaniu talii, z wymianą kart bocznych między grami.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Otwórz sześć boosterów bezpośrednio do puli każdego gracza, a następnie zbuduj talię turniejową do jednej wygranej.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Każdy gracz draftuje po dwie karty naraz i buduje talię Commander z 60 kart, a potem grupa rozgrywa jedną grę wieloosobową.",
     "tournamentFormat": "Format turnieju",
     "tournamentSwiss": "Szwajcarski",
     "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",
@@ -390,6 +406,7 @@
   },
   "podComplete": {
     "title": "Draft zakończony",
+    "launchCommanderGame": "Rozpocznij grę Commander",
     "returnToMenu": "Powrót do menu"
   },
   "podError": {

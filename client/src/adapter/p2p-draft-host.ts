@@ -13,8 +13,8 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS } from "./draft-adapter";
-import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
-import type { PodPolicy, TournamentFormat } from "./draft-adapter";
+import type { DraftCardInstance, DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
+import type { DraftKind, DraftProcedure, PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
@@ -40,6 +40,7 @@ import {
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import { assertNever } from "../utils/assertNever";
 
 function matchConfigForView(view: DraftPlayerView): MatchConfig {
   return view.match_config;
@@ -76,7 +77,8 @@ export type DraftHostEvent =
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
   | { type: "draftStarted"; view: DraftPlayerView }
-  | { type: "pickReceived"; seatIndex: number; cardInstanceId: string }
+  /** `cardInstanceIds` = the cards this seat drafted in this step, on both the normal and the draft-effect path. */
+  | { type: "pickReceived"; seatIndex: number; cardInstanceIds: string[] }
   | { type: "roundComplete" }
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
@@ -126,6 +128,35 @@ function pickTimerDurationMs(pickNumber: number): number {
   return PICK_TIMER_DURATIONS_MS[Math.min(pickNumber, PICK_TIMER_DURATIONS_MS.length - 1)];
 }
 
+/**
+ * `count` distinct random cards from `pack`, or the whole pack if it is shorter.
+ * Distinctness is required: `apply_pick_inner` refuses a repeated id with
+ * `DuplicatePickCardId`.
+ *
+ * D-02: random selection in TypeScript is a display-layer violation and is
+ * PRE-EXISTING here. This generalises it from one card to N so a Commander pod
+ * does not deadlock; it does not fix it.
+ *
+ * `count` comes from `DraftPlayerView.required_pick_count`, a REQUIRED field that
+ * production always publishes. The shape guard below exists because
+ * `slice(0, count)` with an `undefined` count returns the WHOLE pack: a future
+ * hand-built stub view that omits the field would silently submit every card in
+ * the pack instead of failing loudly. It gates on the SHAPE only — a legitimate
+ * `0` (an emptied pack) still returns `[]`, which the engine refuses on its own
+ * terms with `WrongPickCardCount`.
+ */
+function randomDistinctCards(pack: DraftCardInstance[], count: number): string[] {
+  if (!Number.isInteger(count)) {
+    throw new Error(`randomDistinctCards: required_pick_count must be an integer, got ${count}`);
+  }
+  const indices = pack.map((_, i) => i);
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  return indices.slice(0, count).map((i) => pack[i].instance_id);
+}
+
 interface PickOptions {
   acknowledge?: boolean;
   emit?: boolean;
@@ -135,11 +166,33 @@ interface PickOptions {
 
 interface ExportedDraftSession {
   pools?: Array<Array<{ name: string }>>;
-  submitted_decks?: Record<string, { seat: number; main_deck: string[] }>;
+  submitted_decks?: Record<
+    string,
+    {
+      seat: number;
+      main_deck: string[];
+      /**
+       * CR 903.3: the seat's designated commander(s). Optional because the Rust
+       * field carries `#[serde(default)]` and a session exported before the
+       * plural-submission wire landed has none.
+       */
+      commanders?: string[];
+    }
+  >;
 }
 
-function deckPayload(mainDeck: string[], sideboard: string[]): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander: [] };
+/**
+ * The single constructor of a `DraftDeckPayload`.
+ *
+ * `commander` defaults to `[]`, so every existing caller is byte-identical in
+ * behaviour and the four CR 905.1a kinds are untouched.
+ */
+function deckPayload(
+  mainDeck: string[],
+  sideboard: string[],
+  commander: string[] = [],
+): DraftDeckPayload {
+  return { main_deck: mainDeck, sideboard, commander };
 }
 
 function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
@@ -206,6 +259,14 @@ function sideboardFromPool(
 
 export class P2PDraftHost {
   private adapter = new DraftAdapter();
+
+  /**
+   * The engine-owned per-kind axes, fetched once in `initialize()`. Snapshotted
+   * rather than read live, and correctly so: `procedure()` is a pure function
+   * of the kind, and the kind is immutable for this host's lifetime, so a live
+   * read could not differ.
+   */
+  private procedure: DraftProcedure | null = null;
   private listeners: DraftHostEventListener[] = [];
 
   private guestSessions = new Map<number, DraftPeerSession>();
@@ -274,7 +335,7 @@ export class P2PDraftHost {
       handler: (conn: DataConnection) => void,
     ) => () => void,
     private readonly poolInput: PoolInput,
-    private readonly kind: "Premier" | "Traditional" | "Sealed",
+    private readonly kind: Exclude<DraftKind, "Quick">,
     private readonly podSize: number,
     private readonly hostDisplayName: string,
     private readonly tournamentFormat: TournamentFormat,
@@ -355,6 +416,14 @@ export class P2PDraftHost {
   // ── Initialization ─────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
+    // FIRST, before `onGuestConnected` registers the handler behind two of
+    // `buildLobbyView()`'s three callers (the welcome view and the reconnect
+    // ack). That ordering is the binding-time guarantee for those two paths.
+    // The third caller, the public `getHostView()`, is NOT covered by this
+    // ordering — it is covered by `buildLobbyView`'s throw-on-null, which is
+    // why that rule is load-bearing rather than defensive.
+    this.procedure = await this.adapter.draftProcedure(this.kind);
+
     this.hostConnectionUnsub = this.onGuestConnected((conn) => {
       this.handleNewConnection(conn);
     });
@@ -663,7 +732,7 @@ export class P2PDraftHost {
     switch (msg.type) {
       case "draft_pick": {
         if (!this.canGuestPick(seat)) return;
-        await this.handlePick(seat, msg.cardInstanceId);
+        await this.handlePick(seat, msg.cardInstanceIds);
         break;
       }
       case "draft_pick_with_draft_effect": {
@@ -685,7 +754,7 @@ export class P2PDraftHost {
           });
           return;
         }
-        await this.handleDeckSubmission(seat, msg.mainDeck, msg.submissionId);
+        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId);
         break;
       }
       case "draft_match_result": {
@@ -756,10 +825,6 @@ export class P2PDraftHost {
         seats.push({ type: "Bot", name: this.botNameForSeat(i, seed) });
       }
     }
-    if (seats.length < 2) {
-      throw new Error("Need at least two seats to start a pod draft");
-    }
-
     await this.adapter.createMultiplayerDraft(
       this.poolInput,
       seats,
@@ -804,8 +869,8 @@ export class P2PDraftHost {
   /**
    * Host submits their own pick (seat 0).
    */
-  async submitHostPick(cardInstanceId: string): Promise<DraftPlayerView> {
-    return this.enqueueAuthoritativeMutation(() => this.handlePick(0, cardInstanceId));
+  async submitHostPick(cardInstanceIds: string[]): Promise<DraftPlayerView> {
+    return this.enqueueAuthoritativeMutation(() => this.handlePick(0, cardInstanceIds));
   }
 
   /** Host submits an effect pick for seat 0. */
@@ -820,14 +885,19 @@ export class P2PDraftHost {
   /**
    * Host submits their own deck (seat 0).
    */
-  async submitHostDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+  async submitHostDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     return this.enqueueAuthoritativeMutation(() => {
       if (!this.draftStarted) throw new Error("Draft not started");
-      const payloadFingerprint = deckSubmissionFingerprint(mainDeck);
+      // CR 903.3: the designation is part of the payload's identity, so it
+      // joins the fingerprint. Matching on `mainDeck` alone would let a
+      // resubmit that changes only the commander reuse the prior receipt and
+      // resolve straight to the recovered-receipt branch, never reaching the
+      // reducer with the new designation.
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
       const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
         ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
       )?.[0];
-      return this.handleDeckSubmission(0, mainDeck, priorSubmission ?? crypto.randomUUID());
+      return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID());
     });
   }
 
@@ -849,11 +919,11 @@ export class P2PDraftHost {
 
   private async handlePick(
     seat: number,
-    cardInstanceId: string,
+    cardInstanceIds: string[],
     resolveBots = true,
   ): Promise<DraftPlayerView> {
     this.assertPickAllowed();
-    return this.applyPick(seat, cardInstanceId, {
+    return this.applyPick(seat, cardInstanceIds, {
       acknowledge: true,
       emit: true,
       persist: true,
@@ -869,7 +939,10 @@ export class P2PDraftHost {
     this.assertPickAllowed();
     return this.applyPick(
       seat,
-      effectCardInstanceId,
+      // The cards this seat drafted — NOT the effect card. This positional
+      // slot carries one meaning on both paths; the `submitPick` override
+      // below is what makes the effect path's submission different.
+      cardInstanceIds,
       {
         acknowledge: true,
         emit: true,
@@ -886,9 +959,13 @@ export class P2PDraftHost {
 
   private async applyPick(
     seat: number,
-    cardInstanceId: string,
+    cardInstanceIds: string[],
     options: PickOptions,
-    submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceId),
+    // One whole CR 903.13b pick step: exactly `view.required_pick_count` ids,
+    // the count `pick_pass::apply_pick_inner` enforces. On the draft-effect
+    // path the caller overrides `submitPick`; this parameter still names the
+    // cards the seat drafted, which is what `pickReceived` reports.
+    submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceIds),
   ): Promise<DraftPlayerView> {
     try {
       const view = await submitPick();
@@ -909,7 +986,7 @@ export class P2PDraftHost {
       }
 
       if (options.emit) {
-        this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceId });
+        this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceIds });
       }
       if (options.resolveBots && !this.isBotSeat(seat)) {
         await this.resolveBotPicks({ emit: true, persist: true });
@@ -954,12 +1031,13 @@ export class P2PDraftHost {
   private async handleDeckSubmission(
     seat: number,
     mainDeck: string[],
+    commanders: string[],
     submissionId: string,
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
     let receiptDurable = false;
     try {
-      const payloadFingerprint = deckSubmissionFingerprint(mainDeck);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
       const previous = this.deckSubmissionReceipts.get(submissionId);
       let view: DraftPlayerView;
       if (previous) {
@@ -974,7 +1052,7 @@ export class P2PDraftHost {
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.adapter.submitDeckForSeat(seat, mainDeck);
+        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders);
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.
@@ -991,7 +1069,7 @@ export class P2PDraftHost {
         // retry will receive the same acknowledgement without re-reducing.
         console.warn("[P2PDraftHost] deck submission acknowledgement failed:", error);
       }
-      await this.publishAcceptedDeckSubmission(seat, submissionId);
+      await this.publishAcceptedDeckSubmission(seat, submissionId, previous !== undefined);
 
       return seat === 0 ? view : await this.adapter.getViewForSeat(0);
     } catch (err) {
@@ -1007,22 +1085,77 @@ export class P2PDraftHost {
   }
 
   /** Runs delayed downstream deck visibility after a durable receipt retry. */
+  /**
+   * CR 903.3: a deck submission's identity is its main deck AND its commander
+   * designation. Both call sites must agree, or a receipt lookup and a receipt
+   * comparison can disagree about whether two submissions are the same.
+   */
+  private deckPayloadFingerprint(mainDeck: string[], commanders: string[]): string {
+    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+  }
+
   private async publishAcceptedDeckSubmission(
     seat: number,
     submissionId: string,
+    recovered: boolean,
   ): Promise<void> {
     if (this.publishedDeckSubmissions.has(submissionId)) return;
     const hostView = await this.adapter.getViewForSeat(0);
-    // `apply_submit_deck` opens Pairing for the final deck. Once pairing has
-    // generated, a recovered receipt needs no downstream replay.
-    if (hostView.status === "MatchInProgress" || hostView.status === "Complete") {
+    // A terminal status means the downstream work already ran — but only for a
+    // RECOVERED receipt. `publishedDeckSubmissions` is in-memory, so after a
+    // host reload it cannot answer this and the status is the only signal
+    // left. It must not answer for a freshly accepted submission: a Commander
+    // Draft pod is PostDraftPlay::CompleteImmediately, so its LAST deck
+    // submission lands on `Complete` on first visit, and treating that as
+    // "already replayed" would swallow the pod's completion for every guest.
+    if (recovered && (hostView.status === "MatchInProgress" || hostView.status === "Complete")) {
       this.publishedDeckSubmissions.add(submissionId);
       return;
     }
     this.emit({ type: "deckSubmitted", seatIndex: seat });
     if (hostView.seats.every((candidate) => candidate.has_submitted_deck || candidate.is_bot)) {
       this.emit({ type: "allDecksSubmitted" });
-      await this.generatePairingsInner();
+      // The reducer owns "may pairings be generated?" (`apply_generate_pairings`
+      // admits only Deckbuilding | Pairing | RoundComplete). State what every
+      // status does rather than sweeping the rest into a fallback.
+      //
+      // `Pairing` is PostDraftPlay::TournamentPairings, the only status this
+      // funnel really reaches besides `Complete`; `generatePairingsInner`
+      // republishes and overwrites it. The other seven are unreachable here —
+      // `apply_submit_deck`'s last-deck arm assigns only Complete or Pairing,
+      // and this branch runs only once every seat has submitted or is a bot —
+      // so they route to the reducer, which refuses whatever it will not
+      // accept.
+      switch (hostView.status) {
+        // PostDraftPlay::CompleteImmediately (Quick Draft, Commander Draft).
+        // The reducer already assigned Complete and `apply_generate_pairings`
+        // refuses it: republish the engine's own view and generate nothing.
+        case "Complete":
+          await this.broadcastViews();
+          break;
+        // PostDraftPlay::TournamentPairings. The reducer assigned Pairing, and
+        // `apply_generate_pairings` immediately overwrites it with
+        // MatchInProgress — so republish BEFORE generating, or nothing ever
+        // publishes Pairing and the pod's trajectory skips a phase.
+        case "Pairing":
+          await this.broadcastViews();
+          await this.generatePairingsInner();
+          break;
+        case "Lobby":
+        case "Drafting":
+        case "Paused":
+        case "Deckbuilding":
+        case "MatchInProgress":
+        case "RoundComplete":
+        case "Abandoned":
+          await this.generatePairingsInner();
+          break;
+        // The exhaustiveness guard: `assertNever`'s parameter is `never`, so
+        // THIS LINE is what fails to compile if a tenth DraftStatus is added
+        // upstream and left unhandled.
+        default:
+          assertNever(hostView.status);
+      }
     }
     this.publishedDeckSubmissions.add(submissionId);
   }
@@ -1275,9 +1408,12 @@ export class P2PDraftHost {
       try {
         const view = await this.adapter.getViewForSeat(seat);
         if (view.current_pack && view.current_pack.length > 0) {
-          const randomIndex = Math.floor(Math.random() * view.current_pack.length);
-          const card = view.current_pack[randomIndex];
-          await this.handlePick(seat, card.instance_id, false);
+          // CR 903.13b: the sweep owes one whole pick step, not one card.
+          await this.handlePick(
+            seat,
+            randomDistinctCards(view.current_pack, view.required_pick_count),
+            false,
+          );
           anyPicked = true;
         }
       } catch (err) {
@@ -1303,10 +1439,13 @@ export class P2PDraftHost {
       const pack = view.current_pack;
       if (!pack || pack.length === 0) continue;
 
-      const randomIndex = Math.floor(Math.random() * pack.length);
+      // CR 903.13b: a bot owes one whole pick step, not one card. The count is
+      // the engine's; a one-id pick into a Commander pod is refused by
+      // `apply_pick_inner` with `WrongPickCardCount`, and `resolveBotPicks` has
+      // no try/catch, so it would strand the round.
       await this.applyPick(
         seat.seat_index,
-        pack[randomIndex].instance_id,
+        randomDistinctCards(pack, view.required_pick_count),
         { acknowledge: false, emit: options.emit, persist: options.persist, resolveBots: false },
       );
     }
@@ -1474,6 +1613,47 @@ export class P2PDraftHost {
     await this.guestSessions.get(seat)?.send(message);
   }
 
+  /**
+   * The N-seat deck payload for a completed Commander pod (CR 903.13a: "a draft
+   * ... followed by a multiplayer game").
+   *
+   * A different SHAPE from `dispatchMatchLaunch`'s pairwise assembly — N seats
+   * in game-player order rather than two — and it is the only place the
+   * seat -> game-player mapping is defined. It lives here rather than in the
+   * store because the three per-seat primitives it composes and
+   * `exportDraftSession` are all private on this class, and because a
+   * game-shaped ordering rule does not belong in the display layer.
+   *
+   * The local seat becomes game player 0; the remaining seats, in ascending
+   * seat order, become game player 1 (`opponent`) and then 2..N-1 (`ai_decks`).
+   * Throws when the local seat has no submitted deck — the existing
+   * `submittedDeckForSeat` throw, not a new error path.
+   */
+  async podCommanderDeckPayload(
+    view: DraftPlayerView,
+    localSeat: number,
+  ): Promise<DraftMatchDeckPayload> {
+    const session = await this.exportDraftSession();
+    const deckForSeat = async (seat: number): Promise<DraftDeckPayload> =>
+      this.isBotSeatFromView(view, seat)
+        ? this.botDeckForSeat(session, seat)
+        : this.submittedDeckForSeat(session, seat);
+
+    const player = await deckForSeat(localSeat);
+    const others = view.seats
+      .map((s) => s.seat_index)
+      .filter((seat) => seat !== localSeat)
+      .sort((a, b) => a - b);
+
+    const decks: DraftDeckPayload[] = [];
+    for (const seat of others) {
+      decks.push(await deckForSeat(seat));
+    }
+
+    const [opponent, ...aiDecks] = decks;
+    return { player, opponent, ai_decks: aiDecks, draft_set_code: view.draft_set_code };
+  }
+
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
     const seatA = pairing.seat_a;
     const seatB = pairing.seat_b;
@@ -1622,6 +1802,7 @@ export class P2PDraftHost {
     return deckPayload(
       submitted.main_deck,
       sideboardFromPool(session, seat, submitted.main_deck),
+      submitted.commanders ?? [],
     );
   }
 
@@ -1636,9 +1817,12 @@ export class P2PDraftHost {
         Array<string>(count).fill(name),
       ),
     ];
+    // CR 903.3: the designation is a member of `suggested.main_deck` (the
+    // engine guarantees it), so carrying it here adds no name and loses none.
     return deckPayload(
       mainDeck,
       sideboardFromPool(session, botSeat, suggested.main_deck),
+      suggested.commander,
     );
   }
 
@@ -2495,6 +2679,14 @@ export class P2PDraftHost {
   }
 
   private buildLobbyView(): DraftPlayerView {
+    // A null procedure means `buildLobbyView` ran before `initialize()`, which
+    // is a programming error. Throw rather than default: a silent 40-card
+    // fallback would advertise the CR 100.2b limited floor for a CR 903.13f(1)
+    // 60-card format — exactly the class of defect the procedure read exists to
+    // prevent.
+    if (!this.procedure) {
+      throw new Error("P2PDraftHost.buildLobbyView called before initialize()");
+    }
     return {
       status: "Lobby",
       kind: this.kind,
@@ -2502,13 +2694,43 @@ export class P2PDraftHost {
       pick_number: 0,
       pass_direction: "Left",
       current_pack: null,
+      // 0, not `procedure.cards_per_pick`: this mirrors exactly what
+      // `filter_for_player` publishes for a seat with no pending pack. A
+      // placeholder that disagrees with the real view is the [G6] defect class
+      // this run has already paid for once.
+      required_pick_count: 0,
       pool: [],
       draft_effects: [],
       pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
+      // NOT a `DraftProcedure` axis — the struct carries no pack-size field, so
+      // this is a POOL property (`set_cards_per_pack` for a set pool,
+      // `settings.cards_per_pack` for a cube), wrong for all five kinds equally
+      // rather than wrong for CommanderDraft. This is a pre-draft placeholder
+      // view that the real session view replaces once the draft starts; not a
+      // missed kind-derived hardcode.
       cards_per_pack: 14,
-      pack_count: 3,
-      min_deck_size: 40,
+      // 0, not a step count: the lobby host has no session, and its own
+      // `cards_per_pack` above is a POOL placeholder rather than a config
+      // value — so there is no engine-derived answer to publish here. Deriving
+      // one from `procedure.cards_per_pick` is refused: that is a second
+      // authority for CR 903.13b's step rule in the display layer, the same
+      // defect class as the seat-count literal this commit deletes above. `0`
+      // is the one value no reachable producer publishes -- every path that
+      // fills `DraftConfig.cards_per_pack` supplies at least 1 (an MTGJSON
+      // slot-count sum, or the cube panel's clamped `min={1}`), so steps >= 1
+      // -- and it therefore cannot be read as an engine answer. It is wrong
+      // for all five kinds equally rather than right for four and wrong for
+      // CommanderDraft.
+      //
+      // Note which precedent applies: `required_pick_count: 0` above justifies
+      // its `0` as a value production DOES emit (a seat with no pending pack).
+      // That ground does not transfer — there is no production state that
+      // yields 0 steps. The ground here is `cards_per_pack: 14`'s: an
+      // acknowledged placeholder, wrong uniformly rather than kind-selectively.
+      pick_steps_per_pack: 0,
+      pack_count: this.procedure.packs_per_player,
+      min_deck_size: this.procedure.min_deck_size,
       addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
       timer_remaining_ms: null,
       standings: [],
@@ -2517,7 +2739,7 @@ export class P2PDraftHost {
       tournament_format: "Swiss",
       pod_policy: "Competitive",
       pairings: [],
-      match_config: { match_type: this.kind === "Traditional" ? "Bo3" : "Bo1" },
+      match_config: this.procedure.match_config,
     };
   }
 

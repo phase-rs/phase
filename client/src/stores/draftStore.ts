@@ -60,13 +60,13 @@ interface DraftStoreActions {
   pickCardWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   autoPickCard: () => Promise<void>;
   selectCard: (cardInstanceId: string | null) => void;
-  confirmPick: () => Promise<void>;
+  confirmPick: (cardInstanceIds: string[]) => Promise<void>;
   addToDeck: (cardName: string) => void;
   removeFromDeck: (cardName: string) => void;
   setLandCount: (landName: string, count: number) => void;
   autoSuggestDeck: () => Promise<void>;
   autoSuggestLands: () => Promise<void>;
-  submitDeck: () => Promise<void>;
+  submitDeck: (commanders: string[]) => Promise<void>;
   setPoolSortMode: (mode: PoolSortMode) => void;
   togglePoolPanel: () => void;
   setDifficulty: (d: number) => void;
@@ -104,7 +104,16 @@ const initialState: DraftStoreState = {
 /** Index→AI-profile names; the difficulty index maps 1:1 to these and to the
  *  `setSelector.difficultyLevels` i18n keys rendered by `BotDifficultySelector`. */
 export const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
-const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
+/**
+ * The sessionStorage key prefix for a pre-staged `{ player, opponent, ai_decks }`
+ * blob, read back by `GameProvider` at game init.
+ *
+ * Exported so the Commander pod's launch writes THIS key rather than minting a
+ * second copy of the literal. `storeDraftDeckData` deliberately stays private:
+ * the pod's payload is N-ary and giving this 2-player writer an N-ary mode would
+ * make the local path pay for a case it never has.
+ */
+export const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
 
 // ── Match helpers ──────────────────────────────────────────────────────
 
@@ -440,10 +449,22 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       set({ selectedCard: cardInstanceId });
     },
 
-    confirmPick: async () => {
-      const { selectedCard, pickCard } = get();
-      if (!selectedCard) return;
-      await pickCard(selectedCard);
+    confirmPick: async (cardInstanceIds) => {
+      // The local wasm draft path is singular by construction: `LocalDraftKind`
+      // is "Quick" | "Sealed" and both have `cards_per_pick == 1`, so the engine
+      // publishes `required_pick_count <= 1` and PackDisplay never hands this
+      // more than one id. Narrowing here rather than silently ignoring the
+      // argument keeps that assumption visible; if a multi-card kind ever
+      // reaches this path, `apply_pick_inner` refuses the short submission with
+      // `WrongPickCardCount`, and since nothing on this path catches — not
+      // `pickCard`, not `DraftAdapter.submitPick`, and this store has no `error`
+      // state — the throw leaves the pack on screen unchanged and surfaces only
+      // as the `unhandledrejection` telemetry listener's `js_error`. Widening
+      // `adapter.submitPick` is a separate change; so is a pick error surface.
+      const [cardInstanceId] = cardInstanceIds;
+      if (cardInstanceId === undefined) return;
+      const { pickCard } = get();
+      await pickCard(cardInstanceId);
     },
 
     addToDeck: (cardName) => {
@@ -487,7 +508,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       persistDraftDebounced();
     },
 
-    submitDeck: async () => {
+    submitDeck: async (_commanders) => {
       const { adapter, mainDeck, landCounts } = get();
       if (!adapter) return;
 
@@ -499,7 +520,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       }
 
       const fullDeck = [...mainDeck, ...landCards];
-      const view = await adapter.submitDeck(fullDeck);
+      // `LocalDraftKind` is "Quick" | "Sealed"; CR 903.1 puts the commander
+      // designation inside the Commander variant, so neither local kind
+      // produces one and the explicit `[]` is the correct value rather than an
+      // oversight. Widening the signature is what keeps `LimitedDeckBuilder`'s
+      // `?? quickSubmitDeck` fallback from silently swallowing an argument.
+      // Recorded as D6.
+      const view = await adapter.submitDeck(fullDeck, []);
       set({ view, phase: view.status === "Deckbuilding" ? "deckbuilding" : "launching" });
       persistDraft();
     },

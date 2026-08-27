@@ -25,7 +25,7 @@ pub fn guard_create_draft_with_settings(
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
     validate_token("set_code", set_code, MAX_DRAFT_SET_CODE_LEN)?;
     validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-    let minimum_pod_size = if kind == DraftKind::Quick { 1 } else { 2 };
+    let minimum_pod_size = kind.procedure().min_pod_size;
     if !(minimum_pod_size..=MAX_PLAYER_COUNT).contains(&pod_size) {
         return Err(format!(
             "pod_size must be between {minimum_pod_size} and {MAX_PLAYER_COUNT}"
@@ -84,6 +84,47 @@ mod tests {
             DraftKind::Premier
         )
         .is_ok());
+    }
+
+    /// CR 903.13a + CR 800.1: a Commander pod's floor is three seats — the
+    /// smallest pod that can still deliver the multiplayer game the format is
+    /// defined as — so the four-seat product default must pass the wire guard.
+    ///
+    /// This is the REACH-GUARD half of the pod-floor claim: the guard reads
+    /// `kind.procedure().min_pod_size`, so this test fails if that derivation
+    /// is ever replaced by a literal 8 (the four older kinds' pod size).
+    #[test]
+    fn wire_guard_admits_four_seat_commander_pod() {
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            "CMM",
+            &None,
+            None,
+            4,
+            DraftKind::CommanderDraft
+        )
+        .is_ok());
+    }
+
+    /// The paired negative: two seats is not a multiplayer game (CR 800.1), so
+    /// the floor must refuse it — and must say so by naming `pod_size`, not by
+    /// failing on some unrelated field.
+    #[test]
+    fn wire_guard_refuses_two_seat_commander_pod() {
+        let err = guard_create_draft_with_settings(
+            "Alice",
+            "CMM",
+            &None,
+            None,
+            2,
+            DraftKind::CommanderDraft,
+        )
+        .unwrap_err();
+        assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+        assert!(
+            err.contains('3'),
+            "the floor must name the CR 800.1 minimum: {err}"
+        );
     }
 
     #[test]

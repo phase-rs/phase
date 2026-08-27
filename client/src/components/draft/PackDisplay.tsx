@@ -125,7 +125,8 @@ interface PackDisplayProps {
   view?: DraftPlayerView | null;
   selectedCard?: string | null;
   onSelectCard?: (instanceId: string | null) => void;
-  onConfirmPick?: () => Promise<void> | void;
+  /** Receives one whole CR 903.13b pick step: every selected card, primary first. */
+  onConfirmPick?: (cardInstanceIds: string[]) => Promise<void> | void;
   onPickWithDraftEffect?: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void> | void;
   onAutoPick?: () => Promise<void> | void;
 }
@@ -154,18 +155,37 @@ export function PackDisplay({
   const selectedCard = selectedCardOverride !== undefined
     ? selectedCardOverride
     : quickSelectedCard;
+  // The primary is a selection only while the card it names is still in the
+  // pack on screen. Its owner (the store) nulls it ONLY when this client
+  // submits, so a step advanced from the outside — a server auto-pick on
+  // timeout, the documented default under `PodPolicy::Competitive`, or the P2P
+  // host's timer sweep — pushes a new view with the old id left behind. At
+  // `requiredCount > 1` that stale id is unrecoverable by clicking: the deselect
+  // arm below is unsatisfiable for every card in the new pack, so every click
+  // lands in an additional slot and the step can only ever dispatch the dead id.
+  // The gate is pack membership rather than step identity because membership is
+  // the total condition — it also covers a pack replaced within one step and a
+  // primary invalidated by any other cause — and it routes the stale case into
+  // the same `!primaryCard` arm the guest's post-submit window already uses.
+  const primaryCard =
+    selectedCard && view?.current_pack?.some((card) => card.instance_id === selectedCard)
+      ? selectedCard
+      : null;
   const selectCard = onSelectCard ?? quickSelectCard;
   const confirmPick = onConfirmPick ?? quickConfirmPick;
   const pickCardWithDraftEffect = onPickWithDraftEffect ?? quickPickCardWithDraftEffect;
   const autoPickCard = onAutoPick ?? quickAutoPickCard;
   const [activeDraftEffect, setActiveDraftEffect] = useState<string | null>(null);
-  const [additionalCard, setAdditionalCard] = useState<string | null>(null);
+  // Selections beyond the primary `selectedCard`, in click order. A list, not a
+  // nullable single: a Commander pick step takes two (CR 903.13b) and a draft
+  // effect takes two, and the shipped `string | null` was the N = 2 special case.
+  const [additionalCards, setAdditionalCards] = useState<string[]>([]);
 
   useEffect(() => {
-    if (view?.current_pack?.length === 1 && !selectedCard) {
+    if (view?.current_pack?.length === 1 && !primaryCard) {
       selectCard(view.current_pack[0].instance_id);
     }
-  }, [view?.current_pack, selectedCard, selectCard]);
+  }, [view?.current_pack, primaryCard, selectCard]);
 
   const draftEffects = view?.draft_effects ?? EMPTY_DRAFT_EFFECTS;
 
@@ -179,12 +199,35 @@ export function PackDisplay({
   }, [activeDraftEffect, draftEffects]);
 
   useEffect(() => {
-    if (!activeDraftEffect) setAdditionalCard(null);
+    if (!activeDraftEffect) setAdditionalCards([]);
   }, [activeDraftEffect]);
+
+  // The step's identity is the engine's `(pack number, pick number)`, never
+  // `current_pack`'s array identity: a guest receives a fresh array object on
+  // every `draft_state_update` for the SAME step, and clearing on that would
+  // wipe a half-made selection mid-pick.
+  useEffect(() => {
+    setAdditionalCards([]);
+  }, [view?.current_pack_number, view?.pick_number]);
 
   if (!view) return null;
 
   const pack = view.current_pack;
+
+  // CR 903.13b's per-seat pick-step count, read from the engine and never
+  // re-derived: `view.required_pick_count` is `min(cards_per_pick, pack size)`,
+  // so it is 1 for the four CR 905.1a kinds, 2 for a Commander pod, and 1 again
+  // on an odd pack's final step — a distinction no per-kind lookup can make.
+  //
+  // A draft effect is the one case that is NOT the procedure's count: the engine
+  // hard-bounds `apply_pick_with_effect_inner` at two cards and
+  // `validateDraftEffectPick` requires exactly two, so the effect branch keeps
+  // that authority rather than borrowing the published one.
+  const requiredCount = activeDraftEffect ? 2 : view.required_pick_count;
+  // Primary first, then the additional slots in click order — the order
+  // `apply_pick_inner` receives. The additionals can never outlive their
+  // primary, so a null primary means nothing is selected.
+  const selectedIds = primaryCard ? [primaryCard, ...additionalCards] : [];
 
   if (!pack || pack.length === 0) {
     return (
@@ -204,35 +247,50 @@ export function PackDisplay({
   };
 
   const handleConfirmPick = async () => {
-    if (activeDraftEffect && selectedCard && additionalCard) {
-      await pickCardWithDraftEffect(activeDraftEffect, [selectedCard, additionalCard]);
+    // The engine enforces the exact count (`apply_pick_inner`); this gate only
+    // keeps the UI from dispatching a submission it already knows is wrong.
+    if (selectedIds.length !== requiredCount) return;
+    if (activeDraftEffect) {
+      await pickCardWithDraftEffect(activeDraftEffect, selectedIds);
       setActiveDraftEffect(null);
-      setAdditionalCard(null);
+      setAdditionalCards([]);
       return;
     }
-    if (activeDraftEffect) return;
-    await confirmPick();
+    await confirmPick(selectedIds);
   };
 
   const handleSelectCard = (instanceId: string) => {
-    if (!activeDraftEffect) {
+    // A one-card step re-selects rather than toggling, which is exactly today's
+    // behaviour for the four CR 905.1a kinds — and `<=` rather than `===` so a
+    // published 0 (which no engine invariant forbids the client receiving) takes
+    // the same path instead of silently falling into multi-select.
+    if (requiredCount <= 1) {
       selectCard(instanceId);
       return;
     }
-    if (selectedCard === instanceId) {
+    if (primaryCard === instanceId) {
       selectCard(null);
-      setAdditionalCard(null);
-    } else if (additionalCard === instanceId) {
-      setAdditionalCard(null);
-    } else if (!selectedCard) {
+      setAdditionalCards([]);
+    } else if (additionalCards.includes(instanceId)) {
+      setAdditionalCards((current) => current.filter((id) => id !== instanceId));
+    } else if (!primaryCard) {
+      // A fresh primary starts a fresh step: the store can null `selectedCard`
+      // on a completed pick (multiplayerDraftStore's guest branch) before the
+      // engine's next view arrives, and it can still be holding a card from a
+      // step someone else advanced, so additionals must not survive either gap.
       selectCard(instanceId);
+      setAdditionalCards([]);
     } else {
-      setAdditionalCard(instanceId);
+      // Full slots slide: the newest click evicts the oldest additional. At the
+      // shipped capacity of one this is exactly today's unconditional replace.
+      setAdditionalCards((current) =>
+        [...current, instanceId].slice(-(requiredCount - 1)),
+      );
     }
   };
 
   const handleToggleDraftEffect = (instanceId: string) => {
-    setAdditionalCard(null);
+    setAdditionalCards([]);
     setActiveDraftEffect((current) => (current === instanceId ? null : instanceId));
   };
 
@@ -264,7 +322,17 @@ export function PackDisplay({
         </div>
       )}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-white/40">{t("pack.cardsInPack", { count: pack.length })}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-white/40">{t("pack.cardsInPack", { count: pack.length })}</span>
+          {requiredCount > 1 && (
+            <span aria-live="polite" className="text-xs font-medium text-amber-200">
+              {t("pack.selectionProgress", {
+                selected: selectedIds.length,
+                required: requiredCount,
+              })}
+            </span>
+          )}
+        </div>
         {showAutoPick && (
           <button
             type="button"
@@ -290,10 +358,10 @@ export function PackDisplay({
                 <PackCard
                   key={card.instance_id}
                   card={card}
-                  isSelected={selectedCard === card.instance_id || additionalCard === card.instance_id}
+                  isSelected={selectedIds.includes(card.instance_id)}
                   onSelect={handleSelectCard}
                   onConfirm={handleConfirmPick}
-                  confirmDisabled={activeDraftEffect !== null && additionalCard === null}
+                  confirmDisabled={selectedIds.length !== requiredCount}
                   onHover={onCardHover}
                 />
               ))}

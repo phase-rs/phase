@@ -117,8 +117,17 @@ fn load_f4() -> GameState {
 
 /// **MODE1** — the user's own 2026-08-03 capture of the board that raised NO offer at all
 /// (`fastastic-four-no-offer-phase5.zip`, `game-state-turn-5-…19-09-15-030Z.json`), derived by
-/// `jq -c '{gameState}' … | gzip -9 -n` (860,451 B; the raw envelope is 20.5 MB, of which
-/// `turnCheckpoints` alone is 16.4 MB and no loader reads it).
+/// `jq -c '{gameState}' … | gzip -9 -n` (859,705 B, sha256
+/// `31eae665961b3da9161a1ba91907db150d9aa1787b0f3ad667be22055ccbca7e`; the raw envelope is
+/// 20.5 MB, of which `turnCheckpoints` alone is 16.4 MB and no loader reads it).
+///
+/// That `jq` pipeline ALONE is no longer sufficient: this capture predates U5, so its bare
+/// `"deck_size": 100` must first become the adjacently-tagged `DeckSizeRule` form
+/// `{"type":"Exactly","data":100}` — the variant taken from the sibling `format` field,
+/// `Commander` here. Piping the raw member straight through does not merely miss the digest; it
+/// yields a fixture `PersistedGameState` cannot deserialize, so `load_dump`'s
+/// `.expect("gameState deserializes through the production decoder")` aborts — a red test on a
+/// green engine. MODE2 below was captured the same day and needs the same migration.
 ///
 /// Its distinguishing field is `may_trigger_auto_choices`: it carries the user's stored
 /// "always take" for Sue's CR 603.5 `may`, so guard (b) withholds that pin slot and gate (6)
@@ -132,7 +141,9 @@ fn load_mode1() -> GameState {
 /// **MODE2** — the user's own 2026-08-03 capture of the board where the offer DID fire, the
 /// declaration WAS accepted, and the drive then committed **nothing** and re-offered
 /// (`f4-offer-fires-no-ff.zip`, `game-state-turn-5-…19-56-54-597Z.json`), derived by the same
-/// `jq -c '{gameState}' … | gzip -9 -n` (971,617 B).
+/// `jq -c '{gameState}' … | gzip -9 -n` plus the same U5 `deck_size` migration MODE1
+/// documents (968,121 B, sha256
+/// `04bb89f9910edf1c828a7639217620481e40609febc0a3801e59a14857c35b9d`).
 ///
 /// Its distinguishing field is the COMPLEMENT of MODE1's: `may_trigger_auto_choices` is EMPTY
 /// (the user cleared the "always take" as a workaround), so this board reaches the offer

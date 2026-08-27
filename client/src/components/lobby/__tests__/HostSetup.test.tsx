@@ -70,7 +70,7 @@ describe("HostSetup", () => {
       expect.objectContaining({
         formatConfig: expect.objectContaining({
           format: "FreeForAll",
-          deck_size: 40,
+          deck_size: { type: "Minimum", data: 40 },
         }),
       }),
     );

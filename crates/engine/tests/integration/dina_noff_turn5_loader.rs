@@ -10,17 +10,24 @@
 //! |---|---|---|
 //! | `/home/lgray/vibe-coding/combofb-dumps-pristine/dina-conqueror-offers-no-ff.zip` (canonical; the sole entry, line 1, of that directory's `MANIFEST.sha256`) | 4 334 390 | `4a285dbf5184545507c0d80183c4b831b3d21738f96728bb9e8eaa942a007d43` |
 //! | member `game-state-turn-5-2026-08-05T21-53-17-125Z.json` | 21 442 451 | `14e2fe515310ea34f6c1f52087a0ab274842a3bf69f951b3ceacb93c9a0ca660` |
-//! | derived `dina_noff_turn5_4p.json.gz` (this fixture) | 844 846 | `9843d5165cbbf7dd7bca4171c7888c190b7eba7e52a2ed095b44ff76fadd7886` |
+//! | derived `dina_noff_turn5_4p.json.gz` (this fixture) | 841 475 | `12f91f38616bd90386fdb7a137371a9f9ec5c6adcb12dd1bbad04bde167ea2b2` |
 //!
-//! Regeneration re-gzips from the archive and must reproduce those bytes exactly — `-n` is
-//! load-bearing, since without it gzip stamps an mtime and the digest never lands:
+//! Regeneration is the recipe below **plus the U5 `deck_size` migration**, and together they must
+//! reproduce those bytes exactly — `-n` is load-bearing, since without it gzip stamps an mtime and
+//! the digest never lands:
 //!
 //! ```text
 //! unzip -p <canonical zip> game-state-turn-5-2026-08-05T21-53-17-125Z.json \
 //!   | jq -c '{gameState}' | gzip -9 -n > crates/engine/tests/fixtures/dina_noff_turn5_4p.json.gz
 //! ```
 //!
-//! The raw member is 21.4 MB and is deliberately NOT tracked; only the 845 KB `.json.gz` is.
+//! This capture predates U5, so the recipe alone is NOT sufficient: its bare `"deck_size": 100`
+//! must first become the adjacently-tagged `DeckSizeRule` form `{"type":"Exactly","data":100}` —
+//! the variant taken from the sibling `format` field, `Commander` here. Piping the raw member
+//! straight through does not merely miss the digest; it yields a fixture that
+//! `PersistedGameState` cannot deserialize, and a red test on a green engine.
+//!
+//! The raw member is 21.4 MB and is deliberately NOT tracked; only the 841 KB `.json.gz` is.
 
 use engine::types::game_state::{GameState, PersistedGameState};
 

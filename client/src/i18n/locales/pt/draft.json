@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Veja como funciona",
     "startDrafting": "Começar a Draftar",
     "quick": {
@@ -15,6 +16,10 @@
       "step2": "Abra 3 boosters de 14 cartas — escolha uma, passe o restante",
       "step3": "Os boosters alternam de direção a cada rodada — esquerda, direita, esquerda",
       "step4": "Após o draft, monte um deck de 40 cartas e jogue as partidas do torneio"
+    },
+    "commander": {
+      "step2": "Escolha duas cartas de cada booster e passe o restante",
+      "step4": "Após o draft, monte um deck Commander de 60 cartas e jogue uma partida multijogador"
     }
   },
   "steps": {
@@ -82,7 +87,8 @@
     "waitingNext": "Aguardando o próximo booster...",
     "cardsInPack": "{{count}} cartas no booster",
     "picking": "Escolhendo…",
-    "autoPick": "Escolha automática"
+    "autoPick": "Escolha automática",
+    "selectionProgress": "{{selected}} de {{required}} selecionadas"
   },
   "sealedOpening": {
     "title": "Abra seu pool de Selado",
@@ -103,6 +109,7 @@
     "sortColor": "Cor",
     "sortType": "Tipo",
     "sortCmc": "CMC",
+    "grantedFiller": "+ até {{maximum}} × {{name}} (apenas comandante)",
     "groups": {
       "white": "Branco",
       "blue": "Azul",
@@ -165,7 +172,10 @@
     "landCount_one": "{{count}} terreno",
     "landCount_other": "{{count}} terrenos",
     "readyToSubmit": "pronto para enviar",
-    "moreNeeded": "{{count}} a mais necessárias"
+    "moreNeeded": "{{count}} a mais necessárias",
+    "commanderRequired": "Designe um comandante da sua reserva para enviar.",
+    "commanderUnavailable": "A designação de comandante está indisponível no momento — não foi possível carregar a base de dados de cartas.",
+    "grantedFiller": "Sua reserva também inclui até {{maximum}} × {{name}}, utilizável apenas como seu comandante."
   },
   "landing": {
     "title": "Draft",
@@ -187,6 +197,10 @@
     "podDraft": {
       "title": "Pod Draft",
       "description": "Hospede ou entre em um pod com até 8 jogadores, drafte ao vivo juntos e depois jogue um torneio Suíço ou de eliminação."
+    },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Drafte duas cartas de cada vez em um pod, monte um deck Commander de 60 cartas e depois jogue uma partida multijogador."
     },
     "podInProgress": "Pod Draft em Andamento",
     "guestPodInProgress": "Pod ingressado pronto para reconectar",
@@ -328,6 +342,8 @@
     "kindTraditionalDesc": "Partidas de torneio melhor de três após a montagem do deck, com sideboarding entre os jogos.",
     "kindSealed": "Selado",
     "kindSealedDesc": "Abra seis boosters diretamente no pool de cada jogador e depois monte um deck de torneio melhor de um.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Cada jogador drafta duas cartas de cada vez e monta um deck Commander de 60 cartas; depois o pod joga uma partida multijogador.",
     "tournamentFormat": "Formato do Torneio",
     "tournamentSwiss": "Suíço",
     "tournamentSwissDesc": "Todos continuam jogando por três rodadas, mesmo após uma derrota.",
@@ -390,6 +406,7 @@
   },
   "podComplete": {
     "title": "Draft Concluído",
+    "launchCommanderGame": "Iniciar Jogo Commander",
     "returnToMenu": "Voltar ao Menu"
   },
   "podError": {

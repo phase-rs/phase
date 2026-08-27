@@ -112,6 +112,8 @@ mod combo_infinite_pile;
 mod combustible_gearhulk;
 mod come_back_wrong_finality_counter;
 mod comeuppance;
+mod commander_draft_deck_legality;
+mod commander_draft_filler;
 mod companion_special_action;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;

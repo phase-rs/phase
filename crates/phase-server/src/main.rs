@@ -1158,6 +1158,27 @@ fn guard_full_create_game_settings_inbound(
     Ok(pc)
 }
 
+/// Whether the single-elimination seat rule applies to a requested pod.
+///
+/// A single named authority so the `CreateDraftWithSettings` handler and its
+/// test read the SAME predicate — a test that re-states the rule inline would
+/// stay green after the handler's rule changed, which is no evidence at all.
+///
+/// CR 903.13a: a Commander Draft pod plays one multiplayer game, not a bracket,
+/// so the seat requirement does not reach it — its `post_draft_play` is
+/// `CompleteImmediately`, and the kind is read through the procedure table
+/// rather than compared by name. The rule is a property of running tournament
+/// pairings, not of any particular kind.
+fn single_elimination_seat_rule_applies(
+    kind: draft_core::types::DraftKind,
+    tournament_format: draft_core::types::TournamentFormat,
+    pod_size: u8,
+) -> bool {
+    kind.procedure().post_draft_play == draft_core::types::PostDraftPlay::TournamentPairings
+        && tournament_format == draft_core::types::TournamentFormat::SingleElimination
+        && pod_size != 8
+}
+
 /// Returns `Some(reason)` if `action` cannot legitimately come from a client
 /// over the WebSocket draft protocol, or `None` if it is a valid client action.
 ///
@@ -3636,11 +3657,28 @@ fn spawn_pick_timer(
         for seat_idx in seats {
             if let Some(pack) = &session.session.current_pack[seat_idx] {
                 if !pack.0.is_empty() {
-                    let card_idx = rand::rng().random_range(0..pack.0.len());
-                    let card_id = pack.0[card_idx].instance_id.clone();
+                    // CR 903.13b: the expired pick timer takes the kind's WHOLE
+                    // pick step — one card for the four CR 905.1a kinds, two for
+                    // CommanderDraft, dropping to the remainder on an odd final
+                    // pick. Read from the procedure so this and the reducer's
+                    // `expected` agree by construction. Was a hardcoded single
+                    // id, which stalled a Commander pod at `WrongPickCardCount`.
+                    // Same mechanism as `server-core`'s disconnected-seat
+                    // auto-pick, which carries the full derivation.
+                    let cards_per_pick =
+                        usize::from(session.session.config.kind.procedure().cards_per_pick)
+                            .min(pack.0.len());
+                    let mut rng = rand::rng();
+                    // Distinct ids: drawing twice by index into the pack could
+                    // pick the same card twice, which the reducer rejects.
+                    let mut remaining: Vec<String> =
+                        pack.0.iter().map(|c| c.instance_id.clone()).collect();
+                    let card_instance_ids: Vec<String> = (0..cards_per_pick)
+                        .map(|_| remaining.swap_remove(rng.random_range(0..remaining.len())))
+                        .collect();
                     let action = draft_core::types::DraftAction::Pick {
                         seat: seat_idx as u8,
-                        card_instance_id: card_id,
+                        card_instance_ids,
                     };
                     if let Err(e) = draft_core::session::apply(&mut session.session, action, None) {
                         warn!(
@@ -5738,6 +5776,10 @@ async fn handle_client_message(
                     }
                     return;
                 }
+                // Server-hosted constructed play has no draft behind it, so
+                // `None` is the accurate draft set code here, and it means
+                // constructed play — not a placeholder for a value this path
+                // could have supplied.
                 if let Err(reasons) = validate_name_deck_for_format_full(
                     db,
                     &deck.main_deck,
@@ -5747,6 +5789,7 @@ async fn handle_client_message(
                     &deck.planar_deck,
                     &deck.scheme_deck,
                     &deck.signature_spell,
+                    None,
                     fc.format,
                     Some(match_config.match_type),
                     usize::from(pc),
@@ -5798,6 +5841,7 @@ async fn handle_client_message(
                         &ai_deck_data.planar_deck,
                         &ai_deck_data.scheme_deck,
                         &ai_deck_data.signature_spell,
+                        None,
                         fc.format,
                         Some(match_config.match_type),
                         usize::from(pc),
@@ -7745,10 +7789,22 @@ async fn handle_client_message(
                 return;
             }
 
-            if kind != draft_core::types::DraftKind::Quick
-                && tournament_format == draft_core::types::TournamentFormat::SingleElimination
-                && pod_size != 8
-            {
+            // CR 903.13a: a Commander Draft pod plays one multiplayer game, not
+            // a bracket, so the single-elimination seat requirement does not
+            // apply to it. Was `kind != DraftKind::Quick`, which is TRUE for
+            // the fifth kind and would reject a legitimate 4-seat pod that the
+            // reducer accepts — the wire and the reducer disagreeing about the
+            // same kind in opposite directions.
+            //
+            // The predicate itself is covered by
+            // `single_elimination_seat_rule_skips_commander_draft` below, which
+            // asserts it over the procedure table: it must NOT fire for
+            // CommanderDraft (whose `post_draft_play` is `CompleteImmediately`)
+            // and MUST fire for Traditional at a 4-seat SE pod. The live socket
+            // path around it remains uncovered — reaching it needs a real
+            // connection and a created pod — so what is verified here is the
+            // typed comparison, not the frame handling.
+            if single_elimination_seat_rule_applies(kind, tournament_format, pod_size) {
                 let msg = ServerMessage::DraftActionRejected {
                     reason: "Single-elimination draft events require exactly 8 seats".to_string(),
                 };
@@ -7758,6 +7814,7 @@ async fn handle_client_message(
                 return;
             }
 
+            let procedure = kind.procedure();
             let config = draft_core::types::DraftConfig {
                 source: draft_core::types::DraftSource::Set {
                     code: set_code.clone(),
@@ -7765,13 +7822,13 @@ async fn handle_client_message(
                 set_code: set_code.clone(),
                 kind,
                 pod_size,
+                // A SET-POOL property, not a `DraftProcedure` axis — the
+                // struct carries no pack-size field, so this is wrong for all
+                // five kinds equally rather than wrong for CommanderDraft. Not
+                // a missed kind-derived hardcode.
                 cards_per_pack: 14,
-                pack_count: if kind == draft_core::types::DraftKind::Sealed {
-                    6
-                } else {
-                    3
-                },
-                min_deck_size: 40,
+                pack_count: procedure.packs_per_player,
+                min_deck_size: procedure.min_deck_size,
                 addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
                 rng_seed: rand::random(),
                 tournament_format,
@@ -9027,6 +9084,50 @@ mod live_spectator_tests {
             .unwrap();
 
         assert_eq!(spectators.lock().await.get("SAME").map(Vec::len), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod single_elimination_seat_rule_tests {
+    use super::single_elimination_seat_rule_applies;
+    use draft_core::types::{DraftKind, TournamentFormat};
+
+    /// CR 903.13a: a Commander pod plays one multiplayer game rather than a
+    /// bracket, so the 8-seat single-elimination requirement must not reject
+    /// its 4-seat product default.
+    ///
+    /// REVERT-PROBE: restore the old `kind != DraftKind::Quick` form of the
+    /// rule — which is TRUE for the fifth kind — and this reds.
+    #[test]
+    fn single_elimination_seat_rule_skips_commander_draft() {
+        assert!(!single_elimination_seat_rule_applies(
+            DraftKind::CommanderDraft,
+            TournamentFormat::SingleElimination,
+            4
+        ));
+    }
+
+    /// The paired positive reach-guard: the rule still fires for a kind that
+    /// DOES run tournament pairings, so the negative above cannot pass merely
+    /// because the predicate never fires for anything.
+    #[test]
+    fn single_elimination_seat_rule_fires_for_traditional_four_seat_pod() {
+        assert!(single_elimination_seat_rule_applies(
+            DraftKind::Traditional,
+            TournamentFormat::SingleElimination,
+            4
+        ));
+        // ...and not at the legal 8-seat size, nor under Swiss.
+        assert!(!single_elimination_seat_rule_applies(
+            DraftKind::Traditional,
+            TournamentFormat::SingleElimination,
+            8
+        ));
+        assert!(!single_elimination_seat_rule_applies(
+            DraftKind::Traditional,
+            TournamentFormat::Swiss,
+            4
+        ));
     }
 }
 
@@ -10596,7 +10697,7 @@ mod handshake_tests {
             draft_core::types::DraftAction::StartDraft,
             draft_core::types::DraftAction::Pick {
                 seat: 0,
-                card_instance_id: "x".into(),
+                card_instance_ids: vec!["x".into()],
             },
             draft_core::types::DraftAction::PickWithDraftEffect {
                 seat: 0,
@@ -10606,6 +10707,7 @@ mod handshake_tests {
             draft_core::types::DraftAction::SubmitDeck {
                 seat: 0,
                 main_deck: vec![],
+                commanders: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {
                 match_id: "m1".into(),

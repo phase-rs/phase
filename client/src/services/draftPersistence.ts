@@ -118,6 +118,14 @@ export interface PersistedDraftDeckSubmission {
   draftToken: string;
   submissionId: string;
   mainDeck: string[];
+  /**
+   * CR 903.3: the commander designation this submission carried. Persisted
+   * because `draft_submit_deck` REQUIRES it (draft protocol 17) — a reconnect
+   * replay that omitted it would be refused by `validateSubmitDeck` on the
+   * host, and `draftPeerSession`'s decode `.catch` would drop the frame
+   * silently rather than surfacing an error.
+   */
+  commanders: string[];
   timestamp: number;
 }
 
@@ -577,6 +585,7 @@ export async function saveDraftDeckSubmission(
     draftToken: submission.draftToken,
     submissionId: submission.submissionId,
     mainDeck: [...submission.mainDeck],
+    commanders: [...submission.commanders],
     timestamp: Date.now(),
   };
   await set(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, value, getDraftStore());
@@ -596,7 +605,12 @@ export async function loadDraftDeckSubmission(
     if (!value || value.hostPeerId !== hostPeerId || !isNonEmptyString(value.draftCode)
       || !isCanonicalRoomCode(value.roomCode)
       || !isNonEmptyString(value.draftToken) || !isNonEmptyString(value.submissionId)
-      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")) {
+      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")
+      // A record written before the designation existed cannot be replayed:
+      // the host would refuse it. Discarding it is the fail-safe answer — the
+      // guest simply builds a fresh submission.
+      || !Array.isArray(value.commanders)
+      || !value.commanders.every((card) => typeof card === "string")) {
       return null;
     }
     if (identity && (value.roomCode !== roomCode || value.draftToken !== identity.draftToken)) {
