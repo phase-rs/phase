@@ -8379,7 +8379,7 @@ fn respond_resolve_all_consent(
             "Resolve All consent epoch is stale".to_string(),
         ));
     }
-    {
+    let legacy_grant = {
         let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
             EngineError::InvalidAction("Resolve All consent is not active".to_string())
         })?;
@@ -8395,7 +8395,17 @@ fn respond_resolve_all_consent(
                 .find(|participant| participant.representative == representative)
                 .expect("pending Resolve All representative must be a participant");
             participant.granted = true;
+            run.auto_pass_baseline.is_none()
+        } else {
+            false
         }
+    };
+    // A missing baseline identifies the persisted pre-session protocol. Its
+    // Ready reader requires an empty live map, so retain its historical
+    // per-grant removal while fresh `Some` runs preserve their transaction
+    // baseline until the session materializes or rolls back.
+    if legacy_grant {
+        state.auto_pass.remove(&representative);
     }
     if matches!(decision, ResolveAllConsentDecision::Decline) {
         return restore_resolve_all_priority_snapshot(state);

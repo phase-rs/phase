@@ -317,6 +317,143 @@ fn final_grant_materializes_the_ordinary_session_without_a_ready_latch() {
 }
 
 #[test]
+fn single_representative_begin_materializes_directly_without_a_consent_or_ready_stop() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.stack.push_back(no_op_entry(2, P0));
+
+    let result = apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll { max_resolutions: 1 },
+    )
+    .expect("the sole representative is already unanimous");
+
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1,
+        "the one-seat Begin enters the ordinary capped session runner immediately"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the materialized cap stops after one entry"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(state.resolve_all_consent_run.is_none());
+    assert!(state.stack_resolution_session.is_none());
+}
+
+#[test]
+fn final_grant_transfers_the_requested_cap_zero_as_unlimited() {
+    let run = |max_resolutions| {
+        let mut state = GameState::new_two_player(0xCA9);
+        state.stack.push_back(no_op_entry(1, P0));
+        state.stack.push_back(no_op_entry(2, P0));
+        let epoch = apply(
+            &mut state,
+            P0,
+            GameAction::BeginResolveAll { max_resolutions },
+        )
+        .expect("priority holder begins")
+        .waiting_for;
+        let WaitingFor::ResolveAllConsent {
+            epoch,
+            representative: P1,
+        } = epoch
+        else {
+            panic!("two-seat Begin must queue P1")
+        };
+        let result = apply(
+            &mut state,
+            P1,
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("final representative grants");
+        (state, result)
+    };
+
+    let (capped, capped_result) = run(1);
+    assert_eq!(
+        capped_result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(capped.stack.len(), 1);
+    assert!(matches!(capped.waiting_for, WaitingFor::Priority { .. }));
+
+    let (unlimited, unlimited_result) = run(0);
+    assert_eq!(
+        unlimited_result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        2,
+        "zero keeps StackResolutionBudget's legacy unlimited meaning"
+    );
+    assert!(unlimited.stack.is_empty());
+    assert!(!matches!(
+        unlimited.waiting_for,
+        WaitingFor::ResolveAllReady { .. }
+    ));
+}
+
+#[test]
+fn final_grant_restores_the_baseline_when_the_captured_top_fence_changed() {
+    let mut state = GameState::new_two_player(0xF3EC3);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    );
+    let baseline = state.auto_pass.clone();
+    let epoch = begin(&mut state);
+    state
+        .stack
+        .back_mut()
+        .expect("fixture stack entry exists")
+        .id = ObjectId(99);
+
+    let result = apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("a changed top is handled by the ordinary session fence");
+
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+        "the replaced top was never resolved through the captured cohort"
+    );
+    assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.auto_pass, baseline);
+    assert!(state.stack_resolution_session.is_none());
+    assert!(state.resolve_all_consent_run.is_none());
+}
+
+#[test]
 fn pending_consent_preserves_modes_and_cancellation_is_not_resurrected_on_revoke() {
     let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0xC0A5_E17);
     state.stack.push_back(no_op_entry(1, P0));
@@ -514,6 +651,56 @@ fn persisted_pending_consent_decline_restores_the_captured_baseline() {
     .expect("restored responder may decline");
     assert_eq!(restored.stack.len(), 1);
     assert!(restored.auto_pass.is_empty());
+}
+
+#[test]
+fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
+    let mut state = GameState::new_two_player(0x1E6A_C0);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.auto_pass.insert(
+        P1,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let epoch = begin(&mut state);
+    state
+        .resolve_all_consent_run
+        .as_mut()
+        .expect("fresh fixture has a pending run")
+        .auto_pass_baseline = None;
+    let encoded = serde_json::to_string(&PersistedGameState::capture(state))
+        .expect("legacy pending run serializes without a baseline");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&encoded)
+        .expect("legacy pending run deserializes")
+        .into_game_state();
+    assert!(restored
+        .resolve_all_consent_run
+        .as_ref()
+        .expect("restored pending run exists")
+        .auto_pass_baseline
+        .is_none());
+    assert!(restored.auto_pass.contains_key(&P1));
+
+    apply(
+        &mut restored,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("legacy final grant reaches its Ready reader");
+
+    assert!(!restored.auto_pass.contains_key(&P1));
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::ResolveAllReady { .. }
+    ));
+    let result = resolve_all_ready_prefix(&mut restored, P0);
+    assert_eq!(result.items_resolved, 1);
+    assert!(restored.stack.is_empty());
 }
 
 #[test]
