@@ -44,11 +44,6 @@
     "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
     "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
-  "resolutionProgress": {
-    "label": "Rozwiązywanie {{resolved}} / {{total}}",
-    "collapse": "Zwiń postęp rozwiązywania",
-    "expand": "Rozwiń postęp rozwiązywania"
-  },
   "restoredAutomation": {
     "dismiss": "Zamknij",
     "noop": {"title": "Wczytano zapisaną grę", "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.", "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."},

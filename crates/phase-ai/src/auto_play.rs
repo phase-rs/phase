@@ -496,12 +496,12 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(70_001),
-                ability: engine::types::ability::ResolvedAbility::new(
+                ability: Box::new(engine::types::ability::ResolvedAbility::new(
                     Effect::NoOp,
                     Vec::new(),
                     ObjectId(70_001),
                     PlayerId(1),
-                ),
+                )),
             },
         });
         let ability_source = create_object(

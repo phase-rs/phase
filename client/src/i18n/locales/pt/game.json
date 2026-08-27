@@ -44,11 +44,6 @@
     "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
     "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
-  "resolutionProgress": {
-    "label": "Resolvendo {{resolved}} / {{total}}",
-    "collapse": "Recolher progresso de resolução",
-    "expand": "Expandir progresso de resolução"
-  },
   "restoredAutomation": {
     "dismiss": "Fechar",
     "noop": {"title": "Jogo salvo carregado", "summary_one": "Não foi necessário retomar a automação da pilha.", "summary_other": "Não foi necessário retomar a automação da pilha."},

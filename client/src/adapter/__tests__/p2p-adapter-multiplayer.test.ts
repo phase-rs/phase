@@ -284,6 +284,7 @@ function remoteState(label: string): GameState {
     phase: "PreCombatMain",
     players: [],
     objects: {},
+    waiting_for: { type: "Priority", data: { player: 0 } },
   } as unknown as GameState;
 }
 
@@ -928,8 +929,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const { adapter, emitConnection } = makeResumedHost();
 
     const initialize = adapter.initialize();
-    await flushPromises();
-    expect(terminalMocks.commitP2PTerminalResult).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(terminalMocks.commitP2PTerminalResult).toHaveBeenCalledOnce());
     expect(persistenceMocks.clearGame).not.toHaveBeenCalled();
 
     const reconnect = new FakeOpenableConnection();

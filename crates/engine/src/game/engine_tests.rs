@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::*;
@@ -3690,7 +3690,7 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
             policy: StackResolutionPolicy::Committed,
         },
     );
-    let baseline = BTreeMap::from([(
+    let baseline = HashMap::from([(
         PlayerId(1),
         AutoPassMode::UntilTurnBoundary {
             until: TurnBoundary::MyNextTurnStart,
@@ -3724,7 +3724,7 @@ fn representative_replacement_recaptures_the_restored_baseline() {
     let mut state = setup_game_at_main_phase();
     let entry = no_op_stack_entry(7_779, PlayerId(0));
     state.stack.push_back(entry.clone());
-    let baseline = BTreeMap::from([(
+    let baseline = HashMap::from([(
         PlayerId(1),
         AutoPassMode::UntilTurnBoundary {
             until: TurnBoundary::MyNextTurnStart,

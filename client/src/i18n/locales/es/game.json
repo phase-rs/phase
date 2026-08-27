@@ -44,11 +44,6 @@
     "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
     "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
-  "resolutionProgress": {
-    "label": "Resolviendo {{resolved}} / {{total}}",
-    "collapse": "Contraer progreso de resolución",
-    "expand": "Expandir progreso de resolución"
-  },
   "restoredAutomation": {
     "dismiss": "Cerrar",
     "noop": {"title": "Partida guardada cargada", "summary_one": "No fue necesario reanudar la automatización de la pila.", "summary_other": "No fue necesario reanudar la automatización de la pila."},
