@@ -211,8 +211,9 @@ enum RestoredFullStartup {
 /// capability before the engine can make another transition. The session stays
 /// private behind the manager lock throughout. A changed non-terminal resume
 /// must win the database revision fence synchronously; an ended game uses the
-/// same terminal transaction as a live Full game. Either failure removes the
-/// private insertion so a later startup can recover the retained row.
+/// same terminal transaction as a live Full game. Only an active result keeps
+/// the private insertion; failures leave the retained row for recovery and a
+/// terminal outcome leaves only its durable delivery artifact.
 fn finish_restored_full_startup(
     manager: &mut SessionManager,
     game_db: &SharedGameDb,
@@ -272,8 +273,8 @@ fn finish_restored_full_startup(
         Ok(RestoredFullStartup::Active)
     })();
 
-    if completion.is_err() {
-        manager.remove_session(&game_code);
+    if completion.as_ref() != Ok(&RestoredFullStartup::Active) {
+        manager.remove_game(&game_code);
     }
     completion
 }
@@ -2482,6 +2483,11 @@ mod restored_full_startup_tests {
         assert!(
             !target_manager.sessions.contains_key(&game_code),
             "a terminal session is never exposed as an active game"
+        );
+        assert_eq!(
+            target_manager.game_for_token(&token),
+            None,
+            "terminal startup cleanup removes the private token index too"
         );
         assert!(
             db.load_active_full_sessions()
