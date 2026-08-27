@@ -5,6 +5,7 @@ import type { AnimationStep, PositionSnapshot } from "../animation/types";
 interface AnimationStoreState {
   queue: AnimationStep[];
   activeStep: AnimationStep | null;
+  activeGeneration: number;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
   animationNewState: GameState | null;
@@ -25,6 +26,7 @@ export type AnimationStore = AnimationStoreState & AnimationStoreActions;
 export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   queue: [],
   activeStep: null,
+  activeGeneration: 0,
   isPlaying: false,
   positionRegistry: new Map(),
   animationNewState: null,
@@ -39,7 +41,12 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     } else {
       // Nothing playing — promote first step immediately
       const [first, ...rest] = steps;
-      set({ activeStep: first, queue: rest, isPlaying: true });
+      set((state) => ({
+        activeStep: first,
+        activeGeneration: state.activeGeneration + 1,
+        queue: rest,
+        isPlaying: true,
+      }));
     }
   },
 
@@ -47,9 +54,18 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     const { queue } = get();
     if (queue.length > 0) {
       const [next, ...rest] = queue;
-      set({ activeStep: next, queue: rest });
+      set((state) => ({
+        activeStep: next,
+        activeGeneration: state.activeGeneration + 1,
+        queue: rest,
+      }));
     } else {
-      set({ activeStep: null, isPlaying: false, animationNewState: null });
+      set((state) => ({
+        activeStep: null,
+        activeGeneration: state.activeGeneration + 1,
+        isPlaying: false,
+        animationNewState: null,
+      }));
     }
   },
 
@@ -77,5 +93,11 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
 
   setAnimationNewState: (state) => set({ animationNewState: state }),
 
-  clearQueue: () => set({ queue: [], activeStep: null, isPlaying: false, animationNewState: null }),
+  clearQueue: () => set((state) => ({
+    queue: [],
+    activeStep: null,
+    activeGeneration: state.activeGeneration + 1,
+    isPlaying: false,
+    animationNewState: null,
+  })),
 }));

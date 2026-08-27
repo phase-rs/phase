@@ -18,7 +18,7 @@ interface Fragment {
 
 interface DeathShatterProps {
   position: { x: number; y: number; width: number; height: number };
-  imageUrl: string;
+  image: HTMLImageElement;
   onComplete: () => void;
 }
 
@@ -27,6 +27,7 @@ const GRAVITY = 200; // px/s^2
 const FRAGMENT_COLS = 3;
 const FRAGMENT_ROWS = 4;
 const RED_FLASH_DURATION = 0.1; // seconds
+const RAF_SAFETY_TIMEOUT_MS = 1100;
 
 function generateFragments(width: number, height: number): Fragment[] {
   const fragments: Fragment[] = [];
@@ -71,107 +72,116 @@ function generateFragments(width: number, height: number): Fragment[] {
   return fragments;
 }
 
-export function DeathShatter({ position, imageUrl, onComplete }: DeathShatterProps) {
+export function DeathShatter({ position, image, onComplete }: DeathShatterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const startTimeRef = useRef<number>(0);
   const completedRef = useRef(false);
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
+    let animationFrame: number | null = null;
+    let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+    const completeOnce = () => {
+      if (completedRef.current) return;
+      completedRef.current = true;
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      if (safetyTimer !== null) clearTimeout(safetyTimer);
+      onCompleteRef.current();
+    };
+
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      completeOnce();
+      return;
+    }
 
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      completeOnce();
+      return;
+    }
 
     // Canvas covers the card area with generous padding for scattered fragments
     const padding = 200;
     canvas.width = position.width + padding * 2;
     canvas.height = position.height + padding * 2;
 
-    const img = new Image();
-    img.crossOrigin = "anonymous";
+    // The coordinator supplies an already-loaded image. Drawing it into the
+    // offscreen canvas is the only image operation here; this effect never
+    // starts a second network or custom-protocol request.
+    const offscreen = document.createElement("canvas");
+    offscreen.width = position.width;
+    offscreen.height = position.height;
+    const offCtx = offscreen.getContext("2d");
+    if (!offCtx) {
+      completeOnce();
+      return;
+    }
+    offCtx.drawImage(image, 0, 0, position.width, position.height);
 
-    img.onload = () => {
-      // Create offscreen canvas with the card image
-      const offscreen = document.createElement("canvas");
-      offscreen.width = position.width;
-      offscreen.height = position.height;
-      const offCtx = offscreen.getContext("2d");
-      if (!offCtx) return;
-      offCtx.drawImage(img, 0, 0, position.width, position.height);
+    const fragments = generateFragments(position.width, position.height);
+    const startTime = performance.now();
 
-      const fragments = generateFragments(position.width, position.height);
-      startTimeRef.current = performance.now();
+    const tick = (now: number) => {
+      if (completedRef.current) return;
 
-      const tick = (now: number) => {
-        if (completedRef.current) return;
+      const elapsed = (now - startTime) / 1000;
+      const progress = Math.min(elapsed / DURATION, 1);
 
-        const elapsed = (now - startTimeRef.current) / 1000;
-        const progress = Math.min(elapsed / DURATION, 1);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (const frag of fragments) {
+        const currentX = frag.x + frag.vx * elapsed + padding;
+        const currentY = frag.y + frag.vy * elapsed + 0.5 * GRAVITY * elapsed * elapsed + padding;
+        const currentRotation = frag.rotation + frag.rotationSpeed * elapsed;
+        const currentAlpha = 1 - progress;
 
-        for (const frag of fragments) {
-          const dt = elapsed;
-          const currentX = frag.x + frag.vx * dt + padding;
-          const currentY = frag.y + frag.vy * dt + 0.5 * GRAVITY * dt * dt + padding;
-          const currentRotation = frag.rotation + frag.rotationSpeed * dt;
-          const currentAlpha = 1 - progress;
+        if (currentAlpha <= 0) continue;
 
-          if (currentAlpha <= 0) continue;
+        ctx.save();
+        ctx.globalAlpha = currentAlpha;
+        ctx.translate(currentX + frag.sw / 2, currentY + frag.sh / 2);
+        ctx.rotate((currentRotation * Math.PI) / 180);
 
-          ctx.save();
-          ctx.globalAlpha = currentAlpha;
-          ctx.translate(currentX + frag.sw / 2, currentY + frag.sh / 2);
-          ctx.rotate((currentRotation * Math.PI) / 180);
-
-          // Red tint flash in first 0.1s
-          if (elapsed < RED_FLASH_DURATION) {
-            // Draw the fragment
-            ctx.drawImage(
-              offscreen,
-              frag.sx, frag.sy, frag.sw, frag.sh,
-              -frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh,
-            );
-            // Red overlay
-            ctx.globalCompositeOperation = "source-atop";
-            ctx.fillStyle = `rgba(239, 68, 68, ${0.5 * (1 - elapsed / RED_FLASH_DURATION)})`;
-            ctx.fillRect(-frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh);
-            ctx.globalCompositeOperation = "source-over";
-          } else {
-            ctx.drawImage(
-              offscreen,
-              frag.sx, frag.sy, frag.sw, frag.sh,
-              -frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh,
-            );
-          }
-
-          ctx.restore();
+        // Red tint flash in first 0.1s
+        if (elapsed < RED_FLASH_DURATION) {
+          ctx.drawImage(
+            offscreen,
+            frag.sx, frag.sy, frag.sw, frag.sh,
+            -frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh,
+          );
+          ctx.globalCompositeOperation = "source-atop";
+          ctx.fillStyle = `rgba(239, 68, 68, ${0.5 * (1 - elapsed / RED_FLASH_DURATION)})`;
+          ctx.fillRect(-frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh);
+          ctx.globalCompositeOperation = "source-over";
+        } else {
+          ctx.drawImage(
+            offscreen,
+            frag.sx, frag.sy, frag.sw, frag.sh,
+            -frag.sw / 2, -frag.sh / 2, frag.sw, frag.sh,
+          );
         }
 
-        if (progress >= 1) {
-          completedRef.current = true;
-          onComplete();
-          return;
-        }
+        ctx.restore();
+      }
 
-        requestAnimationFrame(tick);
-      };
+      if (progress >= 1) {
+        completeOnce();
+        return;
+      }
 
-      requestAnimationFrame(tick);
+      animationFrame = requestAnimationFrame(tick);
     };
 
-    img.onerror = () => {
-      // If image fails to load, complete immediately
-      onComplete();
-    };
-
-    img.src = imageUrl;
+    safetyTimer = setTimeout(completeOnce, RAF_SAFETY_TIMEOUT_MS);
+    animationFrame = requestAnimationFrame(tick);
 
     return () => {
       completedRef.current = true;
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      if (safetyTimer !== null) clearTimeout(safetyTimer);
     };
-  }, [position, imageUrl, onComplete]);
+  }, [image, position]);
 
   const padding = 200;
 

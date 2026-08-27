@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
+import type { PlayerAvatarIdentity } from "../../services/playerAvatars.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -22,8 +24,8 @@ interface HudPlateProps {
   seatColor?: string;
   /** Passive imposed state: one or more creatures are attacking this player. */
   underAttack?: boolean;
-  /** Planeswalker art crop URL for the player avatar. */
-  avatarUrl?: string | null;
+  /** Semantic gameplay avatar identity for this exact player seat. */
+  avatarIdentity?: PlayerAvatarIdentity | null;
   /** When set, the plate renders a fuchsia debug-highlight ring iff this
    *  player matches `useUiStore.debugHighlightedPlayerId`. Threaded through
    *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
@@ -58,11 +60,13 @@ export function HudPlate({
   active = false,
   seatColor,
   underAttack = false,
-  avatarUrl,
+  avatarIdentity,
   playerId,
   density = "default",
 }: HudPlateProps) {
   const { t } = useTranslation("game");
+  const avatar = usePlayerAvatarImage(avatarIdentity ?? null);
+  const hasAvatarIdentity = avatarIdentity != null;
   const Component = onClick ? "button" : "div";
   const activeChrome = active ? ` ${ACTIVE_TURN_CLASSES[tone]}` : "";
   const isDebugHighlighted = useUiStore(
@@ -106,17 +110,25 @@ export function HudPlate({
         <div className="absolute -top-0.5 left-1/2 z-40 -translate-x-1/2 -translate-y-1/2">{cornerBadge}</div>
       ) : null}
       <div className="absolute inset-[1px] rounded-[9px] border-t border-white/8" />
-      {avatarUrl ? (
+      {avatar.src ? (
         <HudAvatar
           label={label}
-          avatarUrl={avatarUrl}
+          avatarUrl={avatar.src}
           seatColor={seatColor}
           compact={compact}
+          onAvatarError={avatar.advanceFailedSource}
+        />
+      ) : hasAvatarIdentity ? (
+        <HudAvatarFallback
+          label={label}
+          seatColor={seatColor}
+          compact={compact}
+          isLoading={avatar.isLoading}
         />
       ) : null}
       <div className={`relative flex min-w-0 flex-col items-center justify-center ${contentGap}`}>
         <div className={`flex min-w-0 items-center justify-center ${contentGap}`}>
-          {!avatarUrl && seatColor && (
+          {!hasAvatarIdentity && seatColor && (
             <span
               aria-hidden
               className={`${compact ? "h-2 w-2" : "h-2.5 w-2.5"} shrink-0 rounded-full ring-1 ring-black/30`}
@@ -150,11 +162,13 @@ function HudAvatar({
   avatarUrl,
   seatColor,
   compact,
+  onAvatarError,
 }: {
   label: string;
   avatarUrl: string;
   seatColor?: string;
   compact: boolean;
+  onAvatarError(failedSrc: string): void;
 }) {
   return (
     <AvatarHoverPreview
@@ -167,13 +181,41 @@ function HudAvatar({
         borderColor: `${seatColor}cc`,
         boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35)`,
       } : undefined}
+      onAvatarError={onAvatarError}
     >
       <img
         src={avatarUrl}
         alt={label}
         className="h-full w-full object-cover"
+        onError={() => onAvatarError(avatarUrl)}
       />
       <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/32" />
     </AvatarHoverPreview>
+  );
+}
+
+function HudAvatarFallback({
+  label,
+  seatColor,
+  compact,
+  isLoading,
+}: {
+  label: string;
+  seatColor?: string;
+  compact: boolean;
+  isLoading: boolean;
+}) {
+  return (
+    <div
+      aria-hidden={isLoading || undefined}
+      title={isLoading ? undefined : label}
+      className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-slate-950 font-bold text-white/90 shadow-[0_10px_24px_rgba(0,0,0,0.35)] ${compact ? "h-8 w-7" : "h-12 w-10 lg:h-14 lg:w-12"}`}
+      style={seatColor ? {
+        borderColor: `${seatColor}cc`,
+        backgroundColor: `${seatColor}44`,
+      } : undefined}
+    >
+      {isLoading ? null : label.charAt(0).toUpperCase()}
+    </div>
   );
 }
