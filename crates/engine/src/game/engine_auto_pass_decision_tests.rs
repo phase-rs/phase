@@ -460,6 +460,20 @@ fn add_non_mana_activated_artifact(state: &mut GameState, controller: PlayerId) 
     object_id
 }
 
+fn add_basic_mana_land(state: &mut GameState, controller: PlayerId) -> ObjectId {
+    let object_id = create_object(
+        state,
+        CardId(901),
+        controller,
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&object_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj.card_types.subtypes.push("Forest".to_string());
+    object_id
+}
+
 fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability: ResolvedAbility) {
     state.stack.push_back(StackEntry {
         id,
@@ -1629,6 +1643,75 @@ fn nonrepresentative_deliberate_action_does_not_resurrect_at_session_teardown() 
     assert!(
         !state.auto_pass.contains_key(&PlayerId(1)),
         "a deliberate action must not be undone by the session's baseline restore"
+    );
+}
+
+/// A mana ability is an off-stack, deliberate action. The frozen session must
+/// end before its reducer boundary re-enters the authorization runner:
+/// resolving its captured top entry after this tap would turn the
+/// representative's decision to act into an unwanted pass.
+#[test]
+fn representative_mana_action_ends_session_without_resolving_frozen_entry() {
+    let mut state = priority_state();
+    let frozen_entry_id = ObjectId(19_911);
+    push_simple_stack_entry(&mut state, frozen_entry_id.0, PlayerId(0));
+    let p1_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let forest = add_basic_mana_land(&mut state, PlayerId(0));
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+
+    // P1's actionable artifact pauses the newly installed P0 cohort before
+    // any captured entry resolves.
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    assert!(state.stack_resolution_session.is_some());
+    assert_eq!(state.stack.back().unwrap().id, frozen_entry_id);
+
+    // Give P0 a normal priority window with an otherwise inert opponent. The
+    // mana action below is driven through the production reducer, not by
+    // mutating the session or its cursor directly.
+    state.objects.remove(&p1_action);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    let selection =
+        crate::game::mana_sources::activatable_mana_source_selections(&state, PlayerId(0))
+            .into_iter()
+            .find(|selection| selection.source.object_id == forest)
+            .expect("the basic land exposes its production mana action");
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::TapLandForMana { selection },
+    )
+    .unwrap();
+
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(state.stack.back().unwrap().id, frozen_entry_id);
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+        "the former cohort must not resolve after the representative acts"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "teardown must not resurrect P0's pre-overlay auto-pass preference"
     );
 }
 

@@ -8736,9 +8736,20 @@ fn apply_action(
         | GameAction::RespondResolveAllConsent { .. }
         | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
-            state.auto_pass.remove(&actor);
             let representative = super::topology::priority_pass_representative(state, actor);
-            if let Some(session) = state.stack_resolution_session.as_mut() {
+            if state
+                .stack_resolution_session
+                .as_ref()
+                .is_some_and(|session| session.representatives.contains(&representative))
+            {
+                // A representative's deliberate action revokes the frozen
+                // authorization before this action reaches its reducer. Restore
+                // the pre-session preferences first, then remove this action's
+                // standing preference below; otherwise the boundary runner could
+                // consume the cohort after an off-stack action, or teardown could
+                // resurrect the preference the representative just cancelled.
+                take_and_restore_stack_resolution_session(state);
+            } else if let Some(session) = state.stack_resolution_session.as_mut() {
                 if !session.representatives.contains(&representative) {
                     // A deliberate action revokes this nonrepresentative's standing
                     // preference. Keep the deferred restore baseline in lockstep so
@@ -8746,6 +8757,7 @@ fn apply_action(
                     session.auto_pass_overlay.baseline.remove(&actor);
                 }
             }
+            state.auto_pass.remove(&actor);
         }
     }
 
