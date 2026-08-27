@@ -8087,6 +8087,17 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 119.3 + CR 119.9: Direction of a per-turn life-total change — selects which
+/// player life-history ledger a life-change filter/quantity reads
+/// (`life_lost_this_turn` for `Lost`, `life_gained_this_turn` for `Gained`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LifeChangeDirection {
+    /// CR 119.3: life was lost this turn (`life_lost_this_turn > 0`).
+    Lost,
+    /// CR 119.9: life was gained this turn (`life_gained_this_turn > 0`).
+    Gained,
+}
+
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
 ///
 /// A parameter, not a variant pair. The codebase already proliferates this axis
@@ -8138,10 +8149,20 @@ pub enum PlayerFilter {
     Opponent,
     /// CR 506.2: The defending player for the source creature's attack.
     DefendingPlayer,
-    /// Each opponent who lost life this turn (life_lost_this_turn > 0).
-    OpponentLostLife,
-    /// Each opponent who gained life this turn (life_gained_this_turn > 0).
-    OpponentGainedLife,
+    /// CR 119.3 + CR 119.9: Each player matching `scope` (relative to the
+    /// resolving effect/quantity controller) whose per-turn life-history ledger
+    /// for `direction` is nonzero — `life_lost_this_turn > 0` (`Lost`) or
+    /// `life_gained_this_turn > 0` (`Gained`). Parameterizes the retired sibling
+    /// pair `OpponentLostLife` / `OpponentGainedLife` (both `scope: Opponent`)
+    /// and adds the all-players lost-life case (Reaper's Scythe, Strefan →
+    /// `scope: All, direction: Lost`). `scope` is resolved live via
+    /// `game::players::matches_relation` (topology-aware opponents, CR 102.2/102.3).
+    /// The `{All, Gained}` cell is cardless and intentionally unproduced by the
+    /// parser (fails closed to an honest `Unimplemented`).
+    LifeChangedThisTurn {
+        scope: PlayerRelation,
+        direction: LifeChangeDirection,
+    },
     /// CR 104.3 + CR 104.5: Each player who has lost the game (`is_eliminated`).
     /// Quantity-only: players who lost have left the game, so this is not a live
     /// effect recipient filter. Rampant Frogantua class: "+10/+10 for each
@@ -9687,7 +9708,8 @@ pub enum ParsedCondition {
         count: u32,
     },
     /// CR 602.5b: Count of non-eliminated players matching `filter` is at least `minimum`.
-    /// e.g. "an opponent lost life this turn" → `filter: OpponentLostLife, minimum: 1`
+    /// e.g. "an opponent lost life this turn" →
+    /// `filter: LifeChangedThisTurn { scope: Opponent, direction: Lost }, minimum: 1`
     PlayerCountAtLeast {
         filter: PlayerFilter,
         minimum: usize,

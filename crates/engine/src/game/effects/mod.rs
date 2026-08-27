@@ -13,8 +13,8 @@ use crate::types::ability::{
     ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
+    LifeChangeDirection, ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
     SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SubAbilityLink,
     TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
 };
@@ -364,13 +364,15 @@ pub(crate) fn matches_player_scope(
                             |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                         )
                     }
-                    PlayerFilter::OpponentLostLife => {
-                        crate::game::players::is_opponent(state, controller, p.id)
-                            && p.life_lost_this_turn > 0
-                    }
-                    PlayerFilter::OpponentGainedLife => {
-                        crate::game::players::is_opponent(state, controller, p.id)
-                            && p.life_gained_this_turn > 0
+                    // CR 119.3 + CR 119.9 + CR 102.2/102.3: player in `scope`
+                    // whose per-turn life ledger for `direction` is nonzero.
+                    PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+                        let tally = match direction {
+                            LifeChangeDirection::Lost => p.life_lost_this_turn,
+                            LifeChangeDirection::Gained => p.life_gained_this_turn,
+                        };
+                        crate::game::players::matches_relation(state, p.id, controller, *scope)
+                            && tally > 0
                     }
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live effect recipient.
@@ -4149,8 +4151,7 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::ChosenPlayer { .. }
         // Turn/combat ledgers.
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
@@ -5842,8 +5843,7 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
@@ -14459,21 +14459,21 @@ fn scoped_player_matches_filter(
         PlayerFilter::AllExcept { exclude } => {
             !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
-        PlayerFilter::OpponentLostLife => {
-            crate::game::players::is_opponent(state, controller, candidate)
+        // CR 119.3 + CR 119.9 + CR 102.2/102.3: candidate in `scope` whose
+        // per-turn life ledger for `direction` is nonzero.
+        PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+            crate::game::players::matches_relation(state, candidate, controller, *scope)
                 && state
                     .players
                     .iter()
                     .find(|p| p.id == candidate)
-                    .is_some_and(|p| p.life_lost_this_turn > 0)
-        }
-        PlayerFilter::OpponentGainedLife => {
-            crate::game::players::is_opponent(state, controller, candidate)
-                && state
-                    .players
-                    .iter()
-                    .find(|p| p.id == candidate)
-                    .is_some_and(|p| p.life_gained_this_turn > 0)
+                    .is_some_and(|p| {
+                        let tally = match direction {
+                            LifeChangeDirection::Lost => p.life_lost_this_turn,
+                            LifeChangeDirection::Gained => p.life_gained_this_turn,
+                        };
+                        tally > 0
+                    })
         }
         // Set-valued / event-context / aggregate variants: not used by
         // decline-tail today. Fail closed (mirrors the
@@ -14912,6 +14912,7 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;
+    use crate::types::ability::PlayerRelation;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
@@ -32012,8 +32013,14 @@ mod tests {
             }
         }
         for filter in [
-            PlayerFilter::OpponentLostLife,
-            PlayerFilter::OpponentGainedLife,
+            PlayerFilter::LifeChangedThisTurn {
+                scope: PlayerRelation::Opponent,
+                direction: LifeChangeDirection::Lost,
+            },
+            PlayerFilter::LifeChangedThisTurn {
+                scope: PlayerRelation::Opponent,
+                direction: LifeChangeDirection::Gained,
+            },
         ] {
             assert!(
                 !scoped_player_matches_filter(&state, &ability, PlayerId(1), &filter),

@@ -4314,9 +4314,7 @@ fn detect_duration_this_turn(
     if evidence.any::<PlayerFilter>(|p| {
         matches!(
             p,
-            PlayerFilter::OpponentGainedLife
-                | PlayerFilter::OpponentLostLife
-                | PlayerFilter::OpponentDealtDamage { .. }
+            PlayerFilter::LifeChangedThisTurn { .. } | PlayerFilter::OpponentDealtDamage { .. }
         )
     }) {
         return;

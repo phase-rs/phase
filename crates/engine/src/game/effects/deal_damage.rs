@@ -12,7 +12,8 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ExcessRecipient, LifeChangeDirection, PlayerFilter, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1829,11 +1830,19 @@ fn collect_matching_players(
                             |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                         )
                     }
-                    PlayerFilter::OpponentLostLife => {
-                        p.id != source_controller && p.life_lost_this_turn > 0
-                    }
-                    PlayerFilter::OpponentGainedLife => {
-                        p.id != source_controller && p.life_gained_this_turn > 0
+                    // CR 119.3 + CR 119.9 + CR 102.2/102.3: player in `scope`
+                    // whose per-turn life ledger for `direction` is nonzero.
+                    PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+                        let tally = match direction {
+                            LifeChangeDirection::Lost => p.life_lost_this_turn,
+                            LifeChangeDirection::Gained => p.life_gained_this_turn,
+                        };
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            source_controller,
+                            scope,
+                        ) && tally > 0
                     }
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live damage recipient.
@@ -2091,11 +2100,19 @@ pub fn resolve_each_player(
                             |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                         )
                     }
-                    PlayerFilter::OpponentLostLife => {
-                        p.id != ability.controller && p.life_lost_this_turn > 0
-                    }
-                    PlayerFilter::OpponentGainedLife => {
-                        p.id != ability.controller && p.life_gained_this_turn > 0
+                    // CR 119.3 + CR 119.9 + CR 102.2/102.3: player in `scope`
+                    // whose per-turn life ledger for `direction` is nonzero.
+                    PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+                        let tally = match direction {
+                            LifeChangeDirection::Lost => p.life_lost_this_turn,
+                            LifeChangeDirection::Gained => p.life_gained_this_turn,
+                        };
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            ability.controller,
+                            *scope,
+                        ) && tally > 0
                     }
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live damage recipient.

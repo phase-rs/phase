@@ -18,10 +18,10 @@ use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
-    TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter,
-    TypedFilter, ZoneRef,
+    FilterProp, LifeChangeDirection, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PossessionAxis, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition,
+    SubtypeExclusion, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -7397,11 +7397,16 @@ pub(crate) fn resolve_player_count(
                                 |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                             )
                         }
-                        PlayerFilter::OpponentLostLife => {
-                            p.id != controller && p.life_lost_this_turn > 0
-                        }
-                        PlayerFilter::OpponentGainedLife => {
-                            p.id != controller && p.life_gained_this_turn > 0
+                        // CR 119.3 + CR 119.9 + CR 102.2/102.3: count players in
+                        // `scope` (topology-aware via `matches_relation`) whose
+                        // per-turn life ledger for `direction` is nonzero.
+                        PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+                            let tally = match direction {
+                                LifeChangeDirection::Lost => p.life_lost_this_turn,
+                                LifeChangeDirection::Gained => p.life_gained_this_turn,
+                            };
+                            crate::game::players::matches_relation(state, p.id, controller, *scope)
+                                && tally > 0
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,
@@ -7663,6 +7668,7 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::PlayerRelation;
     use crate::types::ability::{
         AggregateFunction, ChoiceValue, ControllerRef, DamageKindFilter, DevotionColors, Effect,
         FilterProp, KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef,
@@ -12747,7 +12753,10 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
@@ -12758,7 +12767,10 @@ mod tests {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
@@ -13256,8 +13268,11 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
-    /// CR 119.2 + CR 700.1: `PlayerCount { OpponentLostLife }` counts only
-    /// opponents whose `life_lost_this_turn > 0` — Belbe's mana count base.
+    /// CR 119.3 + CR 700.1: `PlayerCount { LifeChangedThisTurn { scope, Lost } }`
+    /// counts players in `scope` whose `life_lost_this_turn > 0`. The `Opponent`
+    /// scope excludes the controller (Belbe's mana count base); the `All` scope
+    /// includes the controller (Reaper's Scythe / Strefan) — the discriminating
+    /// axis this test pins.
     #[test]
     fn player_count_opponent_lost_life_counts_only_damaged_opponents() {
         use crate::types::format::FormatConfig;
@@ -13268,13 +13283,38 @@ mod tests {
         state.players[1].life_lost_this_turn = 3;
         state.players[2].life_lost_this_turn = 0;
 
-        let expr = QuantityExpr::Ref {
+        let opponent_lost = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         };
-        // Controller = P0: only P1 qualifies (P0 excluded as self, P2 lost 0).
-        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+        let expr = opponent_lost.clone();
+        // Controller = P0, Opponent scope: only P1 qualifies (P0 excluded as self,
+        // P2 lost 0).
+        assert_eq!(
+            resolve_quantity(&state, &opponent_lost, PlayerId(0), ObjectId(1)),
+            1
+        );
+
+        // All-players scope from P0: the controller's own loss now counts, so P0
+        // (lost 4) and P1 (lost 3) both qualify; P2 (lost 0) is excluded → 2. This
+        // is the exact discriminator between the retired opponent-only sibling and
+        // the new all-players cell (Reaper's Scythe / Strefan).
+        let all_lost = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::All,
+                    direction: LifeChangeDirection::Lost,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_lost, PlayerId(0), ObjectId(1)),
+            2
+        );
 
         // Now both opponents have lost life.
         state.players[2].life_lost_this_turn = 1;
@@ -14218,7 +14258,10 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentGainedLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Gained,
+                },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);

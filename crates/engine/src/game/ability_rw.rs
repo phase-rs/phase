@@ -2293,8 +2293,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         // The per-member narrowing is a nested object population;
         // the membership ledger itself stays non-legacy (see the group below).
         PlayerFilter::TrackedSetPossessor { filter, .. } => legacy_target_filter(filter),
-        PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
@@ -6936,9 +6935,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
 
 fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
     match x {
-        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
-            reads_player_of(StateKind::JournalLife)
-        }
+        PlayerFilter::LifeChangedThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         // The life-journal read is this filter's own axis, but the
         // optional damage-SOURCE narrowing is a nested object population that
         // carries its own reads — fold it in rather than dropping it, matching
