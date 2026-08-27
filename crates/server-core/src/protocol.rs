@@ -2324,10 +2324,7 @@ mod tests {
             draft_effect: None,
         };
         let pool = vec![first_pull.clone(), second_pull.clone()];
-        let pool_groups = DraftPoolGroups::from_pool(
-            &pool,
-            &DraftSource::single_set("TST"),
-        );
+        let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         let view = DraftPlayerView {
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,

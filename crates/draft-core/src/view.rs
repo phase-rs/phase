@@ -1356,10 +1356,7 @@ mod tests {
             draft_card("Field", &[], 0, "Land"),
         ];
 
-        let groups = DraftPoolGroups::from_pool(
-            &pool,
-            &DraftSource::single_set("TST"),
-        );
+        let groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
 
         assert_eq!(
             groups
@@ -1698,10 +1695,7 @@ mod tests {
         // The engine-owned option list offers every membership, in engine
         // order — while the exclusive presentation axis keeps one bucket per
         // card (the Artifact Land sorts under Artifact, not Land).
-        let groups = DraftPoolGroups::from_pool(
-            &pool,
-            &DraftSource::single_set("TST"),
-        );
+        let groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         assert_eq!(
             groups.type_filter_options,
             vec![
@@ -1758,10 +1752,7 @@ mod tests {
 
         // The option list offers every membership; the sorted display keeps
         // its exclusive shape (Charm sorts under Multicolor alone).
-        let groups = DraftPoolGroups::from_pool(
-            &pool,
-            &DraftSource::single_set("TST"),
-        );
+        let groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         assert_eq!(
             groups.color_filter_options,
             vec![
@@ -1893,10 +1884,7 @@ mod tests {
         rare.instance_id = "adept-rare".to_string();
         rare.rarity = "rare".to_string();
 
-        let groups = DraftPoolGroups::from_pool(
-            &[common, rare],
-            &DraftSource::single_set("TST"),
-        );
+        let groups = DraftPoolGroups::from_pool(&[common, rare], &DraftSource::single_set("TST"));
 
         assert_eq!(
             groups
