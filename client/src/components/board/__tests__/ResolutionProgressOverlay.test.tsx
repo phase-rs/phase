@@ -11,8 +11,10 @@ vi.mock("react-i18next", () => ({
       key === "restoredAutomation.progressed.title"
         ? "Stack automation resumed"
         : key === "restoredAutomation.progressed.summary"
-          ? `Resolved ${opts?.count}; omitted ${opts?.omitted}`
-          : key === "restoredAutomation.dismiss"
+          ? `Resolved ${opts?.count}`
+          : key === "restoredAutomation.progressed.omitted"
+            ? `; omitted ${opts?.count}`
+            : key === "restoredAutomation.dismiss"
             ? "Dismiss"
             : key,
   }),
