@@ -111,7 +111,7 @@ describe("CardPreview chosen attributes", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     expect(preview?.style.transformOrigin).toBe("50% 100%");
-    expect(screen.getByAltText("Pithing Needle")).toHaveClass(
+    expect(screen.getByAltText("Pithing Needle").parentElement!).toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
@@ -148,7 +148,7 @@ describe("CardPreview chosen attributes", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     expect(preview).toHaveClass("pointer-events-none");
-    expect(screen.getByAltText("Pithing Needle")).toHaveClass(
+    expect(screen.getByAltText("Pithing Needle").parentElement!).toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
