@@ -2798,20 +2798,16 @@ fn resolve_keyword_action(
     }
 }
 
-// ── Tier 3: true batch-resolution of identical token-creating triggers ────
+// ── Session-authorized sequential batch proof ────────────────────────────
 //
-// `resolve_next` wraps `resolve_top`. When the top of the stack begins a
-// contiguous run of provably-batch-safe identical triggered abilities, it
-// resolves the whole run in one step that applies the effect N times — the
-// same observable state and (coalesced) event sequence as one-by-one. Any
-// uncertainty falls back to the unchanged `resolve_top`. Three layers gate
-// eligibility: Layer A (run-identity, `BatchRunKey`), Layer B (handler purity,
-// `effects::try_resolve_batch`), Layer C (observer-order-invariance,
-// `observers_are_batch_safe`). See the plan trace in `effects/mod.rs`.
+// `resolve_next` normally resolves exactly one stack object. A committed
+// session may authorize a fenced prefix; it is proved by resolving each exact
+// member through `resolve_top` and the normal post-action pipeline on a clone.
 
 /// Sentinel object id used only to build Layer C probe events. `keys_from_event`
 /// reads only `record.core_types`/`to` (ETB keys) and the `TokenCreated` variant
 /// tag — never the `object_id` — so a sentinel is sound (§2.3 PROBE_ID note).
+#[cfg(test)]
 const PROBE_ID: ObjectId = ObjectId(u64::MAX);
 
 /// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
@@ -3785,6 +3781,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
 /// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
 /// emits-exactly gate makes this two-event probe complete by construction for
 /// ALL observer axes.
+#[cfg(test)]
 fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) -> bool {
     for (spec, mana_value) in plan
         .produced_token_specs()
@@ -3820,6 +3817,7 @@ fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) ->
     true
 }
 
+#[cfg(test)]
 fn observer_candidates_are_inert(
     state: &mut GameState,
     event: &GameEvent,
@@ -3970,6 +3968,7 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
 /// token emits, from the resolved `TokenSpec` characteristics. `keys_from_event`
 /// reads only `core_types`/`to` for ETB keys, so the record's `core_types`
 /// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
+#[cfg(test)]
 fn zone_change_record_from_spec(
     spec: &crate::types::proposed_event::TokenSpec,
     mana_value: u32,

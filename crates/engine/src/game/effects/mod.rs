@@ -1,5 +1,7 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::VecDeque;
 
 use crate::game::conditions::{
     eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
@@ -24,10 +26,12 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
     LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
-    PendingCopyTokenBatch, PendingCostMoveResume, PendingDiscardBatchCompletion,
+    PendingCostMoveResume, PendingDiscardBatchCompletion,
     PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
     PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
 };
+#[cfg(test)]
+use crate::types::game_state::PendingCopyTokenBatch;
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
@@ -4783,6 +4787,7 @@ fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
 
 /// Handler-specific execution data for a batch. Each variant carries exactly
 /// what the execute step needs to reproduce N one-by-one resolutions.
+#[cfg(test)]
 pub(crate) enum BatchExecutionPlan {
     /// Resolve `Effect::Token` `run_len` times by replaying the existing
     /// per-resolution body. Carries the resolved per-resolution `TokenSpec`
@@ -4812,6 +4817,7 @@ pub(crate) enum BatchExecutionPlan {
 
 /// A proven-safe batch plan returned by `try_resolve_batch`. The driver
 /// consumes `consumed` stack entries and applies the plan once.
+#[cfg(test)]
 pub(crate) struct BatchPlan {
     plan: BatchExecutionPlan,
     /// Number of stack entries this batch consumes (drives the pop loop and
@@ -4819,6 +4825,7 @@ pub(crate) struct BatchPlan {
     consumed: u32,
 }
 
+#[cfg(test)]
 impl BatchPlan {
     /// Build a Token batch plan: resolve the base `Effect::Token` `run_len`
     /// times, producing the single per-resolution `spec` each iteration.
@@ -4938,6 +4945,7 @@ impl BatchPlan {
 /// pass the battlefield-wide observer-order-invariance gate (Layer C,
 /// `game/stack.rs::observers_are_batch_safe`) before batching — that probe is
 /// complete by construction precisely because the spec emits only the ETB pair.
+#[cfg(test)]
 pub(crate) fn try_resolve_batch(
     state: &GameState,
     ability: &ResolvedAbility,
