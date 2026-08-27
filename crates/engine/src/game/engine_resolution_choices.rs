@@ -5630,7 +5630,7 @@ pub(super) fn handle_resolution_choice(
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
                 EffectKind::Attach => {
-                    let Some(mut frame) = state
+                    let Some(frame) = state
                         .take_active_attachment_choice_continuation()
                         .expect("attach choice cannot consume a buried continuation")
                     else {
@@ -5638,21 +5638,58 @@ pub(super) fn handle_resolution_choice(
                             "Attach EffectZoneChoice missing stashed ability".to_string(),
                         ));
                     };
+                    let trigger_context = frame.pending.trigger_context.clone();
+                    let trigger_firing = frame.pending.trigger_firing;
                     let attachment_choice =
-                        frame.pending.attachment_choice.take().ok_or_else(|| {
+                        frame.pending.attachment_choice.clone().ok_or_else(|| {
                             EngineError::InvalidAction(
                                 "Attach EffectZoneChoice missing typed attachment operation"
                                     .to_string(),
                             )
                         })?;
+                    effects::restore_continuation_trigger_firing(state, trigger_firing);
+                    let trigger_snapshot = trigger_context.as_ref().map(|context| {
+                        crate::game::triggers::push_resolving_trigger_context(state, context)
+                    });
                     let operation = effects::attach::bind_resolution_attachment_choice(
                         &*state,
                         *attachment_choice.operation,
                         &chosen,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
-                    frame.pending.chain = Box::new(operation);
-                    state.push_ability_continuation(frame);
+                    let mut child = frame;
+                    child.pending.chain = Box::new(operation.clone());
+                    child.pending.attachment_choice =
+                        Some(crate::types::game_state::PendingAttachmentChoice {
+                            operation: Box::new(operation.clone()),
+                        });
+                    state
+                        .resolve_and_apply_frame_transition(
+                            crate::types::resolved_commands::ResolvedFrameTransition::Push {
+                                frame:
+                                    crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                                        child,
+                                    ),
+                            },
+                        )
+                        .expect("attachment choice child frame must push atomically");
+                    set_priority(state, player);
+                    let resolve_result = effects::attach::resolve(&mut *state, &operation, events);
+                    if let Some(snapshot) = trigger_snapshot {
+                        crate::game::triggers::restore_trigger_event_context(state, snapshot);
+                    }
+                    resolve_result.map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    let opened_follow_up_prompt =
+                        !matches!(state.waiting_for, WaitingFor::Priority { .. });
+                    if opened_follow_up_prompt {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    state
+                        .take_active_ability_continuation()
+                        .expect("completed attachment child must remain active")
+                        .expect("completed attachment child must exist");
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
