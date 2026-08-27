@@ -28990,7 +28990,10 @@ mod tests {
             serde_json::from_str::<StackResolutionBudget>("17").unwrap(),
             StackResolutionBudget::Limited(NonZeroU32::new(17).unwrap())
         );
-        assert!(NonZeroU32::new(0).is_none(), "a zero cap is not representable");
+        assert!(
+            NonZeroU32::new(0).is_none(),
+            "a zero cap is not representable"
+        );
         assert!(
             serde_json::from_str::<StackResolutionBudget>("null").is_err(),
             "only the established numeric zero, not null, means unlimited"

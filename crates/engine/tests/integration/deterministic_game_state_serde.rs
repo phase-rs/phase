@@ -6,15 +6,17 @@ use engine::game::combat::{
 use engine::game::dungeon::DungeonProgress;
 use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
 use engine::game::printed_cards::intrinsic_copiable_values;
-use engine::types::ability::ThisWayCause;
+use engine::types::ability::{Effect, KeywordAction, ResolvedAbility, ThisWayCause};
 use engine::types::attribution::ObjectAttribution;
 use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
-    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord,
-    StackPaidSnapshot, StackResolutionPolicy, TokenProjection, WaitingFor,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -2171,6 +2173,113 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
             serde_json::to_string(&restored).expect("restored state should reserialize"),
             forward_json
         );
+    }
+}
+
+fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState {
+    let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+    let activated = StackEntry {
+        id: ObjectId(9_001),
+        source_id: ObjectId(9_002),
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ObjectId(9_002),
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(9_002),
+                PlayerId(0),
+            )),
+        },
+    };
+    let keyword = StackEntry {
+        id: ObjectId(9_003),
+        source_id: ObjectId(9_004),
+        controller: PlayerId(2),
+        kind: StackEntryKind::KeywordAction {
+            action: KeywordAction::Equip {
+                equipment_id: ObjectId(9_004),
+                target_creature_id: ObjectId(9_005),
+            },
+        },
+    };
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![
+            StackResolutionEntryFence::capture(&activated),
+            StackResolutionEntryFence::capture(&keyword),
+        ],
+        cursor: 1,
+        representatives: BTreeSet::from([PlayerId(0), PlayerId(2)]),
+        budget,
+        policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: BTreeMap::from([(
+                PlayerId(1),
+                AutoPassMode::UntilStackEmpty {
+                    initial_stack_len: 4,
+                    policy: StackResolutionPolicy::Committed,
+                },
+            )]),
+        },
+    });
+    state
+}
+
+#[test]
+fn populated_stack_resolution_session_round_trips_deterministically_through_raw_and_trusted() {
+    for (budget_name, budget) in [
+        (
+            "limited",
+            StackResolutionBudget::from_legacy_max_resolutions(7),
+        ),
+        ("unlimited", StackResolutionBudget::Unlimited),
+    ] {
+        let state = stack_resolution_session_fixture(budget);
+        let session = state
+            .stack_resolution_session
+            .as_ref()
+            .expect("fixture persists a shared stack-resolution session");
+        assert_eq!(session.entries.len(), 2, "fixture contains nonempty fences");
+        assert_eq!(session.cursor, 1, "fixture exercises a nonzero cursor");
+        assert_eq!(
+            session.representatives,
+            BTreeSet::from([PlayerId(0), PlayerId(2)]),
+            "fixture uses multiple canonical representatives"
+        );
+        assert_eq!(
+            session.policy,
+            StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+        );
+        assert_eq!(
+            session.budget, budget,
+            "fixture exercises the {budget_name} cap"
+        );
+        assert!(!session.auto_pass_overlay.baseline.is_empty());
+
+        for (persistence_name, persisted) in [
+            ("raw", PersistedGameState::Raw(Box::new(state.clone()))),
+            ("trusted", PersistedGameState::capture(state.clone())),
+        ] {
+            let bytes = serde_json::to_string(&persisted).unwrap_or_else(|error| {
+                panic!("{budget_name} {persistence_name} serializes: {error}")
+            });
+            let restored: PersistedGameState =
+                serde_json::from_str(&bytes).unwrap_or_else(|error| {
+                    panic!("{budget_name} {persistence_name} deserializes: {error}")
+                });
+            assert_eq!(
+                serde_json::to_string(&restored).unwrap_or_else(|error| panic!(
+                    "{budget_name} {persistence_name} reserializes: {error}"
+                )),
+                bytes,
+                "{budget_name} {persistence_name} bytes stay deterministic after restore"
+            );
+            assert_eq!(
+                restored.into_game_state(),
+                state,
+                "{budget_name} {persistence_name} restores the full private session"
+            );
+        }
     }
 }
 
