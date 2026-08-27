@@ -1509,11 +1509,7 @@ fn nonrepresentative_set_auto_pass_survives_later_session_teardown() {
 
 #[test]
 fn nonrepresentative_cancel_does_not_resurrect_at_session_teardown() {
-    let mut state = GameState::new(
-        crate::types::format::FormatConfig::free_for_all(),
-        3,
-        42,
-    );
+    let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
     state.turn_number = 1;
     state.phase = Phase::PreCombatMain;
     state.active_player = PlayerId(0);
@@ -1581,11 +1577,7 @@ fn nonrepresentative_cancel_does_not_resurrect_at_session_teardown() {
 
 #[test]
 fn nonrepresentative_deliberate_action_does_not_resurrect_at_session_teardown() {
-    let mut state = GameState::new(
-        crate::types::format::FormatConfig::free_for_all(),
-        3,
-        42,
-    );
+    let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
     state.turn_number = 1;
     state.phase = Phase::PreCombatMain;
     state.active_player = PlayerId(0);
