@@ -10,7 +10,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
     MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -2825,7 +2826,12 @@ pub fn resolve_next_with_limit(
     events: &mut Vec<GameEvent>,
     max_consumed: Option<u32>,
 ) -> u32 {
-    let max_consumed = max_consumed.unwrap_or(u32::MAX).max(1);
+    // A caller supplied cap is not itself permission to consume several stack
+    // entries.  The only multi-entry authority is a live committed session whose
+    // cursor still fences the actual top entry.  Keeping this check at the
+    // resolver boundary prevents a transport or future caller from turning a
+    // harmless `Some(n)` into an unauthorized shortcut.
+    let max_consumed = authorized_batch_limit(state, max_consumed);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
         .pending_trigger_entry
@@ -2834,8 +2840,12 @@ pub fn resolve_next_with_limit(
         if let Some(consumed) = inert_noop_run_len(state) {
             let consumed = consumed.min(max_consumed);
             if consumed >= 2 {
-                crate::game::perf_counters::record_stack_inert_noop_batch(consumed);
-                return resolve_inert_noop_batch(state, consumed, events);
+                if let Some(consumed) =
+                    resolve_proven_inert_trigger_batch(state, events, consumed, None)
+                {
+                    crate::game::perf_counters::record_stack_inert_noop_batch(consumed);
+                    return consumed;
+                }
             }
         }
         if let Some(run_len) = self_counter_run_len(state) {
@@ -2873,43 +2883,14 @@ pub fn resolve_next_with_limit(
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
                 crate::game::perf_counters::record_stack_batch_candidate();
-                // Layer B FIRST: per-handler purity produces the resolved token
-                // spec(s) the Layer C probe needs (HIGH-1) and applies the
-                // §2.2a/§2.3a/§3.4 gates internally.
-                let ability = state.stack.back().and_then(|e| e.ability()).cloned();
-                if let Some(ability) = ability {
-                    // Gather the run's per-entry source ids (top-down resolution
-                    // order) so the met-copy prefix path can read each entry's
-                    // `SelfRef` copy source. Only the top `run_len` contiguous
-                    // batch-key-equal entries form the run. This allocates only
-                    // on the batch-eligible path (run_len >= 2), never on the
-                    // single-resolution hot path.
-                    let run_source_ids: Vec<ObjectId> = state
-                        .stack
-                        .iter()
-                        .rev()
-                        .take(run_len as usize)
-                        .map(|e| e.source_id)
-                        .collect();
-                    // CR 603.6a + CR 611.2e: deserialize/imported states can
-                    // carry an empty derived trigger index. Refresh it before
-                    // Layer B so token handlers can cheaply detect broad
-                    // observers that would make Layer C refuse anyway.
-                    if state.trigger_index.by_key.is_empty()
-                        && state.trigger_index.unclassified.is_empty()
-                        && !state.battlefield.is_empty()
-                    {
-                        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
-                    }
-                    if let Some(plan) =
-                        effects::try_resolve_batch(state, &ability, run_len, &run_source_ids)
-                    {
-                        crate::game::perf_counters::record_stack_batch_plan();
-                        if observers_are_batch_safe(state, &plan) {
-                            return resolve_batched(state, &plan, &ability, events);
-                        }
-                        crate::game::perf_counters::record_stack_batch_observer_refusal();
-                    }
+                // The batch proof executes the ordinary resolver and full
+                // post-resolution checkpoint once per captured entry on a clone.
+                // Token/copy handlers therefore remain single-entry authorities;
+                // no bulk token creation is permitted here.
+                if let Some(consumed) =
+                    resolve_proven_inert_trigger_batch(state, events, run_len, None)
+                {
+                    return consumed;
                 }
             }
         }
@@ -2918,12 +2899,83 @@ pub fn resolve_next_with_limit(
     1
 }
 
+fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
+    let Some(requested) = requested.filter(|limit| *limit > 1) else {
+        return 1;
+    };
+    let Some(session) = state.stack_resolution_session.as_ref() else {
+        return 1;
+    };
+    if session.policy != StackResolutionPolicy::Committed {
+        return 1;
+    }
+    let Some(top_fence) = session.entries.get(session.cursor) else {
+        return 1;
+    };
+    if !state
+        .stack
+        .back()
+        .is_some_and(|entry| top_fence.matches_captured_entry(entry))
+    {
+        return 1;
+    }
+    let budget = session
+        .budget
+        .max_resolutions()
+        .map(|maximum| maximum.saturating_sub(session.cursor as u32))
+        .unwrap_or(u32::MAX);
+    let fenced_prefix = state
+        .stack
+        .iter()
+        .rev()
+        .zip(session.entries.iter().skip(session.cursor))
+        .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    requested.min(budget).min(fenced_prefix).max(1)
+}
+
 /// Optional post-resolution invariant checked after each `resolve_top` and the
 /// subsequent post-action pipeline. Shared settled/event/stack checks always
 /// run; class-specific proofs add only what their effect mutates.
 enum InertTriggerBatchPipelineInvariant {
     /// Pipeline must leave battlefield counters unchanged (self-counter class).
     UnchangedBattlefieldCounters,
+}
+
+/// The complete per-entry stack state that the speculative runner is allowed
+/// to consume.  These rows are captured before the clone is advanced so the
+/// proof cannot accidentally validate an entry after its paid or trigger-event
+/// facts have been replaced by another entry with the same object id.
+#[derive(Clone, PartialEq)]
+struct CapturedBatchMember {
+    entry: StackEntry,
+    paid_facts: Option<StackPaidSnapshot>,
+    trigger_event_batch: Option<Vec<GameEvent>>,
+    trigger_firing: Option<TriggerFiring>,
+}
+
+fn capture_batch_members(state: &GameState, run_len: u32) -> Vec<CapturedBatchMember> {
+    state
+        .stack
+        .iter()
+        .rev()
+        .take(run_len as usize)
+        .map(|entry| CapturedBatchMember {
+            entry: entry.clone(),
+            paid_facts: state.stack_paid_facts.get(&entry.id).cloned(),
+            trigger_event_batch: state.stack_trigger_event_batches.get(&entry.id).cloned(),
+            trigger_firing: state.stack_trigger_firings.get(&entry.id).copied(),
+        })
+        .collect()
+}
+
+fn top_matches_captured_member(state: &GameState, member: &CapturedBatchMember) -> bool {
+    state.stack.back() == Some(&member.entry)
+        && state.stack_paid_facts.get(&member.entry.id) == member.paid_facts.as_ref()
+        && state.stack_trigger_event_batches.get(&member.entry.id)
+            == member.trigger_event_batch.as_ref()
+        && state.stack_trigger_firings.get(&member.entry.id).copied() == member.trigger_firing
 }
 
 /// CR 117.4 + CR 117.5 + CR 608.2 + CR 704.3: Shared authority for proving a
@@ -2941,6 +2993,11 @@ fn resolve_proven_inert_trigger_batch(
         return None;
     }
 
+    let members = capture_batch_members(state, run_len);
+    if members.len() < 2 {
+        return None;
+    }
+
     let mut proof = state.clone();
     let mut proof_events = Vec::new();
     let default_wf = WaitingFor::Priority {
@@ -2948,7 +3005,10 @@ fn resolve_proven_inert_trigger_batch(
     };
     let initial_len = proof.stack.len();
 
-    for expected_consumed in 1..=run_len as usize {
+    for (index, member) in members.iter().enumerate() {
+        if !top_matches_captured_member(&proof, member) {
+            return None;
+        }
         let event_start = proof_events.len();
         let stack_before = proof.stack.len();
         // CR 608.2: each ability still resolves individually via `resolve_top`.
@@ -2985,10 +3045,15 @@ fn resolve_proven_inert_trigger_batch(
             || proof.stack.len() != stack_after_resolution
             || counters_after_resolution
                 .is_some_and(|before| battlefield_counter_snapshot(&proof) != before)
-            || initial_len.saturating_sub(proof.stack.len()) != expected_consumed
+            || initial_len.saturating_sub(proof.stack.len()) != index + 1
             || !priority_checkpoint_is_settled(&proof)
         {
             return None;
+        }
+        if let Some(next) = members.get(index + 1) {
+            if !top_matches_captured_member(&proof, next) {
+                return None;
+            }
         }
     }
 
@@ -3968,23 +4033,17 @@ fn ability_has_no_legal_resolution_targets(
 }
 
 fn inert_noop_run_len(state: &mut GameState) -> Option<u32> {
-    let top = state.stack.back()?.clone();
-    if !stack_entry_is_inert_noop(state, &top) {
-        return None;
-    }
-    let mut count = 0u32;
-    let entries = state.stack.iter().rev().cloned().collect::<Vec<_>>();
-    for entry in &entries {
-        if count == 0 {
-            count += 1;
-            continue;
-        }
-        if !same_inert_noop_run_member(&top, entry) {
-            break;
-        }
-        count += 1;
-    }
-    Some(count)
+    let count = state
+        .stack
+        .iter()
+        .rev()
+        // An already-recorded Decline is resolution-inert regardless of the
+        // trigger source or firing event.  The speculative runner still proves
+        // each exact entry and checkpoint before committing the prefix.
+        .take_while(|entry| stack_entry_is_inert_noop(state, entry))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    (count > 0).then_some(count)
 }
 
 fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool {
@@ -4003,103 +4062,6 @@ fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool 
     }
 
     optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
-}
-
-fn same_inert_noop_run_member(top: &StackEntry, entry: &StackEntry) -> bool {
-    let StackEntryKind::TriggeredAbility {
-        ability: top_ability,
-        condition: top_condition,
-        trigger_event: top_event,
-        ..
-    } = &top.kind
-    else {
-        return false;
-    };
-    let StackEntryKind::TriggeredAbility {
-        ability,
-        condition,
-        trigger_event,
-        ..
-    } = &entry.kind
-    else {
-        return false;
-    };
-
-    top.source_id == entry.source_id
-        && top.controller == entry.controller
-        && top_ability == ability
-        && top_condition == condition
-        && trigger_events_are_equivalent_for_inert_target(top_ability, top_event, trigger_event)
-}
-
-fn trigger_events_are_equivalent_for_inert_target(
-    ability: &ResolvedAbility,
-    a: &Option<GameEvent>,
-    b: &Option<GameEvent>,
-) -> bool {
-    if a == b {
-        return true;
-    }
-    if !change_zone_target_depends_only_on_cost_paid_mana_value(ability) {
-        return false;
-    }
-    zone_changed_mana_context(a.as_ref()) == zone_changed_mana_context(b.as_ref())
-}
-
-fn change_zone_target_depends_only_on_cost_paid_mana_value(ability: &ResolvedAbility) -> bool {
-    let Effect::ChangeZone { target, .. } = &ability.effect else {
-        return false;
-    };
-    let TargetFilter::Typed(typed) = target else {
-        return false;
-    };
-    typed.properties.iter().all(|prop| {
-        matches!(
-            prop,
-            FilterProp::InZone { .. }
-                | FilterProp::Cmc {
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectManaValue {
-                            scope: ObjectScope::CostPaidObject,
-                        },
-                    },
-                    ..
-                }
-        )
-    })
-}
-
-fn zone_changed_mana_context(event: Option<&GameEvent>) -> Option<(u32, PlayerId)> {
-    match event {
-        Some(GameEvent::ZoneChanged { record, .. }) => Some((record.mana_value, record.controller)),
-        _ => None,
-    }
-}
-
-fn resolve_inert_noop_batch(
-    state: &mut GameState,
-    consumed: u32,
-    events: &mut Vec<GameEvent>,
-) -> u32 {
-    debug_assert!(state.resolving_stack_entry.is_none());
-    debug_assert!(state.resolving_trigger_firing.is_none());
-    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-    state.resolution_source_relatch = None;
-    for _ in 0..consumed {
-        let Some(removed) = pop_top_stack_entry(state) else {
-            break;
-        };
-        events.push(GameEvent::StackResolved {
-            object_id: removed.entry.id,
-        });
-        if let Some(firing) = removed.trigger_firing {
-            super::lifecycle::record_delayed_terminal(
-                firing,
-                super::lifecycle::DelayedTerminalDisposition::Resolved,
-            );
-        }
-    }
-    consumed
 }
 
 /// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
@@ -4211,11 +4173,18 @@ fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> 
     normalize_ability_source(a) == normalize_ability_source(b)
 }
 
-/// Clone an ability with `source_id` (and nested sub/else `source_id`s)
-/// canonicalized to `ObjectId(0)`, so equality ignores the creating source.
+/// Clone an ability with only its per-source trigger identity canonicalized.
+/// Every LKI-derived semantic field remains in the value; the speculative
+/// runner executes each member with its original value before it can commit.
+/// This permits independent Scute-style trigger sources to share admission
+/// without treating their captured resolution facts as interchangeable.
 fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut out = ability.clone();
     out.source_id = ObjectId(0);
+    out.source_incarnation = None;
+    out.trigger_source = None;
+    out.trigger_definition_ref = None;
+    out.may_trigger_origin = None;
     out.sub_ability = out
         .sub_ability
         .map(|sub| Box::new(normalize_ability_source(&sub)));
@@ -4515,11 +4484,12 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if condition.is_some() {
         return None;
     }
-    // CR 111.2 + CR 109.4: collapse the source dimension when the base effect
-    // reads nothing from the source (a base token's controller/characteristics
-    // are fixed at creation), so distinct sources join one run. Otherwise keep
-    // a per-source boundary.
-    let source_axis = if effects::token::token_effect_is_source_independent(ability) {
+    // Token trigger membership is determined by the handler-owned read-only
+    // profile, while semantic equality below keeps every non-identity field.
+    // A clone proof resolves every member through the canonical path, so a
+    // source-relative copy may join only when its exact sequential trace is
+    // still inert at every checkpoint.
+    let source_axis = if matches!(&ability.effect, Effect::Token { .. }) {
         BatchSourceAxis::SourceIndependent
     } else {
         BatchSourceAxis::Source(*source_id)

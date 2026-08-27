@@ -7498,6 +7498,17 @@ fn stack_resolution_session_priority_decision(
                 let limit = matching_prefix
                     .min(remaining_budget as usize)
                     .min(u32::MAX as usize) as u32;
+                // AI continuation is deliberately re-evaluated at every
+                // ordinary priority window.  It may use the session fence to
+                // authorize the next object, but it must never turn a prior
+                // pass decision into a multi-entry commitment.
+                let limit = if session.policy
+                    == crate::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+                {
+                    limit.min(1)
+                } else {
+                    limit
+                };
                 (limit != 0).then_some(limit)
             }
         }
