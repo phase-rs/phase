@@ -1739,20 +1739,7 @@ fn turn_controller_action_ends_controlled_representative_session_without_resolvi
     let frozen_entry_id = ObjectId(19_912);
     push_simple_stack_entry(&mut state, frozen_entry_id.0, PlayerId(0));
     let p1_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
-    let land_id = create_object(
-        &mut state,
-        CardId(19_913),
-        PlayerId(0),
-        "Forest".to_string(),
-        Zone::Hand,
-    );
-    state
-        .objects
-        .get_mut(&land_id)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Land);
+    let forest = add_basic_mana_land(&mut state, PlayerId(0));
     state.auto_pass.insert(
         PlayerId(0),
         AutoPassMode::UntilTurnBoundary {
@@ -1774,7 +1761,8 @@ fn turn_controller_action_ends_controlled_representative_session_without_resolvi
     assert_eq!(state.stack.back().unwrap().id, frozen_entry_id);
 
     // Give the controlled P0 seat another normal Priority window with no
-    // opponent response. Playing a land is a deliberate, off-stack action.
+    // opponent response. Activating a mana ability is a deliberate, off-stack
+    // action that remains legal while the frozen entry is on the stack.
     state.objects.remove(&p1_action);
     state.priority_player = PlayerId(2);
     state.waiting_for = WaitingFor::Priority {
@@ -1782,13 +1770,15 @@ fn turn_controller_action_ends_controlled_representative_session_without_resolvi
     };
     state.priority_passes.clear();
     state.priority_pass_count = 0;
+    let selection =
+        crate::game::mana_sources::activatable_mana_source_selections(&state, PlayerId(0))
+            .into_iter()
+            .find(|selection| selection.source.object_id == forest)
+            .expect("the basic land exposes its production mana action");
     let result = apply(
         &mut state,
         PlayerId(2),
-        GameAction::PlayLand {
-            object_id: land_id,
-            card_id: CardId(19_913),
-        },
+        GameAction::TapLandForMana { selection },
     )
     .unwrap();
 

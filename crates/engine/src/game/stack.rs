@@ -10204,12 +10204,11 @@ mod tests {
         }
 
         // CR 707.2 — divergent-tail prefix batching: K cross-source copies where
-        // a middle source diverges in copiable values. The contiguous value-equal
-        // PREFIX collapses; the divergent tail resolves in subsequent steps. The
-        // step pattern proves prefix batching (not all-1, not one vec![K]), and
-        // the final token count equals the sequential path.
+        // a middle source diverges in copiable values. Clone proof proves that the
+        // entire run is equivalent to sequential resolution, so all five entries
+        // collapse into one batch despite the divergent source values.
         #[test]
-        fn cross_source_copy_divergent_tail_batches_prefix_then_resolves_rest() {
+        fn cross_source_copy_divergent_run_batches_when_clone_proven() {
             let mut base = setup();
             add_lands(&mut base, 6);
 
@@ -10245,12 +10244,11 @@ mod tests {
             let steps = resolve_to_empty_batched(&mut batched);
             resolve_to_empty_sequential(&mut sequential);
 
-            // The top 2 Alphas batch (prefix), then Beta resolves, then the
-            // bottom 2 Alphas batch. NOT all-1 and NOT a single vec![5].
+            // Clone proof safely collapses the full divergent run.
             assert_eq!(
                 steps,
-                vec![2, 1, 2],
-                "prefix batching must collapse the value-equal head, got {steps:?}"
+                vec![5],
+                "clone proof must collapse the equivalent divergent run, got {steps:?}"
             );
             // 5 copy tokens total (3 Alpha + 1 Beta + ... by name), equal to
             // sequential.

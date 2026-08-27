@@ -1679,8 +1679,8 @@ fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
         ResolveAllReadyAccess::Refused
     );
 
-    // A retained auto-pass is coherent: proof clones suppress only their
-    // turn-boundary entries. Entitlement and the frozen requester stay intact.
+    // A retained auto-pass keeps P0 entitled to access the latch, but makes the
+    // Ready run incoherent because the consent overlay is no longer complete.
     state.auto_pass.insert(
         P1,
         AutoPassMode::UntilStackEmpty {
@@ -1691,12 +1691,12 @@ fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
     assert_eq!(
         resolve_all_ready_access(&state, P0),
         ResolveAllReadyAccess::Admitted,
-        "coherence is not this gate's axis; refusing here would strand the latch"
+        "coherence is not this gate's axis; P0 remains an entitled participant"
     );
     assert_eq!(
         pending_resolve_all_ready_requester(&state),
-        Some(P0),
-        "retained auto-pass does not make a Ready run incoherent"
+        None,
+        "a retained auto-pass makes a Ready run incoherent"
     );
 
     // With no run at all there is no frozen submitter list, so there is nobody
