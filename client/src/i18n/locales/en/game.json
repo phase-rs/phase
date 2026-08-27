@@ -54,15 +54,20 @@
     "dismiss": "Dismiss",
     "noop": {
       "title": "Saved game loaded",
-      "summary": "No stack automation needed to resume."
+      "summary_one": "No stack automation needed to resume.",
+      "summary_other": "No stack automation needed to resume."
     },
     "progressed": {
       "title": "Stack automation resumed",
-      "summary": "The engine completed {{count}} automated resolutions and omitted {{omitted}} intermediate events."
+      "summary_one": "The engine completed {{count}} automated resolution.",
+      "summary_other": "The engine completed {{count}} automated resolutions.",
+      "omitted_one": "{{count}} intermediate event was omitted.",
+      "omitted_other": "{{count}} intermediate events were omitted."
     },
     "zeroResolutionRepair": {
       "title": "Stack automation repaired",
-      "summary": "The saved automation was safely repaired before play resumed."
+      "summary_one": "The saved automation was safely repaired before play resumed.",
+      "summary_other": "The saved automation was safely repaired before play resumed."
     }
   },
   "resolveAllConsent": {
