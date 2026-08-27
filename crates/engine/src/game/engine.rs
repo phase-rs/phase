@@ -1055,11 +1055,14 @@ pub fn apply_interaction_with_rejection(
 /// cache and it never authorizes a new stack entry.
 pub fn apply_verified_ai_priority_pass(
     state: &mut GameState,
+    authenticated_actor: PlayerId,
     contract: &crate::ai_support::AiDecisionContract,
+    action: GameAction,
 ) -> Result<ActionResult, EngineError> {
-    let action = GameAction::PassPriority;
-    let actor = contract.authorized_actor;
-    if !contract.permits(state, actor, &action) {
+    if action != GameAction::PassPriority
+        || authenticated_actor != contract.authorized_actor
+        || !contract.permits(state, authenticated_actor, &action)
+    {
         return Err(EngineError::ActionNotAllowed(
             "AI priority pass no longer matches its issued decision contract".to_string(),
         ));
@@ -1097,6 +1100,11 @@ pub fn apply_verified_ai_priority_pass(
             ));
         }
     } else {
+        // The shared session is installed before the ordinary action boundary
+        // so its explicit-pass seam can enforce the one-entry limit. Preserve
+        // the exact pre-install state until that boundary succeeds: a later
+        // reducer error must not leak a private session or auto-pass overlay.
+        let before_install = state.clone();
         let baseline = state
             .auto_pass
             .iter()
@@ -1111,23 +1119,33 @@ pub fn apply_verified_ai_priority_pass(
             StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
             baseline,
         );
+        return match apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                *state = before_install;
+                Err(error)
+            }
+        };
     }
 
-    apply_interaction(state, actor, contract.semantic_owner, action)
+    apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
 }
 
 /// Applies a verified AI priority pass while returning the same stable rejection
 /// metadata as other interaction-materialized actions.
 pub fn apply_verified_ai_priority_pass_with_rejection(
     state: &mut GameState,
+    authenticated_actor: PlayerId,
     contract: &crate::ai_support::AiDecisionContract,
+    action: GameAction,
 ) -> Result<ActionResult, ActionRejection> {
-    let actor = contract.authorized_actor;
-    apply_verified_ai_priority_pass(state, contract).map_err(|error| {
+    let related_object_ids = action.related_object_ids();
+    apply_verified_ai_priority_pass(state, authenticated_actor, contract, action).map_err(|error| {
         super::visibility::filter_action_rejection_for_viewer(
             state,
-            actor,
-            &action_rejection_for_engine_error(&error, GameAction::PassPriority.related_object_ids()),
+            authenticated_actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
         )
     })
 }
@@ -8142,7 +8160,13 @@ fn begin_resolve_all_consent(
                 granted: representative == current_representative,
             })
             .collect(),
-        auto_pass_baseline: Some(state.auto_pass.clone()),
+        auto_pass_baseline: Some(
+            state
+                .auto_pass
+                .iter()
+                .map(|(&player, &mode)| (player, mode))
+                .collect(),
+        ),
     });
 
     if state
@@ -8182,7 +8206,7 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
         EngineError::InvalidAction("Resolve All consent is not active".to_string())
     })?;
     if let Some(baseline) = run.auto_pass_baseline {
-        state.auto_pass = baseline;
+        state.auto_pass = baseline.into_iter().collect();
     }
     let snapshot = run.priority_snapshot;
     state.priority_player = snapshot.priority_player;
@@ -8310,8 +8334,9 @@ fn install_auto_pass_and_pass_priority(
     let WaitingFor::Priority { player } = &state.waiting_for else {
         unreachable!("auto-pass may only be installed from a Priority window");
     };
-    let pass_immediately = *player == auto_pass_owner;
-    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, *player) {
+    let player = *player;
+    let pass_immediately = player == auto_pass_owner;
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A shortened pre-cast shortcut requires a different meaningful action before passing"
                 .to_string(),
@@ -8325,7 +8350,7 @@ fn install_auto_pass_and_pass_priority(
             log_entries: vec![],
         });
     }
-    pass_installed_auto_pass_priority(state, *player, events)
+    pass_installed_auto_pass_priority(state, player, events)
 }
 
 /// Consume the immediate pass implied by a successful direct auto-pass request.

@@ -2040,8 +2040,13 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priori
     add_non_mana_activated_artifact(&mut state, PlayerId(1));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
-    let result = apply_verified_ai_priority_pass(&mut state, &contract)
-        .expect("the issued AI pass starts its fenced recheck session");
+    let result = apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(0),
+        &contract,
+        GameAction::PassPriority,
+    )
+    .expect("the issued AI pass starts its fenced recheck session");
 
     assert!(matches!(
         result.waiting_for,
@@ -2062,17 +2067,100 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priori
 }
 
 #[test]
+fn verified_ai_pass_internally_continues_when_no_priority_action_is_meaningful() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_110, PlayerId(1));
+    push_simple_stack_entry(&mut state, 30_111, PlayerId(1));
+    let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+    apply_verified_ai_priority_pass(&mut state, PlayerId(0), &contract, GameAction::PassPriority)
+        .expect("one verified pass continues through priority windows with no meaningful actions");
+
+    assert!(
+        state.stack.is_empty(),
+        "the retained session must internally pass and resolve its fenced entries"
+    );
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "the session restores its overlay when its fenced cohort is exhausted"
+    );
+}
+
+#[test]
 fn stale_verified_ai_pass_does_not_install_a_session() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 30_102, PlayerId(1));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
     state.state_revision = state.state_revision.saturating_add(1);
 
-    assert!(apply_verified_ai_priority_pass(&mut state, &contract).is_err());
+    assert!(apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(0),
+        &contract,
+        GameAction::PassPriority,
+    )
+    .is_err());
     assert!(
         state.stack_resolution_session.is_none(),
         "a stale AI contract must not promote an ordinary priority window"
     );
+}
+
+#[test]
+fn verified_ai_pass_rejects_foreign_and_nonpass_submissions_without_mutation() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_105, PlayerId(1));
+    let contract = AiDecisionContract::issue(&state, PlayerId(0));
+    let before = state.clone();
+
+    assert!(apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(1),
+        &contract,
+        GameAction::PassPriority,
+    )
+    .is_err());
+    assert_eq!(state, before, "a foreign actor must not install a session");
+
+    assert!(apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(0),
+        &contract,
+        GameAction::Concede {
+            player_id: PlayerId(0)
+        },
+    )
+    .is_err());
+    assert_eq!(state, before, "a non-pass must not install a session");
+}
+
+#[test]
+fn another_canonical_representative_can_continue_a_rechecking_session() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_106, PlayerId(1));
+    push_simple_stack_entry(&mut state, 30_107, PlayerId(1));
+    add_non_mana_activated_artifact(&mut state, PlayerId(0));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+    let first_contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+    apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(0),
+        &first_contract,
+        GameAction::PassPriority,
+    )
+    .expect("the first AI representative starts the session");
+    let second_contract = AiDecisionContract::issue(&state, PlayerId(1));
+
+    apply_verified_ai_priority_pass(
+        &mut state,
+        PlayerId(1),
+        &second_contract,
+        GameAction::PassPriority,
+    )
+    .expect("a second representative may supply its own fresh AI pass");
+
+    assert!(state.stack_resolution_session.is_some());
 }
 
 #[test]

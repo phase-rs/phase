@@ -478,7 +478,10 @@ pub(crate) fn rebase_invalid_resolve_all_consent(state: &mut GameState) {
 fn invalidate_resolve_all_consent_inner(state: &mut GameState, force_projected_rebase: bool) {
     let run = state.resolve_all_consent_run.take();
     if let Some(baseline) = run.as_ref().and_then(|run| run.auto_pass_baseline.as_ref()) {
-        state.auto_pass = baseline.clone();
+        state.auto_pass = baseline
+            .iter()
+            .map(|(&player, &mode)| (player, mode))
+            .collect();
     }
     if !matches!(
         state.waiting_for,

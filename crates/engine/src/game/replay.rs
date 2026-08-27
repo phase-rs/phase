@@ -207,22 +207,14 @@ impl ReplayPlayer {
                     apply(&mut state, recorded.actor, recorded.action.clone())
                 }
                 RecordedActionKind::VerifiedAiPriorityPass { semantic_owner } => {
-                    if recorded.action != GameAction::PassPriority {
-                        Err(super::engine::EngineError::InvalidAction(
-                            "verified AI replay marker must carry PassPriority".to_string(),
-                        ))
-                    } else {
-                        let contract =
-                            crate::ai_support::AiDecisionContract::issue(&state, semantic_owner);
-                        if contract.authorized_actor != recorded.actor {
-                            Err(super::engine::EngineError::ActionNotAllowed(
-                                "verified AI replay marker actor no longer matches its contract"
-                                    .to_string(),
-                            ))
-                        } else {
-                            apply_verified_ai_priority_pass(&mut state, &contract)
-                        }
-                    }
+                    let contract =
+                        crate::ai_support::AiDecisionContract::issue(&state, semantic_owner);
+                    apply_verified_ai_priority_pass(
+                        &mut state,
+                        recorded.actor,
+                        &contract,
+                        recorded.action.clone(),
+                    )
                 }
             };
             applied.map_err(|e| ReplayError::Desync {
@@ -292,23 +284,31 @@ fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::ability::{
-        Effect, ResolvedAbility, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-    };
-    use crate::types::actions::{GameAction, ResolveAllConsentDecision};
-    use crate::types::format::FormatConfig;
-    use crate::types::game_state::{
-        AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, TurnBoundary,
-    };
-    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+            TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+        };
+        use crate::types::actions::{GameAction, ResolveAllConsentDecision};
+        use crate::types::card_type::CoreType;
+        use crate::types::format::FormatConfig;
+        use crate::types::game_state::{
+            AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, StackResolutionPolicy,
+            TurnBoundary, WaitingFor,
+        };
+        use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
         ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use crate::types::match_config::MatchConfig;
-    use crate::types::replay::RecordedResolveAll;
+        use crate::types::replay::RecordedResolveAll;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
 
     fn two_player_header(seed: u64) -> ReplayHeader {
         ReplayHeader {
@@ -348,6 +348,87 @@ mod tests {
                 )),
             },
         }
+    }
+
+    fn recheck_fixture_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.push_back(StackEntry {
+            id: ObjectId(70_200),
+            source_id: ObjectId(70_200),
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(70_200),
+                ability: crate::types::ability::ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(70_200),
+                    PlayerId(1),
+                ),
+            },
+        });
+        let object_id = create_object(
+            &mut state,
+            CardId(70_201),
+            PlayerId(1),
+            "Replay Recheck Action".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("created battlefield object");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        state
+    }
+
+    #[test]
+    fn verified_ai_stack_pass_replays_with_live_private_session_state() {
+        let initial = recheck_fixture_state();
+        let contract = crate::ai_support::AiDecisionContract::issue(&initial, PlayerId(0));
+        let mut live = initial.clone();
+        apply_verified_ai_priority_pass(
+            &mut live,
+            PlayerId(0),
+            &contract,
+            GameAction::PassPriority,
+        )
+        .expect("the live verified pass applies");
+
+        let header = two_player_header(42);
+        let mut log = ReplayLog::new(header);
+        log.push_verified_ai_priority_pass(PlayerId(0), PlayerId(0));
+        let mut checkpoints = BTreeMap::new();
+        checkpoints.insert(0, initial);
+        let mut player = ReplayPlayer {
+            log,
+            checkpoints,
+            scratch: None,
+        };
+        let replayed = player.seek(1).expect("the marker must replay");
+
+        assert_eq!(replayed, &live, "replay must use the same engine seam");
+        assert_eq!(replayed.state_revision, live.state_revision);
+        assert_eq!(
+            replayed
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| (session.cursor, session.policy)),
+            Some((0, StackResolutionPolicy::RecheckNoMeaningfulPriorityAction)),
+            "the retained private cursor and policy must match live application"
+        );
     }
 
     #[test]

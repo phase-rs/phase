@@ -24,9 +24,9 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
     LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
-    PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
-    PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
+    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp, WaitingFor,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -4866,7 +4866,6 @@ impl BatchPlan {
             } => vec![*probe_mana_value],
         }
     }
-
 }
 
 /// CR 608.2 + CR 608.2c: Returns a `BatchPlan` iff this effect instance is

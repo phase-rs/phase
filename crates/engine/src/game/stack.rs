@@ -7490,9 +7490,9 @@ mod tests {
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
             AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-            StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
-            StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession,
-            StackPaidSnapshot,
+            StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
+            StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+            StackResolutionSession,
         };
         use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;
@@ -8264,7 +8264,10 @@ mod tests {
             // public runner before any hostile proof mutation is introduced.
             let mut accepted = build();
             let mut accepted_events = Vec::new();
-            assert_eq!(resolve_next_committed(&mut accepted, &mut accepted_events), 2);
+            assert_eq!(
+                resolve_next_committed(&mut accepted, &mut accepted_events),
+                2
+            );
 
             for mutation in [
                 |proof: &mut GameState, entry_id| {
@@ -8287,16 +8290,14 @@ mod tests {
                 let entry_id = state.stack.back().unwrap().id;
                 let before = state.clone();
                 let mut events = Vec::new();
-                assert!(
-                    resolve_proven_inert_trigger_batch_with_proof_hook(
-                        &mut state,
-                        &mut events,
-                        2,
-                        None,
-                        |proof| mutation(proof, entry_id),
-                    )
-                    .is_none()
-                );
+                assert!(resolve_proven_inert_trigger_batch_with_proof_hook(
+                    &mut state,
+                    &mut events,
+                    2,
+                    None,
+                    |proof| mutation(proof, entry_id),
+                )
+                .is_none());
                 assert_eq!(state, before, "failed proof must not touch live state");
                 assert!(events.is_empty());
             }

@@ -275,7 +275,9 @@ fn run_ai_actions_with_limit(
             }
         };
 
-        if !contract.permits(state, actor, &action) {
+        let is_stack_recheck_pass =
+            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        if !is_stack_recheck_pass && !contract.permits(state, actor, &action) {
             let error = EngineError::InvalidAction(
                 "AI chose an action outside its issued decision contract".to_string(),
             );
@@ -297,10 +299,8 @@ fn run_ai_actions_with_limit(
         // The decision owner and authenticated AI actor are intentionally
         // separate: control effects can make one player submit another
         // player's pending choice.
-        let is_stack_recheck_pass =
-            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
         let applied = if is_stack_recheck_pass {
-            apply_verified_ai_priority_pass(state, &contract)
+            apply_verified_ai_priority_pass(state, actor, &contract, action.clone())
         } else {
             apply_interaction(state, actor, semantic_owner, action.clone())
         };
@@ -470,6 +470,61 @@ pub fn run_driver_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+    };
+    use engine::types::card_type::CoreType;
+    use engine::types::game_state::{
+        StackEntry, StackEntryKind, StackResolutionPolicy, WaitingFor,
+    };
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    fn recheck_priority_state() -> GameState {
+        let mut state = GameState::new_two_player(1);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.push_back(StackEntry {
+            id: ObjectId(70_001),
+            source_id: ObjectId(70_001),
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(70_001),
+                ability: engine::types::ability::ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(70_001),
+                    PlayerId(1),
+                ),
+            },
+        });
+        let ability_source = create_object(
+            &mut state,
+            CardId(70_002),
+            PlayerId(1),
+            "AI Recheck Action".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&ability_source)
+            .expect("created battlefield object");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        state
+    }
 
     fn dummy_result(state: &GameState) -> AiActionResult {
         AiActionResult {
@@ -555,5 +610,33 @@ mod tests {
         }
         .is_safety_cap());
         assert!(ActionLimit::SafetyCap.is_safety_cap());
+    }
+
+    #[test]
+    fn native_ai_pass_on_the_stack_uses_the_verified_recheck_seam() {
+        let mut state = recheck_priority_state();
+        let ai_players = HashSet::from([PlayerId(0)]);
+        let ai_configs = HashMap::from([(PlayerId(0), AiConfig::default())]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rng();
+
+        let run =
+            run_ai_actions_bounded(&mut state, &ai_players, &ai_configs, &mut rng, &session, 1);
+
+        assert!(matches!(
+            run.results.as_slice(),
+            [AiActionResult {
+                action: GameAction::PassPriority,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| session.policy),
+            Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
+            "the native AI runner must use the verified stack-pass seam"
+        );
     }
 }

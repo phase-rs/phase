@@ -3110,17 +3110,19 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        if !proposal.contract.permits(state, actor, &action) {
+        let is_stack_recheck_pass =
+            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
             return AiProposalSubmission::Stale {
                 reason: "decision_changed_or_action_outside_issued_bounds",
             };
         }
-        let is_stack_recheck_pass =
-            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
         let applied = if is_stack_recheck_pass {
             engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
                 state,
+                actor,
                 &proposal.contract,
+                action.clone(),
             )
         } else {
             apply_interaction_with_rejection(
@@ -4113,6 +4115,35 @@ mod tests {
     }
 
     #[test]
+    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
+        add_non_mana_recheck_action(&mut state, PlayerId(1));
+        let action = GameAction::PassPriority;
+        let token = install_issued_candidate(state, player, &action);
+
+        assert_eq!(
+            proposal_outcome(&token, player, &action)["status"],
+            "applied"
+        );
+        with_state(|state| {
+            assert_eq!(
+                state
+                    .stack_resolution_session
+                    .as_ref()
+                    .map(|session| session.policy),
+                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
+                "the WASM proposal boundary must not downgrade a verified stack pass"
+            );
+        })
+        .expect("test state must remain installed");
+        clear_game_state();
+    }
+
+    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4605,6 +4636,28 @@ mod tests {
                 ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
             },
         }
+    }
+
+    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
+        let object_id = create_object(
+            state,
+            CardId(70_100),
+            controller,
+            "Wasm Recheck Action".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("created battlefield object");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
     }
 
     #[test]
