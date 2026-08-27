@@ -2856,35 +2856,8 @@ fn try_resolve_copy_batch(
         return None;
     }
 
-    // 6. Build the count-aware copy-token batch directly. This uses the same
-    //    replacement/apply primitive as `CopyTokenOf`, but avoids re-resolving the
-    //    self target and recomputing identical copiable values once per stack
-    //    entry.
-    let top_source_id = *run_source_ids.first()?;
-    let top_source = state.objects.get(&top_source_id)?;
-    let copy_batch = PendingCopyTokenBatch {
-        owner,
-        count: prefix_len,
-        copy: Box::new(CopyTokenSpec {
-            values: Box::new(prefix_values.clone()),
-            display_source: top_source.display_source,
-            printed_ref: top_source.printed_ref.clone(),
-            token_image_ref: top_source.token_image_ref.clone(),
-            extra_keywords: extra_keywords.clone(),
-            additional_modifications: additional_modifications.clone(),
-            tapped: false,
-            enters_attacking: false,
-            sacrifice_at: ability.duration.clone(),
-            source_id: ability.source_id,
-            controller: ability.controller,
-        }),
-    };
-
-    // 7. Hand back the copy-prefix batch.
+    // 6. Retain only the read-only probe facts needed by legacy observer tests.
     Some(super::BatchPlan::copy_token(
-        copy_batch,
-        EffectKind::from(&sub.effect),
-        ability.source_id,
         probe_spec,
         prefix_values.mana_cost.mana_value(),
         prefix_len,

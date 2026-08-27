@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-#[cfg(test)]
-use std::collections::VecDeque;
 
 use crate::game::conditions::{
     eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
@@ -30,8 +28,6 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
     PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
 };
-#[cfg(test)]
-use crate::types::game_state::PendingCopyTokenBatch;
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
@@ -4796,7 +4792,6 @@ pub(crate) enum BatchExecutionPlan {
     /// characteristics (HIGH-1).
     Token {
         spec: crate::types::proposed_event::TokenSpec,
-        run_len: u32,
     },
     /// CR 608.2c + CR 707.2: Resolve a met copy-instead swap (`CopyTokenOf`)
     /// `prefix_len` times by replaying `token_copy::resolve` on the swapped
@@ -4806,9 +4801,6 @@ pub(crate) enum BatchExecutionPlan {
     /// ZoneChanged/TokenCreated probe events from the produced token's true
     /// characteristics.
     CopyToken {
-        copy_batch: PendingCopyTokenBatch,
-        effect_kind: EffectKind,
-        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
         probe_mana_value: u32,
         prefix_len: u32,
@@ -4831,7 +4823,7 @@ impl BatchPlan {
     /// times, producing the single per-resolution `spec` each iteration.
     pub(crate) fn token(spec: crate::types::proposed_event::TokenSpec, run_len: u32) -> Self {
         BatchPlan {
-            plan: BatchExecutionPlan::Token { spec, run_len },
+            plan: BatchExecutionPlan::Token { spec },
             consumed: run_len,
         }
     }
@@ -4840,18 +4832,12 @@ impl BatchPlan {
     /// swapped `CopyTokenOf` `prefix_len` times, producing one copy token each
     /// iteration. Consumes `prefix_len` stack entries (may be < the full run).
     pub(crate) fn copy_token(
-        copy_batch: PendingCopyTokenBatch,
-        effect_kind: EffectKind,
-        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
         probe_mana_value: u32,
         prefix_len: u32,
     ) -> Self {
         BatchPlan {
             plan: BatchExecutionPlan::CopyToken {
-                copy_batch,
-                effect_kind,
-                source_id,
                 probe_spec,
                 probe_mana_value,
                 prefix_len,
@@ -4883,52 +4869,6 @@ impl BatchPlan {
         }
     }
 
-    /// CR 608.2: Apply the batch by replaying the per-resolution handler body
-    /// `run_len` times. The pipeline checkpoint (process_triggers + SBA) is
-    /// hoisted to once-after by the driver, but the per-token creation +
-    /// replacement + ETB bookkeeping stays at full N-fold multiplicity (§5.2).
-    pub(crate) fn execute(
-        &self,
-        state: &mut GameState,
-        ability: &ResolvedAbility,
-        events: &mut Vec<GameEvent>,
-    ) {
-        match &self.plan {
-            BatchExecutionPlan::Token { run_len, .. } => {
-                for _ in 0..*run_len {
-                    let _ = token::resolve(state, ability, events);
-                }
-            }
-            // CR 608.2c + CR 707.2: Replay the swapped `CopyTokenOf` resolver
-            // `prefix_len` times. Like the base Token arm, this intentionally
-            // bypasses `resolve_ability_chain`'s depth-0 prelude (resolution-
-            // scoped clears, NthResolutionThisTurn counter) — the instead-swap
-            // was applied ONCE in `try_resolve_batch`, and each copy is an
-            // independent per-token creation at full multiplicity (§5.2).
-            BatchExecutionPlan::CopyToken {
-                copy_batch,
-                effect_kind,
-                source_id,
-                prefix_len,
-                ..
-            } => {
-                token_copy::drive_copy_token_batches(
-                    state,
-                    VecDeque::from([copy_batch.clone()]),
-                    *effect_kind,
-                    *source_id,
-                    events,
-                );
-                for _ in 1..*prefix_len {
-                    events.push(GameEvent::EffectResolved {
-                        kind: *effect_kind,
-                        source_id: *source_id,
-                        subject: None,
-                    });
-                }
-            }
-        }
-    }
 }
 
 /// CR 608.2 + CR 608.2c: Returns a `BatchPlan` iff this effect instance is
