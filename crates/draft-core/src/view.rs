@@ -1358,9 +1358,7 @@ mod tests {
 
         let groups = DraftPoolGroups::from_pool(
             &pool,
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
 
         assert_eq!(
@@ -1410,9 +1408,7 @@ mod tests {
 
         let groups = DraftPoolGroups::from_pool(
             &[mythic, rare, special, common_a, common_b],
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
 
         assert_eq!(
@@ -1704,9 +1700,7 @@ mod tests {
         // card (the Artifact Land sorts under Artifact, not Land).
         let groups = DraftPoolGroups::from_pool(
             &pool,
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
         assert_eq!(
             groups.type_filter_options,
@@ -1766,9 +1760,7 @@ mod tests {
         // its exclusive shape (Charm sorts under Multicolor alone).
         let groups = DraftPoolGroups::from_pool(
             &pool,
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
         assert_eq!(
             groups.color_filter_options,
@@ -1903,9 +1895,7 @@ mod tests {
 
         let groups = DraftPoolGroups::from_pool(
             &[common, rare],
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
 
         assert_eq!(

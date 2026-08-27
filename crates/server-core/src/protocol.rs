@@ -2326,9 +2326,7 @@ mod tests {
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(
             &pool,
-            &DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            &DraftSource::single_set("TST"),
         );
         let view = DraftPlayerView {
             status: DraftStatus::Deckbuilding,
@@ -2422,9 +2420,7 @@ mod tests {
             DraftPoolGroups, DraftWorkspaceCapabilities, DraftWorkspaceRowClassification,
         };
 
-        let source = DraftSource::Set {
-            code: "TST".to_string(),
-        };
+        let source = DraftSource::single_set("TST");
         let value = serde_json::to_value(DraftPoolGroups::from_pool(&[], &source)).unwrap();
 
         let mut legacy = value.clone();
