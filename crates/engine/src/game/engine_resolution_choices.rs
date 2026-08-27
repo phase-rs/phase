@@ -8125,16 +8125,17 @@ pub(crate) fn run_batch_completion(
                         !continuation.is_empty();
                 }
             }
-            if rest_delivery.destination.is_some() {
-                // The rest delivery is the final logical group in this path;
-                // its settled members are therefore the current "this way"
-                // population, independent from the kept-side continuation.
-                state.last_zone_changed_ids = rest_completed;
-            } else if kept_delivery.destination.is_some() {
-                // A Dig completion replaces the ledger even when every selected
-                // move was prevented or redirected; retaining an older value
-                // would let a later `ZoneChangedThisWay` read a stale delivery.
+            if kept_delivery.destination.is_some() {
+                // CR 608.2c + CR 614.1 + CR 616.1: A Dig's continuation reads
+                // its kept delivery (for example, Equipment put onto the
+                // battlefield), not the later rest-pile move. Replace the
+                // ledger even when every kept move was prevented or redirected
+                // so a `ZoneChangedThisWay` rider cannot read stale data.
                 state.last_zone_changed_ids = kept_completed;
+            } else if rest_delivery.destination.is_some() {
+                // A non-Dig reveal-rest completion has no kept delivery, so its
+                // settled rest pile remains the resolution's event population.
+                state.last_zone_changed_ids = rest_completed;
             }
             if let Some(source_id) = emit_reveal_until_resolved {
                 events.push(crate::types::events::GameEvent::EffectResolved {

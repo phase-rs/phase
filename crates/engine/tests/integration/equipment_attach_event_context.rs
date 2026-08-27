@@ -4,8 +4,8 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, ChoiceType, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
-    TargetRef,
+    AdditionalCostRepeatability, ChoiceType, ControllerRef, Effect, MultiTargetSpec, QuantityExpr,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -60,8 +60,12 @@ fn paid_instead_attach_definition() -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Attach {
-                attachment: TargetFilter::Any,
-                target: TargetFilter::Any,
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             },
         )
         .condition(AbilityCondition::AdditionalCostPaidInstead),
