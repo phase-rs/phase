@@ -226,12 +226,6 @@ fn defer_remaining_selected_attachments(
     ability: &ResolvedAbility,
     remaining: &[ObjectId],
 ) {
-    let Some(frame) = state
-        .active_ability_continuation_frame_mut()
-        .filter(|frame| frame.pending.attachment_choice.is_some())
-    else {
-        return;
-    };
     let mut continuation = ability.clone();
     continuation.set_attach_attachment_targets(
         ability
@@ -242,15 +236,54 @@ fn defer_remaining_selected_attachments(
             .collect(),
     );
     if remaining.is_empty() {
-        continuation = ResolvedAbility::new(
-            Effect::NoOp,
-            Vec::new(),
-            ability.source_id,
-            ability.controller,
-        );
+        if let Some(frame) = state
+            .active_ability_continuation_frame_mut()
+            .filter(|frame| frame.pending.attachment_choice.is_some())
+        {
+            *frame.pending.chain = ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ability.source_id,
+                ability.controller,
+            );
+            frame.pending.attachment_choice = None;
+        }
+        return;
     }
-    *frame.pending.chain = continuation;
-    frame.pending.attachment_choice = None;
+
+    if let Some(frame) = state
+        .active_ability_continuation_frame_mut()
+        .filter(|frame| frame.pending.attachment_choice.is_some())
+    {
+        *frame.pending.chain = continuation;
+        frame.pending.attachment_choice = None;
+        return;
+    }
+
+    // CR 608.2c + CR 616.1: an already selected multi-attachment operation can
+    // pause on its first Attached replacement without having first opened an
+    // EffectZoneChoice. Split this Attach's printed tail into its parent, then
+    // park an Attach-owned child for the remaining bound attachments. The child
+    // is deliberately marked as an attachment operation so its final member
+    // drains back to the parent tail instead of replacing it.
+    let tail = continuation.sub_ability.take();
+    if let Some(tail) = tail {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain = tail;
+            frame.pending.attachment_choice = None;
+        } else {
+            state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
+                tail, state,
+            ));
+        }
+    }
+
+    let mut child =
+        crate::types::game_state::PendingContinuation::new(Box::new(continuation.clone()), state);
+    child.attachment_choice = Some(crate::types::game_state::PendingAttachmentChoice {
+        operation: Box::new(continuation),
+    });
+    state.park_ability_continuation(child);
 }
 
 /// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment
@@ -767,9 +800,9 @@ fn resolve_attach_target<'a>(
     }
 }
 
-/// Return attachment role ids only while their pinned incarnations remain
-/// current. A later object with the same id is a new object (CR 400.7), so it
-/// must remain eligible to be selected as this Attach instruction's host.
+/// CR 400.7: Return attachment role ids only while their pinned incarnations
+/// remain current. A later object with the same id is a new object after a zone
+/// change, so this dynamic-host exclusion must not exclude it.
 fn current_attachment_target_ids(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
     ability
         .attach_attachment_targets()

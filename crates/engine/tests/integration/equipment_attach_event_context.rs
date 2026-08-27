@@ -4,7 +4,8 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, ChoiceType, Effect, TargetFilter, TargetRef,
+    AdditionalCostRepeatability, ChoiceType, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -178,6 +179,116 @@ fn paid_instead_attach_choose_target_preserves_role_bindings_to_resolution() {
         })
         .expect("second role target must complete the paid attachment cast");
     assert_paid_attachment_bindings_and_resolve(&mut runner, equipment, host);
+}
+
+#[test]
+fn attached_replacement_between_bound_attachments_preserves_remaining_attachment_and_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Attachment Host", 2, 2).id();
+    let first = scenario
+        .add_artifact_from_oracle(P0, "Psychic Paper", PSYCHIC_PAPER_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let second = scenario
+        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Attach Both", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::Any,
+                    target: TargetFilter::Any,
+                },
+            )
+            .multi_target(MultiTargetSpec::fixed(2, 2))
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec!["Llanowar Elves".to_string()].into();
+    let life_before = runner.life(P0);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("attach-both spell must begin casting");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![
+                TargetRef::Object(first),
+                TargetRef::Object(second),
+                TargetRef::Object(host),
+            ],
+        })
+        .expect("both attachment roles and their host must be selectable");
+
+    let mut saw_attached_replacement = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("attachment spell must keep resolving");
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CardName,
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Llanowar Elves".to_string(),
+                    })
+                    .expect("first attachment replacement name choice must be accepted");
+                saw_attached_replacement = true;
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Zombie".to_string(),
+                    })
+                    .expect("first attachment replacement type choice must be accepted");
+            }
+            other => panic!("unexpected attach-both prompt: {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_attached_replacement,
+        "the first bound attachment must pause through its Attached replacement"
+    );
+    for attachment in [first, second] {
+        assert_eq!(
+            runner.state().objects[&attachment].attached_to,
+            Some(AttachTarget::Object(host)),
+            "each bound attachment must resolve after the first replacement pause"
+        );
+    }
+    assert_eq!(
+        runner.life(P0),
+        life_before + 1,
+        "the enclosing Attach tail must resume after both attachments"
+    );
+    assert!(runner.state().stack.is_empty());
 }
 
 #[test]

@@ -4057,8 +4057,9 @@ fn assign_attach_attachment_declared_targets(
     Ok(())
 }
 
-/// Captures the exact incarnation of an object selected into an attachment
-/// role, so a later object reusing its storage ID cannot satisfy that role.
+/// CR 400.7: Captures the exact incarnation of an object selected into an
+/// attachment role, so a later object reusing its storage ID cannot satisfy
+/// that role after a zone change made it a new object.
 fn attach_object_binding(
     state: &GameState,
     target: &TargetRef,
