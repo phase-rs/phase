@@ -5648,17 +5648,6 @@ pub(super) fn handle_resolution_choice(
                                     .to_string(),
                             )
                         })?;
-                    let selecting_host = !attachment_choice
-                        .operation
-                        .attach_attachment_candidates()
-                        .is_empty()
-                        && attachment_choice.operation.attach_host_target().is_none();
-                    if !selecting_host {
-                        let _ = state
-                            .take_active_attachment_choice_continuation()
-                            .expect("final Equipment choice must retain its active child")
-                            .expect("final Equipment choice must own its active child");
-                    }
                     effects::restore_continuation_trigger_firing(state, trigger_firing);
                     let trigger_snapshot = trigger_context.as_ref().map(|context| {
                         crate::game::triggers::push_resolving_trigger_context(state, context)
@@ -5677,21 +5666,18 @@ pub(super) fn handle_resolution_choice(
                     resolve_result.map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                         // CR 608.2c + CR 616.1: A host answer can replace its
-                        // marker with the following Equipment-choice child or
-                        // park a post-replacement owner above it. A final
-                        // Equipment answer consumed that marker before its
-                        // operation resolved, so its replacement owns only
-                        // its own post-replacement work.
+                        // marker with the following Equipment-choice child,
+                        // and an Attached replacement parks above that same
+                        // marker. In either case it remains the next prompt's
+                        // exact owner until the resolution reaches priority.
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             state.waiting_for.clone(),
                         ));
                     }
-                    if selecting_host {
-                        let _ = state
-                            .take_active_attachment_choice_continuation()
-                            .expect("completed host choice must retain its active child")
-                            .expect("completed host choice must own its active child");
-                    }
+                    let _ = state
+                        .take_active_attachment_choice_continuation()
+                        .expect("completed attach choice must retain its active child")
+                        .expect("completed attach choice must own its active child");
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
