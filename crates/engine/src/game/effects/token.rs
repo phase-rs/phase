@@ -2745,6 +2745,13 @@ pub(crate) fn try_resolve_batch(
     Some(super::BatchPlan::token(spec, run_len))
 }
 
+/// Token handler-owned admission for the stack's clone-and-proof runner.
+/// This is deliberately read-only; `resolve` remains the sole production
+/// authority for creating each token.
+pub(crate) fn supports_sequential_batch_proof(ability: &ResolvedAbility) -> bool {
+    matches!(&ability.effect, Effect::Token { .. })
+}
+
 /// CR 608.2c + CR 707.2: A met `ConditionInstead` whose swapped effect is a
 /// bare `CopyTokenOf { target: SelfRef, … }` copies the run's own source object
 /// per entry. When a contiguous prefix of the run's copy sources share

@@ -4953,6 +4953,19 @@ pub(crate) fn try_resolve_batch(
     }
 }
 
+/// Read-only admission profile for the ordinary sequential batch proof.
+///
+/// The stack runner never executes a token handler in bulk: it uses this only
+/// to decide which handler family may be speculatively resolved one entry at a
+/// time on a clone.  Token-specific source identity is intentionally owned by
+/// `token`, keeping stack mechanics from duplicating effect classification.
+pub(crate) fn supports_sequential_batch_proof(ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::Token { .. } => token::supports_sequential_batch_proof(ability),
+        _ => false,
+    }
+}
+
 /// Dispatch to the appropriate effect handler using typed pattern matching.
 ///
 /// Canonical single-effect dispatch — one exhaustive match over `Effect`.

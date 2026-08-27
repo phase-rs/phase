@@ -2922,7 +2922,9 @@ fn authorized_batch_limit(state: &GameState, requested: Option<u32>) -> u32 {
     let budget = session
         .budget
         .max_resolutions()
-        .map(|maximum| maximum.saturating_sub(session.cursor as u32))
+        .map(|maximum| {
+            maximum.saturating_sub(session.cursor.try_into().unwrap_or(u32::MAX))
+        })
         .unwrap_or(u32::MAX);
     let fenced_prefix = state
         .stack
@@ -4489,7 +4491,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     // A clone proof resolves every member through the canonical path, so a
     // source-relative copy may join only when its exact sequential trace is
     // still inert at every checkpoint.
-    let source_axis = if matches!(&ability.effect, Effect::Token { .. }) {
+    let source_axis = if effects::supports_sequential_batch_proof(ability) {
         BatchSourceAxis::SourceIndependent
     } else {
         BatchSourceAxis::Source(*source_id)
