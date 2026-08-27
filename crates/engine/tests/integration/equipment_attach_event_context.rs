@@ -148,9 +148,6 @@ fn gilgamesh_direct_equipment_choice_completes_to_priority() {
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                if saw_attachment_choice && runner.state().stack.is_empty() {
-                    break;
-                }
                 runner
                     .act(GameAction::PassPriority)
                     .expect("priority pass must be accepted");
@@ -194,12 +191,34 @@ fn gilgamesh_direct_equipment_choice_completes_to_priority() {
                     !cards.contains(&preexisting_equipment),
                     "a matching Equipment that was already on the battlefield is not 'one of them'"
                 );
-                runner
+                let resolved = runner
                     .act(GameAction::SelectCards {
                         cards: vec![other_dug_equipment],
                     })
                     .expect("selecting the moved Equipment must be accepted");
+                assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
                 saw_attachment_choice = true;
+                assert!(saw_dig_choice, "Gilgamesh must surface the DigChoice");
+                assert!(
+                    saw_optional_attach,
+                    "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
+                );
+                assert!(
+                    saw_attachment_choice,
+                    "the two moved Equipment must produce a second, candidate-scoped attachment choice"
+                );
+                assert_eq!(
+                    runner.state().objects[&other_dug_equipment].attached_to,
+                    Some(AttachTarget::Object(samurai)),
+                    "the selected Equipment from the Dig attaches to the selected Samurai"
+                );
+                assert_eq!(runner.state().objects[&dug_equipment].attached_to, None);
+                assert_eq!(
+                    runner.state().objects[&preexisting_equipment].attached_to,
+                    None,
+                    "a preexisting matching Equipment must not be attached by Gilgamesh's event-scoped choice"
+                );
+                return;
             }
             other => panic!("unexpected Gilgamesh resolution prompt: {other:?}"),
         }

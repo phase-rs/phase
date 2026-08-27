@@ -11800,7 +11800,10 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
                 .expect("Dig publishes its kept set after the delivery settles"),
         )
         .expect("Dig tracked set exists");
-    assert_eq!(tracked, &vec![kept]);
+    assert!(
+        tracked.is_empty(),
+        "a kept card redirected away from its requested destination is absent from the settled delivery"
+    );
     assert!(
         runner.state().last_zone_changed_ids.is_empty(),
         "a redirected kept card must not satisfy a requested-destination reflexive gate"
