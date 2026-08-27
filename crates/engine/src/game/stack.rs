@@ -7567,7 +7567,11 @@ mod tests {
         use crate::types::card_type::CoreType;
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
-        use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+        use crate::types::game_state::{
+            GameState, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+            StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+            StackResolutionSession,
+        };
         use crate::types::identifiers::{CardId, ObjectId};
         use crate::types::mana::ManaColor;
         use crate::types::player::PlayerId;
@@ -7575,7 +7579,31 @@ mod tests {
         use crate::types::resolution::PendingProliferateActions;
         use crate::types::triggers::TriggerMode;
         use crate::types::zones::Zone;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::Arc;
+
+        fn arm_committed_session(state: &mut GameState) {
+            state.stack_resolution_session = Some(StackResolutionSession {
+                entries: state
+                    .stack
+                    .iter()
+                    .rev()
+                    .map(StackResolutionEntryFence::capture)
+                    .collect(),
+                cursor: 0,
+                representatives: BTreeSet::from([PlayerId(0)]),
+                budget: StackResolutionBudget::Unlimited,
+                policy: StackResolutionPolicy::Committed,
+                auto_pass_overlay: StackResolutionAutoPassOverlay {
+                    baseline: BTreeMap::new(),
+                },
+            });
+        }
+
+        fn resolve_next_committed(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
+            arm_committed_session(state);
+            resolve_next_with_limit(state, events, Some(u32::MAX))
+        }
 
         /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
         fn insect_token_effect() -> Effect {
@@ -8102,7 +8130,7 @@ mod tests {
             let mut guard = 0;
             while !state.stack.is_empty() {
                 let mut events = Vec::new();
-                let consumed = resolve_next(state, &mut events);
+                let consumed = resolve_next_committed(state, &mut events);
                 steps.push(consumed);
                 triggers::process_triggers(state, &events);
                 crate::game::sba::check_state_based_actions(state, &mut events);
@@ -8183,7 +8211,7 @@ mod tests {
         }
 
         #[test]
-        fn resolve_next_with_limit_caps_batch_consumption() {
+        fn resolve_next_with_limit_requires_a_committed_session() {
             let mut state = setup();
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
@@ -8192,16 +8220,28 @@ mod tests {
             let mut events = Vec::new();
             let consumed = resolve_next_with_limit(&mut state, &mut events, Some(4));
 
-            assert_eq!(consumed, 4);
-            assert_eq!(state.stack.len(), 6);
-            assert_eq!(token_ids(&state).len(), 4);
+            assert_eq!(consumed, 1);
+            assert_eq!(state.stack.len(), 9);
+            assert_eq!(token_ids(&state).len(), 1);
             assert_eq!(
                 events
                     .iter()
                     .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
                     .count(),
-                4
+                1
             );
+        }
+
+        #[test]
+        fn resolve_next_without_a_limit_is_always_a_singleton() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 3);
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next(&mut state, &mut events), 1);
+            assert_eq!(state.stack.len(), 2);
         }
 
         #[test]
@@ -8222,7 +8262,7 @@ mod tests {
             );
 
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(consumed, 2);
             assert_eq!(state.stack.len(), 1);
@@ -8325,7 +8365,7 @@ mod tests {
             push_self_counter_trigger(&mut state, source, life_event(PlayerId(1), 1));
 
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(
                 consumed, 1,
@@ -8370,7 +8410,7 @@ mod tests {
             push_self_counter_trigger(&mut state, source, life_event(PlayerId(1), 1));
 
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(
                 consumed, 1,
@@ -8401,7 +8441,7 @@ mod tests {
 
             let life_before = state.players[0].life;
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(consumed, 3);
             assert_eq!(state.players[0].life, life_before + 3);
@@ -8496,7 +8536,7 @@ mod tests {
 
             let life_before = state.players[1].life;
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(consumed, 3);
             assert_eq!(state.players[1].life, life_before - 6);
@@ -8531,7 +8571,7 @@ mod tests {
 
             let opponent_life_before = state.players[1].life;
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(consumed, 2);
             assert_eq!(state.players[1].life, opponent_life_before);
@@ -8574,7 +8614,7 @@ mod tests {
             );
 
             let mut events = Vec::new();
-            assert_eq!(resolve_next(&mut state, &mut events), 2);
+            assert_eq!(resolve_next_committed(&mut state, &mut events), 2);
             assert_eq!(state.stack.len(), 1);
         }
 
@@ -8614,7 +8654,7 @@ mod tests {
             push_fixed_opponent_lose_life_trigger(&mut state, source, trigger_event, None, None);
 
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(
                 consumed, 1,
@@ -8654,7 +8694,7 @@ mod tests {
             );
 
             let mut events = Vec::new();
-            let consumed = resolve_next(&mut state, &mut events);
+            let consumed = resolve_next_committed(&mut state, &mut events);
 
             assert_eq!(consumed, 3);
             assert!(state.stack.is_empty());
