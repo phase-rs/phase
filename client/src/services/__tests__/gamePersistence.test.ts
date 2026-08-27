@@ -18,6 +18,7 @@ import {
   loadP2PHostSession,
   saveAuthoritativeGame,
   saveGame,
+  saveResumableGameStrict,
 } from "../gamePersistence";
 
 function fixtureState(): GameState {
@@ -65,6 +66,24 @@ describe("game persistence", () => {
 
     expect(idbSet).not.toHaveBeenCalled();
     expect(idbDel).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when asked to retain a terminal state as resumable", async () => {
+    const state = fixtureState();
+    state.match_phase = "Completed";
+
+    await expect(saveResumableGameStrict("terminal", state)).rejects.toThrow(
+      "Refusing to retain a terminal game",
+    );
+    expect(idbSet).not.toHaveBeenCalled();
+  });
+
+  it("propagates a strict resumable-write failure", async () => {
+    vi.mocked(idbSet).mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+
+    await expect(saveResumableGameStrict("resume", fixtureState())).rejects.toThrow(
+      "IndexedDB unavailable",
+    );
   });
 
   it("rejects a legacy P2P host snapshot without a session key", async () => {
