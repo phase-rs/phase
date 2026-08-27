@@ -683,8 +683,8 @@ mod tests {
         );
         assert_eq!(
             run.results.len(),
-            2,
-            "each AI representative decides once; cached passes drain the remaining cohort"
+            26,
+            "the fenced cache must keep a 201-entry stack well below the generic action cap"
         );
         assert!(state.stack.is_empty());
         assert!(state.stack_resolution_session.is_none());
