@@ -7404,16 +7404,6 @@ mod auto_pass_decision_tests;
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
-    run_auto_pass_loop_with_recording(state, result, None)
-}
-
-/// Runs the ordinary auto-pass progression and optionally records the semantic
-/// actions it materializes for an enclosing action batch.
-fn run_auto_pass_loop_with_recording(
-    state: &mut GameState,
-    result: &mut ActionResult,
-    mut recorded_actions: Option<&mut Vec<(PlayerId, GameAction)>>,
-) -> bool {
     // CR 732.2: per-dispatch resource ceilings for a runaway mandatory cascade.
     // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
     // landfall copies every Scute in one resolution — tested boards reach ~2,936
@@ -7486,13 +7476,9 @@ fn run_auto_pass_loop_with_recording(
                 }
 
                 let mut events = Vec::new();
-                let actor = turn_control::authorized_submitter_for_player(state, player);
                 match pass_priority_once_with_pipeline(state, &mut events, None) {
                     Ok(wf) => {
                         advanced = true;
-                        if let Some(recorded_actions) = recorded_actions.as_deref_mut() {
-                            recorded_actions.push((actor, GameAction::PassPriority));
-                        }
                         let stack_empty_or_grew =
                             finish_completed_or_interrupted_until_stack_empty_sessions(state);
                         result.events.extend(events);
@@ -7599,19 +7585,9 @@ fn run_auto_pass_loop_with_recording(
                 && (valid_attacker_ids.is_empty() || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
-                let actor = turn_control::authorized_submitter_for_player(state, *player);
                 match engine_combat::handle_empty_attackers(state, &mut events) {
                     Ok(wf) => {
                         advanced = true;
-                        if let Some(recorded_actions) = recorded_actions.as_deref_mut() {
-                            recorded_actions.push((
-                                actor,
-                                GameAction::DeclareAttackers {
-                                    attacks: Vec::new(),
-                                    bands: Vec::new(),
-                                },
-                            ));
-                        }
                         sync_waiting_for(state, &wf);
                         result.events.extend(events);
                         result.waiting_for = wf;
@@ -7640,18 +7616,9 @@ fn run_auto_pass_loop_with_recording(
                     || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
-                let actor = turn_control::authorized_submitter_for_player(state, *player);
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
                         advanced = true;
-                        if let Some(recorded_actions) = recorded_actions.as_deref_mut() {
-                            recorded_actions.push((
-                                actor,
-                                GameAction::DeclareBlockers {
-                                    assignments: Vec::new(),
-                                },
-                            ));
-                        }
                         sync_waiting_for(state, &wf);
                         result.events.extend(events);
                         result.waiting_for = wf;
@@ -7686,7 +7653,7 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     // `finish_action_boundary`, so without this a loss created by its final
     // resolution could remain at Priority instead of becoming GameOver.
     reconcile_terminal_result(state, &mut result);
-    run_auto_pass_loop_with_recording(state, &mut result, Some(&mut batch.recorded_actions));
+    run_auto_pass_loop(state, &mut result);
     reconcile_terminal_result(state, &mut result);
 
     let log_entries = super::log::resolve_log_entries(&result.events, &before, state);

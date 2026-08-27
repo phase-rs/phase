@@ -22,13 +22,13 @@ pub struct ResolveAllFastForwardResult {
     /// Stack depth at this chunk's entry. The frontend latches the first
     /// chunk's `total` as the storm-origin denominator for progress display.
     pub total: u32,
-    /// Every action applied during this batch (including priority passes
-    /// fast-forwarded by `seed_remaining_priority_cycle_passes`, which are
-    /// semantically equivalent to — but bypass — an explicit `PassPriority`
-    /// through `apply`), in submission order. `#[serde(skip)]`: this is
-    /// consumed in-process by the WASM bridge to extend the Replay system's
-    /// recording (see `crates/engine-wasm/src/lib.rs::resolve_all`) and must
-    /// never reach the JS-visible result shape.
+    /// Every action applied during the legacy callback batch (including priority
+    /// passes fast-forwarded by `seed_remaining_priority_cycle_passes`, which
+    /// are semantically equivalent to — but bypass — an explicit
+    /// `PassPriority` through `apply`), in submission order. `#[serde(skip)]`:
+    /// this never reaches the JS-visible result shape. Ready-consumer Resolve
+    /// All is replayed atomically by the transport-owned replay boundary rather
+    /// than by appending these internal actions individually.
     #[serde(skip)]
     pub recorded_actions: Vec<(PlayerId, GameAction)>,
 }
@@ -1192,45 +1192,6 @@ mod tests {
             WaitingFor::ResolveAllReady { .. }
         ));
         assert!(state.resolve_all_consent_run.is_none());
-    }
-
-    #[test]
-    fn retained_auto_pass_remainder_records_actions_replay_can_apply() {
-        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
-        // A nonempty pending-event batch makes the clone proof stop before it
-        // commits, leaving the live turn-boundary preference to resume.
-        state.pending_trigger_event_batch = vec![GameEvent::StackResolved {
-            object_id: ObjectId(99),
-        }];
-
-        let mut replay = state.clone();
-        replay.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        replay.resolve_all_consent_run = None;
-
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
-
-        assert_eq!(
-            result.recorded_actions,
-            vec![(PlayerId(0), GameAction::PassPriority)],
-            "the resumed turn-boundary pass is an action replay can submit"
-        );
-        for (actor, action) in result.recorded_actions {
-            super::super::engine::apply(&mut replay, actor, action)
-                .expect("recorded auto-pass action reconstructs through apply");
-        }
-        assert_eq!(replay.stack, state.stack);
-        assert_eq!(replay.waiting_for, state.waiting_for);
-        assert_eq!(replay.auto_pass, state.auto_pass);
-        assert_eq!(replay.priority_player, state.priority_player);
-        assert_eq!(replay.priority_passes, state.priority_passes);
     }
 
     #[test]

@@ -3155,28 +3155,22 @@ pub fn resolve_all(
             Ok(result) => result,
             Err(rejection) => return Ok(rejected_action_outcome(rejection)),
         };
-        // A Resolve All burst applies real actions directly via
-        // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
-        // which is the only other place REPLAY_LOG is appended to) — without
-        // this, an exported replay would silently omit every action a player
-        // fast-forwarded through, and playback would desync from the game
-        // they actually played. `recorded_actions` is `#[serde(skip)]`, so
-        // draining it here has no effect on the JS-visible result shape.
-        if !result.recorded_actions.is_empty() {
-            REPLAY_LOG.with(|cell| {
-                let mut log = cell.take();
-                if let Some(log) = log.as_mut() {
-                    for (actor, action) in result.recorded_actions.drain(..) {
-                        log.push_action(actor, action);
-                    }
-                }
-                cell.set(log);
-            });
-            // Resolve All advances the live state without travelling through
-            // `submit_action`, so it must invalidate proposal capabilities at
-            // the same authority boundary.
-            invalidate_ai_proposals();
-        }
+        // Resolve All consumes a transport-owned Ready latch, rather than one
+        // `GameAction` per internal priority pass. Record the entire consumer
+        // atomically after the last submitted consent action; playback invokes
+        // the same engine consumer at that exact boundary, so auto-pass cannot
+        // re-run between synthetic recorded passes.
+        REPLAY_LOG.with(|cell| {
+            let mut log = cell.take();
+            if let Some(log) = log.as_mut() {
+                log.push_resolve_all_boundary(requester);
+            }
+            cell.set(log);
+        });
+        // Resolve All advances the live state without travelling through
+        // `submit_action`, so it must invalidate proposal capabilities at the
+        // same authority boundary.
+        invalidate_ai_proposals();
         result.events.clear();
         result.log_entries.clear();
         Ok(action_outcome(Ok(result)))

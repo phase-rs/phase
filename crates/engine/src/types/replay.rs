@@ -6,7 +6,9 @@ use super::match_config::MatchConfig;
 use super::player::PlayerId;
 use crate::game::deck_loading::DeckList;
 
-pub const REPLAY_FORMAT_VERSION: u32 = 2;
+/// Version 3 adds atomic Resolve All replay boundaries. Version 2 recordings
+/// remain readable because they cannot contain those boundaries.
+pub const REPLAY_FORMAT_VERSION: u32 = 3;
 
 /// Everything needed to reconstruct a game's starting state, deterministically,
 /// from scratch. Mirrors the inputs `initialize_game` already accepts at the
@@ -38,6 +40,17 @@ pub struct RecordedAction {
     pub action: GameAction,
 }
 
+/// One engine-owned Resolve All burst, anchored after the preceding submitted
+/// action. Resolve All has no `GameAction` because its Ready latch is consumed
+/// by the transport; replay therefore carries the whole burst as one atomic
+/// boundary rather than manufacturing individual priority passes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedResolveAll {
+    /// Number of ordinary actions already applied when this burst began.
+    pub after_action_count: u32,
+    pub requester: PlayerId,
+}
+
 /// A complete, deterministic recording of a game: the inputs needed to
 /// reconstruct its starting state, plus every action that was submitted and
 /// accepted afterward. Replaying `actions` against the state produced by
@@ -51,6 +64,8 @@ pub struct ReplayLog {
     pub format_version: Option<u32>,
     pub header: ReplayHeader,
     pub actions: Vec<RecordedAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve_all_boundaries: Vec<RecordedResolveAll>,
 }
 
 impl ReplayLog {
@@ -59,6 +74,7 @@ impl ReplayLog {
             format_version: Some(REPLAY_FORMAT_VERSION),
             header,
             actions: Vec::new(),
+            resolve_all_boundaries: Vec::new(),
         }
     }
 
@@ -68,5 +84,16 @@ impl ReplayLog {
     pub fn push_action(&mut self, actor: PlayerId, action: GameAction) {
         let seq = self.actions.len() as u32;
         self.actions.push(RecordedAction { seq, actor, action });
+    }
+
+    /// Records the transport-owned consumption of an already-ready Resolve All
+    /// latch. Playback runs the same engine consumer after this many ordinary
+    /// actions, preserving automatic follow-up without replaying its internal
+    /// passes as independent user actions.
+    pub fn push_resolve_all_boundary(&mut self, requester: PlayerId) {
+        self.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: self.actions.len() as u32,
+            requester,
+        });
     }
 }

@@ -19,7 +19,7 @@ use crate::types::player::PlayerId;
 use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
-use super::engine::{apply, start_game, start_game_with_starting_player};
+use super::engine::{apply, resolve_all_ready_prefix, start_game, start_game_with_starting_player};
 
 /// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
 /// size to roughly `len / CHECKPOINT_INTERVAL` snapshots while keeping any
@@ -33,7 +33,7 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
-    #[error("unsupported replay format version {version}; this engine supports version 2")]
+    #[error("unsupported replay format version {version}; this engine supports versions 2 and 3")]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
@@ -133,7 +133,7 @@ impl ReplayPlayer {
     /// is `Some` and `db` is `None` — see that function's doc comment.
     pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Result<Self, ReplayError> {
         match log.format_version {
-            Some(REPLAY_FORMAT_VERSION) => {}
+            Some(2 | REPLAY_FORMAT_VERSION) => {}
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
         }
@@ -198,6 +198,15 @@ impl ReplayPlayer {
                     message: e.to_string(),
                 }
             })?;
+            let after_action_count = recorded.seq + 1;
+            for boundary in self
+                .log
+                .resolve_all_boundaries
+                .iter()
+                .filter(|boundary| boundary.after_action_count == after_action_count)
+            {
+                resolve_all_ready_prefix(&mut state, boundary.requester);
+            }
         }
         Ok(state)
     }
@@ -206,10 +215,14 @@ impl ReplayPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
-    use crate::types::actions::GameAction;
+    use crate::types::ability::{
+        Effect, ResolvedAbility, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    };
+    use crate::types::actions::{GameAction, ResolveAllConsentDecision};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{ProductionOverride, WaitingFor};
+    use crate::types::game_state::{
+        AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, TurnBoundary, WaitingFor,
+    };
     use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
         ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
@@ -238,6 +251,24 @@ mod tests {
         }
     }
 
+    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
     #[test]
     fn load_rejects_missing_format_version_before_reconstruction() {
         let mut log = ReplayLog::new(two_player_header(1));
@@ -259,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_roundtrips_semantic_mana_source_selections() {
+    fn version_three_roundtrips_semantic_mana_source_selections() {
         let source = ObjectIncarnationRef::of(ObjectId(7), 3);
         let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
         let action = GameAction::TapLandForMana {
@@ -370,6 +401,53 @@ mod tests {
                 "waiting_for at {index}"
             );
         }
+    }
+
+    #[test]
+    fn replay_player_reconstructs_atomic_resolve_all_with_two_retained_auto_passes() {
+        let header = two_player_header(101);
+        let mut initial = GameState::new_two_player(header.seed);
+        initial.stack.push_back(no_op_entry(1, PlayerId(0)));
+        for player in [PlayerId(0), PlayerId(1)] {
+            initial.auto_pass.insert(
+                player,
+                AutoPassMode::UntilTurnBoundary {
+                    until: TurnBoundary::EndOfCurrentTurn,
+                },
+            );
+        }
+
+        let mut live = initial.clone();
+        let mut log = ReplayLog::new(header);
+        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        apply(&mut live, PlayerId(0), begin.clone()).expect("P0 begins Resolve All consent");
+        log.push_action(PlayerId(0), begin);
+        let WaitingFor::ResolveAllConsent { epoch, .. } = live.waiting_for else {
+            panic!("P1 should be asked for consent, got {:?}", live.waiting_for);
+        };
+        let grant = GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        };
+        apply(&mut live, PlayerId(1), grant.clone()).expect("P1 grants Resolve All consent");
+        log.push_action(PlayerId(1), grant);
+        assert!(matches!(
+            live.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+
+        resolve_all_ready_prefix(&mut live, PlayerId(0));
+        log.push_resolve_all_boundary(PlayerId(0));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("the atomic boundary is replayable");
+        replay.checkpoints.insert(0, initial);
+        let replay_len = replay.len();
+        let reconstructed = replay
+            .seek(replay_len)
+            .expect("ReplayPlayer applies the Resolve All boundary")
+            .clone();
+
+        assert_eq!(reconstructed, live);
     }
 
     #[test]
