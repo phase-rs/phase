@@ -4175,11 +4175,11 @@ fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> 
     normalize_ability_source(a) == normalize_ability_source(b)
 }
 
-/// Clone an ability with only its per-source trigger identity canonicalized.
-/// Every LKI-derived semantic field remains in the value; the speculative
-/// runner executes each member with its original value before it can commit.
-/// This permits independent Scute-style trigger sources to share admission
-/// without treating their captured resolution facts as interchangeable.
+/// Clone an ability with source identity/provenance removed for *admission*
+/// comparison only. The speculative runner separately captures and resolves
+/// every original entry, so no canonicalized value is ever executed or
+/// committed. This permits independent Scute-style trigger sources to share
+/// the proof attempt without treating their facts as interchangeable.
 fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut out = ability.clone();
     out.source_id = ObjectId(0);
