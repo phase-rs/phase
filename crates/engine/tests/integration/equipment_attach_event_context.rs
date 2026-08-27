@@ -4,12 +4,11 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, ChoiceType, Effect, EffectKind, MultiTargetSpec, QuantityExpr,
-    TargetFilter, TargetRef,
+    AdditionalCostRepeatability, ChoiceType, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -193,7 +192,7 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
         .with_subtypes(vec!["Equipment"])
         .id();
     let second = scenario
-        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .add_artifact_from_oracle(P0, "Psychic Paper", PSYCHIC_PAPER_ORACLE)
         .with_subtypes(vec!["Equipment"])
         .id();
     let spell = scenario
@@ -298,7 +297,7 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
 }
 
 #[test]
-fn bound_attachments_without_a_pause_do_not_replay_the_final_attachment() {
+fn bound_attachments_with_a_synchronous_prefix_do_not_replay_the_final_attachment() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let host = scenario.add_creature(P0, "Attachment Host", 2, 2).id();
@@ -332,6 +331,7 @@ fn bound_attachments_without_a_pause_do_not_replay_the_final_attachment() {
         )
         .id();
     let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec!["Llanowar Elves".to_string()].into();
     let life_before = runner.life(P0);
     let card_id = runner.state().objects[&spell].card_id;
     runner
@@ -352,13 +352,37 @@ fn bound_attachments_without_a_pause_do_not_replay_the_final_attachment() {
         })
         .expect("both attachment roles and their host must be selectable");
 
-    for _ in 0..8 {
-        match runner.state().waiting_for {
+    let mut card_name_choices = 0;
+    let mut creature_type_choices = 0;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner
                 .act(GameAction::PassPriority)
                 .expect("attachment spell must keep resolving"),
-            ref other => panic!("ordinary attachments must not open a prompt: {other:?}"),
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CardName,
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Llanowar Elves".to_string(),
+                    })
+                    .expect("the second attachment's card-name choice must resolve");
+                card_name_choices += 1;
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Zombie".to_string(),
+                    })
+                    .expect("the second attachment's creature-type choice must resolve");
+                creature_type_choices += 1;
+            }
+            other => panic!("unexpected attachment prompt: {other:?}"),
         };
     }
 
@@ -375,22 +399,12 @@ fn bound_attachments_without_a_pause_do_not_replay_the_final_attachment() {
         "the trailing effect resolves once"
     );
     assert_eq!(
-        runner
-            .events()
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    GameEvent::EffectResolved {
-                        kind: EffectKind::Attach,
-                        source_id,
-                        ..
-                    } if *source_id == spell
-                )
-            })
-            .count(),
-        2,
-        "each selected attachment must resolve exactly once when none pauses"
+        card_name_choices, 1,
+        "the paused second attachment must not replay its card-name replacement"
+    );
+    assert_eq!(
+        creature_type_choices, 1,
+        "the paused second attachment must not replay its creature-type replacement"
     );
 }
 
