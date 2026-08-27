@@ -7966,6 +7966,9 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
+            // CR 608.2c + CR 614.1 + CR 616.1: After the complete
+            // replacement-choice sequence, settled kept cards drive the
+            // `last_zone_changed_ids` ledger and continuation target filtering.
             let completed = kept_delivery.completed_ids();
             effects::publish_fresh_tracked_set(state, publish_tracked_set);
             state.last_zone_changed_ids = completed.clone();
@@ -8117,6 +8120,9 @@ pub(crate) fn run_batch_completion(
                     ResolvedInformationEdit::Hide,
                 )
                 .expect("reveal-rest cleanup must reference live card occurrences");
+            // CR 608.2c + CR 614.1 + CR 616.1: The kept and rest deliveries can
+            // settle in different replacement-choice groups; publish each from
+            // its own completed outcome only after both tails have finished.
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
             if let Some(kept) = publish_tracked_set {

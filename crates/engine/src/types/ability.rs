@@ -22685,9 +22685,11 @@ pub struct SpellContext {
     /// when an activated or triggered ability was put onto the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_transformation_count: Option<u32>,
-    /// Semantic bindings for `Effect::Attach` target roles. This runtime
-    /// resolution context keeps attachment and host identity distinct across
-    /// resolution-time choices without expanding `ResolvedAbility` literals.
+    /// CR 701.3a + CR 608.2d: Semantic bindings for `Effect::Attach` roles:
+    /// selected attachment targets, the selected host, and forwarded
+    /// event-scoped attachment candidates. This runtime resolution context keeps
+    /// those roles distinct across resolution-time choices without expanding
+    /// `ResolvedAbility` literals.
     #[serde(default, skip_serializing_if = "AttachTargetBindings::is_empty")]
     pub attach_target_bindings: AttachTargetBindings,
 }
@@ -26714,12 +26716,14 @@ pub enum DetachedRemainder {
     HoldsPublisher,
 }
 
-/// The two semantic roles of an [`Effect::Attach`] instruction's object targets.
+/// CR 701.3a + CR 608.2d: The three semantic roles of an [`Effect::Attach`]
+/// instruction: selected attachment targets, selected host, and forwarded
+/// event-scoped attachment candidates.
 ///
 /// `targets` remains the compatibility/chain anaphor projection. This narrow
-/// binding preserves which selected object is the attachment and which is the
-/// host across resolution-time choices, where appending a selected Equipment to
-/// the generic target vector would otherwise make the two roles ambiguous.
+/// binding preserves all three roles across resolution-time choices, where
+/// appending a selected Equipment to the generic target vector would otherwise
+/// make them ambiguous.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachTargetBindings {
     #[serde(flatten)]

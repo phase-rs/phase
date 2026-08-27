@@ -5297,9 +5297,10 @@ pub struct CloakExileMember {
     pub attachments: Vec<ObjectId>,
 }
 
-/// The settled subset of a Dig's chosen cards. The choice itself is not an
-/// outcome: replacements may redirect or prevent individual zone changes, so
-/// downstream "this way" instructions must consume only this carrier.
+/// CR 614.1 + CR 616.1 + CR 400.7: The settled subset of a Dig's chosen cards.
+/// The choice itself is not an outcome: replacements may redirect or prevent
+/// individual zone changes, so downstream "this way" instructions consume only
+/// selected incarnations that arrived at the requested destination.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DigKeptDeliveryOutcome {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -5330,6 +5331,8 @@ impl DigKeptDeliveryOutcome {
         }
     }
 
+    /// CR 614.1 + CR 616.1 + CR 400.7: Records only selected incarnations whose
+    /// final, settled zone is the requested destination after replacements.
     pub fn settle_from_logical_group(&mut self, state: &GameState, group: &LogicalZoneChangeGroup) {
         let Some(destination) = self.destination.filter(|_| !self.settled) else {
             return;
@@ -5449,9 +5452,10 @@ impl DigRestDeliveryOutcome {
     }
 }
 
-/// Stamp a Dig delivery completion with its exact settled zone-change members.
-/// Only the zone pipeline owns a complete logical group, so this is the single
-/// seam where a selected pile becomes an actual delivery outcome.
+/// CR 614.1 + CR 616.1 + CR 400.7: Stamp a Dig delivery completion with its
+/// exact settled destination arrivals. Only the zone pipeline owns a complete
+/// logical group, so this is the single seam where a selected pile becomes an
+/// actual delivery outcome.
 pub(crate) fn settle_dig_delivery_outcome(
     completion: &mut BatchCompletion,
     state: &GameState,

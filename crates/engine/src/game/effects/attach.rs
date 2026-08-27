@@ -2993,11 +2993,11 @@ mod tests {
         let changed_host = spawn_creature(&mut state, "Changed Kor");
         state.last_created_token_ids = vec![created_host];
         state.last_revealed_ids = vec![revealed_host];
-        state.last_zone_changed_ids = vec![changed_host];
         let first_equipment = spawn_equipment(&mut state, "First Blade", 10);
         let second_equipment = spawn_equipment(&mut state, "Second Blade", 11);
         let revealed_equipment = spawn_equipment(&mut state, "Revealed Blade", 12);
         let changed_equipment = spawn_equipment(&mut state, "Changed Blade", 13);
+        state.last_zone_changed_ids = vec![changed_equipment, changed_host];
 
         let attachment_filter = TargetFilter::Typed(
             TypedFilter::default()

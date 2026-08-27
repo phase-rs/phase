@@ -13474,6 +13474,9 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
 /// continuation edges; when a dependent node is removed, resume at its next
 /// `SequentialSibling` rather than treating a dependent `ContinuationStep` as
 /// independently executable.
+/// CR 400.7 + CR 608.2c: Capture only the live, battlefield objects delivered
+/// by this resolution event. Their exact incarnations exclude both stale objects
+/// that reused an id and preexisting matching Equipment.
 /// Capture the exact, live objects a forward-result move delivered for the
 /// special `Attach { ParentTarget, .. }` "one of them" continuation shape. The
 /// attach operand has no standalone filter: its
