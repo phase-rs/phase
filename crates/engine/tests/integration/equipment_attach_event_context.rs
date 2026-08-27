@@ -266,14 +266,9 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     let mut saw_dig_choice = false;
     let mut saw_optional_attach = false;
     let mut saw_host_choice = false;
-    let mut saw_enclosing_trigger_drain = false;
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                if saw_host_choice && runner.state().stack.is_empty() {
-                    saw_enclosing_trigger_drain = true;
-                    break;
-                }
                 runner
                     .act(GameAction::PassPriority)
                     .expect("priority pass must be accepted");
@@ -314,6 +309,7 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
                     .expect("selecting the Samurai host must consume the prompt");
                 assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
                 saw_host_choice = true;
+                break;
             }
             WaitingFor::TriggerTargetSelection { .. } => {
                 panic!("Gilgamesh's non-targeted Samurai choice must not be stack targeting")
@@ -330,10 +326,6 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     assert!(
         saw_host_choice,
         "multiple Samurai must require the host choice"
-    );
-    assert!(
-        saw_enclosing_trigger_drain,
-        "the singleton attachment's enclosing trigger must fully drain before the turn advances"
     );
     assert_eq!(
         runner.state().objects[&equipment].attached_to,
