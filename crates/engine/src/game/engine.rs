@@ -1104,7 +1104,9 @@ pub fn apply_verified_ai_priority_pass(
             .collect();
         install_stack_resolution_session(
             state,
-            [representative].into_iter().collect(),
+            super::topology::priority_pass_participants(state)
+                .into_iter()
+                .collect(),
             StackResolutionBudget::Unlimited,
             StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
             baseline,
