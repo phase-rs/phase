@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{AutoPassMode, GameState, ResolveAllConsentRun, WaitingFor};
+use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
