@@ -16113,6 +16113,102 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
 mod tests;
 
 #[cfg(test)]
+mod resolve_all_consent_session_tests {
+    use super::*;
+    use crate::types::format::FormatConfig;
+    use std::collections::BTreeSet;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+    const P3: PlayerId = PlayerId(3);
+
+    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+        StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(id),
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(id),
+                ability: Box::new(crate::types::ability::ResolvedAbility::new(
+                    crate::types::ability::Effect::NoOp,
+                    vec![],
+                    ObjectId(id),
+                    controller,
+                )),
+            },
+        }
+    }
+
+    #[test]
+    fn one_representative_begin_materializes_a_session_without_a_consent_or_ready_stop() {
+        // This invokes the producer before the outer lifecycle can terminalize
+        // an intentionally one-seat fixture, so the assertion observes the
+        // actual singleton materializer rather than a post-GameOver boundary.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
+        state.stack.push_back(no_op_entry(1, P0));
+
+        let waiting = begin_resolve_all_consent(&mut state, P0, 1)
+            .expect("the sole representative is already unanimous");
+
+        assert!(matches!(waiting, WaitingFor::Priority { player: P0 }));
+        assert!(state.resolve_all_consent_run.is_none());
+        let session = state
+            .stack_resolution_session
+            .as_ref()
+            .expect("singleton Begin creates the ordinary session directly");
+        assert_eq!(session.representatives, BTreeSet::from([P0]));
+        assert_eq!(session.budget.max_resolutions(), Some(1));
+    }
+
+    #[test]
+    fn two_headed_giant_final_grant_overlays_only_canonical_team_representatives() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0x2A6);
+        state.stack.push_back(no_op_entry(1, P0));
+        let waiting = begin_resolve_all_consent(&mut state, P0, 7)
+            .expect("the active team representative begins consent");
+        let WaitingFor::ResolveAllConsent {
+            epoch,
+            representative: P2,
+        } = waiting
+        else {
+            panic!("the opposing team's canonical representative must consent")
+        };
+        state.waiting_for = WaitingFor::ResolveAllConsent {
+            epoch,
+            representative: P2,
+        };
+
+        let materialized = respond_resolve_all_consent(
+            &mut state,
+            epoch,
+            P2,
+            epoch,
+            ResolveAllConsentDecision::Grant,
+        )
+        .expect("the final team grant materializes a shared session");
+
+        assert!(matches!(materialized, WaitingFor::Priority { player: P0 }));
+        let session = state
+            .stack_resolution_session
+            .as_ref()
+            .expect("the final team grant creates a session");
+        assert_eq!(session.representatives, BTreeSet::from([P0, P2]));
+        for representative in [P0, P2] {
+            assert!(matches!(
+                state.auto_pass.get(&representative),
+                Some(AutoPassMode::UntilStackEmpty {
+                    policy: StackResolutionPolicy::Committed,
+                    ..
+                })
+            ));
+        }
+        assert!(!state.auto_pass.contains_key(&P1));
+        assert!(!state.auto_pass.contains_key(&P3));
+    }
+}
+
+#[cfg(test)]
 #[path = "engine_trigger_target_tests.rs"]
 mod trigger_target_tests;
 

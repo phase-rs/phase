@@ -16,8 +16,8 @@ use engine::game::interaction::{
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter,
+    TargetRef, TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::{GameAction, ResolveAllConsentDecision};
 use engine::types::card_type::CoreType;
@@ -33,6 +33,7 @@ use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponse, InteractionSessionId,
     InteractionSubmission,
 };
+use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -64,6 +65,15 @@ fn begin(state: &mut GameState) -> u64 {
 }
 
 fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+    ability_entry(id, controller, Effect::NoOp, vec![])
+}
+
+fn ability_entry(
+    id: u64,
+    controller: PlayerId,
+    effect: Effect,
+    targets: Vec<TargetRef>,
+) -> StackEntry {
     StackEntry {
         id: ObjectId(id),
         source_id: ObjectId(id),
@@ -71,8 +81,8 @@ fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
         kind: StackEntryKind::ActivatedAbility {
             source_id: ObjectId(id),
             ability: Box::new(ResolvedAbility::new(
-                Effect::NoOp,
-                vec![],
+                effect,
+                targets,
                 ObjectId(id),
                 controller,
             )),
@@ -317,41 +327,6 @@ fn final_grant_materializes_the_ordinary_session_without_a_ready_latch() {
 }
 
 #[test]
-fn single_representative_begin_materializes_directly_without_a_consent_or_ready_stop() {
-    let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
-    state.stack.push_back(no_op_entry(1, P0));
-    state.stack.push_back(no_op_entry(2, P0));
-
-    let result = apply(
-        &mut state,
-        P0,
-        GameAction::BeginResolveAll { max_resolutions: 1 },
-    )
-    .expect("the sole representative is already unanimous");
-
-    assert_eq!(
-        result
-            .events
-            .iter()
-            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
-            .count(),
-        1,
-        "the one-seat Begin enters the ordinary capped session runner immediately"
-    );
-    assert_eq!(
-        state.stack.len(),
-        1,
-        "the materialized cap stops after one entry"
-    );
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::Priority { player: P0 }
-    ));
-    assert!(state.resolve_all_consent_run.is_none());
-    assert!(state.stack_resolution_session.is_none());
-}
-
-#[test]
 fn final_grant_transfers_the_requested_cap_zero_as_unlimited() {
     let run = |max_resolutions| {
         let mut state = GameState::new_two_player(0xCA9);
@@ -413,9 +388,22 @@ fn final_grant_transfers_the_requested_cap_zero_as_unlimited() {
 }
 
 #[test]
-fn final_grant_restores_the_baseline_when_the_captured_top_fence_changed() {
+fn final_grant_restores_the_baseline_when_a_materialized_copy_changes_the_next_top_fence() {
     let mut state = GameState::new_two_player(0xF3EC3);
     state.stack.push_back(no_op_entry(1, P0));
+    state.stack.push_back(ability_entry(
+        2,
+        P0,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
+            additional_modifications: vec![],
+            starting_loyalty_from_casualty_sacrifice: false,
+        },
+        vec![],
+    ));
+    state.stack.push_back(no_op_entry(3, P0));
     state.auto_pass.insert(
         P0,
         AutoPassMode::UntilTurnBoundary {
@@ -424,11 +412,6 @@ fn final_grant_restores_the_baseline_when_the_captured_top_fence_changed() {
     );
     let baseline = state.auto_pass.clone();
     let epoch = begin(&mut state);
-    state
-        .stack
-        .back_mut()
-        .expect("fixture stack entry exists")
-        .id = ObjectId(99);
 
     let result = apply(
         &mut state,
@@ -438,19 +421,150 @@ fn final_grant_restores_the_baseline_when_the_captured_top_fence_changed() {
             decision: ResolveAllConsentDecision::Grant,
         },
     )
-    .expect("a changed top is handled by the ordinary session fence");
+    .expect("CopySpell changes the next top only after final Grant materializes the session");
 
     assert!(
-        !result
+        result
             .events
             .iter()
-            .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
-        "the replaced top was never resolved through the captured cohort"
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count()
+            >= 2,
+        "the normal runner resolves the captured top and CopySpell before its copy breaks the next fence"
     );
-    assert_eq!(state.stack.len(), 1);
+    assert!(
+        state.stack.iter().any(|entry| entry.id == ObjectId(1)),
+        "the lower captured entry remains once CopySpell's fresh top no longer matches its fence"
+    );
     assert_eq!(state.auto_pass, baseline);
     assert!(state.stack_resolution_session.is_none());
     assert!(state.resolve_all_consent_run.is_none());
+}
+
+#[test]
+fn final_grant_prompt_restores_the_preconsent_overlay_before_waiting_for_choice() {
+    let mut state = GameState::new_two_player(0xC401CE);
+    state.stack.push_back(ability_entry(
+        1,
+        P0,
+        Effect::Choose {
+            choice_type: ChoiceType::BasicLandType,
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        },
+        vec![],
+    ));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    );
+    let baseline = state.auto_pass.clone();
+    let epoch = begin(&mut state);
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the final grant resolves through the normal interactive choice path");
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::NamedChoice { player: P0, .. }
+    ));
+    assert_eq!(state.auto_pass, baseline);
+    assert!(state.stack_resolution_session.is_none());
+    assert!(state.resolve_all_consent_run.is_none());
+}
+
+#[test]
+fn final_grant_terminal_resolution_restores_a_survivors_preconsent_overlay() {
+    let mut state = GameState::new_two_player(0x7E21_A1);
+    state.stack.push_back(ability_entry(
+        1,
+        P0,
+        Effect::LoseTheGame { target: None },
+        vec![],
+    ));
+    state.auto_pass.insert(
+        P1,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    );
+    let survivor_mode = state.auto_pass.get(&P1).copied();
+    let epoch = begin(&mut state);
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the final grant resolves the terminal entry through the shared session");
+
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(state.auto_pass.get(&P1).copied(), survivor_mode);
+    assert!(state.stack_resolution_session.is_none());
+    assert!(state.resolve_all_consent_run.is_none());
+}
+
+#[test]
+fn pending_non_auto_pass_preference_does_not_mutate_the_consent_baseline() {
+    let mut state = GameState::new_two_player(0xA9EF);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline = state.auto_pass.clone();
+    let epoch = begin(&mut state);
+    let stops = vec![PhaseStop {
+        phase: Phase::End,
+        scope: PhaseStopScope::AllTurns,
+    }];
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::SetPhaseStops {
+            stops: stops.clone(),
+        },
+    )
+    .expect("an actor-scoped phase-stop preference remains legal during consent");
+
+    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(
+        state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("fresh consent is still pending")
+            .auto_pass_baseline
+            .as_ref(),
+        Some(&baseline)
+    );
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Decline,
+        },
+    )
+    .expect("the queued representative may decline");
+
+    assert_eq!(state.auto_pass, baseline);
+    assert_eq!(state.phase_stops.get(&P1), Some(&stops));
 }
 
 #[test]
