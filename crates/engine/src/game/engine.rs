@@ -78,10 +78,11 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    pending_resolve_all_ready_requester, recover_orphaned_resolve_all, resolve_all_fast_forward,
-    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
+    classify_restored_stack_automation, pending_resolve_all_ready_requester,
+    recover_orphaned_resolve_all, resolve_all_fast_forward, resolve_all_ready_access,
+    resolve_all_ready_prefix, resolve_all_ready_prefix_with, resume_restored_stack_automation,
     ResolveAllCallbackDecision, ResolveAllContinuation, ResolveAllFastForwardResult,
-    ResolveAllReadyAccess,
+    ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationResult,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -7541,6 +7542,40 @@ pub(crate) fn take_and_restore_stack_resolution_session(state: &mut GameState) -
     true
 }
 
+/// Drives an already-authorized restored stack-resolution session through the
+/// same ordinary auto-pass runner used at a player-action boundary.
+///
+/// Restore itself deliberately does not call this: deserialization must remain
+/// a pure state reconstruction. The explicit restore-resume entry point
+/// validates the saved authorization before selecting this lifecycle seam.
+pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> ActionResult {
+    let boundary_snapshot = state.clone();
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+
+    reconcile_terminal_result(state, &mut result);
+    bump_state_revision(state);
+    sync_waiting_for(state, &result.waiting_for);
+    run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
+    if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
+        take_and_restore_stack_resolution_session(state);
+    }
+    super::mana_payment::refill_infinite_mana(state);
+    mark_public_state_from_events(state, &result.events);
+    finalize_rules_state(state);
+    result.waiting_for = state.waiting_for.clone();
+    finalize_display_state(state);
+    result.log_entries = super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
+    interaction::ensure_interaction_authority(state);
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(state);
+    result
+}
+
 #[derive(Clone, Copy)]
 enum StackResolutionSessionPassKind {
     /// The session runner is considering an implicit pass. A rechecking AI
@@ -8223,7 +8258,7 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
 /// Resolve All, direct UntilStackEmpty, and a verified AI pass. The caller owns
 /// authorization and supplies the exact sparse preference map to restore when
 /// the bounded cohort ends.
-fn install_stack_resolution_session(
+pub(crate) fn install_stack_resolution_session(
     state: &mut GameState,
     representatives: BTreeSet<PlayerId>,
     budget: StackResolutionBudget,

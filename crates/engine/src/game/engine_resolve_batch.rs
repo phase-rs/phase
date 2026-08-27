@@ -3,12 +3,18 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, AutoPassMode, GameState, ResolveAllConsentRun, StackResolutionPolicy, WaitingFor,
+};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
-use super::engine::{apply_action_boundary_with_stack_limit, PublicFinalizeMode};
-use super::public_state::finalize_display_state;
+use super::engine::{
+    apply_action_boundary_with_stack_limit, install_stack_resolution_session,
+    resume_stack_resolution_session_runner, take_and_restore_stack_resolution_session,
+    PublicFinalizeMode,
+};
+use super::public_state::{bump_state_revision, finalize_display_state};
 use super::{interaction, stack, topology, turn_control};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +53,43 @@ pub enum ResolveAllCallbackDecision {
     /// dispatched as a current prompt.
     Action(GameAction),
     Stop,
+}
+
+/// The restore-time classification of persisted stack automation.
+///
+/// This is intentionally a read-only classifier. A generic saved-game decode
+/// may inspect it to decide whether an explicit engine resume is useful, but
+/// it must never resolve a stack entry merely by reconstructing a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RestoredStackAutomation {
+    None,
+    ActiveSession,
+    LegacyResolveAllReady,
+    Repair,
+}
+
+/// Outcome of an explicit restored-stack automation resume.
+///
+/// `Progressed` carries the ordinary engine boundary result; repairs are
+/// deliberately observable as a separate zero-resolution outcome so a caller
+/// cannot mistake a stale authorization repair for successful fast-forwarding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
+pub enum RestoredStackAutomationResult {
+    Noop(ActionResult),
+    Progressed(ActionResult),
+    ZeroResolutionRepair(ActionResult),
+}
+
+impl RestoredStackAutomationResult {
+    pub fn action_result(&self) -> &ActionResult {
+        match self {
+            Self::Noop(result) | Self::Progressed(result) | Self::ZeroResolutionRepair(result) => {
+                result
+            }
+        }
+    }
 }
 
 /// Resolves the greatest prefix which has already received every priority
@@ -325,39 +368,175 @@ pub fn pending_resolve_all_ready_requester(state: &GameState) -> Option<PlayerId
         .then_some(requester)
 }
 
-/// Discharge a `ResolveAllReady` latch carried by a state that is being
-/// restored, returning the batch when a prefix was collapsed.
+/// Classifies persisted stack automation without advancing game state.
 ///
-/// Every restore seam owes this call, and the reason is structural rather than
-/// defensive. `ResolveAllReady` reports no acting player
-/// (`WaitingFor::acting_player` is `None` for it), so it is advanced only out
-/// of band, by whichever driver holds the submitting call's return value. That
-/// driver is in-memory and does not survive the process that created it.
-///
-/// The latch is not literally action-less: while its run is intact,
-/// `candidate_actions` offers each grantor a `RevokeResolveAllConsent`. But no
-/// client renders anything at `ResolveAllReady` — `ResolveAllConsentModal` is
-/// gated on `ResolveAllConsent` — so that escape is never presented to a human,
-/// and it disappears entirely once the run is gone. A restored latch is
-/// therefore unadvanceable in practice even where it is not in theory.
-///
-/// [`resolve_all_ready_prefix`] is the single authority for both outcomes, so
-/// this deliberately does not branch on which one applies. An intact unanimous
-/// run collapses to the prefix the players already consented to; an incoherent
-/// one repairs `waiting_for` back to priority together with the display and
-/// interaction-authority state that repair implies. Passing a seat that is not
-/// a participant reaches the repair branch by construction, which is why the
-/// fallback requester below needs no separate justification.
-pub fn recover_orphaned_resolve_all(state: &mut GameState) -> Option<ResolveAllFastForwardResult> {
-    if !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
-        return None;
+/// A generic saved-game decode is a state reconstruction boundary, not an
+/// implicit priority pass. Call [`resume_restored_stack_automation`] explicitly
+/// when the owner is ready to drive a restored stack automation session.
+pub fn classify_restored_stack_automation(state: &GameState) -> RestoredStackAutomation {
+    if let Some(session) = state.stack_resolution_session.as_ref() {
+        return restored_stack_resolution_session_is_coherent(state, session)
+            .then_some(RestoredStackAutomation::ActiveSession)
+            .unwrap_or(RestoredStackAutomation::Repair);
     }
-    let requester = pending_resolve_all_ready_requester(state).unwrap_or(state.priority_player);
-    Some(resolve_all_ready_prefix_with(
+    if matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        return restored_legacy_ready_is_coherent(state)
+            .then_some(RestoredStackAutomation::LegacyResolveAllReady)
+            .unwrap_or(RestoredStackAutomation::Repair);
+    }
+    RestoredStackAutomation::None
+}
+
+/// Compatibility no-op for restore code that previously advanced Ready latches.
+///
+/// The old call sites remain source-compatible while their generic decode stays
+/// pure. New owners inspect [`classify_restored_stack_automation`] and choose
+/// whether to call [`resume_restored_stack_automation`] explicitly.
+pub fn recover_orphaned_resolve_all(_: &mut GameState) -> Option<ResolveAllFastForwardResult> {
+    None
+}
+
+/// Explicitly resumes coherent persisted stack automation through the ordinary
+/// runner, or repairs an incoherent saved authorization without resolving a
+/// stack entry.
+pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackAutomationResult {
+    match classify_restored_stack_automation(state) {
+        RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(ActionResult {
+            events: Vec::new(),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: Vec::new(),
+        }),
+        RestoredStackAutomation::ActiveSession => {
+            RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(state))
+        }
+        RestoredStackAutomation::LegacyResolveAllReady => {
+            materialize_restored_legacy_ready_session(state);
+            RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(state))
+        }
+        RestoredStackAutomation::Repair => RestoredStackAutomationResult::ZeroResolutionRepair(
+            repair_restored_stack_automation(state),
+        ),
+    }
+}
+
+fn restored_stack_resolution_session_is_coherent(
+    state: &GameState,
+    session: &crate::types::game_state::StackResolutionSession,
+) -> bool {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.stack.is_empty()
+        || session.representatives.is_empty()
+        || session.cursor >= session.entries.len()
+        || session.entries.len().saturating_sub(session.cursor) != state.stack.len()
+        || session
+            .budget
+            .max_resolutions()
+            .is_some_and(|maximum| session.cursor >= maximum as usize)
+    {
+        return false;
+    }
+
+    let canonical_representatives = topology::canonical_priority_representatives(
         state,
-        requester,
-        ResolveAllContinuation::StopAtPriority,
-    ))
+        session.representatives.iter().copied(),
+    );
+    let live_representatives = topology::priority_pass_participants(state);
+    if canonical_representatives != session.representatives
+        || !session
+            .representatives
+            .iter()
+            .all(|representative| live_representatives.contains(representative))
+    {
+        return false;
+    }
+
+    let mut expected_auto_pass = session.auto_pass_overlay.baseline.clone();
+    let overlay_mode = AutoPassMode::UntilStackEmpty {
+        initial_stack_len: session.entries.len(),
+        policy: session.policy,
+    };
+    for representative in &session.representatives {
+        expected_auto_pass.insert(*representative, overlay_mode);
+    }
+    if state.auto_pass != expected_auto_pass {
+        return false;
+    }
+
+    state
+        .stack
+        .iter()
+        .rev()
+        .zip(session.entries.iter().skip(session.cursor))
+        .all(|(entry, fence)| fence.matches_captured_entry(entry))
+}
+
+fn restored_legacy_ready_is_coherent(state: &GameState) -> bool {
+    let Some(requester) = pending_resolve_all_ready_requester(state) else {
+        return false;
+    };
+    !state.stack.is_empty() && ready_consent_run(state, requester).is_some()
+}
+
+fn materialize_restored_legacy_ready_session(state: &mut GameState) {
+    let requester = pending_resolve_all_ready_requester(state)
+        .expect("the Ready classifier admitted a requester");
+    let run = ready_consent_run(state, requester)
+        .cloned()
+        .expect("the Ready classifier admitted a coherent consent run");
+    let consumed = state
+        .resolve_all_consent_run
+        .take()
+        .expect("a coherent Ready latch retains its consent run");
+    debug_assert_eq!(consumed, run);
+    let representatives = run
+        .participants
+        .iter()
+        .map(|participant| participant.representative)
+        .collect();
+    state.waiting_for = WaitingFor::Priority {
+        player: run.priority_snapshot.waiting_player,
+    };
+    install_stack_resolution_session(
+        state,
+        representatives,
+        run.max_resolutions,
+        StackResolutionPolicy::Committed,
+        Default::default(),
+    );
+}
+
+fn repair_restored_stack_automation(state: &mut GameState) -> ActionResult {
+    let restored_session = take_and_restore_stack_resolution_session(state);
+    let had_consent_wait = matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    );
+    if had_consent_wait && !restored_session {
+        turn_control::rebase_invalid_resolve_all_consent(state);
+    } else {
+        state.resolve_all_consent_run = None;
+        restore_ordinary_priority_after_stack_automation_repair(state);
+    }
+    bump_state_revision(state);
+    finalize_display_state(state);
+    interaction::ensure_interaction_authority(state);
+    ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    }
+}
+
+fn restore_ordinary_priority_after_stack_automation_repair(state: &mut GameState) {
+    let preferred = topology::priority_pass_representative(state, state.active_player);
+    let player = super::players::is_alive(state, preferred)
+        .then_some(preferred)
+        .or_else(|| topology::priority_pass_participants(state).first().copied())
+        .unwrap_or(preferred);
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = turn_control::authorized_submitter_for_player(state, player);
+    state.priority_pass_count = 0;
+    state.priority_passes.clear();
 }
 
 fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveAllConsentRun> {

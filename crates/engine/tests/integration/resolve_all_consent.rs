@@ -1,13 +1,14 @@
 //! Phase-1 protocol coverage for explicit Resolve All consent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
 use engine::game::elimination::eliminate_player;
 use engine::game::engine::{
-    apply, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
+    apply, classify_restored_stack_automation, pending_resolve_all_ready_requester,
     resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
-    ResolveAllContinuation, ResolveAllReadyAccess,
+    resume_restored_stack_automation, ResolveAllContinuation, ResolveAllReadyAccess,
+    RestoredStackAutomation, RestoredStackAutomationResult,
 };
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
@@ -1289,6 +1290,185 @@ fn ready_two_seat_state() -> GameState {
     state
 }
 
+fn restored_session_state(max_resolutions: u32) -> GameState {
+    let mut state = GameState::new_two_player(0xA11CE);
+    state.stack.push_back(no_op_entry(1, P0));
+    state.stack.push_back(no_op_entry(2, P1));
+    let baseline: BTreeMap<_, _> = BTreeSet::from([P0])
+        .into_iter()
+        .map(|player| {
+            (
+                player,
+                AutoPassMode::UntilTurnBoundary {
+                    until: Default::default(),
+                },
+            )
+        })
+        .collect();
+    let representatives = BTreeSet::from([P0, P1]);
+    let entries = state
+        .stack
+        .iter()
+        .rev()
+        .map(StackResolutionEntryFence::capture)
+        .collect();
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries,
+        cursor: 0,
+        representatives: representatives.clone(),
+        budget: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+    for representative in representatives {
+        state.auto_pass.insert(
+            representative,
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+                policy: StackResolutionPolicy::Committed,
+            },
+        );
+    }
+    state
+}
+
+#[test]
+fn persisted_restore_classifies_without_advancing_stack_automation() {
+    let state = ready_two_seat_state();
+    let persisted = PersistedGameState::capture(state.clone());
+    let encoded = serde_json::to_string(&persisted).expect("Ready state serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&encoded)
+        .expect("Ready state deserializes")
+        .into_game_state();
+
+    assert_eq!(
+        classify_restored_stack_automation(&restored),
+        RestoredStackAutomation::LegacyResolveAllReady
+    );
+    assert_eq!(
+        restored, state,
+        "generic decode reconstructs rules state without consuming automation"
+    );
+    assert_eq!(
+        restored.stack, state.stack,
+        "decode resolves no stack entry"
+    );
+    assert_eq!(
+        restored.auto_pass, state.auto_pass,
+        "decode preserves overlays"
+    );
+    assert_eq!(
+        restored.waiting_for, state.waiting_for,
+        "decode preserves Ready"
+    );
+}
+
+#[test]
+fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner() {
+    let mut state = restored_session_state(1);
+    state
+        .stack_resolution_session
+        .as_mut()
+        .expect("fixture has a session")
+        .auto_pass_overlay
+        .baseline
+        .clear();
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::ActiveSession
+    );
+
+    let RestoredStackAutomationResult::Progressed(result) =
+        resume_restored_stack_automation(&mut state)
+    else {
+        panic!("a coherent session must enter the ordinary runner");
+    };
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        1,
+        "the saved budget limits ordinary runner resolution"
+    );
+    assert_eq!(state.stack.len(), 1);
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "cap tears down the session"
+    );
+    assert!(
+        state.auto_pass.is_empty(),
+        "teardown restores the empty baseline"
+    );
+}
+
+#[test]
+fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() {
+    let mut state = restored_session_state(0);
+    state
+        .stack
+        .back_mut()
+        .expect("fixture has a top stack entry")
+        .source_id = ObjectId(99);
+
+    let RestoredStackAutomationResult::ZeroResolutionRepair(result) =
+        resume_restored_stack_automation(&mut state)
+    else {
+        panic!("a stale entry fence must repair, never advance");
+    };
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+        "repair emits no stack resolution"
+    );
+    assert_eq!(state.stack.len(), 2, "repair leaves every entry intact");
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(
+        state.auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        })
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
+fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
+    let mut stale_cursor = restored_session_state(0);
+    let entries_len = stale_cursor
+        .stack_resolution_session
+        .as_ref()
+        .expect("fixture has a session")
+        .entries
+        .len();
+    stale_cursor
+        .stack_resolution_session
+        .as_mut()
+        .expect("fixture has a session")
+        .cursor = entries_len;
+    let RestoredStackAutomationResult::ZeroResolutionRepair(cursor_result) =
+        resume_restored_stack_automation(&mut stale_cursor)
+    else {
+        panic!("an exhausted cursor must repair");
+    };
+    assert!(cursor_result.events.is_empty());
+
+    let mut bad_overlay = restored_session_state(0);
+    bad_overlay.auto_pass.remove(&P1);
+    let RestoredStackAutomationResult::ZeroResolutionRepair(overlay_result) =
+        resume_restored_stack_automation(&mut bad_overlay)
+    else {
+        panic!("a malformed overlay must repair");
+    };
+    assert!(overlay_result.events.is_empty());
+    assert_eq!(bad_overlay.stack.len(), 2);
+}
+
 /// The gate answers ONE question — entitlement — and coherence is answered
 /// elsewhere, by the resolver. This pins that separation from both sides: the
 /// gate's verdict does not move when coherence changes, and
@@ -1373,17 +1553,18 @@ fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
     );
     assert!(state.auto_pass.is_empty());
 }
-/// Recovery is the single obligation every restore seam owes, so it must be
-/// inert on the overwhelming majority of states, which carry no latch at all.
+/// Generic restore classification is inert on the overwhelming majority of
+/// states, which carry no stack automation at all.
 #[test]
 fn recovery_is_inert_on_a_state_carrying_no_latch() {
     let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE1);
     state.stack.push_back(no_op_entry(1, P1));
     let before = state.waiting_for.clone();
 
-    assert!(
-        recover_orphaned_resolve_all(&mut state).is_none(),
-        "no latch means nothing to discharge"
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::None,
+        "generic restore classification must leave ordinary states alone"
     );
     assert_eq!(state.waiting_for, before, "an inert call mutates nothing");
     assert_eq!(state.stack.len(), 1);
@@ -1401,10 +1582,26 @@ fn recovery_discharges_an_intact_latch() {
         "non-vacuity: the fixture must present a consumable latch"
     );
 
-    let batch =
-        recover_orphaned_resolve_all(&mut state).expect("an intact latch must be discharged");
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::LegacyResolveAllReady,
+        "generic decode recognizes but does not consume the legacy authorization"
+    );
+    let RestoredStackAutomationResult::Progressed(batch) =
+        resume_restored_stack_automation(&mut state)
+    else {
+        panic!("an intact Ready latch resumes through the shared session runner");
+    };
 
-    assert_eq!(batch.items_resolved, 1, "the consented prefix is collapsed");
+    assert_eq!(
+        batch
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        1,
+        "the explicit resume resolves the consented entry"
+    );
     assert!(state.stack.is_empty(), "the stack entry resolved");
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -1441,11 +1638,19 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
         "non-vacuity: the fixture must actually carry Ready-era slots"
     );
 
-    let batch =
-        recover_orphaned_resolve_all(&mut state).expect("a latch is present, so recovery acts");
+    let RestoredStackAutomationResult::ZeroResolutionRepair(batch) =
+        resume_restored_stack_automation(&mut state)
+    else {
+        panic!("an incoherent latch must repair without resolving");
+    };
 
     assert_eq!(
-        batch.items_resolved, 0,
+        batch
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        0,
         "an incoherent run resolves nothing"
     );
     assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
