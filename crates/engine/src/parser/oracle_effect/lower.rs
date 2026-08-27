@@ -1747,7 +1747,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             attachment: TargetFilter::ParentTarget,
             ..
         } => matches!(
-            clause_ir.parsed.condition.as_ref(),
+            clause_ir.condition.as_ref(),
             Some(AbilityCondition::ZoneChangedThisWay {
                 destination: Some(Zone::Battlefield),
                 ..
