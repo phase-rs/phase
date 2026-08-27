@@ -15,7 +15,7 @@ import {
   getDeckCardCount,
   getDeckColorIdentity,
   getDeckColorIdentityPips,
-  getRepresentativeCard,
+  getRepresentativeDeckVisual,
   loadDeck,
 } from "../deckHelpers";
 
@@ -178,8 +178,11 @@ function ActiveDeckCard() {
   // an empty name yields no src and falls back to the loading shimmer.
   const randomDeckSelected = isRandomDeckSelection(name);
   const displayName = randomDeckSelected ? t("myDecks.randomDeckTile") : name;
-  const repCard = name && !randomDeckSelected ? getRepresentativeCard(name) : null;
-  const { src: artSrc } = useCardImage(repCard ?? "", { size: "art_crop" });
+  const representativeVisual = name && !randomDeckSelected ? getRepresentativeDeckVisual(name) : null;
+  const { src: artSrc, advanceFailedSource } = useCardImage(representativeVisual?.name ?? "", {
+    size: "art_crop",
+    sourcePrinting: representativeVisual?.sourcePrinting,
+  });
 
   useEffect(() => {
     if (!name || randomDeckSelected) {
@@ -237,7 +240,12 @@ function ActiveDeckCard() {
           dark backing chip so they stay legible over any artwork. */}
       <div className="relative h-24 overflow-hidden">
         {artSrc ? (
-          <img src={artSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+          <img
+            src={artSrc}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => advanceFailedSource?.(artSrc)}
+          />
         ) : (
           <div className="absolute inset-0 animate-pulse bg-gray-800" />
         )}

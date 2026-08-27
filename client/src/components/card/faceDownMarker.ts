@@ -13,46 +13,74 @@ import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
  * survives a reprint — `fetchTokenImageByRef` falls back to the oracle key that
  * `scryfall-token-images.json` already indexes for all three.
  */
-const MARKERS: Partial<Record<FaceDownCause, TokenImageRef>> = {
+export type FaceDownMarkerVisual =
+  | {
+      outcome: "reference";
+      name: string;
+      reference: TokenImageRef;
+    }
+  | {
+      outcome: "none";
+      reason: "no_printed_marker";
+    };
+
+/**
+ * Exhaustive source table shared by the UI and the offline visual-pack audit.
+ * Keeping the explicit `none` row here prevents a newly-added engine cause from
+ * silently falling through a partial lookup during catalog generation.
+ */
+export const FACE_DOWN_MARKER_VISUALS: Record<FaceDownCause, FaceDownMarkerVisual> = {
   // https://scryfall.com/card/tfrf/4/manifest — also used for manifest dread,
   // which is the same keyword action with a different card-selection step.
   Manifest: {
-    scryfall_id: "",
-    scryfall_oracle_id: "f4f184ef-f456-47d8-9012-095629a5ea4d",
-    face_name: "manifest",
-    preset_id: "face-down-manifest",
+    outcome: "reference",
+    name: "Manifest",
+    reference: {
+      scryfall_id: "",
+      scryfall_oracle_id: "f4f184ef-f456-47d8-9012-095629a5ea4d",
+      face_name: "manifest",
+      preset_id: "face-down-manifest",
+    },
   },
   // https://scryfall.com/card/tdtk/7/morph — megamorph shares it.
   Morph: {
-    scryfall_id: "",
-    scryfall_oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
-    face_name: "morph",
-    preset_id: "face-down-morph",
+    outcome: "reference",
+    name: "Morph",
+    reference: {
+      scryfall_id: "",
+      scryfall_oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
+      face_name: "morph",
+      preset_id: "face-down-morph",
+    },
   },
   // https://scryfall.com/card/tmkm/21/a-mysterious-creature — cloak and
   // disguise are different rules (CR 701.58a vs CR 702.168a) with one printing.
   Cloak: {
-    scryfall_id: "",
-    scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
-    face_name: "a mysterious creature",
-    preset_id: "face-down-cloak",
+    outcome: "reference",
+    name: "A Mysterious Creature",
+    reference: {
+      scryfall_id: "",
+      scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
+      face_name: "a mysterious creature",
+      preset_id: "face-down-cloak",
+    },
   },
   Disguise: {
-    scryfall_id: "",
-    scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
-    face_name: "a mysterious creature",
-    preset_id: "face-down-cloak",
+    outcome: "reference",
+    name: "A Mysterious Creature",
+    reference: {
+      scryfall_id: "",
+      scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",
+      face_name: "a mysterious creature",
+      preset_id: "face-down-cloak",
+    },
   },
-  // `TurnedFaceDown` (Ixidron class) is deliberately absent: no marker token is
-  // printed for it, so it keeps the generic card back.
-};
-
-/** Printed token names, for the tile's name bar and the preview caption. */
-const MARKER_NAMES: Partial<Record<FaceDownCause, string>> = {
-  Manifest: "Manifest",
-  Morph: "Morph",
-  Cloak: "A Mysterious Creature",
-  Disguise: "A Mysterious Creature",
+  // `TurnedFaceDown` (Ixidron class) has no printed marker and deliberately
+  // keeps the generic card back.
+  TurnedFaceDown: {
+    outcome: "none",
+    reason: "no_printed_marker",
+  },
 };
 
 /**
@@ -65,7 +93,8 @@ export function faceDownMarkerName(
   cause: FaceDownCause | null | undefined,
 ): string | null {
   if (!faceDown || !cause) return null;
-  return MARKER_NAMES[cause] ?? null;
+  const visual = FACE_DOWN_MARKER_VISUALS[cause];
+  return visual.outcome === "reference" ? visual.name : null;
 }
 
 /**
@@ -78,5 +107,6 @@ export function faceDownMarkerRef(
   cause: FaceDownCause | null | undefined,
 ): TokenImageRef | null {
   if (!faceDown || !cause) return null;
-  return MARKERS[cause] ?? null;
+  const visual = FACE_DOWN_MARKER_VISUALS[cause];
+  return visual.outcome === "reference" ? visual.reference : null;
 }

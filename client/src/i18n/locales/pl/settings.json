@@ -200,6 +200,131 @@
     "telemetry": "Wysyłaj anonimowe raporty o awariach i użyciu",
     "telemetryDescription": "Pomaga naprawiać awarie i ustalać priorytety obsługi kart. Bez konta, bez danych osobowych — tylko liczniki błędów i podsumowań gier."
   },
+  "visualPacks": {
+    "title": "Katalog wizualny offline",
+    "description": "Wybierz, które obrazy zaufanych kart chcesz zachować na tym urządzeniu, lub zainstaluj cały aktualny katalog.",
+    "availability": {
+      "loading": "Sprawdzam obsługę katalogu wizualnego offline…",
+      "browser": "Pobieranie obrazów offline nie jest skonfigurowane w tej kompilacji.",
+      "browserFuture": "Ta kompilacja nie zawiera zaufanej polityki podpisywania katalogu wymaganej do weryfikacji pobierania obrazów.",
+      "unsupported": "Ta aplikacja komputerowa jest za stara, aby zarządzać katalogami wizualnymi offline. Zaktualizuj aplikację, aby kontynuować.",
+      "empty": "Nie pobrano jeszcze żadnego zaufanego katalogu wizualnego.",
+      "invalid": "Lokalnemu katalogowi wizualnemu nie można ufać. Odśwież go przed kontynuowaniem."
+    },
+    "selector": {
+      "title": "Wybór katalogu",
+      "core": "Podstawowe wizualizacje",
+      "printing": "Nadruki zestawów angielskich",
+      "locale": "Zlokalizowane wydruki setów",
+      "complete": "Uzupełnij aktualny katalog",
+      "setCode": "Ustaw kod",
+      "setPlaceholder": "np. płetwa",
+      "language": "Język obrazu",
+      "currentRoot": "Bieżący katalog główny: {{root}}",
+      "invalidSet": "Wprowadź prawidłowy kod zestawu składający się z trzech do sześciu znaków."
+    },
+    "actions": {
+      "estimate": "Oszacuj pobranie",
+      "install": "Zainstaluj wybór",
+      "cancel": "Anuluj operację",
+      "resume": "Wznów działanie",
+      "retry": "Spróbuj ponownie",
+      "refresh": "Odśwież katalog",
+      "verifyMetadata": "Zweryfikuj metadane",
+      "verifyFull": "Sprawdź wszystkie pliki",
+      "repair": "Wybrano naprawę",
+      "removeSelected": "Usuń wybrane",
+      "removeComplete": "Usuń cały katalog",
+      "removeAll": "Usuń wszystkie wizualizacje offline"
+    },
+    "estimate": {
+      "title": "Oszacowanie zaplecza i zamknięcie zależności"
+    },
+    "metrics": {
+      "assetRecords": "Zapisy majątku",
+      "uniqueObjects": "Unikalne obiekty",
+      "logicalImageBytes": "Bajty obrazu logicznego",
+      "uniqueImageBytes": "Unikalne bajty obrazu",
+      "shardCount": "Odłamki",
+      "shardBytes": "Fragmenty bajtów"
+    },
+    "operation": {
+      "title": "Bieżąca operacja",
+      "states": {
+        "downloading": "Pobieranie",
+        "cancel_requested": "Zażądano anulowania",
+        "finalizing": "Finalizowanie",
+        "failed": "Niepowodzenie — można wznowić",
+        "completed": "Ukończono",
+        "cancelled": "Anulowano"
+      },
+      "id": "Operacja",
+      "root": "Katalog główny",
+      "packs": "Pakiety: {{current}} z {{total}}",
+      "objects": "Obiekty: {{current}} z {{total}}",
+      "finalizing": "Kończenie instalacji katalogu"
+    },
+    "status": {
+      "title": "Stan katalogu zainstalowanego",
+      "root": "Katalog główny",
+      "epoch": "Epoka",
+      "revision": "Zainstalowana wersja",
+      "selectorCount": "Selektory",
+      "shardCount": "Odłamki",
+      "installed": "Zainstalowane pakiety",
+      "noneInstalled": "Nie są zainstalowane żadne pakiety wizualne.",
+      "upgradeAvailable": "Dostępna aktualizacja",
+      "receiptRoot": "Katalog główny paragonu: {{root}}"
+    },
+    "verification": {
+      "revision": "Zweryfikowano zainstalowaną wersję {{revision}}.",
+      "healthy": "Nie znaleziono żadnych problemów z weryfikacją.",
+      "issues": {
+        "missing_root_witness": "Brak głównego świadka katalogu",
+        "invalid_root_witness": "Nieprawidłowy świadek główny katalogu",
+        "receipt_metadata": "Metadane paragonu różnią się od zaufanego katalogu",
+        "missing_shard": "Brak fragmentu katalogu",
+        "invalid_shard": "Nieprawidłowy fragment katalogu",
+        "missing_object": "Brakujący obiekt obrazu",
+        "invalid_object_metadata": "Nieprawidłowe metadane obiektu obrazu",
+        "corrupt_object": "Uszkodzony obiekt obrazu",
+        "dependency_drift": "Zainstalowane rekordy zależności różnią się od zaufanego katalogu",
+        "projection_drift": "Zainstalowane rekordy wyszukiwania różnią się od zaufanego katalogu"
+      }
+    },
+    "removal": {
+      "committed": "Usunięcie dokonane w wersji {{revision}}."
+    },
+    "cleanup": {
+      "malformed_entry": "Nie można odzyskać źle sformułowanego wpisu w pamięci podręcznej",
+      "unsafe_entry": "Niebezpieczny wpis w pamięci podręcznej pozostał nietknięty",
+      "remove_failed": "Nie można usunąć pliku pamięci podręcznej",
+      "catalog_state": "Nie udało się odzyskać historycznego stanu katalogu"
+    },
+    "errors": {
+      "unsupported_shell": "Ta wersja aplikacji nie obsługuje katalogów wizualnych offline.",
+      "unauthorized": "W tym oknie nie można zarządzać katalogami wizualnymi offline.",
+      "unavailable": "Wizualne zarządzanie katalogiem w trybie offline jest tymczasowo niedostępne.",
+      "invalid_input": "Żądany wybór katalogu jest nieprawidłowy.",
+      "conflict": "Zainstalowane pakiety zależą od tego wyboru.",
+      "cancelled": "Operację odwołano.",
+      "network": "Żądanie sieciowe katalogu nie powiodło się.",
+      "storage": "Nie można zapisać katalogu w pamięci urządzenia.",
+      "trust": "Nie można ufać odpowiedzi katalogu.",
+      "emit": "Aplikacja nie mogła zgłosić postępu katalogu.",
+      "internal": "Nie można ukończyć operacji na katalogu."
+    },
+    "confirm": {
+      "cascadeTitle": "Usunąć pakiety zależne?",
+      "cascadeMessage": "Inne zainstalowane pakiety zależą od {{selection}}. Usunąć zamrożony wybór i jego elementy zależne?",
+      "cascadeAction": "Usuń osoby na utrzymaniu",
+      "completeTitle": "Usunąć cały katalog?",
+      "completeMessage": "Usunąć każdy zainstalowany pakiet z katalogu głównego {{selection}}?",
+      "allTitle": "Usunąć wszystkie elementy wizualne offline?",
+      "allMessage": "Usunąć wszystkie zainstalowane pakiety wizualne z tego urządzenia?",
+      "removeAction": "Usuń"
+    }
+  },
   "resetAll": {
     "confirm": "Zresetować wszystkie preferencje do wartości domyślnych? Spowoduje to wyczyszczenie każdego ustawienia w tym oknie.",
     "button": "Zresetuj wszystkie preferencje",

@@ -204,6 +204,130 @@
     "telemetry": "Send anonymous crash & usage reports",
     "telemetryDescription": "Helps fix crashes and prioritize card support. No account, no personal data — just error and game-summary counts."
   },
+  "visualPacks": {
+    "title": "Offline card images",
+    "description": "Choose images to keep on this device. The card catalog is cached from Scryfall; every image is then downloaded directly from Scryfall.",
+    "availability": {
+      "loading": "Checking offline visual catalog support…",
+      "browser": "This browser does not provide the local storage features required for offline image downloads.",
+      "browserFuture": "Use a current desktop browser with Cache Storage, IndexedDB, and gzip decompression support.",
+      "unsupported": "This desktop app is too old to manage offline visual catalogs. Update the app to continue.",
+      "empty": "Load the current Scryfall card snapshot to choose offline images.",
+      "invalid": "The local card snapshot could not be read. Refresh it before continuing."
+    },
+    "selector": {
+      "title": "Download selection",
+      "core": "Card back",
+      "printing": "English set printings",
+      "locale": "Localized set printings",
+      "complete": "All current English card images",
+      "setCode": "Set code",
+      "setPlaceholder": "e.g. fin",
+      "language": "Image language",
+      "currentRoot": "Pinned Scryfall snapshot: {{root}}",
+      "invalidSet": "Enter a valid three-to-six character set code."
+    },
+    "actions": {
+      "estimate": "Scan catalog and estimate",
+      "estimating": "Scanning Scryfall catalog…",
+      "install": "Install selection",
+      "cancel": "Cancel operation",
+      "resume": "Resume operation",
+      "retry": "Try again",
+      "refresh": "Check Scryfall catalog",
+      "refreshing": "Checking Scryfall catalog…",
+      "verifyMetadata": "Verify metadata",
+      "verifyFull": "Verify all files",
+      "repair": "Repair selected",
+      "removeSelected": "Remove selected",
+      "removeComplete": "Remove complete catalog",
+      "removeAll": "Remove all offline visuals"
+    },
+    "estimate": { "title": "Scryfall snapshot scan" },
+    "metrics": {
+      "assetRecords": "Image records",
+      "uniqueObjects": "Images to download",
+      "logicalImageBytes": "Image bytes (known after download)",
+      "uniqueImageBytes": "Unique image bytes (known after download)",
+      "shardCount": "Metadata files",
+      "shardBytes": "Compressed Scryfall catalog"
+    },
+    "operation": {
+      "title": "Current operation",
+      "states": {
+        "downloading": "Downloading and scanning Scryfall",
+        "cancel_requested": "Cancellation requested",
+        "finalizing": "Finalizing",
+        "failed": "Failed — ready to resume",
+        "completed": "Completed",
+        "cancelled": "Cancelled"
+      },
+      "id": "Operation",
+      "root": "Scryfall snapshot",
+      "packs": "Packs: {{current}} of {{total}}",
+      "objects": "Images: {{current}} of {{total}}",
+      "scanNote": "The total grows as the Scryfall snapshot is scanned. Completed images are stored locally and skipped when you resume.",
+      "finalizing": "Finalizing offline image installation"
+    },
+    "status": {
+      "title": "Offline image status",
+      "root": "Scryfall snapshot",
+      "epoch": "Epoch",
+      "revision": "Installed revision",
+      "selectorCount": "Selectors",
+      "shardCount": "Shards",
+      "installed": "Installed packs",
+      "noneInstalled": "No visual packs are installed.",
+      "upgradeAvailable": "Upgrade available"
+      ,"receiptRoot": "Installed from snapshot: {{root}}"
+    },
+    "verification": {
+      "revision": "Verified installed revision {{revision}}.",
+      "healthy": "No verification issues found.",
+      "issues": {
+        "missing_root_witness": "Missing catalog-root witness",
+        "invalid_root_witness": "Invalid catalog-root witness",
+        "receipt_metadata": "Receipt metadata differs from the trusted catalog",
+        "missing_shard": "Missing catalog shard",
+        "invalid_shard": "Invalid catalog shard",
+        "missing_object": "Missing image object",
+        "invalid_object_metadata": "Invalid image-object metadata",
+        "corrupt_object": "Corrupt image object",
+        "dependency_drift": "Installed dependency records differ from the trusted catalog",
+        "projection_drift": "Installed lookup records differ from the trusted catalog"
+      }
+    },
+    "removal": { "committed": "Removal committed at revision {{revision}}." },
+    "cleanup": {
+      "malformed_entry": "A malformed cache entry could not be reclaimed",
+      "unsafe_entry": "An unsafe cache entry was left untouched",
+      "remove_failed": "A cache file could not be removed",
+      "catalog_state": "Historical catalog state could not be reclaimed"
+    },
+    "errors": {
+      "unsupported_shell": "This app version does not support offline visual catalogs.",
+      "unauthorized": "This window is not allowed to manage offline visual catalogs.",
+      "unavailable": "Offline image downloads are unavailable in this browser.",
+      "invalid_input": "The requested catalog selection is invalid.",
+      "conflict": "Installed packs depend on this selection.",
+      "cancelled": "The operation was cancelled.",
+      "network": "The Scryfall catalog or image download failed.",
+      "storage": "The catalog could not be written to device storage.",
+      "trust": "The downloaded image could not be verified locally.",
+      "emit": "The app could not report catalog progress.",
+      "internal": "The catalog operation could not be completed."
+    },
+    "confirm": {
+      "cascadeTitle": "Remove dependent packs?",
+      "cascadeMessage": "Other installed packs depend on {{selection}}. Remove the frozen selection and its dependents?",
+      "cascadeAction": "Remove dependents",
+      "completeTitle": "Remove this complete catalog?",
+      "completeMessage": "Remove every installed pack from catalog root {{selection}}?",
+      "allTitle": "Remove all offline visuals?",
+      "allMessage": "Remove all installed visual packs from this device?",
+      "removeAction": "Remove"
+    }
+  },
   "resetAll": {
     "confirm": "Reset all preferences to defaults? This clears every setting in this dialog.",
     "button": "Reset all preferences",

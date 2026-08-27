@@ -1,6 +1,10 @@
 #[cfg(desktop)]
 use tauri::{Manager, WebviewWindowBuilder};
 
+#[cfg(desktop)]
+mod artifact_trust;
+#[cfg(desktop)]
+mod artifact_trust;
 mod audio_probe;
 mod host_platform;
 mod migration;
@@ -10,7 +14,6 @@ mod native_bridge;
 #[cfg(desktop)]
 mod native_engine;
 mod native_engine_contract;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's dmabuf renderer renders blank frames when the GPU import
@@ -130,6 +133,8 @@ mod tests {
 
     use serde_json::{json, Value};
     use tauri::utils::{config::parse::read_from, platform::Target};
+
+    type ConfigMutation = Box<dyn Fn(&mut Value)>;
 
     fn android_overlay_value() -> Value {
         serde_json::from_str(include_str!("../tauri.android.conf.json")).unwrap()
@@ -413,7 +418,7 @@ mod tests {
     fn every_android_config_mutation_is_rejected_and_the_positive_is_restored() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let base = include_str!("../tauri.conf.json");
-        let mut cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        let mut cases: Vec<(&str, ConfigMutation)> = vec![
             (
                 "delete createUpdaterArtifacts",
                 Box::new(|v| {

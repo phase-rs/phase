@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  CARD_BACK_URL,
   fetchCardImageAsset,
   fetchCardImageAssetByOracleId,
-  fetchTokenImageByRef,
+  fetchTokenImageAssetByRef,
   fetchTokenImageUrl,
+  deriveImageUrl,
   findPrintingById,
   getCardPrintings,
   isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
   isLocaleArtReady,
+  imageUrlSize,
   loadLocaleArt,
   pickOldestPrinting,
   resolveFaceIndexSync,
@@ -19,8 +22,20 @@ import {
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
 import type { TokenImageRef } from "../adapter/types.ts";
+import {
+  cardBackCandidate,
+  cardCandidateGroups,
+  tokenCandidateGroups,
+} from "../services/visualPacks/candidateKeys.ts";
+import { visualPackRepository } from "../services/visualPacks/repository.ts";
+import type {
+  CardImageSource,
+  ImageRungs,
+  VisualImageRung,
+} from "../services/visualPacks/types.ts";
 import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
 import type { ArtChainEntry } from "../stores/preferencesStore.ts";
+import { useFixedVisualImage } from "./useFixedVisualImage.ts";
 
 export interface SourcePrinting {
   setCode: string;
@@ -60,12 +75,87 @@ interface UseCardImageResult {
   /** True for Kamigawa-style flip cards (`layout: "flip"`), whose alternate half
    *  is the same image rotated 180°. The preview uses this to enable Ctrl-spin. */
   isFlip: boolean;
+  source?: CardImageSource | null;
+  rungs?: ImageRungs;
+  advanceFailedSource?(failedSrc: string): void;
+}
+
+export interface UseCardBackImageResult {
+  src: string | null;
+  isLoading: boolean;
+  source?: CardImageSource | null;
+  advanceFailedSource?(failedSrc: string): void;
 }
 
 interface MemoryCacheEntry {
   promise: Promise<CardImageAsset | null> | null;
   refCount: number;
   asset: CardImageAsset | null;
+  sources?: CardImageSource[];
+}
+
+function remoteRungs(src: string, size: ImageSize): ImageRungs | undefined {
+  return size === "art_crop" || imageUrlSize(src) === null
+    ? undefined
+    : { small: deriveImageUrl(src, "small"), normal: deriveImageUrl(src, "normal") };
+}
+
+function remoteAsset(
+  src: string,
+  size: ImageSize,
+  semantic: CardImageAsset["semantic"],
+  isRotated: boolean,
+): CardImageAsset {
+  const rungs = remoteRungs(src, size);
+  return { src, isRotated, rungs, source: { kind: "remote", src, rungs }, semantic };
+}
+
+function repositoryGroups(
+  asset: CardImageAsset,
+  size: ImageSize,
+  cardName: string,
+  faceName: string,
+  language: string,
+  isToken: boolean,
+  tokenImageRef: TokenImageRef | null,
+) {
+  if (isToken && size === "art_crop") return [];
+  const requestedRung: VisualImageRung | "large" = size;
+  try {
+    const build = (rung: VisualImageRung | "large") => isToken
+      ? tokenCandidateGroups({
+          scryfallId: tokenImageRef?.scryfall_id || undefined,
+          oracleId: tokenImageRef?.scryfall_oracle_id || undefined,
+          faceName: tokenImageRef?.face_name || undefined,
+          presetId: tokenImageRef?.preset_id || undefined,
+          faceIndex: asset.semantic.faceIndex,
+          rung: rung === "art_crop" ? "normal" : rung,
+        })
+      : cardCandidateGroups({
+          language: language === "en" ? undefined : language,
+          englishPrintingId: asset.semantic.englishPrintingId,
+          oracleId: asset.semantic.oracleId,
+          localizedAliases: [cardName, faceName].filter(Boolean),
+          englishAliases: [cardName, faceName].filter(Boolean),
+          oracleAliases: [cardName, faceName].filter(Boolean),
+          faceIndex: asset.semantic.faceIndex,
+          variant: size === "art_crop" ? "art_crop" : "full_card",
+          rung,
+        });
+    const requested = build(requestedRung);
+    if (size === "art_crop") {
+      return requested.map((group) => ({ requested: group.keys }));
+    }
+    const small = build("small");
+    const normal = build("normal");
+    return requested.map((group, index) => ({
+      requested: group.keys,
+      small: small[index]?.keys,
+      normal: normal[index]?.keys,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 const imageRequestCache = new Map<string, MemoryCacheEntry>();
@@ -324,6 +414,8 @@ function imageRequestKey(
   // stay language-neutral on purpose: which printing wins is a function of the
   // user's art preferences, not of their language.
   artLocaleKey: string,
+  repositoryRevision: string,
+  sourcePrinting: SourcePrinting | undefined,
 ): string {
   return [
     oracleId || cardName,
@@ -337,6 +429,8 @@ function imageRequestKey(
     String(filterHasAbilities),
     tokenImageRefKey,
     artLocaleKey,
+    repositoryRevision,
+    sourcePrinting ? `${sourcePrinting.setCode.toLowerCase()}:${sourcePrinting.collectorNumber}` : "",
   ].join("|");
 }
 
@@ -363,6 +457,7 @@ async function acquireCachedImageSrc(
   tokenImageRef: TokenImageRef | null,
   oracleId: string,
   faceName: string,
+  sourcePrinting: SourcePrinting | undefined,
 ): Promise<CardImageAsset | null> {
   const existing = imageRequestCache.get(key);
   if (existing) {
@@ -379,12 +474,15 @@ async function acquireCachedImageSrc(
   imageRequestCache.set(key, entry);
 
   entry.promise = (async () => {
-    let asset: CardImageAsset | null;
+    let asset: CardImageAsset;
     if (isToken) {
       let remoteSrc: string | null = null;
+      let resolvedFaceIndex = faceIndex;
       if (tokenImageRef) {
         try {
-          remoteSrc = await fetchTokenImageByRef(tokenImageRef, size);
+          const tokenAsset = await fetchTokenImageAssetByRef(tokenImageRef, size);
+          remoteSrc = tokenAsset?.src ?? null;
+          resolvedFaceIndex = tokenAsset?.faceIndex ?? resolvedFaceIndex;
         } catch {
           remoteSrc = null;
         }
@@ -396,11 +494,34 @@ async function acquireCachedImageSrc(
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
       });
-      asset = { src: remoteSrc, isRotated: false };
+      asset = remoteAsset(
+        remoteSrc,
+        size,
+        {
+          oracleId: tokenImageRef?.scryfall_oracle_id?.toLowerCase() || undefined,
+          faceIndex: resolvedFaceIndex,
+          alias: cardName.toLowerCase().normalize("NFC"),
+        },
+        false,
+      );
     } else if (oracleId) {
       asset = await fetchCardImageAssetByOracleId(oracleId, faceName, size);
     } else {
       asset = await fetchCardImageAsset(cardName, faceIndex, size);
+    }
+    if (sourcePrinting && asset.semantic.oracleId) {
+      const printings = await getCardPrintings(asset.semantic.oracleId);
+      printingsCacheMap.set(asset.semantic.oracleId, printings);
+      const source = printings.find((printing) =>
+        printing.set === sourcePrinting.setCode.toLowerCase()
+        && printing.collector_number === sourcePrinting.collectorNumber);
+      const sourceUrl = source && resolvePrintingImageUrl(source, asset.semantic.faceIndex, size);
+      if (sourceUrl) {
+        asset = remoteAsset(sourceUrl, size, {
+          ...asset.semantic,
+          englishPrintingId: source.id.toLowerCase(),
+        }, asset.isRotated);
+      }
     }
     entry.asset = asset;
     entry.promise = null;
@@ -430,12 +551,13 @@ export function useCardImage(
         tokenImageRef.scryfall_id,
         tokenImageRef.scryfall_oracle_id ?? "",
         tokenImageRef.face_name ?? "",
+        tokenImageRef.preset_id ?? "",
       ].join(":")
     : "";
-  // Stabilize the token ref's identity to tokenImageRefKey. fetchTokenImageByRef
-  // reads only scryfall_id / scryfall_oracle_id / face_name — all captured by the
-  // key (preset_id is intentionally excluded; it doesn't affect image lookup) —
-  // so a caller passing a fresh inline {scryfall_id,...} object on every render
+  // Stabilize the token ref's identity to tokenImageRefKey. fetchTokenImageAssetByRef
+  // reads the Scryfall identity while the visual-pack candidate also reads the
+  // preset identity. All four axes are captured by the key, so a caller passing
+  // a fresh inline {scryfall_id,...} object on every render
   // would otherwise re-fire the image-load effect (release + refetch the cached
   // src) for an unchanged image. exhaustive-deps can't see that the key fully
   // captures the object, so the disable is scoped to this one line rather than
@@ -475,6 +597,15 @@ export function useCardImage(
   const [isFlip, setIsFlip] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
+  const [sources, setSources] = useState<CardImageSource[]>([]);
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const [repositoryRevision, setRepositoryRevision] = useState(
+    visualPackRepository.currentRevision(),
+  );
+  const failedSources = useRef<{ generation: string; values: Set<string> }>({
+    generation: "",
+    values: new Set(),
+  });
   const [, setArtCacheTick] = useState(0);
 
   const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
@@ -518,6 +649,10 @@ export function useCardImage(
     loadLocaleArtInBackground(language);
   }, [language]);
 
+  useEffect(() => visualPackRepository.subscribe(() => {
+    setRepositoryRevision(visualPackRepository.currentRevision());
+  }), []);
+
   // The printings/art-strategy path indexes faces numerically, but for a
   // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its
   // back face reports `transformed: false`, so the caller's `faceIndex` is 0 —
@@ -527,11 +662,14 @@ export function useCardImage(
     resolveFaceIndexSync(resolvedOracleId, faceName) ?? faceIndex;
 
   let overrideUrl: string | null = null;
+  let overridePrintingId = "";
   if (!isToken && resolvedOracleId) {
     if (scryfallId) {
       overrideUrl = resolveOverrideUrl(resolvedOracleId, scryfallId, resolvedFaceIndex, size);
+      overridePrintingId = scryfallId;
     } else if (artOverrides[resolvedOracleId]) {
       overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, resolvedFaceIndex, size);
+      overridePrintingId = artOverrides[resolvedOracleId].scryfallId;
     } else if (artChain.length > 0) {
       if (sourcePrinting && artChain.some((e) => e.type === "source_printing")) {
         const printings = printingsCacheMap.get(resolvedOracleId);
@@ -539,6 +677,7 @@ export function useCardImage(
           const winner = applyChain(artChain, printings, sourcePrinting);
           if (winner) {
             overrideUrl = resolvePrintingImageUrl(winner, resolvedFaceIndex, size);
+            overridePrintingId = winner.id;
           }
         } else {
           resolveStrategyInBackground(resolvedOracleId, artChain);
@@ -547,12 +686,17 @@ export function useCardImage(
         const cached = strategyCacheMap.get(resolvedOracleId);
         if (cached) {
           overrideUrl = resolvePrintingImageUrl(cached, resolvedFaceIndex, size);
+          overridePrintingId = cached.id;
         } else {
           resolveStrategyInBackground(resolvedOracleId, artChain);
         }
       }
     } else if (sourcePrinting) {
       overrideUrl = resolveSourcePrintingUrl(resolvedOracleId, sourcePrinting, resolvedFaceIndex, size);
+      const source = printingsCacheMap.get(resolvedOracleId)?.find((printing) =>
+        printing.set === sourcePrinting.setCode.toLowerCase()
+        && printing.collector_number === sourcePrinting.collectorNumber);
+      overridePrintingId = source?.id ?? "";
     }
   }
 
@@ -570,16 +714,56 @@ export function useCardImage(
     oracleId,
     faceName,
     artLocaleKey,
+    repositoryRevision,
+    sourcePrinting,
   );
 
   useEffect(() => {
-    if (overrideUrl) {
-      setStateRequestKey(requestKey);
-      setSrc(overrideUrl);
-      setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
+    let cancelled = false;
+    failedSources.current = { generation: requestKey, values: new Set() };
+
+    async function applyAsset(imageAsset: CardImageAsset) {
+      const result = await visualPackRepository.resolve({
+        groups: repositoryGroups(
+          imageAsset,
+          size,
+          cardName,
+          faceName,
+          language,
+          isToken,
+          stableTokenImageRef,
+        ),
+        rung: size,
+        remote: { src: imageAsset.src, rungs: imageAsset.rungs },
+      });
+      if (cancelled) return;
+      const cacheEntry = imageRequestCache.get(requestKey);
+      if (cacheEntry) cacheEntry.sources = result.sources;
+      setSources(result.sources);
+      setSourceIndex(0);
+      setSrc(result.sources[0]?.src ?? null);
+      setIsRotated(imageAsset.isRotated);
       setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
       setIsLoading(false);
-      return;
+    }
+
+    if (overrideUrl) {
+      setStateRequestKey(requestKey);
+      setSrc(null);
+      setSources([]);
+      setIsLoading(true);
+      void applyAsset(remoteAsset(
+        overrideUrl,
+        size,
+        {
+          oracleId: resolvedOracleId.toLowerCase(),
+          englishPrintingId: overridePrintingId.toLowerCase() || undefined,
+          faceIndex: resolvedFaceIndex,
+          alias: cardName.toLowerCase().normalize("NFC"),
+        },
+        isCardImageRotatedSync(resolvedOracleId, cardName),
+      ));
+      return () => { cancelled = true; };
     }
 
     // A face-down marker request carries NO name and NO oracle id — only the
@@ -589,25 +773,34 @@ export function useCardImage(
     if (!cardName && !oracleId && !resolvableTokenImageRef) {
       setStateRequestKey(requestKey);
       setSrc(null);
+      setSources([{ kind: "fallback", src: null }]);
       setIsRotated(false);
       setIsFlip(false);
       setIsLoading(false);
       return;
     }
 
-    let cancelled = false;
-
     async function loadImage() {
       const cachedEntry = imageRequestCache.get(requestKey);
       setStateRequestKey(requestKey);
       if (cachedEntry && !cachedEntry.promise) {
-        setSrc(cachedEntry.asset?.src ?? null);
-        setIsRotated(cachedEntry.asset?.isRotated ?? false);
-        setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
-        setIsLoading(false);
+        if (cachedEntry.asset && cachedEntry.sources) {
+          setSources(cachedEntry.sources);
+          setSourceIndex(0);
+          setSrc(cachedEntry.sources[0]?.src ?? null);
+          setIsRotated(cachedEntry.asset.isRotated);
+          setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
+          setIsLoading(false);
+        } else if (cachedEntry.asset) void applyAsset(cachedEntry.asset);
+        else {
+          setSrc(null);
+          setSources([{ kind: "fallback", src: null }]);
+          setIsLoading(false);
+        }
       } else {
         setIsLoading(true);
         setSrc(null);
+        setSources([]);
       }
 
       try {
@@ -625,15 +818,20 @@ export function useCardImage(
           stableTokenImageRef,
           oracleId,
           faceName,
+          artChain.length === 0 ? sourcePrinting : undefined,
         );
-        if (!cancelled) {
-          setSrc(imageAsset?.src || null);
-          setIsRotated(imageAsset?.isRotated ?? false);
-          setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
+        if (!cancelled && imageAsset) await applyAsset(imageAsset);
+        else if (!cancelled) {
+          setSrc(null);
+          setSources([{ kind: "fallback", src: null }]);
+          setIsRotated(false);
+          setIsFlip(false);
           setIsLoading(false);
         }
       } catch {
         if (!cancelled) {
+          setSrc(null);
+          setSources([{ kind: "fallback", src: null }]);
           setIsRotated(false);
           setIsFlip(false);
           setIsLoading(false);
@@ -660,12 +858,34 @@ export function useCardImage(
     stableTokenImageRef,
     tokenImageRefKey,
     isToken,
+    language,
     oracleId,
+    overridePrintingId,
     overrideUrl,
     requestKey,
     resolvedOracleId,
+    resolvedFaceIndex,
     size,
+    artChain.length,
   ]);
+
+  const activeSource = sources[sourceIndex] ?? null;
+  const advanceFailedSource = useCallback((failedSrc: string) => {
+    const current = sources[sourceIndex];
+    if (!current?.src || current.src !== failedSrc) return;
+    if (failedSources.current.generation !== requestKey) return;
+    if (failedSources.current.values.has(failedSrc)) return;
+    failedSources.current.values.add(failedSrc);
+    let nextIndex = sourceIndex + 1;
+    while (true) {
+      const nextSrc = sources[nextIndex]?.src;
+      if (!nextSrc || !failedSources.current.values.has(nextSrc)) break;
+      nextIndex += 1;
+    }
+    const next = sources[nextIndex];
+    setSourceIndex(nextIndex);
+    setSrc(next?.src ?? null);
+  }, [requestKey, sourceIndex, sources]);
 
   // Effects reset the state after render, so a component reused for a new card
   // would otherwise expose the previous card's src for one frame. Hand previews
@@ -675,26 +895,55 @@ export function useCardImage(
   if (stateRequestKey !== requestKey) {
     if (overrideUrl) {
       return {
-        src: overrideUrl,
-        isLoading: false,
+        src: null,
+        isLoading: true,
         isRotated: isCardImageRotatedSync(resolvedOracleId, cardName),
         isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+        source: null,
+        advanceFailedSource,
       };
     }
     if (!cardName && !oracleId && !resolvableTokenImageRef) {
-      return { src: null, isLoading: false, isRotated: false, isFlip: false };
+      return {
+        src: null, isLoading: false, isRotated: false, isFlip: false,
+        source: { kind: "fallback", src: null }, advanceFailedSource,
+      };
     }
     const cachedEntry = imageRequestCache.get(requestKey);
     if (cachedEntry && !cachedEntry.promise) {
+      const cachedSource = cachedEntry.sources?.[0] ?? cachedEntry.asset?.source ?? null;
       return {
-        src: cachedEntry.asset?.src ?? null,
+        src: cachedSource?.src ?? null,
         isLoading: false,
         isRotated: cachedEntry.asset?.isRotated ?? false,
         isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+        source: cachedSource,
+        rungs: cachedSource?.kind === "fallback" ? undefined : cachedSource?.rungs,
+        advanceFailedSource,
       };
     }
-    return { src: null, isLoading: true, isRotated: false, isFlip: false };
+    return {
+      src: null, isLoading: true, isRotated: false, isFlip: false,
+      source: null, advanceFailedSource,
+    };
   }
 
-  return { src, isLoading, isRotated, isFlip };
+  return {
+    src,
+    isLoading,
+    isRotated,
+    isFlip,
+    source: activeSource,
+    rungs: activeSource?.kind === "fallback" ? undefined : activeSource?.rungs,
+    advanceFailedSource,
+  };
+}
+
+/**
+ * Resolve the one public fixed card-back identity without accepting any card
+ * or object identity from the caller. Hidden-information surfaces use this
+ * closed hook instead of submitting a blank or private face to useCardImage.
+ */
+export function useCardBackImage(): UseCardBackImageResult {
+  return useFixedVisualImage(cardBackCandidate(), CARD_BACK_URL);
 }

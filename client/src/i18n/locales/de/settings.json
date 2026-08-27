@@ -200,6 +200,131 @@
     "telemetry": "Anonyme Absturz- und Nutzungsberichte senden",
     "telemetryDescription": "Hilft, Abstürze zu beheben und die Kartenunterstützung zu priorisieren. Kein Konto, keine persönlichen Daten – nur Fehler- und Spielzusammenfassungszählungen."
   },
+  "visualPacks": {
+    "title": "Offline-visueller Katalog",
+    "description": "Wählen Sie aus, welche vertrauenswürdigen Kartenbilder auf diesem Gerät gespeichert werden sollen, oder installieren Sie den vollständigen aktuellen Katalog.",
+    "availability": {
+      "loading": "Unterstützung für visuelle Offline-Kataloge wird geprüft …",
+      "browser": "Offline-Bilddownloads sind in diesem Build nicht konfiguriert.",
+      "browserFuture": "Dieser Build enthält nicht die vertrauenswürdige Katalogsignaturrichtlinie, die zum Überprüfen von Bilddownloads erforderlich ist.",
+      "unsupported": "Diese Desktop-App ist zu alt, um visuelle Offline-Kataloge zu verwalten. Aktualisieren Sie die App, um fortzufahren.",
+      "empty": "Es wurde noch kein vertrauenswürdiger visueller Katalog heruntergeladen.",
+      "invalid": "Dem lokalen visuellen Katalog konnte nicht vertraut werden. Aktualisieren Sie es, bevor Sie fortfahren."
+    },
+    "selector": {
+      "title": "Katalogauswahl",
+      "core": "Kernvisualisierungen",
+      "printing": "Englische Satzdrucke",
+      "locale": "Lokalisierte Satzdrucke",
+      "complete": "Kompletter aktueller Katalog",
+      "setCode": "Code festlegen",
+      "setPlaceholder": "z.B. Flosse",
+      "language": "Bildsprache",
+      "currentRoot": "Aktueller Katalogstamm: {{root}}",
+      "invalidSet": "Geben Sie einen gültigen Code mit drei bis sechs Zeichen ein."
+    },
+    "actions": {
+      "estimate": "Geschätzter Download",
+      "install": "Auswahl installieren",
+      "cancel": "Vorgang abbrechen",
+      "resume": "Betrieb wieder aufnehmen",
+      "retry": "Versuchen Sie es erneut",
+      "refresh": "Katalog aktualisieren",
+      "verifyMetadata": "Metadaten überprüfen",
+      "verifyFull": "Überprüfen Sie alle Dateien",
+      "repair": "Reparatur ausgewählt",
+      "removeSelected": "Ausgewählte entfernen",
+      "removeComplete": "Kompletten Katalog entfernen",
+      "removeAll": "Entfernen Sie alle Offline-Visuals"
+    },
+    "estimate": {
+      "title": "Backend-Schätzung und Abhängigkeitsschließung"
+    },
+    "metrics": {
+      "assetRecords": "Vermögensaufzeichnungen",
+      "uniqueObjects": "Einzigartige Objekte",
+      "logicalImageBytes": "Logische Bildbytes",
+      "uniqueImageBytes": "Eindeutige Bildbytes",
+      "shardCount": "Scherben",
+      "shardBytes": "Shard-Bytes"
+    },
+    "operation": {
+      "title": "Aktueller Betrieb",
+      "states": {
+        "downloading": "Herunterladen",
+        "cancel_requested": "Stornierung beantragt",
+        "finalizing": "Finalisierung",
+        "failed": "Fehlgeschlagen – bereit zur Fortsetzung",
+        "completed": "Abgeschlossen",
+        "cancelled": "Abgesagt"
+      },
+      "id": "Betrieb",
+      "root": "Katalogstamm",
+      "packs": "Pakete: {{current}} von {{total}}",
+      "objects": "Objekte: {{current}} von {{total}}",
+      "finalizing": "Die Installation des Katalogs wird abgeschlossen"
+    },
+    "status": {
+      "title": "Status des installierten Katalogs",
+      "root": "Katalogstamm",
+      "epoch": "Epoche",
+      "revision": "Installierte Revision",
+      "selectorCount": "Selektoren",
+      "shardCount": "Scherben",
+      "installed": "Installierte Pakete",
+      "noneInstalled": "Es sind keine visuellen Pakete installiert.",
+      "upgradeAvailable": "Upgrade verfügbar",
+      "receiptRoot": "Empfangsstamm: {{root}}"
+    },
+    "verification": {
+      "revision": "Verifizierte installierte Revision {{revision}}.",
+      "healthy": "Es wurden keine Verifizierungsprobleme gefunden.",
+      "issues": {
+        "missing_root_witness": "Fehlender Katalog-Root-Zeuge",
+        "invalid_root_witness": "Ungültiger Katalog-Root-Zeuge",
+        "receipt_metadata": "Die Empfangsmetadaten weichen vom vertrauenswürdigen Katalog ab",
+        "missing_shard": "Fehlender Katalog-Shard",
+        "invalid_shard": "Ungültiger Katalog-Shard",
+        "missing_object": "Fehlendes Bildobjekt",
+        "invalid_object_metadata": "Ungültige Bildobjekt-Metadaten",
+        "corrupt_object": "Beschädigtes Bildobjekt",
+        "dependency_drift": "Installierte Abhängigkeitsdatensätze unterscheiden sich vom vertrauenswürdigen Katalog",
+        "projection_drift": "Installierte Suchdatensätze weichen vom vertrauenswürdigen Katalog ab"
+      }
+    },
+    "removal": {
+      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt."
+    },
+    "cleanup": {
+      "malformed_entry": "Ein fehlerhafter Cache-Eintrag konnte nicht wiederhergestellt werden",
+      "unsafe_entry": "Ein unsicherer Cache-Eintrag blieb unberührt",
+      "remove_failed": "Eine Cache-Datei konnte nicht entfernt werden",
+      "catalog_state": "Der historische Katalogstatus konnte nicht wiederhergestellt werden"
+    },
+    "errors": {
+      "unsupported_shell": "Diese App-Version unterstützt keine visuellen Offline-Kataloge.",
+      "unauthorized": "In diesem Fenster dürfen keine Offline-Visualkataloge verwaltet werden.",
+      "unavailable": "Die Offline-Verwaltung des visuellen Katalogs ist vorübergehend nicht verfügbar.",
+      "invalid_input": "Die angeforderte Katalogauswahl ist ungültig.",
+      "conflict": "Installierte Pakete hängen von dieser Auswahl ab.",
+      "cancelled": "Der Vorgang wurde abgebrochen.",
+      "network": "Die Katalognetzwerkanforderung ist fehlgeschlagen.",
+      "storage": "Der Katalog konnte nicht in den Gerätespeicher geschrieben werden.",
+      "trust": "Der Katalogantwort konnte nicht vertraut werden.",
+      "emit": "Die App konnte den Katalogfortschritt nicht melden.",
+      "internal": "Der Katalogvorgang konnte nicht abgeschlossen werden."
+    },
+    "confirm": {
+      "cascadeTitle": "Abhängige Pakete entfernen?",
+      "cascadeMessage": "Andere installierte Pakete hängen von {{selection}} ab. Die eingefrorene Auswahl und ihre abhängigen Elemente entfernen?",
+      "cascadeAction": "Angehörige entfernen",
+      "completeTitle": "Diesen kompletten Katalog entfernen?",
+      "completeMessage": "Jedes installierte Paket aus dem Katalogstamm {{selection}} entfernen?",
+      "allTitle": "Alle Offline-Visuals entfernen?",
+      "allMessage": "Alle installierten Visual Packs von diesem Gerät entfernen?",
+      "removeAction": "Entfernen"
+    }
+  },
   "resetAll": {
     "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",
     "button": "Alle Einstellungen zurücksetzen",

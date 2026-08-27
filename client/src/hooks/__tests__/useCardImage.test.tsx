@@ -13,6 +13,7 @@ describe("useCardImage", () => {
     vi.resetModules();
     vi.restoreAllMocks();
     vi.doUnmock("../../services/scryfall.ts");
+    vi.doUnmock("../../services/visualPacks/repository.ts");
   });
 
   afterEach(() => {
@@ -20,6 +21,16 @@ describe("useCardImage", () => {
   });
 
   it("uses imported source printing art by default when no art chain is configured", async () => {
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ remote }: { remote: { src: string } }) => ({
+          revision: "0",
+          sources: [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url === "/scryfall-data.json") {
         return Promise.resolve(jsonResponse({
@@ -73,6 +84,16 @@ describe("useCardImage", () => {
   });
 
   it("marks split-layout card images as rotated", async () => {
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ remote }: { remote: { src: string } }) => ({
+          revision: "0",
+          sources: [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url === "/scryfall-data.json") {
         return Promise.resolve(jsonResponse({
@@ -107,17 +128,20 @@ describe("useCardImage", () => {
   });
 
   it("falls back to token search when exact token image metadata is unusable", async () => {
-    const fetchTokenImageByRef = vi.fn().mockRejectedValue(new Error("missing image"));
+    const fetchTokenImageAssetByRef = vi.fn().mockRejectedValue(new Error("missing image"));
     const fetchTokenImageUrl = vi.fn().mockResolvedValue("https://img.example/food.jpg");
     vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
       fetchCardImageAsset: vi.fn(),
       fetchCardImageAssetByOracleId: vi.fn(),
       fetchCardImageByOracleId: vi.fn(),
       fetchCardImageUrl: vi.fn(),
-      fetchTokenImageByRef,
+      fetchTokenImageAssetByRef,
       fetchTokenImageUrl,
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
+      imageUrlSize: vi.fn().mockReturnValue(null),
+      isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
       // Report the art locale as already resolved so the hook's background
       // loader short-circuits — this test is about token fallback, not
@@ -154,21 +178,29 @@ describe("useCardImage", () => {
   });
 
   it("never returns the previous card's image after a rapid request change", async () => {
-    let resolveFirst: ((asset: { src: string; isRotated: boolean }) => void) | undefined;
-    let resolveSecond: ((asset: { src: string; isRotated: boolean }) => void) | undefined;
+    type TestAsset = {
+      src: string;
+      isRotated: boolean;
+      source: { kind: "remote"; src: string };
+      semantic: { faceIndex: number };
+    };
+    let resolveFirst: ((asset: TestAsset) => void) | undefined;
+    let resolveSecond: ((asset: TestAsset) => void) | undefined;
     const fetchCardImageAsset = vi.fn((name: string) =>
-      new Promise<{ src: string; isRotated: boolean }>((resolve) => {
+      new Promise<TestAsset>((resolve) => {
         if (name === "First Card") resolveFirst = resolve;
         else resolveSecond = resolve;
       })
     );
     vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
       fetchCardImageAsset,
       fetchCardImageAssetByOracleId: vi.fn(),
-      fetchTokenImageByRef: vi.fn(),
+      fetchTokenImageAssetByRef: vi.fn(),
       fetchTokenImageUrl: vi.fn(),
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
+      imageUrlSize: vi.fn().mockReturnValue(null),
       isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
       // See the note on the token-fallback mock above: the art locale is
@@ -188,7 +220,12 @@ describe("useCardImage", () => {
     );
 
     await act(async () => {
-      resolveFirst?.({ src: "first.png", isRotated: false });
+      resolveFirst?.({
+        src: "first.png",
+        isRotated: false,
+        source: { kind: "remote", src: "first.png" },
+        semantic: { faceIndex: 0 },
+      });
     });
     expect(result.current.src).toBe("first.png");
 
@@ -197,7 +234,12 @@ describe("useCardImage", () => {
     expect(result.current.isLoading).toBe(true);
 
     await act(async () => {
-      resolveSecond?.({ src: "second.png", isRotated: false });
+      resolveSecond?.({
+        src: "second.png",
+        isRotated: false,
+        source: { kind: "remote", src: "second.png" },
+        semantic: { faceIndex: 0 },
+      });
     });
     expect(result.current.src).toBe("second.png");
   });
@@ -245,17 +287,20 @@ describe("useCardImage", () => {
     // With BOTH `scryfall_id` and `scryfall_oracle_id` empty there is nothing
     // to resolve — the request must short-circuit exactly like the empty-name
     // case, not fall through to a `fetchTokenImageUrl("")` junk search.
-    const fetchTokenImageByRef = vi.fn().mockResolvedValue(null);
+    const fetchTokenImageAssetByRef = vi.fn().mockResolvedValue(null);
     const fetchTokenImageUrl = vi.fn().mockResolvedValue(null);
     vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
       fetchCardImageAsset: vi.fn(),
       fetchCardImageAssetByOracleId: vi.fn(),
       fetchCardImageByOracleId: vi.fn(),
       fetchCardImageUrl: vi.fn(),
-      fetchTokenImageByRef,
+      fetchTokenImageAssetByRef,
       fetchTokenImageUrl,
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
+      imageUrlSize: vi.fn().mockReturnValue(null),
+      isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
       isLocaleArtReady: vi.fn().mockReturnValue(true),
       loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
@@ -279,8 +324,253 @@ describe("useCardImage", () => {
 
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.src).toBeNull();
-    expect(fetchTokenImageByRef).not.toHaveBeenCalled();
+    expect(fetchTokenImageAssetByRef).not.toHaveBeenCalled();
     expect(fetchTokenImageUrl).not.toHaveBeenCalled();
+  });
+
+  it("uses the token catalog's resolved DFC face index for installed candidates", async () => {
+    const resolve = vi.fn(async ({ remote }: {
+      groups: Array<{ requested: string[] }>;
+      remote: { src: string };
+    }) => ({
+      revision: "0",
+      sources: [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }],
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve,
+      },
+    }));
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          "scryfall:44444444-4444-4444-8444-444444444444": {
+            scryfall_id: "44444444-4444-4444-8444-444444444444",
+            oracle_id: "55555555-5555-4555-8555-555555555555",
+            face_names: ["front token", "back token"],
+            faces: [
+              { normal: "https://img.example/front.jpg", art_crop: "https://img.example/front-art.jpg" },
+              { normal: "https://img.example/back.jpg", art_crop: "https://img.example/back-art.jpg" },
+            ],
+            layout: "transform",
+            name: "Front Token // Back Token",
+            mana_cost: "",
+            cmc: 0,
+            type_line: "Token Creature",
+            colors: [],
+            color_identity: [],
+            keywords: [],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { decodeCandidateKey } = await import("../../services/visualPacks/candidateKeys.ts");
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() => useCardImage("Back Token", {
+      faceIndex: 0,
+      isToken: true,
+      tokenImageRef: {
+        scryfall_id: "44444444-4444-4444-8444-444444444444",
+        scryfall_oracle_id: "55555555-5555-4555-8555-555555555555",
+        face_name: "back token",
+        preset_id: "two-face-fixture",
+      },
+    }));
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/back.jpg"));
+    const request = resolve.mock.calls[0][0];
+    const [, tuple] = decodeCandidateKey(request.groups[0].requested[0]);
+    expect(tuple[1]).toBe(1);
+  });
+
+  it("omits installed token art crops and keeps the remote crop fallback", async () => {
+    const resolve = vi.fn(async ({ groups, remote }: { groups: unknown[]; remote: { src: string } }) => ({
+      revision: "0",
+      sources: groups.length === 0
+        ? [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }]
+        : [{ kind: "installed" as const, src: "must-not-be-used" }],
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve,
+      },
+    }));
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          "scryfall:44444444-4444-4444-8444-444444444444": {
+            scryfall_id: "44444444-4444-4444-8444-444444444444",
+            oracle_id: "55555555-5555-4555-8555-555555555555",
+            face_names: ["token"],
+            faces: [{ normal: "https://img.example/token.jpg", art_crop: "https://img.example/token-art.jpg" }],
+            layout: "token",
+            name: "Token",
+            mana_cost: "",
+            cmc: 0,
+            type_line: "Token Creature",
+            colors: [],
+            color_identity: [],
+            keywords: [],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() => useCardImage("Token", {
+      isToken: true,
+      size: "art_crop",
+      tokenImageRef: {
+        scryfall_id: "44444444-4444-4444-8444-444444444444",
+        scryfall_oracle_id: "55555555-5555-4555-8555-555555555555",
+        face_name: "token",
+        preset_id: "fixture",
+      },
+    }));
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/token-art.jpg"));
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ groups: [] }));
+  });
+
+  it("prefers installed candidates, advances exactly once, and invalidates on revision", async () => {
+    let revision = "0";
+    let revisionListener: (() => void) | undefined;
+    const resolve = vi.fn(async ({ remote }: { remote: { src: string } }) => ({
+      revision,
+      sources: [
+        {
+          kind: "installed" as const,
+          src: `http://visual-pack.localhost/installed-${revision}`,
+          rungs: {
+            small: "http://visual-pack.localhost/small",
+            normal: "http://visual-pack.localhost/normal",
+          },
+          assetKey: "asset:v1:canonical_card:QQ",
+          packId: "core",
+          catalogRoot: "a".repeat(64),
+        },
+        { kind: "remote" as const, src: remote.src },
+        { kind: "fallback" as const, src: null },
+      ],
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => revision,
+        subscribe: (listener: () => void) => {
+          revisionListener = listener;
+          return () => {};
+        },
+        resolve,
+      },
+    }));
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-data.json") {
+        return Promise.resolve(jsonResponse({
+          "offline card": {
+            oracle_id: "11111111-1111-4111-8111-111111111111",
+            face_names: ["offline card"],
+            faces: [{ normal: "https://cards.scryfall.io/normal/front/a/a/offline.jpg", art_crop: "https://cards.scryfall.io/art_crop/front/a/a/offline.jpg" }],
+            name: "Offline Card",
+            mana_cost: "{1}",
+            cmc: 1,
+            type_line: "Artifact",
+            colors: [],
+            color_identity: [],
+            keywords: [],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() => useCardImage("Offline Card"));
+    await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/installed-0"));
+    expect(result.current.rungs).toEqual({
+      small: "http://visual-pack.localhost/small",
+      normal: "http://visual-pack.localhost/normal",
+    });
+
+    act(() => result.current.advanceFailedSource?.("http://visual-pack.localhost/installed-0"));
+    expect(result.current.src).toBe("https://cards.scryfall.io/normal/front/a/a/offline.jpg");
+    act(() => result.current.advanceFailedSource?.("http://visual-pack.localhost/installed-0"));
+    expect(result.current.src).toBe("https://cards.scryfall.io/normal/front/a/a/offline.jpg");
+    act(() => result.current.advanceFailedSource?.("https://cards.scryfall.io/normal/front/a/a/offline.jpg"));
+    expect(result.current.src).toBeNull();
+
+    const resolvesBeforeRevision = resolve.mock.calls.length;
+    revision = "2";
+    act(() => revisionListener?.());
+    await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/installed-2"));
+    expect(resolve.mock.calls.length).toBeGreaterThan(resolvesBeforeRevision);
+  });
+
+  it("resolves the fixed back without face identity and advances installed to remote to null", async () => {
+    let revision = "0";
+    let revisionListener: (() => void) | undefined;
+    const resolve = vi.fn(async ({ groups, rung, remote }) => ({
+      revision,
+      sources: [
+        {
+          kind: "installed" as const,
+          src: `http://visual-pack.localhost/back-${revision}`,
+          assetKey: "asset:v1:card_back:W10",
+          packId: "core",
+          catalogRoot: "a".repeat(64),
+        },
+        { kind: "remote" as const, src: remote.src },
+        { kind: "fallback" as const, src: null },
+      ],
+      request: { groups, rung, remote },
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => revision,
+        subscribe: (listener: () => void) => {
+          revisionListener = listener;
+          return () => {};
+        },
+        resolve,
+      },
+    }));
+    const forbiddenFetch = vi.fn(() => Promise.reject(new Error("network forbidden")));
+    vi.stubGlobal("fetch", forbiddenFetch);
+
+    const { useCardBackImage } = await import("../useCardImage");
+    const { result } = renderHook(() => useCardBackImage());
+
+    await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/back-0"));
+    expect(forbiddenFetch).not.toHaveBeenCalled();
+    expect(resolve).toHaveBeenCalledWith({
+      groups: [{
+        requested: ["candidate:v1:card_back:WyJjYXJkX2JhY2siLFtdXQo"],
+      }],
+      rung: "normal",
+      remote: {
+        src: "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg",
+      },
+    });
+
+    act(() => result.current.advanceFailedSource?.("stale-installed"));
+    expect(result.current.src).toBe("http://visual-pack.localhost/back-0");
+    act(() => result.current.advanceFailedSource?.("http://visual-pack.localhost/back-0"));
+    const remote = result.current.src;
+    expect(remote).toMatch(/^https:\/\/backs\.scryfall\.io\//);
+    act(() => result.current.advanceFailedSource?.("http://visual-pack.localhost/back-0"));
+    expect(result.current.src).toBe(remote);
+    act(() => result.current.advanceFailedSource?.(remote!));
+    expect(result.current.src).toBeNull();
+
+    revision = "1";
+    act(() => revisionListener?.());
+    await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/back-1"));
   });
 
 });

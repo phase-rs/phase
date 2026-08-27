@@ -200,6 +200,131 @@
     "telemetry": "Envoyer des rapports anonymes de plantage et d'utilisation",
     "telemetryDescription": "Aide à corriger les plantages et à prioriser la prise en charge des cartes. Aucun compte, aucune donnée personnelle — uniquement des comptages d'erreurs et de résumés de partie."
   },
+  "visualPacks": {
+    "title": "Catalogue visuel hors ligne",
+    "description": "Choisissez les images de cartes de confiance à conserver sur cet appareil ou installez le catalogue complet actuel.",
+    "availability": {
+      "loading": "Vérification de la prise en charge du catalogue visuel hors ligne…",
+      "browser": "Les téléchargements d'images hors ligne ne sont pas configurés dans cette version.",
+      "browserFuture": "Cette version n'inclut pas la politique de signature de catalogue de confiance nécessaire pour vérifier les téléchargements d'images.",
+      "unsupported": "Cette application de bureau est trop ancienne pour gérer des catalogues visuels hors ligne. Mettez à jour l'application pour continuer.",
+      "empty": "Aucun catalogue visuel fiable n’a encore été téléchargé.",
+      "invalid": "On ne pouvait pas faire confiance au catalogue visuel local. Actualisez-le avant de continuer."
+    },
+    "selector": {
+      "title": "Sélection du catalogue",
+      "core": "Visuels de base",
+      "printing": "Impressions de décors anglais",
+      "locale": "Impressions de décors localisées",
+      "complete": "Catalogue actuel complet",
+      "setCode": "Définir le code",
+      "setPlaceholder": "par ex. aileron",
+      "language": "Langage des images",
+      "currentRoot": "Racine actuelle du catalogue : {{root}}",
+      "invalidSet": "Entrez un code de jeu de caractères valide de trois à six caractères."
+    },
+    "actions": {
+      "estimate": "Téléchargement de devis",
+      "install": "Sélection d'installation",
+      "cancel": "Annuler l'opération",
+      "resume": "Reprendre l'opération",
+      "retry": "Réessayez",
+      "refresh": "Actualiser le catalogue",
+      "verifyMetadata": "Vérifier les métadonnées",
+      "verifyFull": "Vérifier tous les fichiers",
+      "repair": "Réparation sélectionnée",
+      "removeSelected": "Supprimer la sélection",
+      "removeComplete": "Supprimer le catalogue complet",
+      "removeAll": "Supprimer tous les visuels hors ligne"
+    },
+    "estimate": {
+      "title": "Estimation backend et fermeture des dépendances"
+    },
+    "metrics": {
+      "assetRecords": "Enregistrements d'actifs",
+      "uniqueObjects": "Objets uniques",
+      "logicalImageBytes": "Octets d'image logique",
+      "uniqueImageBytes": "Octets d'image uniques",
+      "shardCount": "Éclats",
+      "shardBytes": "Octets de fragment"
+    },
+    "operation": {
+      "title": "Opération actuelle",
+      "states": {
+        "downloading": "Téléchargement",
+        "cancel_requested": "Annulation demandée",
+        "finalizing": "Finalisation",
+        "failed": "Échec – prêt à reprendre",
+        "completed": "Terminé",
+        "cancelled": "Annulé"
+      },
+      "id": "Fonctionnement",
+      "root": "Racine du catalogue",
+      "packs": "Packs : {{current}} sur {{total}}",
+      "objects": "Objets : {{current}} sur {{total}}",
+      "finalizing": "Finalisation de l'installation du catalogue"
+    },
+    "status": {
+      "title": "État du catalogue installé",
+      "root": "Racine du catalogue",
+      "epoch": "Époque",
+      "revision": "Révision installée",
+      "selectorCount": "Sélecteurs",
+      "shardCount": "Éclats",
+      "installed": "Packs installés",
+      "noneInstalled": "Aucun pack visuel n’est installé.",
+      "upgradeAvailable": "Mise à niveau disponible",
+      "receiptRoot": "Racine du reçu : {{root}}"
+    },
+    "verification": {
+      "revision": "Révision installée vérifiée {{revision}}.",
+      "healthy": "Aucun problème de vérification trouvé.",
+      "issues": {
+        "missing_root_witness": "Témoin racine du catalogue manquant",
+        "invalid_root_witness": "Témoin racine du catalogue non valide",
+        "receipt_metadata": "Les métadonnées du reçu diffèrent du catalogue de confiance",
+        "missing_shard": "Fragment de catalogue manquant",
+        "invalid_shard": "Fragment de catalogue invalide",
+        "missing_object": "Objet image manquant",
+        "invalid_object_metadata": "Métadonnées d'objet image non valides",
+        "corrupt_object": "Objet image corrompu",
+        "dependency_drift": "Les enregistrements de dépendances installés diffèrent du catalogue approuvé",
+        "projection_drift": "Les enregistrements de recherche installés diffèrent du catalogue de confiance"
+      }
+    },
+    "removal": {
+      "committed": "Suppression validée lors de la révision {{revision}}."
+    },
+    "cleanup": {
+      "malformed_entry": "Une entrée de cache mal formée n'a pas pu être récupérée",
+      "unsafe_entry": "Une entrée de cache non sécurisée n'a pas été touchée",
+      "remove_failed": "Un fichier cache n'a pas pu être supprimé",
+      "catalog_state": "L'état du catalogue historique n'a pas pu être récupéré"
+    },
+    "errors": {
+      "unsupported_shell": "Cette version de l'application ne prend pas en charge les catalogues visuels hors ligne.",
+      "unauthorized": "Cette fenêtre n'est pas autorisée à gérer les catalogues visuels hors ligne.",
+      "unavailable": "La gestion visuelle du catalogue hors ligne est temporairement indisponible.",
+      "invalid_input": "La sélection de catalogue demandée n'est pas valide.",
+      "conflict": "Les packs installés dépendent de cette sélection.",
+      "cancelled": "L'opération a été annulée.",
+      "network": "La demande de réseau de catalogue a échoué.",
+      "storage": "Le catalogue n'a pas pu être écrit sur le stockage de l'appareil.",
+      "trust": "La réponse du catalogue n'était pas fiable.",
+      "emit": "L'application n'a pas pu signaler la progression du catalogue.",
+      "internal": "L'opération de catalogue n'a pas pu être terminée."
+    },
+    "confirm": {
+      "cascadeTitle": "Supprimer les packs dépendants ?",
+      "cascadeMessage": "Les autres packs installés dépendent de {{selection}}. Supprimer la sélection figée et ses dépendances ?",
+      "cascadeAction": "Supprimer les personnes à charge",
+      "completeTitle": "Supprimer ce catalogue complet ?",
+      "completeMessage": "Supprimer tous les packs installés de la racine du catalogue {{selection}} ?",
+      "allTitle": "Supprimer tous les visuels hors connexion ?",
+      "allMessage": "Supprimer tous les packs visuels installés sur cet appareil ?",
+      "removeAction": "Supprimer"
+    }
+  },
   "resetAll": {
     "confirm": "Réinitialiser toutes les préférences aux valeurs par défaut ? Cela efface tous les paramètres de cette boîte de dialogue.",
     "button": "Réinitialiser toutes les préférences",

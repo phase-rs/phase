@@ -200,6 +200,131 @@
     "telemetry": "Enviar informes anónimos de fallos y uso",
     "telemetryDescription": "Ayuda a corregir fallos y priorizar la compatibilidad de cartas. Sin cuenta ni datos personales, solo recuentos de errores y resúmenes de partida."
   },
+  "visualPacks": {
+    "title": "Catálogo visual sin conexión",
+    "description": "Elija qué imágenes de tarjetas confiables desea conservar en este dispositivo o instale el catálogo actual completo.",
+    "availability": {
+      "loading": "Comprobando el soporte del catálogo visual sin conexión...",
+      "browser": "Las descargas de imágenes sin conexión no están configuradas en esta compilación.",
+      "browserFuture": "Esta compilación no incluye la política de firma de catálogo de confianza necesaria para verificar las descargas de imágenes.",
+      "unsupported": "Esta aplicación de escritorio es demasiado antigua para administrar catálogos visuales sin conexión. Actualiza la aplicación para continuar.",
+      "empty": "Aún no se ha descargado ningún catálogo visual confiable.",
+      "invalid": "No se podía confiar en el catálogo visual local. Actualízalo antes de continuar."
+    },
+    "selector": {
+      "title": "Selección de catálogo",
+      "core": "Imágenes principales",
+      "printing": "Impresiones en inglés",
+      "locale": "Impresiones de conjuntos localizados",
+      "complete": "Catálogo completo actual",
+      "setCode": "Establecer código",
+      "setPlaceholder": "por ej. aleta",
+      "language": "Idioma de la imagen",
+      "currentRoot": "Raíz del catálogo actual: {{root}}",
+      "invalidSet": "Ingrese un código de juego de caracteres válido de tres a seis."
+    },
+    "actions": {
+      "estimate": "Descarga de presupuesto",
+      "install": "Instalar selección",
+      "cancel": "Cancelar operación",
+      "resume": "Reanudar operación",
+      "retry": "Inténtalo de nuevo",
+      "refresh": "Actualizar catálogo",
+      "verifyMetadata": "Verificar metadatos",
+      "verifyFull": "Verificar todos los archivos",
+      "repair": "Reparación seleccionada",
+      "removeSelected": "Eliminar seleccionado",
+      "removeComplete": "Eliminar catálogo completo",
+      "removeAll": "Eliminar todos los elementos visuales sin conexión"
+    },
+    "estimate": {
+      "title": "Estimación de backend y cierre de dependencia"
+    },
+    "metrics": {
+      "assetRecords": "Registros de activos",
+      "uniqueObjects": "Objetos únicos",
+      "logicalImageBytes": "Bytes de imagen lógica",
+      "uniqueImageBytes": "Bytes de imagen únicos",
+      "shardCount": "fragmentos",
+      "shardBytes": "Bytes de fragmentos"
+    },
+    "operation": {
+      "title": "Operación actual",
+      "states": {
+        "downloading": "Descargando",
+        "cancel_requested": "Cancelación solicitada",
+        "finalizing": "Finalizando",
+        "failed": "Error: listo para reanudar",
+        "completed": "Completado",
+        "cancelled": "Cancelado"
+      },
+      "id": "Operación",
+      "root": "raíz del catálogo",
+      "packs": "Paquetes: {{current}} de {{total}}",
+      "objects": "Objetos: {{current}} de {{total}}",
+      "finalizing": "Finalizando la instalación del catálogo"
+    },
+    "status": {
+      "title": "Estado del catálogo instalado",
+      "root": "raíz del catálogo",
+      "epoch": "Época",
+      "revision": "Revisión instalada",
+      "selectorCount": "Selectores",
+      "shardCount": "fragmentos",
+      "installed": "Paquetes instalados",
+      "noneInstalled": "No hay paquetes visuales instalados.",
+      "upgradeAvailable": "Actualización disponible",
+      "receiptRoot": "Raíz del recibo: {{root}}"
+    },
+    "verification": {
+      "revision": "Revisión instalada verificada {{revision}}.",
+      "healthy": "No se encontraron problemas de verificación.",
+      "issues": {
+        "missing_root_witness": "Falta el testigo de raíz del catálogo",
+        "invalid_root_witness": "Testigo de raíz de catálogo no válido",
+        "receipt_metadata": "Los metadatos del recibo difieren del catálogo confiable",
+        "missing_shard": "Falta un fragmento de catálogo",
+        "invalid_shard": "Fragmento de catálogo no válido",
+        "missing_object": "Objeto de imagen faltante",
+        "invalid_object_metadata": "Metadatos de objetos de imagen no válidos",
+        "corrupt_object": "Objeto de imagen corrupto",
+        "dependency_drift": "Los registros de dependencia instalados difieren del catálogo de confianza",
+        "projection_drift": "Los registros de búsqueda instalados difieren del catálogo confiable"
+      }
+    },
+    "removal": {
+      "committed": "Eliminación confirmada en la revisión {{revision}}."
+    },
+    "cleanup": {
+      "malformed_entry": "No se pudo recuperar una entrada de caché con formato incorrecto",
+      "unsafe_entry": "Una entrada de caché insegura no se modificó",
+      "remove_failed": "No se pudo eliminar un archivo de caché",
+      "catalog_state": "No se pudo recuperar el estado del catálogo histórico"
+    },
+    "errors": {
+      "unsupported_shell": "Esta versión de la aplicación no admite catálogos visuales sin conexión.",
+      "unauthorized": "Esta ventana no puede administrar catálogos visuales sin conexión.",
+      "unavailable": "La gestión del catálogo visual sin conexión no está disponible temporalmente.",
+      "invalid_input": "La selección de catálogo solicitada no es válida.",
+      "conflict": "Los paquetes instalados dependen de esta selección.",
+      "cancelled": "La operación fue cancelada.",
+      "network": "La solicitud de red del catálogo falló.",
+      "storage": "El catálogo no se pudo escribir en el almacenamiento del dispositivo.",
+      "trust": "No se puede confiar en la respuesta del catálogo.",
+      "emit": "La aplicación no pudo informar el progreso del catálogo.",
+      "internal": "No se pudo completar la operación del catálogo."
+    },
+    "confirm": {
+      "cascadeTitle": "¿Eliminar paquetes dependientes?",
+      "cascadeMessage": "Otros paquetes instalados dependen de {{selection}}. ¿Eliminar la selección congelada y sus dependientes?",
+      "cascadeAction": "Eliminar dependientes",
+      "completeTitle": "¿Eliminar este catálogo completo?",
+      "completeMessage": "¿Eliminar todos los paquetes instalados de la raíz del catálogo {{selection}}?",
+      "allTitle": "¿Eliminar todos los elementos visuales sin conexión?",
+      "allMessage": "¿Eliminar todos los paquetes visuales instalados en este dispositivo?",
+      "removeAction": "Quitar"
+    }
+  },
   "resetAll": {
     "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",
     "button": "Restablecer todas las preferencias",

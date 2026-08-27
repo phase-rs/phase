@@ -42,4 +42,16 @@ describe("getCardImageSrcSetProps", () => {
     expect(getCardImageSrcSetProps(undefined)).toBeUndefined();
     expect(getCardImageSrcSetProps("Focused Opponent Card.png")).toBeUndefined();
   });
+
+  it("uses explicit installed rungs without rewriting an opaque protocol URL", () => {
+    expect(getCardImageSrcSetProps("http://visual-pack.localhost/current", {
+      small: "http://visual-pack.localhost/small-object",
+      normal: "http://visual-pack.localhost/normal-object",
+    })).toEqual({
+      srcSet: "http://visual-pack.localhost/small-object 146w, http://visual-pack.localhost/normal-object 488w",
+      sizes: "auto, 200px",
+      loading: "lazy",
+    });
+    expect(getCardImageSrcSetProps("http://visual-pack.localhost/current")).toBeUndefined();
+  });
 });

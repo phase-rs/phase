@@ -47,7 +47,9 @@ import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 import { isDesktopTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
+import { useSetCatalog } from "../../hooks/useSetSymbols.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
+import { VisualPackManager } from "./visual-packs/VisualPackManager.tsx";
 
 export type SettingsHighlight = "board-background";
 
@@ -775,6 +777,7 @@ export function PreferencesModal({
 
               {activeTab === "data" && (
         <>
+          <VisualPackManager />
           <CloudSyncSection />
           <DataSection />
         </>
@@ -1367,12 +1370,6 @@ const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[
   { type: "prefer_extended", labelKey: "artChain.rules.preferExtended" },
 ];
 
-interface ScryfallSetInfo {
-  name: string;
-  icon_svg_uri: string;
-  released_at: string;
-}
-
 function artChainEntryLabel(entry: ArtChainEntry, t: TFunction<"settings">): string {
   switch (entry.type) {
     // `entry.label` is the Scryfall set name (engine/asset data) — left raw.
@@ -1402,14 +1399,7 @@ function ArtChainEditor({
 }) {
   const { t } = useTranslation("settings");
   const [setInput, setSetInput] = useState("");
-  const [scryfallSets, setScryfallSets] = useState<Record<string, ScryfallSetInfo> | null>(null);
-
-  useEffect(() => {
-    fetch(__SCRYFALL_SETS_URL__)
-      .then((r) => r.json() as Promise<Record<string, ScryfallSetInfo>>)
-      .then(setScryfallSets)
-      .catch(() => {});
-  }, []);
+  const { catalog: scryfallSets } = useSetCatalog();
 
   const resolveSetCode = useCallback(
     (input: string): { code: string; label: string } | null => {

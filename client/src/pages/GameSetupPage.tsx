@@ -19,7 +19,7 @@ import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
-  getRepresentativeCard,
+  getRepresentativeDeckVisual,
   getDeckCardCount,
   getDeckColorIdentityPips,
 } from "../components/menu/deckHelpers";
@@ -243,15 +243,18 @@ export function GameSetupPage() {
     !randomDeckSelected &&
     cedhMode &&
     !isDeckCedhLegal(humanDeckBracket);
-  const representativeCard = useMemo(
-    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getRepresentativeCard(activeDeckName) : null),
+  const representativeVisual = useMemo(
+    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getRepresentativeDeckVisual(activeDeckName) : null),
     [activeDeckName],
   );
   const deckCardCount = useMemo(
     () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getDeckCardCount(activeDeckName) : 0),
     [activeDeckName],
   );
-  const { src: deckArtSrc } = useCardImage(representativeCard ?? "", { size: "art_crop" });
+  const { src: deckArtSrc, advanceFailedSource: advanceFailedDeckArtSource } = useCardImage(
+    representativeVisual?.name ?? "",
+    { size: "art_crop", sourcePrinting: representativeVisual?.sourcePrinting },
+  );
   const colorPips = getDeckColorIdentityPips(selectedCompat?.color_identity ?? null);
 
   return (
@@ -384,7 +387,12 @@ export function GameSetupPage() {
                 <div>
                   <div className="aspect-[5/3] overflow-hidden rounded-xl bg-gray-800">
                     {deckArtSrc ? (
-                      <img src={deckArtSrc} alt="" className="h-full w-full object-cover" />
+                      <img
+                        src={deckArtSrc}
+                        alt=""
+                        className="h-full w-full object-cover"
+                        onError={() => advanceFailedDeckArtSource?.(deckArtSrc)}
+                      />
                     ) : (
                       <div className="h-full w-full animate-pulse bg-gray-800" />
                     )}

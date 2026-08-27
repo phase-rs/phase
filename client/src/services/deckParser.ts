@@ -20,6 +20,22 @@ export interface ParsedDeck {
   companion?: string;
 }
 
+export interface DeckVisualIdentity {
+  name: string;
+  sourcePrinting?: SourcePrinting;
+}
+
+export function representativeDeckVisual(deck: ParsedDeck): DeckVisualIdentity | null {
+  const commander = deck.commander?.[0];
+  if (commander) return { name: commander };
+  const entry = deck.main.find((card) => !BASIC_LAND_NAMES.has(card.name));
+  if (!entry) return null;
+  return {
+    name: entry.name,
+    ...(entry.sourcePrinting ? { sourcePrinting: { ...entry.sourcePrinting } } : {}),
+  };
+}
+
 const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*(?::|=)?\s*(.+)$/i;
 
 /**

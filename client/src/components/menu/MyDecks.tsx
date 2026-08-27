@@ -34,6 +34,7 @@ import { FeedManagerModal } from "./FeedManagerModal";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
+import type { DeckVisualIdentity } from "../../services/deckParser";
 import {
   evaluateDeckCompatibilityBatch,
   type DeckCompatibilityResult,
@@ -58,7 +59,7 @@ import {
   getDeckCardCount,
   getDeckColorIdentity,
   getDeckColorIdentityPips,
-  getRepresentativeCard,
+  getRepresentativeDeckVisual,
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
@@ -174,14 +175,24 @@ function savedPreconMatchesSetFilter(deckName: string, setFilter: string): boole
   return code != null && (setFilter === PRECON_SET_ALL || code === setFilter);
 }
 
-function DeckArtTile({ cardName }: { cardName: string | null }) {
-  const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
+function DeckArtTile({ visual }: { visual: DeckVisualIdentity | null }) {
+  const { src, isLoading, advanceFailedSource } = useCardImage(visual?.name ?? "", {
+    size: "art_crop",
+    sourcePrinting: visual?.sourcePrinting,
+  });
 
-  if (!cardName || isLoading || !src) {
+  if (!visual || isLoading || !src) {
     return <div className="absolute inset-0 animate-pulse bg-gray-800" />;
   }
 
-  return <img src={src} alt="" className="absolute inset-0 h-full w-full object-cover" />;
+  return (
+    <img
+      src={src}
+      alt=""
+      className="absolute inset-0 h-full w-full object-cover"
+      onError={() => advanceFailedSource?.(src)}
+    />
+  );
 }
 
 export function StatusBadge({ label, active }: { label: string; active: boolean }) {
@@ -250,11 +261,21 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
     : preconDeckOverride
       ? preconDeckOverride.mainBoard.reduce((sum, e) => sum + e.count, 0)
     : getDeckCardCount(deckName);
-  const representativeCard = feedDeckOverride
-    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
-    : preconDeckOverride
-      ? (preconDeckOverride.commander?.[0]?.name ?? preconDeckOverride.mainBoard.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
-    : getRepresentativeCard(deckName);
+  const feedCommander = feedDeckOverride?.commander?.[0];
+  const feedMain = feedDeckOverride?.main.find((entry) => !BASIC_LAND_NAMES.has(entry.name));
+  const preconName = preconDeckOverride?.commander?.[0]?.name
+    ?? preconDeckOverride?.mainBoard.find((entry) => !BASIC_LAND_NAMES.has(entry.name))?.name;
+  const representativeVisual: DeckVisualIdentity | null = preconDeckOverride
+    ? preconName
+      ? { name: preconName }
+      : null
+    : feedDeckOverride
+      ? feedCommander
+        ? { name: feedCommander }
+        : feedMain
+          ? { name: feedMain.name }
+          : null
+      : getRepresentativeDeckVisual(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");
   const feedBadge = !hideFeedBadge && feedOrigin ? (feedForBadge?.name ?? t("deckTile.feedBadge")) : null;
@@ -279,7 +300,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
 
       {/* Art header: real Scryfall card art + color identity + source/state badges. */}
       <div className="relative h-28 overflow-hidden">
-        <DeckArtTile cardName={representativeCard} />
+        <DeckArtTile visual={representativeVisual} />
         <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
         {/* Color identity as actual Scryfall mana symbols, clustered top-right.
@@ -551,7 +572,7 @@ const FeedDeckTile = memo(function FeedDeckTile({
 
 function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
   const { t } = useTranslation("menu");
-  const setIcon = useSetSymbol(deck?.code);
+  const { src: setIcon, isLoading, advanceFailedSource } = useSetSymbol(deck?.code);
   if (!deck?.code) return null;
 
   return (
@@ -564,10 +585,11 @@ function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
           src={setIcon}
           alt={t("deckTile.setIconAlt", { code: deck.code })}
           className="h-[18px] w-[18px] invert"
+          onError={() => advanceFailedSource(setIcon)}
         />
-      ) : (
+      ) : !isLoading ? (
         deck.code
-      )}
+      ) : null}
     </span>
   );
 }

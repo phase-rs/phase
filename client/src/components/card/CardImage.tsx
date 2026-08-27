@@ -1,14 +1,13 @@
-import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
-import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
+import { CardBackFallback } from "./CardBackFallback.tsx";
 import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
@@ -75,7 +74,7 @@ export function CardImage({
   // Ixidron class, which has no printing) the lookup is skipped entirely and the
   // generic card back is rendered exactly as before.
   const faceDownMarker = faceDownMarkerRef(faceDown, faceDownCause);
-  const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
     isToken: faceDown ? faceDownMarker !== null : isToken,
@@ -84,17 +83,11 @@ export function CardImage({
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
   });
-  const [imageError, setImageError] = useState(false);
-  // Reset whenever the art source changes so a component instance that once saw
-  // a 404 re-tries the new image: the same instance survives a permanent turning
-  // face up or a DFC transforming, and would otherwise stay latched on the text
-  // tile forever. Mirrors `CardPreview.tsx`'s `useEffect(… , [src])`.
-  useEffect(() => setImageError(false), [src]);
   // Only resolve rules text when the art lookup has definitively failed. On the
   // first render `src` is null for every card while useCardImage is loading; an
   // eager fallback lookup here used to make all seven mulligan cards initialize
   // card-data queries even though their artwork resolved a moment later.
-  const showArtFallback = !faceDown && !isLoading && (imageError || !src);
+  const showArtFallback = !faceDown && !isLoading && !src;
   const fallbackData = useEngineCardData(
     showArtFallback && oracleText == null ? cardName : null,
   );
@@ -118,30 +111,18 @@ export function CardImage({
     );
   }
 
-  // Two distinct art failures collapse to the same deliberate text tile:
-  //   - `!src`: art resolution finished with no image (issue #6156 — tokens with
-  //     no official paper printing, e.g. Kibo, Uktabi Prince's Banana, resolve to
-  //     a null token-image src). Previously these fell into the pulse branch and
-  //     animated forever as a featureless dark square.
-  //   - `imageError`: the resolved `<img>` failed to load.
-  // Both render the card/token name (and Oracle text when known) so every artless
-  // card or token — not just one hard-coded name — stays identifiable.
-  // The card back is the fallback in BOTH directions: a marker that never
-  // resolves (`!src`) and a marker URL whose `<img>` fails to load
-  // (`imageError` — offline, CDN gap, stale printing) both fall back to it. A
-  // face-down permanent must never render a broken image, and it must never
-  // fall through to the artless text tile either: `showArtFallback` stays gated
-  // on `!faceDown`, so this is the only fallback the face-down path has.
-  const renderedSrc = faceDown
-    ? (imageError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
-    : (src ?? "");
   const renderedAlt = faceDown
     ? (faceDownMarkerName(true, faceDownCause) ?? t("card.faceDownName"))
     : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">
-      {showArtFallback ? (
+      {faceDown && (!faceDownMarker || !src) ? (
+        <CardBackFallback
+          className={`${baseClasses} shadow-lg`}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      ) : showArtFallback ? (
         // Swapped in place of the `<img>` rather than early-returned, so the
         // overlay badges below stay on screen: an artless card must not also
         // lose its unimplemented-mechanics warning.
@@ -153,11 +134,11 @@ export function CardImage({
         />
       ) : (
         <img
-          src={renderedSrc}
-          {...getCardImageSrcSetProps(renderedSrc)}
+          src={src!}
+          {...getCardImageSrcSetProps(src, rungs)}
           alt={renderedAlt}
           draggable={false}
-          onError={() => setImageError(true)}
+          onError={() => advanceFailedSource?.(src!)}
           className={`${baseClasses} shadow-lg object-cover`}
           style={borderStyle ?? { border: "1px solid #4b5563" }}
         />

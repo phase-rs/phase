@@ -1,4 +1,5 @@
 import { IMAGE_SIZE_WIDTHS, deriveImageUrl, imageUrlSize } from "../../services/scryfall.ts";
+import type { ImageRungs } from "../../services/visualPacks/types.ts";
 
 /**
  * The image-element attributes that offer a card image at both of Scryfall's usable
@@ -35,8 +36,18 @@ export interface CardImageSrcSetProps {
  */
 export function getCardImageSrcSetProps(
   src: string | null | undefined,
+  explicitRungs?: ImageRungs,
 ): CardImageSrcSetProps | undefined {
   if (!src) return undefined;
+  if (explicitRungs?.small && explicitRungs.normal) {
+    return {
+      srcSet:
+        `${explicitRungs.small} ${IMAGE_SIZE_WIDTHS.small}w, `
+        + `${explicitRungs.normal} ${IMAGE_SIZE_WIDTHS.normal}w`,
+      sizes: "auto, 200px",
+      loading: "lazy",
+    };
+  }
   const size = imageUrlSize(src);
   // `art_crop` is a crop, not a scaled variant — its rungs are different images.
   if (size === null || size === "art_crop") return undefined;

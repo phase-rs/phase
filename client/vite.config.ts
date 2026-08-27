@@ -412,6 +412,17 @@ export default defineConfig(({ mode }) => ({
           // colliding cache variants. See the #4822 (introduced) / #4855
           // (credentials patch) incident before re-adding.
           {
+            // Installed images are committed directly to this Cache Storage
+            // bucket by the browser backend. The service worker only reads it;
+            // installation owns every write and never revalidates an image.
+            urlPattern: ({ sameOrigin, url }) =>
+              sameOrigin && /^\/__visual-packs\/sha256\/[0-9a-f]{64}\.(jpg|png|webp|svg)$/.test(url.pathname),
+            handler: "CacheOnly",
+            options: {
+              cacheName: "phase-visual-pack-scryfall-images-v1",
+            },
+          },
+          {
             // Same-origin static imagery from public/ (battlefield art, nav
             // icons, logos). Not in the precache manifest — the default glob
             // only covers js/css/html — and unhashed, so StaleWhileRevalidate

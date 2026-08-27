@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { MyDecks } from "../MyDecks";
@@ -12,9 +12,13 @@ import type { ParsedDeck } from "../../../services/deckParser";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 
-vi.mock("../../../hooks/useCardImage", () => ({
-  useCardImage: () => ({ src: null, isLoading: false }),
+const { useCardImage, useSetSymbol, advanceSetSource } = vi.hoisted(() => ({
+  useCardImage: vi.fn(),
+  useSetSymbol: vi.fn(),
+  advanceSetSource: vi.fn(),
 }));
+
+vi.mock("../../../hooks/useCardImage", () => ({ useCardImage }));
 
 vi.mock("../../../hooks/useBracketEstimate", () => ({
   useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
@@ -25,7 +29,7 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
 }));
 
 vi.mock("../../../hooks/useSetSymbols", () => ({
-  useSetSymbol: (setCode: string | undefined) => setCode ? `https://img.example/${setCode}.svg` : null,
+  useSetSymbol,
 }));
 
 vi.mock("../../../services/deckCompatibility", () => ({
@@ -46,6 +50,12 @@ describe("MyDecks", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    useCardImage.mockReturnValue({ src: null, isLoading: false });
+    useSetSymbol.mockImplementation((setCode: string | undefined) => ({
+      src: setCode ? `visual-pack://set/${setCode.toLowerCase()}` : null,
+      isLoading: false,
+      advanceFailedSource: advanceSetSource,
+    }));
     vi.mocked(loadPreconDeckMap).mockResolvedValue({});
     vi.stubGlobal("IntersectionObserver", class {
       private readonly callback: IntersectionObserverCallback;
@@ -348,6 +358,12 @@ describe("MyDecks", () => {
   });
 
   it("shows legal precons in a newest-first load-more section and saves one when selected", async () => {
+    const setSymbolResult = {
+      src: "visual-pack://set/sos" as string | null,
+      isLoading: false,
+      advanceFailedSource: advanceSetSource,
+    };
+    useSetSymbol.mockReturnValue(setSymbolResult);
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`deck-${i}`, {
         code: `P${i}`,
@@ -383,19 +399,41 @@ describe("MyDecks", () => {
     });
     const onSelectDeck = vi.fn();
     const onEditDeck = vi.fn();
+    let activeDeckName: string | null = null;
 
-    render(
+    const renderDecks = () => (
       <MyDecks
         mode="select"
         selectedFormat="Commander"
-        activeDeckName={null}
+        activeDeckName={activeDeckName}
         onSelectDeck={onSelectDeck}
         onEditDeck={onEditDeck}
-      />,
+      />
     );
+    const { rerender } = render(renderDecks());
 
     expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
-    expect(screen.getByAltText("SOS set icon")).toBeInTheDocument();
+    const installed = screen.getByAltText("SOS set icon");
+    expect(installed).toHaveAttribute("src", "visual-pack://set/sos");
+    fireEvent.error(installed);
+    expect(advanceSetSource).toHaveBeenCalledWith("visual-pack://set/sos");
+
+    setSymbolResult.src = "https://svgs.scryfall.io/sets/sos.svg";
+    activeDeckName = "[Pre-built] Secrets of Strixhaven (SOS)";
+    rerender(renderDecks());
+    const remote = screen.getByAltText("SOS set icon");
+    expect(remote).toHaveAttribute("src", "https://svgs.scryfall.io/sets/sos.svg");
+    fireEvent.error(remote);
+    expect(advanceSetSource).toHaveBeenLastCalledWith(
+      "https://svgs.scryfall.io/sets/sos.svg",
+    );
+
+    setSymbolResult.src = null;
+    activeDeckName = null;
+    rerender(renderDecks());
+    expect(screen.queryByAltText("SOS set icon")).not.toBeInTheDocument();
+    expect(screen.getByTitle("SOS")).toHaveTextContent("SOS");
+
     expect(screen.queryByText("Precon 0 (P0)")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Load More" }));
     expect(await screen.findByText("Precon 0 (P0)")).toBeInTheDocument();
@@ -409,6 +447,51 @@ describe("MyDecks", () => {
     expect(onSelectDeck).toHaveBeenCalledWith("[Pre-built] Secrets of Strixhaven (SOS)");
     expect(localStorage.getItem(`${STORAGE_KEY_PREFIX}[Pre-built] Secrets of Strixhaven (SOS)`)).toBeTruthy();
     expect(loadPreconDeckMap).toHaveBeenCalled();
+  });
+
+  it("does not fall through to saved-deck art for a basic-only precon override", async () => {
+    let resolvePrecons: (
+      value: Awaited<ReturnType<typeof loadPreconDeckMap>>,
+    ) => void = () => {};
+    vi.mocked(loadPreconDeckMap).mockReturnValue(new Promise((resolve) => {
+      resolvePrecons = resolve;
+    }));
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Commander"
+        activeDeckName={null}
+        onSelectDeck={vi.fn()}
+      />,
+    );
+
+    // The catalog already captured its saved-deck-name snapshot. Adding this
+    // same-name deck now creates the exact hostile condition: a precon tile
+    // exists, but an incorrect representative branch could still consult
+    // local storage after finding no non-basic precon card.
+    saveDeck("Basics Only (BAS)", {
+      main: [{ name: "Saved Fallback", count: 1 }],
+      sideboard: [],
+    });
+    resolvePrecons({
+      basics: {
+        code: "BAS",
+        name: "Basics Only",
+        type: "Commander Deck",
+        releaseDate: "2026-02-01",
+        coveragePct: 100,
+        mainBoard: [{ name: "Forest", count: 100 }],
+        sideBoard: [],
+      },
+    });
+
+    expect(await screen.findByText("Basics Only (BAS)")).toBeInTheDocument();
+    expect(useCardImage).toHaveBeenCalledWith("", {
+      size: "art_crop",
+      sourcePrinting: undefined,
+    });
+    expect(useCardImage).not.toHaveBeenCalledWith("Saved Fallback", expect.anything());
   });
 
   it("filters selection decks by source and precon set", async () => {
@@ -532,5 +615,55 @@ describe("MyDecks", () => {
       expect.any(Array),
       expect.objectContaining({ summaryOnly: true }),
     );
+  });
+
+  it("preserves saved cover printing identity and advances the installed art crop", async () => {
+    const advanceFailedSource = vi.fn();
+    useCardImage.mockReturnValue({
+      src: "visual-pack://installed/deck-art",
+      isLoading: false,
+      advanceFailedSource,
+    });
+    saveDeck("Printed Deck", {
+      main: [
+        { name: "Island", count: 20 },
+        {
+          name: "Opt",
+          count: 4,
+          sourcePrinting: { setCode: "DAR", collectorNumber: "60" },
+        },
+      ],
+      sideboard: [],
+    });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
+      "Printed Deck": {
+        standard: { compatible: true, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: true,
+        selected_format_reasons: [],
+        color_identity: ["U"],
+      },
+    });
+
+    const { container } = render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName={null}
+        onSelectDeck={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Printed Deck")).toBeInTheDocument();
+    expect(useCardImage).toHaveBeenCalledWith("Opt", {
+      size: "art_crop",
+      sourcePrinting: { setCode: "DAR", collectorNumber: "60" },
+    });
+    const image = container.querySelector('img[src="visual-pack://installed/deck-art"]');
+    expect(image).not.toBeNull();
+    fireEvent.error(image!);
+    expect(advanceFailedSource).toHaveBeenCalledWith("visual-pack://installed/deck-art");
   });
 });
