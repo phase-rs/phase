@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -12,12 +12,13 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
@@ -101,24 +102,23 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
   const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
-  const imageLookup = sourceObj
-    ? cardImageLookup(sourceObj)
-    : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const imageProps = sourceObj ? objectImageProps(sourceObj) : null;
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
     sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
 
-  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps?.cardName ?? sourceName,
+    {
     size: "normal",
-    faceIndex: imageLookup.faceIndex,
+    faceIndex: imageProps?.faceIndex ?? 0,
     isToken: sourceIsToken,
-    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenFilters: imageProps?.tokenFilters,
     tokenImageRef: sourceTokenImageRef,
-    oracleId: imageLookup.oracleId,
-    faceName: imageLookup.faceName,
-  });
-  const [artError, setArtError] = useState(false);
-  useEffect(() => setArtError(false), [src]);
+    oracleId: imageProps?.oracleId,
+    faceName: imageProps?.faceName,
+    },
+  );
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -252,7 +252,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
           />
-        ) : !src || artError ? (
+        ) : !src ? (
           // Issue #6156 on the stack: this path is explicitly token-aware
           // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
           // token's triggered or activated ability landed here and pulsed
@@ -265,10 +265,11 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
         ) : (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
-            onError={() => setArtError(true)}
+            onError={() => advanceFailedSource?.(src)}
           />
         )}
       </div>

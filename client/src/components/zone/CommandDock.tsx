@@ -6,12 +6,15 @@ import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZoneDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import {
   type CommanderDamageEntry,
   commandZoneLeaders,
   commanderDamageEntriesFor,
 } from "../../viewmodel/commanderColumn.ts";
 import { CommanderDamage } from "../board/CommanderDamage.tsx";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { CommanderCardZone } from "./CommanderCardZone.tsx";
 import { CommandZone } from "./CommandZone.tsx";
 
@@ -140,7 +143,19 @@ function CompactCommandDock({
   const closeTimerRef = useRef<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
   const firstCommander = commanders[0];
-  const { src } = useCardImage(firstCommander?.name ?? "", { size: "normal" });
+  const imageProps = firstCommander ? objectImageProps(firstCommander) : null;
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps?.cardName ?? "",
+    {
+      size: "normal",
+      faceIndex: imageProps?.faceIndex,
+      isToken: imageProps?.isToken,
+      tokenFilters: imageProps?.tokenFilters,
+      tokenImageRef: imageProps?.tokenImageRef,
+      oracleId: imageProps?.oracleId,
+      faceName: imageProps?.faceName,
+    },
+  );
   const totalDamage = damageEntries.reduce(
     (sum, entry) => sum + entry.views.reduce((s, v) => s + v.damage, 0),
     0,
@@ -227,10 +242,25 @@ function CompactCommandDock({
         title={label}
         aria-expanded={open}
       >
-        {firstCommander && src ? (
+        {firstCommander && isLoading ? (
+          <span className="h-full w-full animate-pulse rounded-lg bg-gray-700" />
+        ) : firstCommander && src ? (
           <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black/70">
-            <img src={src} alt={firstCommander.name} className="h-full w-full object-contain" draggable={false} />
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, rungs)}
+              alt={firstCommander.name}
+              className="h-full w-full object-contain"
+              draggable={false}
+              onError={() => advanceFailedSource?.(src)}
+            />
           </span>
+        ) : firstCommander ? (
+          <CardArtFallback
+            name={firstCommander.name}
+            variant="artCrop"
+            className="h-full w-full rounded-lg"
+          />
         ) : (
           <span aria-hidden className="text-2xl leading-none text-amber-500/80">✦</span>
         )}

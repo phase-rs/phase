@@ -11,7 +11,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -22,6 +22,7 @@ import {
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -85,12 +86,15 @@ function CommanderCard({
   // for objects carrying no `printed_ref` — command-zone leaders always carry
   // one — and it indexes faces numerically, so a leader whose active face is
   // not Scryfall's front resolved to the wrong face's art.
-  const imageLookup = cardImageLookup(commander);
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const imageProps = objectImageProps(commander);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(imageProps.cardName, {
     size: "normal",
-    faceIndex: imageLookup.faceIndex,
-    oracleId: imageLookup.oracleId,
-    faceName: imageLookup.faceName,
+    faceIndex: imageProps.faceIndex,
+    isToken: imageProps.isToken,
+    tokenFilters: imageProps.tokenFilters,
+    tokenImageRef: imageProps.tokenImageRef,
+    oracleId: imageProps.oracleId,
+    faceName: imageProps.faceName,
   });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
@@ -262,9 +266,11 @@ function CommanderCard({
         ) : src ? (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
             alt={commander.name}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => advanceFailedSource?.(src)}
           />
         ) : (
           /* `artCrop` centres and wraps the name; `fullCard` top-aligns and
