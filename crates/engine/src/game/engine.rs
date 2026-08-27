@@ -7191,7 +7191,7 @@ fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
 
 struct PriorityPassPipelineOutcome {
     waiting_for: WaitingFor,
-    consumed_stack_entries: usize,
+    consumed_stack_entries: u32,
 }
 
 fn pass_priority_once_with_pipeline(
@@ -7500,13 +7500,15 @@ fn stack_resolution_session_priority_decision(
 
 fn advance_stack_resolution_session_after_priority_pass(
     state: &mut GameState,
-    consumed_stack_entries: usize,
+    consumed_stack_entries: u32,
     waiting_for: &WaitingFor,
 ) -> bool {
     let should_restore = {
         let Some(session) = state.stack_resolution_session.as_mut() else {
             return false;
         };
+        let consumed_stack_entries = usize::try_from(consumed_stack_entries)
+            .expect("a stack resolver count fits the engine's native index size");
         session.cursor = session.cursor.saturating_add(consumed_stack_entries);
         let budget_exhausted = session
             .budget

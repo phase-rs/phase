@@ -39,7 +39,7 @@ pub fn handle_priority_pass(
 /// triggers, so a length delta is not a trustworthy authorization cursor.
 pub(crate) struct PriorityPassOutcome {
     pub(crate) waiting_for: WaitingFor,
-    pub(crate) consumed_stack_entries: usize,
+    pub(crate) consumed_stack_entries: u32,
 }
 
 pub(crate) fn handle_priority_pass_with_limit(
@@ -144,7 +144,9 @@ pub(crate) fn handle_priority_pass_with_limit(
                 } = mode
                 {
                     if !session_representative_auto_pass_keys.contains(&player) {
-                        *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
+                        let consumed = usize::try_from(consumed)
+                            .expect("a stack resolver count fits the engine's native index size");
+                        *initial_stack_len = initial_stack_len.saturating_sub(consumed);
                     }
                 }
             }
