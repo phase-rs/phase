@@ -1377,6 +1377,14 @@ mod tests {
             WaitingFor::ResolveAllConsent { epoch, .. } => *epoch,
             _ => panic!("second representative should be queued"),
         };
+        // Ready is retained solely for saved games created before the shared
+        // stack-resolution session protocol. Model that historical encoding
+        // explicitly instead of treating a newly granted consent run as Ready.
+        state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("the pending run must remain available")
+            .auto_pass_baseline = None;
         super::super::engine::apply(
             &mut state,
             PlayerId(1),
@@ -1405,14 +1413,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_all_consent_retains_until_end_of_turn_auto_passes() {
+    fn resolve_all_consent_materializes_the_shared_session_with_its_baseline() {
         let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
+        let retained = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        };
+        state.auto_pass.insert(PlayerId(0), retained);
 
         super::super::engine::apply(
             &mut state,
@@ -1420,18 +1426,11 @@ mod tests {
             GameAction::BeginResolveAll { max_resolutions: 0 },
         )
         .expect("priority holder begins the consent run");
-        assert!(state.auto_pass.contains_key(&PlayerId(0)));
-
         let epoch = match &state.waiting_for {
             WaitingFor::ResolveAllConsent { epoch, .. } => *epoch,
             _ => panic!("second representative should be queued"),
         };
-        state.auto_pass.insert(
-            PlayerId(1),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
+
         super::super::engine::apply(
             &mut state,
             PlayerId(1),
@@ -1442,31 +1441,25 @@ mod tests {
         )
         .expect("second representative grants");
 
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
-        assert_eq!(
-            state.auto_pass.get(&PlayerId(0)),
-            Some(&AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            })
-        );
-        assert_eq!(
-            state.auto_pass.get(&PlayerId(1)),
-            Some(&AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            })
-        );
-
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
-        assert_eq!(result.items_resolved, 1);
-        assert!(state.stack.is_empty());
-        assert!(!matches!(
-            state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolve_all_consent_run.is_none());
+        let session = state
+            .stack_resolution_session
+            .as_ref()
+            .expect("unanimous live consent installs the shared session");
+        assert_eq!(
+            session.auto_pass_overlay.baseline.get(&PlayerId(0)),
+            Some(&retained)
+        );
+        for player in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(
+                state.auto_pass.get(&player),
+                Some(&AutoPassMode::UntilStackEmpty {
+                    initial_stack_len: 1,
+                    policy: StackResolutionPolicy::Committed,
+                })
+            );
+        }
     }
 
     #[test]
@@ -1554,56 +1547,36 @@ mod tests {
     }
 
     #[test]
-    fn ready_consent_proof_isolates_turn_boundary_auto_pass_from_the_second_entry() {
+    fn incoherent_legacy_ready_with_turn_boundary_auto_pass_repairs_without_resolving() {
         let mut state = ready_state(vec![
             no_op_entry(1, PlayerId(0)),
             no_op_entry(2, PlayerId(0)),
         ]);
-        state
-            .resolve_all_consent_run
-            .as_mut()
-            .expect("Ready retains its frozen run")
-            .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
+        let retained = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        };
+        state.auto_pass.insert(PlayerId(0), retained);
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
-        assert_eq!(result.items_resolved, 1);
-        assert_eq!(state.stack.len(), 1);
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 2);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolve_all_consent_run.is_none());
-        assert_eq!(
-            state.auto_pass.get(&PlayerId(0)),
-            Some(&AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            })
-        );
+        assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
     }
 
     #[test]
-    fn ready_consent_proof_isolates_until_stack_empty_from_the_second_entry() {
+    fn incoherent_legacy_ready_with_stack_empty_auto_pass_repairs_without_resolving() {
         let mut state = ready_state(vec![
             no_op_entry(1, PlayerId(0)),
             no_op_entry(2, PlayerId(0)),
         ]);
-        state
-            .resolve_all_consent_run
-            .as_mut()
-            .expect("Ready retains its frozen run")
-            .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
-        let initial_stack_len = state.stack.len();
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilStackEmpty {
-                initial_stack_len,
-                policy: StackResolutionPolicy::Committed,
-            },
-        );
+        let retained = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: state.stack.len(),
+            policy: StackResolutionPolicy::Committed,
+        };
+        state.auto_pass.insert(PlayerId(0), retained);
 
         let result = resolve_all_ready_prefix_with(
             &mut state,
@@ -1611,92 +1584,49 @@ mod tests {
             ResolveAllContinuation::StopAtPriority,
         );
 
-        assert_eq!(result.items_resolved, 1);
-        assert_eq!(
-            stack_resolved_count(&result.events),
-            1,
-            "one consented materialization may resolve only one stack entry"
-        );
-        assert_eq!(state.stack.len(), 1);
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 2);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        assert_eq!(
-            state.auto_pass.get(&PlayerId(0)),
-            Some(&AutoPassMode::UntilStackEmpty {
-                initial_stack_len: 2,
-                policy: StackResolutionPolicy::Committed,
-            })
-        );
+        assert!(state.resolve_all_consent_run.is_none());
+        assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
     }
 
     #[test]
-    fn ready_consumer_resumes_retained_turn_boundary_auto_pass_after_clearing_stack() {
+    fn incoherent_legacy_ready_preserves_retained_auto_pass() {
         let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
-        state.phase = Phase::PreCombatMain;
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
+        let retained = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        };
+        state.auto_pass.insert(PlayerId(0), retained);
+
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
-        assert_eq!(result.items_resolved, 1);
-        assert!(state.stack.is_empty());
-        assert_eq!(result.waiting_for, state.waiting_for);
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::Priority {
-                player: PlayerId(1)
-            }
-        ));
-        assert!(result
-            .events
-            .iter()
-            .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+        assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
     }
 
     #[test]
-    fn resumed_remainder_reconciles_empty_library_loss_to_game_over() {
-        // The no-op is consented and committed. The empty-library draw then
-        // fails the next proof on its terminal checkpoint and is resolved by
-        // the ordinary retained auto-pass remainder.
+    fn incoherent_legacy_ready_never_auto_resolves_a_remainder() {
         let mut state = ready_state(vec![
             draw_entry(1, PlayerId(0)),
             no_op_entry(2, PlayerId(0)),
         ]);
-        // After the settled no-op, P0's retained turn-boundary preference
-        // passes its own draw and P1's stack-empty session completes the
-        // priority cycle that reaches the CR 704.5b SBA.
-        state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
-            },
-        );
-        state.auto_pass.insert(
-            PlayerId(1),
-            AutoPassMode::UntilStackEmpty {
-                initial_stack_len: 1,
-                policy: StackResolutionPolicy::Committed,
-            },
-        );
+        let retained = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        };
+        state.auto_pass.insert(PlayerId(0), retained);
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
-        assert_eq!(result.items_resolved, 2);
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::GameOver {
-                winner: Some(PlayerId(1))
-            }
-        ));
-        assert!(state.players[0].drew_from_empty_library);
-        assert!(state.players[0].is_eliminated);
-        assert!(result.events.iter().any(|event| matches!(
-            event,
-            GameEvent::GameOver {
-                winner: Some(PlayerId(1))
-            }
-        )));
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 2);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.players[0].drew_from_empty_library);
+        assert!(!state.players[0].is_eliminated);
+        assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
     }
+
 }
