@@ -1431,7 +1431,7 @@ mod tests {
             _ => panic!("second representative should be queued"),
         };
 
-        super::super::engine::apply(
+        let result = super::super::engine::apply(
             &mut state,
             PlayerId(1),
             GameAction::RespondResolveAllConsent {
@@ -1441,25 +1441,18 @@ mod tests {
         )
         .expect("second representative grants");
 
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        assert!(state.resolve_all_consent_run.is_none());
-        let session = state
-            .stack_resolution_session
-            .as_ref()
-            .expect("unanimous live consent installs the shared session");
-        assert_eq!(
-            session.auto_pass_overlay.baseline.get(&PlayerId(0)),
-            Some(&retained)
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::StackResolved { .. })),
+            "the final grant drives the shared session through the ordinary runner"
         );
-        for player in [PlayerId(0), PlayerId(1)] {
-            assert_eq!(
-                state.auto_pass.get(&player),
-                Some(&AutoPassMode::UntilStackEmpty {
-                    initial_stack_len: 1,
-                    policy: StackResolutionPolicy::Committed,
-                })
-            );
-        }
+        assert!(state.stack.is_empty());
+        assert!(state.stack_resolution_session.is_none());
+        assert!(state.resolve_all_consent_run.is_none());
+        assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
+        assert!(!state.auto_pass.contains_key(&PlayerId(1)));
     }
 
     #[test]
