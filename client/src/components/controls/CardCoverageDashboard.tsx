@@ -1350,8 +1350,16 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
       <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:gap-5">
         {/* Card image */}
         <div className="mx-auto w-[160px] shrink-0 sm:mx-0 sm:w-[200px]">
-          {cardImageLoading || !cardImageSrc ? (
+          {cardImageLoading ? (
             <div className="aspect-[488/680] w-full animate-pulse rounded-lg bg-white/5" />
+          ) : !cardImageSrc ? (
+            <div
+              className="flex aspect-[488/680] w-full items-center justify-center rounded-lg bg-white/5 px-2 text-center text-xs text-white/50"
+              role="img"
+              aria-label={card.card_name}
+            >
+              {card.card_name}
+            </div>
           ) : (
             <img
               src={cardImageSrc}

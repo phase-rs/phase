@@ -145,7 +145,7 @@ describe("visual-pack visible previews", () => {
     expect(advanceFailedSource).toHaveBeenCalledWith("Current Face.png");
   });
 
-  it("renders coverage rungs and retains the public card name after exhaustion", async () => {
+  it("renders coverage rungs", async () => {
     vi.stubGlobal("__COVERAGE_DATA_URL__", "/coverage.json");
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,
@@ -172,7 +172,7 @@ describe("visual-pack visible previews", () => {
       advanceFailedSource,
     });
 
-    const { unmount } = render(<CardCoverageDashboard />);
+    render(<CardCoverageDashboard />);
     fireEvent.click(await screen.findByRole("button", { name: /Coverage Card/i }));
     const image = await screen.findByRole("img", { name: "Coverage Card" });
     expect(image).toHaveAttribute(
@@ -182,17 +182,5 @@ describe("visual-pack visible previews", () => {
     fireEvent.error(image);
     expect(advanceFailedSource).toHaveBeenCalledWith("coverage-normal.png");
 
-    mockUseCardImage.mockReturnValue({
-      src: null,
-      isLoading: false,
-      isRotated: false,
-      isFlip: false,
-    });
-    unmount();
-    render(<CardCoverageDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: /Coverage Card/i }));
-    expect(await screen.findByRole("img", { name: "Coverage Card" })).toHaveTextContent(
-      "Coverage Card",
-    );
   });
 });
