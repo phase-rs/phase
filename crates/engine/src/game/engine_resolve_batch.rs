@@ -1195,6 +1195,45 @@ mod tests {
     }
 
     #[test]
+    fn retained_auto_pass_remainder_records_actions_replay_can_apply() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        // A nonempty pending-event batch makes the clone proof stop before it
+        // commits, leaving the live turn-boundary preference to resume.
+        state.pending_trigger_event_batch = vec![GameEvent::StackResolved {
+            object_id: ObjectId(99),
+        }];
+
+        let mut replay = state.clone();
+        replay.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        replay.resolve_all_consent_run = None;
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(
+            result.recorded_actions,
+            vec![(PlayerId(0), GameAction::PassPriority)],
+            "the resumed turn-boundary pass is an action replay can submit"
+        );
+        for (actor, action) in result.recorded_actions {
+            super::super::engine::apply(&mut replay, actor, action)
+                .expect("recorded auto-pass action reconstructs through apply");
+        }
+        assert_eq!(replay.stack, state.stack);
+        assert_eq!(replay.waiting_for, state.waiting_for);
+        assert_eq!(replay.auto_pass, state.auto_pass);
+        assert_eq!(replay.priority_player, state.priority_player);
+        assert_eq!(replay.priority_passes, state.priority_passes);
+    }
+
+    #[test]
     fn ready_consent_commits_the_greatest_settled_prefix_and_records_passes() {
         // The lower self-copy creates a new stack object. It is deliberately
         // left for ordinary priority, while both safe entries above it commit.

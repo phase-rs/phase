@@ -22,7 +22,8 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, WaitingFor,
+    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, TurnBoundary,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
@@ -366,6 +367,46 @@ fn stale_epoch_and_decline_continue_through_the_requesters_engine_auto_pass() {
         },
     )
     .is_err());
+}
+
+#[test]
+fn decline_preserves_the_requesters_retained_end_of_turn_auto_pass() {
+    let mut state = GameState::new_two_player(44);
+    state.stack.push_back(no_op_entry(1, P1));
+    state.auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let epoch = begin(&mut state);
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Decline,
+        },
+    )
+    .expect("a decline restores the retained end-of-turn preference");
+
+    assert_eq!(
+        state.auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "declining Resolve All must not overwrite a live end-of-turn preference"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the opponent's stack object still pauses it"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 }
 
 #[test]
