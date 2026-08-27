@@ -373,7 +373,12 @@ beforeEach(() => {
       legalResult: { actions: [], autoPassRecommended: false },
       seq: 1,
     },
-    presentation: { type: "None" },
+    presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
   });
   persistenceMocks.clearGame.mockReset();
   persistenceMocks.clearGame.mockResolvedValue(undefined);
@@ -898,7 +903,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalResult: { actions: [], autoPassRecommended: false },
         seq: 1,
       },
-      presentation: { type: "None" },
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
     });
     (mockGetViewerSnapshot as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
       state: terminalState,
@@ -943,7 +953,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalResult: { actions: [], autoPassRecommended: false },
         seq: 1,
       },
-      presentation: { type: "None" },
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
     };
     mocks.resumeMultiplayerHostState.mockResolvedValueOnce(restored);
     const { adapter } = makeResumedHost();
