@@ -1385,23 +1385,33 @@ mod tests {
             draw_entry(1, PlayerId(0)),
             no_op_entry(2, PlayerId(0)),
         ]);
-        for player in [PlayerId(0), PlayerId(1)] {
-            state.auto_pass.insert(
-                player,
-                AutoPassMode::UntilTurnBoundary {
-                    until: TurnBoundary::EndOfCurrentTurn,
-                },
-            );
-        }
+        // After the settled no-op, P0's retained turn-boundary preference
+        // passes its own draw and P1's stack-empty session completes the
+        // priority cycle that reaches the CR 704.5b SBA.
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        state.auto_pass.insert(
+            PlayerId(1),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+            },
+        );
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
+        assert_eq!(result.items_resolved, 2);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver {
                 winner: Some(PlayerId(1))
             }
         ));
+        assert!(state.players[0].drew_from_empty_library);
+        assert!(state.players[0].is_eliminated);
         assert!(result.events.iter().any(|event| matches!(
             event,
             GameEvent::GameOver {
