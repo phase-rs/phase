@@ -14,14 +14,17 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::database::CardDatabase;
+use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
-use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
+use crate::types::replay::{
+    RecordedAction, RecordedActionKind, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION,
+};
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
 use super::engine::{
-    apply, resolve_all_ready_access, resolve_all_ready_prefix, start_game,
-    start_game_with_starting_player, ResolveAllReadyAccess,
+    apply, apply_verified_ai_priority_pass, resolve_all_ready_access, resolve_all_ready_prefix,
+    start_game, start_game_with_starting_player, ResolveAllReadyAccess,
 };
 
 /// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
@@ -199,11 +202,32 @@ impl ReplayPlayer {
             .iter()
             .enumerate()
         {
-            apply(&mut state, recorded.actor, recorded.action.clone()).map_err(|e| {
-                ReplayError::Desync {
-                    index: recorded.seq,
-                    message: e.to_string(),
+            let applied = match recorded.kind {
+                RecordedActionKind::Submitted => {
+                    apply(&mut state, recorded.actor, recorded.action.clone())
                 }
+                RecordedActionKind::VerifiedAiPriorityPass { semantic_owner } => {
+                    if recorded.action != GameAction::PassPriority {
+                        Err(super::engine::EngineError::InvalidAction(
+                            "verified AI replay marker must carry PassPriority".to_string(),
+                        ))
+                    } else {
+                        let contract =
+                            crate::ai_support::AiDecisionContract::issue(&state, semantic_owner);
+                        if contract.authorized_actor != recorded.actor {
+                            Err(super::engine::EngineError::ActionNotAllowed(
+                                "verified AI replay marker actor no longer matches its contract"
+                                    .to_string(),
+                            ))
+                        } else {
+                            apply_verified_ai_priority_pass(&mut state, &contract)
+                        }
+                    }
+                }
+            };
+            applied.map_err(|e| ReplayError::Desync {
+                index: recorded.seq,
+                message: e.to_string(),
             })?;
             let after_action_count = start_idx + offset as u32 + 1;
             for boundary in self
@@ -466,8 +490,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn version_three_roundtrips_semantic_mana_source_selections() {
+    fn current_version_roundtrips_semantic_mana_source_selections() {
         let source = ObjectIncarnationRef::of(ObjectId(7), 3);
         let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
         let action = GameAction::TapLandForMana {

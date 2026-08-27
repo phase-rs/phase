@@ -82,7 +82,9 @@ pub use phase::Phase;
 pub use player::{Player, PlayerId};
 pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
-pub use replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
+pub use replay::{
+    RecordedAction, RecordedActionKind, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION,
+};
 pub use resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, ChildStackDepth, DirectChoiceGate, FrameGate,
     FrameKind, MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame,
