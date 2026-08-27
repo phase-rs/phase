@@ -284,31 +284,31 @@ fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
     Ok(())
 }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::sync::Arc;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
 
-        use crate::game::zones::create_object;
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
-            TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-        };
-        use crate::types::actions::{GameAction, ResolveAllConsentDecision};
-        use crate::types::card_type::CoreType;
-        use crate::types::format::FormatConfig;
-        use crate::types::game_state::{
-            AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, StackResolutionPolicy,
-            TurnBoundary, WaitingFor,
-        };
-        use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    };
+    use crate::types::actions::{GameAction, ResolveAllConsentDecision};
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{
+        AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, StackResolutionPolicy,
+        TurnBoundary, WaitingFor,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
         ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use crate::types::match_config::MatchConfig;
-        use crate::types::replay::RecordedResolveAll;
-        use crate::types::phase::Phase;
-        use crate::types::zones::Zone;
+    use crate::types::phase::Phase;
+    use crate::types::replay::RecordedResolveAll;
+    use crate::types::zones::Zone;
 
     fn two_player_header(seed: u64) -> ReplayHeader {
         ReplayHeader {

@@ -16,8 +16,8 @@ use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    apply_for_simulation, recover_orphaned_resolve_all, resolve_all_ready_access,
+    apply_for_simulation, apply_interaction_with_rejection, apply_with_rejection,
+    preflight_debug_action_with_rejection, recover_orphaned_resolve_all, resolve_all_ready_access,
     resolve_all_ready_prefix, resolve_all_ready_prefix_with_rejection,
     resume_restored_stack_automation, ResolveAllReadyAccess, RestoredStackAutomationOutcome,
     RestoredStackAutomationPresentation,

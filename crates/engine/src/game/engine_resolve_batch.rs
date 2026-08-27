@@ -663,9 +663,9 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
     };
     let run = state.resolve_all_consent_run.as_ref().filter(|run| {
         state.auto_pass.is_empty()
-        && run.epoch == *epoch
-        && run.auto_pass_baseline.is_none()
-        && run.participants.iter().all(|p| p.granted)
+            && run.epoch == *epoch
+            && run.auto_pass_baseline.is_none()
+            && run.participants.iter().all(|p| p.granted)
     })?;
     (run.participants
         .iter()

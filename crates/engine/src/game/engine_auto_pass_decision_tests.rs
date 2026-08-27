@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::Arc;
 
-use crate::game::combat::AttackTarget;
 use crate::ai_support::AiDecisionContract;
+use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, PtValue, QuantityExpr,
