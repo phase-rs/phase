@@ -2,6 +2,10 @@
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    AdditionalCostRepeatability, ChoiceType, Effect, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -25,6 +29,8 @@ you may attach that Equipment to target creature you control.\n\
 Equipped creature gets +2/+0 and has indestructible.\n\
 Equip {4}";
 
+const PSYCHIC_PAPER_ORACLE: &str = "As this Equipment becomes attached to a creature, choose a creature card name and a creature type.\nEquipped creature has ward {1}, it can't be blocked, and its name and creature type are the last chosen name and creature type.\nEquip {2}";
+
 fn cast_for_free(runner: &mut GameRunner, object_id: ObjectId) {
     let card_id = runner.state().objects[&object_id].card_id;
     runner
@@ -43,6 +49,135 @@ fn choose_trigger_target(runner: &mut GameRunner, target: ObjectId) {
             targets: vec![engine::types::ability::TargetRef::Object(target)],
         })
         .expect("trigger target selection must be accepted");
+}
+
+/// CR 601.2b/c + CR 608.2c: paid AdditionalCostPaidInstead attachments select
+/// their two roles while casting, then carry those exact bindings to the root
+/// effect that replaces the base spell on resolution.
+fn paid_instead_attach_definition() -> AbilityDefinition {
+    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Attach {
+                attachment: TargetFilter::Any,
+                target: TargetFilter::Any,
+            },
+        )
+        .condition(AbilityCondition::AdditionalCostPaidInstead),
+    )
+}
+
+fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Paid Instead Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let host = scenario.add_creature(P0, "Paid Instead Host", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Paid Instead Attach", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            repeatability: AdditionalCostRepeatability::Once,
+        })
+        .with_ability_definition(paid_instead_attach_definition())
+        .id();
+    (scenario.build(), spell, equipment, host)
+}
+
+fn cast_paid_instead_attach_to_target_selection(runner: &mut GameRunner, spell: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast must begin");
+
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("zero additional cost must be paid");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("zero mana payment must complete");
+            }
+            WaitingFor::TargetSelection { .. } => return,
+            ref other => panic!("expected paid attachment target selection, got {other:?}"),
+        }
+    }
+    panic!("paid attachment cast did not reach target selection");
+}
+
+fn assert_paid_attachment_bindings_and_resolve(
+    runner: &mut GameRunner,
+    equipment: ObjectId,
+    host: ObjectId,
+) {
+    let ability = runner
+        .state()
+        .stack
+        .back()
+        .and_then(|entry| entry.ability())
+        .expect("paid spell must be on the stack");
+    assert_ne!(
+        ability.context.attach_target_bindings,
+        Default::default(),
+        "the AdditionalCostPaidInstead root must retain the child Attach role bindings"
+    );
+
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("paid attachment spell must resolve");
+    }
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(host)),
+        "the paid override must resolve the chosen Equipment and host roles"
+    );
+}
+
+#[test]
+fn paid_instead_attach_select_targets_preserves_role_bindings_to_resolution() {
+    let (mut runner, spell, equipment, host) = paid_instead_attach_fixture();
+    cast_paid_instead_attach_to_target_selection(&mut runner, spell);
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(equipment), TargetRef::Object(host)],
+        })
+        .expect("bulk target submission must complete the paid attachment cast");
+    assert_paid_attachment_bindings_and_resolve(&mut runner, equipment, host);
+}
+
+#[test]
+fn paid_instead_attach_choose_target_preserves_role_bindings_to_resolution() {
+    let (mut runner, spell, equipment, host) = paid_instead_attach_fixture();
+    cast_paid_instead_attach_to_target_selection(&mut runner, spell);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(equipment)),
+        })
+        .expect("first role target must be accepted");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(host)),
+        })
+        .expect("second role target must complete the paid attachment cast");
+    assert_paid_attachment_bindings_and_resolve(&mut runner, equipment, host);
 }
 
 #[test]
@@ -263,6 +398,10 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
         .with_subtypes(vec!["Human", "Warrior"])
         .with_mana_cost(ManaCost::default())
         .id();
+    let psychic_paper_template = scenario
+        .add_artifact_from_oracle(P0, "Psychic Paper Template", PSYCHIC_PAPER_ORACLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
     let equipment = scenario.add_card_to_library_top(P0, "Only Dug Equipment");
     let _rest = scenario.add_card_to_library_top(P0, "Library Rest");
     let mut runner = scenario.build();
@@ -280,11 +419,16 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
         .subtypes
         .push("Equipment".to_string());
     equipment_object.base_card_types = equipment_object.card_types.clone();
+    equipment_object.replacements = runner.state().objects[&psychic_paper_template]
+        .replacements
+        .clone();
+    runner.state_mut().all_card_names = vec!["Llanowar Elves".to_string()].into();
 
     cast_for_free(&mut runner, gilgamesh);
     let mut saw_dig_choice = false;
     let mut saw_optional_attach = false;
     let mut saw_host_choice = false;
+    let mut saw_attached_replacement = false;
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
@@ -326,7 +470,10 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
                         cards: vec![samurai],
                     })
                     .expect("selecting the Samurai host must consume the prompt");
-                assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
+                assert!(matches!(
+                    resolved.waiting_for,
+                    WaitingFor::NamedChoice { .. }
+                ));
                 saw_host_choice = true;
                 assert!(saw_dig_choice, "Gilgamesh must surface the DigChoice");
                 assert!(
@@ -337,10 +484,36 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
                     saw_optional_attach,
                     "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
                 );
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CardName,
+                ..
+            } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Llanowar Elves".to_string(),
+                    })
+                    .expect("attached replacement card-name choice must be accepted");
+                saw_attached_replacement = true;
+            }
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            } => {
+                let resolved = runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Zombie".to_string(),
+                    })
+                    .expect("attached replacement creature-type choice must be accepted");
+                assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
+                assert!(
+                    saw_attached_replacement,
+                    "the singleton attachment must reach its replacement prompt"
+                );
                 assert_eq!(
                     runner.state().objects[&equipment].attached_to,
                     Some(AttachTarget::Object(samurai)),
-                    "the singleton Equipment must attach after its host choice without retaining a stale prompt"
+                    "the singleton forwarded attachment must resume through its enclosing continuation"
                 );
                 return;
             }
@@ -359,6 +532,10 @@ fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     assert!(
         saw_host_choice,
         "multiple Samurai must require the host choice"
+    );
+    assert!(
+        saw_attached_replacement,
+        "the singleton forwarded attachment must enter the attached-event replacement path"
     );
     assert_eq!(
         runner.state().objects[&equipment].attached_to,

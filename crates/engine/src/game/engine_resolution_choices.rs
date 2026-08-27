@@ -8126,7 +8126,8 @@ pub(crate) fn run_batch_completion(
             let kept_completed = kept_delivery.completed_ids();
             let rest_completed = rest_delivery.completed_ids();
             if let Some(kept) = publish_tracked_set {
-                let published = if rest_delivery.destination.is_some()
+                let published = if !kept.is_empty()
+                    && rest_delivery.destination.is_some()
                     && kept.iter().all(|id| {
                         rest_delivery
                             .selected
@@ -8134,7 +8135,8 @@ pub(crate) fn run_batch_completion(
                             .any(|selected| selected.object_id == *id)
                     }) {
                     rest_completed.clone()
-                } else if kept_delivery.destination.is_some()
+                } else if !kept.is_empty()
+                    && kept_delivery.destination.is_some()
                     && kept.iter().all(|id| {
                         kept_delivery
                             .selected

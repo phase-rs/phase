@@ -23,7 +23,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
+    BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
     PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind,
     WaitingFor, ZoneDeliveryExileTracking,
@@ -237,6 +237,104 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .expect("first attempted rest card is outside the parked suffix");
     assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
     assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+}
+
+/// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
+/// kept set after a deferred rest-pile delivery; it must not publish the cards
+/// that merely completed the rest route.
+#[test]
+fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Zero-Kept Dig Source", 1, 1).id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Zero-Kept Rest A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Zero-Kept Rest B", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .id(),
+        scenario
+            .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: true,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
+            reveal: true,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Dig reaches its up-to selection");
+
+    let paused = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("an empty up-to selection reaches the rest-pile replacement choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let reparking = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first rest redirect reaches the remaining rest card");
+    assert!(matches!(
+        reparking.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    for redirect_source in redirect_sources {
+        let redirect_source = runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
+    }
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the remaining rest-pile delivery completes");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("the deferred Dig completion publishes a tracked set"),
+        )
+        .expect("the freshly-published Dig tracked set exists");
+    assert!(
+        tracked.is_empty(),
+        "the rest-pile delivery must not replace an empty kept selection"
+    );
 }
 
 /// W-R3 (red first): deterministic Dig's nonbattlefield kept batch must defer
@@ -611,11 +709,14 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(
-        runner
-            .state()
-            .active_batch_delivery()
-            .is_some_and(|pending| pending.completion.is_some()),
-        "the kept-card pause must retain a completion for the deferred rest pile"
+        matches!(
+            runner
+                .state()
+                .active_batch_delivery()
+                .and_then(|pending| pending.completion.as_ref()),
+            Some(BatchCompletion::RevealRestPile { .. })
+        ),
+        "the kept-card pause must retain a RevealRestPile completion for the deferred rest pile"
     );
 
     let rest_pause = runner
@@ -631,8 +732,11 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         .expect("the second rest placement is parked behind the first redirect");
     assert_eq!(first_rest_park.remaining.len(), 1);
     assert!(
-        first_rest_park.completion.is_some(),
-        "the first rest redirect must retain the Dig completion"
+        matches!(
+            first_rest_park.completion.as_ref(),
+            Some(BatchCompletion::RevealRestPile { .. })
+        ),
+        "the first rest redirect must retain the RevealRestPile completion"
     );
     assert!(runner.state().chain_tracked_set_id.is_none());
 
@@ -644,11 +748,14 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(
-        runner
-            .state()
-            .active_batch_delivery()
-            .is_some_and(|pending| pending.completion.is_some()),
-        "the re-parked rest delivery must retain its completion"
+        matches!(
+            runner
+                .state()
+                .active_batch_delivery()
+                .and_then(|pending| pending.completion.as_ref()),
+            Some(BatchCompletion::RevealRestPile { .. })
+        ),
+        "the re-parked rest delivery must retain its RevealRestPile completion"
     );
     assert!(runner.state().chain_tracked_set_id.is_none());
 

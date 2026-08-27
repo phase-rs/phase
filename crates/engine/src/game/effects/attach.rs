@@ -216,7 +216,8 @@ pub fn resolve(
     Ok(())
 }
 
-/// A selected attachment can open an attached-event replacement prompt. Keep
+/// CR 608.2c + CR 616.1: A selected attachment can open an attached-event
+/// replacement prompt. Keep
 /// only the unprocessed selected attachments in the active child so answering
 /// that prompt resumes the next selection rather than replaying the first one
 /// or skipping the remaining selections.
@@ -225,7 +226,10 @@ fn defer_remaining_selected_attachments(
     ability: &ResolvedAbility,
     remaining: &[ObjectId],
 ) {
-    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+    let Some(frame) = state
+        .active_ability_continuation_frame_mut()
+        .filter(|frame| frame.pending.attachment_choice.is_some())
+    else {
         return;
     };
     let mut continuation = ability.clone();
@@ -720,7 +724,7 @@ fn resolve_bound_attachment_targets(
         .collect()
 }
 
-/// Resolve the host role of an attachment instruction. A
+/// CR 608.2d + CR 400.7: Resolve the host role of an attachment instruction. A
 /// role-bound host wins; otherwise preserve the legacy parent-target anaphor
 /// while excluding attachment-role objects, then use the captured battlefield
 /// event as the final event-context fallback. This keeps an event host and a
@@ -731,8 +735,7 @@ fn resolve_attach_target<'a>(
     filter: &TargetFilter,
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
-    if !ability.attach_attachment_candidates().is_empty() {
-        let host = ability.attach_host_target()?;
+    if let Some(host) = ability.attach_host_target() {
         if !host.is_current(state) {
             return None;
         }
@@ -747,13 +750,7 @@ fn resolve_attach_target<'a>(
 
     match filter {
         TargetFilter::ParentTarget => {
-            if let Some(host) = ability
-                .attach_host_target()
-                .filter(|host| host.is_current(state))
-            {
-                return Some(host.object_id);
-            }
-            let attachment_ids = attachment_target_ids(ability);
+            let attachment_ids = current_attachment_target_ids(state, ability);
             ability
                 .live_object_targets(state)
                 .into_iter()
@@ -770,10 +767,14 @@ fn resolve_attach_target<'a>(
     }
 }
 
-fn attachment_target_ids(ability: &ResolvedAbility) -> Vec<ObjectId> {
+/// Return attachment role ids only while their pinned incarnations remain
+/// current. A later object with the same id is a new object (CR 400.7), so it
+/// must remain eligible to be selected as this Attach instruction's host.
+fn current_attachment_target_ids(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
     ability
         .attach_attachment_targets()
         .iter()
+        .filter(|target| target.is_current(state))
         .map(|target| target.object_id)
         .collect()
 }
@@ -788,7 +789,7 @@ fn resolve_dynamic_attach_host_target<'a>(
     filter: &TargetFilter,
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
-    let attachment_ids = attachment_target_ids(ability);
+    let attachment_ids = current_attachment_target_ids(state, ability);
     let dynamic_ids = match filter {
         TargetFilter::LastCreated => &state.last_created_token_ids,
         TargetFilter::LastRevealed => &state.last_revealed_ids,
@@ -3096,13 +3097,14 @@ mod tests {
     fn attachment_role_binding_rejects_a_reincarnated_selected_equipment() {
         let mut state = setup();
         let equipment = spawn_equipment(&mut state, "Rod", 10);
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact)
+                .subtype("Equipment".to_string())
+                .controller(ControllerRef::You),
+        );
         let mut ability = crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Attach {
-                attachment: TargetFilter::Typed(
-                    TypedFilter::new(TypeFilter::Artifact)
-                        .subtype("Equipment".to_string())
-                        .controller(ControllerRef::You),
-                ),
+                attachment: filter.clone(),
                 target: TargetFilter::LastCreated,
             },
             Vec::new(),
@@ -3115,6 +3117,11 @@ mod tests {
                 .get(&equipment)
                 .expect("selected Equipment exists"),
         ));
+        assert_eq!(
+            resolve_bound_attachment_target(&state, &ability, &filter),
+            Some(equipment),
+            "the bound role pin must resolve before the incarnation changes"
+        );
         state
             .objects
             .get_mut(&equipment)
@@ -3122,17 +3129,61 @@ mod tests {
             .incarnation += 1;
 
         assert_eq!(
-            resolve_bound_attachment_target(
-                &state,
-                &ability,
-                &TargetFilter::Typed(
+            resolve_bound_attachment_target(&state, &ability, &filter),
+            None,
+            "a selected role pin cannot attach a later incarnation sharing its object id"
+        );
+    }
+
+    #[test]
+    fn stale_attachment_binding_does_not_exclude_new_incarnation_as_host() {
+        let mut state = setup();
+        let former_attachment = spawn_equipment(&mut state, "Returned Blade", 10);
+        let selected_attachment = spawn_equipment(&mut state, "Selected Blade", 11);
+        let stale_binding = ObjectIncarnationRef::from_object(
+            state
+                .objects
+                .get(&former_attachment)
+                .expect("former attachment exists"),
+        );
+        let returned_host = state
+            .objects
+            .get_mut(&former_attachment)
+            .expect("former attachment remains addressable");
+        returned_host.incarnation += 1;
+        returned_host.card_types.core_types = vec![CoreType::Creature];
+        returned_host.card_types.subtypes.clear();
+        returned_host.base_card_types = returned_host.card_types.clone();
+        state.last_zone_changed_ids = vec![selected_attachment, former_attachment];
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
                     TypedFilter::new(TypeFilter::Artifact)
                         .subtype("Equipment".to_string())
                         .controller(ControllerRef::You),
                 ),
-            ),
-            None,
-            "a selected role pin cannot attach a later incarnation sharing its object id"
+                target: TargetFilter::LastZoneChanged,
+            },
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.bind_attach_attachment_target(stale_binding);
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(
+            &mut state,
+            ability,
+            &[selected_attachment],
+            &mut events,
+        )
+        .expect("a stale attachment binding must not exclude the new host incarnation");
+
+        assert_eq!(
+            state.objects[&selected_attachment].attached_to,
+            Some(AttachTarget::Object(former_attachment)),
+            "the selected Equipment attaches to the new incarnation, not to itself"
         );
     }
 

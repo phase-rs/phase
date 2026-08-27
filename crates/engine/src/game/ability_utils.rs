@@ -6684,6 +6684,8 @@ fn assign_targets_recursive(
         if ability.context.additional_cost_paid {
             assign_targets_recursive(state, sub_ability, targets, next_target)?;
             ability.targets = sub_ability.targets.clone();
+            ability.context.attach_target_bindings =
+                sub_ability.context.attach_target_bindings.clone();
             return Ok(());
         }
     }
@@ -6998,6 +7000,8 @@ fn assign_selected_slots_recursive(
         if ability.context.additional_cost_paid {
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
             ability.targets = sub_ability.targets.clone();
+            ability.context.attach_target_bindings =
+                sub_ability.context.attach_target_bindings.clone();
             return Ok(());
         }
     }
