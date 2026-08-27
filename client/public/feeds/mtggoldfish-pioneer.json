@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-26T00:00:00Z",
+  "updated": "2026-08-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -688,285 +688,6 @@
       ]
     },
     {
-      "name": "Dimir Self-Bounce",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Clearwater Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Cryogen Relic"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 4,
-          "name": "Fear of Isolation"
-        },
-        {
-          "count": 4,
-          "name": "Shipwreck Marsh"
-        },
-        {
-          "count": 4,
-          "name": "Hopeless Nightmare"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Momentum Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Narset, Parter of Veils"
-        },
-        {
-          "count": 4,
-          "name": "Nowhere to Run"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 3,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 3,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "This Town Ain't Big Enough"
-        },
-        {
-          "count": 2,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 2,
-          "name": "Underground River"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Darkslick Shores"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 2,
-          "name": "Go Blank"
-        },
-        {
-          "count": 4,
-          "name": "Grim Bauble"
-        },
-        {
-          "count": 3,
-          "name": "Invoke Despair"
-        },
-        {
-          "count": 1,
-          "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 3,
-          "name": "Unlicensed Hearse"
-        }
-      ]
-    },
-    {
-      "name": "Jeskai Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "W",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 3,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 1,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Jeskai Revelation"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 2,
-          "name": "Thor, God of Thunder"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 1,
-          "name": "Sundown Pass"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Avengers Disassembled"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Anger of the Gods"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Soulless Jailer"
-        },
-        {
-          "count": 1,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Sphinx of the Final Word"
-        },
-        {
-          "count": 1,
-          "name": "Airbender's Reversal"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        }
-      ]
-    },
-    {
       "name": "Temur Lessons",
       "author": "MTGGoldfish",
       "colors": [
@@ -1130,6 +851,285 @@
         {
           "count": 1,
           "name": "Price of Freedom"
+        }
+      ]
+    },
+    {
+      "name": "Jeskai Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 3,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 3,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 1,
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Jeskai Revelation"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Divide by Zero"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 2,
+          "name": "Thor, God of Thunder"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 1,
+          "name": "Sundown Pass"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Anger of the Gods"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Soulless Jailer"
+        },
+        {
+          "count": 1,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Sphinx of the Final Word"
+        },
+        {
+          "count": 1,
+          "name": "Airbender's Reversal"
+        },
+        {
+          "count": 2,
+          "name": "Ghost Vacuum"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Self-Bounce",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Clearwater Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Cryogen Relic"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 4,
+          "name": "Fear of Isolation"
+        },
+        {
+          "count": 4,
+          "name": "Shipwreck Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Hopeless Nightmare"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Momentum Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Narset, Parter of Veils"
+        },
+        {
+          "count": 4,
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 3,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 3,
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 4,
+          "name": "This Town Ain't Big Enough"
+        },
+        {
+          "count": 2,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 2,
+          "name": "Underground River"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Darkslick Shores"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Change the Equation"
+        },
+        {
+          "count": 2,
+          "name": "Go Blank"
+        },
+        {
+          "count": 4,
+          "name": "Grim Bauble"
+        },
+        {
+          "count": 3,
+          "name": "Invoke Despair"
+        },
+        {
+          "count": 1,
+          "name": "Yorion, Sky Nomad"
+        },
+        {
+          "count": 3,
+          "name": "Unlicensed Hearse"
         }
       ]
     },

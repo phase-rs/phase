@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-08-26T00:00:00Z",
+  "updated": "2026-08-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -738,8 +738,8 @@
       "name": "Devoted Combo",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
         "B",
+        "G",
         "W"
       ],
       "tags": [
@@ -747,60 +747,20 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Agatha's Soul Cauldron"
-        },
-        {
           "count": 2,
-          "name": "Birds of Paradise"
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
-          "name": "Beastrider Vanguard"
-        },
-        {
-          "count": 4,
-          "name": "Delighted Halfling"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 1,
-          "name": "Summoner's Pact"
-        },
-        {
-          "count": 4,
-          "name": "Devoted Druid"
-        },
-        {
-          "count": 2,
-          "name": "Dryad Arbor"
-        },
-        {
-          "count": 4,
-          "name": "Green Sun's Zenith"
-        },
-        {
-          "count": 1,
-          "name": "Fiend Artisan"
-        },
-        {
-          "count": 3,
-          "name": "Forest"
+          "name": "Shang-Chi, Master of Kung Fu"
         },
         {
           "count": 4,
           "name": "Leyline of Abundance"
         },
         {
-          "count": 3,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 2,
-          "name": "Overgrown Tomb"
+          "count": 1,
+          "name": "Ouroboroid"
         },
         {
           "count": 4,
@@ -808,27 +768,11 @@
         },
         {
           "count": 1,
-          "name": "Nurturing Peatland"
+          "name": "Craterhoof Behemoth"
         },
         {
           "count": 1,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 2,
-          "name": "Verdant Catacombs"
-        },
-        {
-          "count": 2,
-          "name": "Shang-Chi, Master of Kung Fu"
-        },
-        {
-          "count": 1,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Tyvar, Jubilant Brawler"
+          "name": "Forest"
         },
         {
           "count": 1,
@@ -836,58 +780,90 @@
         },
         {
           "count": 2,
-          "name": "Windswept Heath"
+          "name": "Agatha's Soul Cauldron"
+        },
+        {
+          "count": 4,
+          "name": "Delighted Halfling"
+        },
+        {
+          "count": 4,
+          "name": "Tyvar, Jubilant Brawler"
         },
         {
           "count": 1,
-          "name": "Vizier of Remedies"
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Nurturing Peatland"
+        },
+        {
+          "count": 1,
+          "name": "Fiend Artisan"
         },
         {
           "count": 1,
           "name": "Walking Ballista"
         },
         {
+          "count": 3,
+          "name": "Verdant Catacombs"
+        },
+        {
+          "count": 1,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 3,
+          "name": "Birds of Paradise"
+        },
+        {
+          "count": 4,
+          "name": "Devoted Druid"
+        },
+        {
+          "count": 2,
+          "name": "Misty Rainforest"
+        },
+        {
+          "count": 1,
+          "name": "Postmortem Lunge"
+        },
+        {
+          "count": 1,
+          "name": "Dryad Arbor"
+        },
+        {
+          "count": 2,
+          "name": "Windswept Heath"
+        },
+        {
           "count": 2,
           "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Duskwatch Recruiter"
+        },
+        {
+          "count": 1,
+          "name": "Vizier of Remedies"
+        },
+        {
+          "count": 4,
+          "name": "Green Sun's Zenith"
         },
         {
           "count": 4,
           "name": "Badgermole Cub"
         },
         {
-          "count": 1,
-          "name": "Horizon Canopy"
+          "count": 2,
+          "name": "Forest"
         }
       ],
       "sideboard": [
-        {
-          "count": 1,
-          "name": "Agatha's Soul Cauldron"
-        },
-        {
-          "count": 1,
-          "name": "Collector Ouphe"
-        },
-        {
-          "count": 1,
-          "name": "Crystal Barricade"
-        },
-        {
-          "count": 1,
-          "name": "Dewdrop Cure"
-        },
-        {
-          "count": 1,
-          "name": "Drannith Magistrate"
-        },
-        {
-          "count": 2,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Grist, the Hunger Tide"
-        },
         {
           "count": 1,
           "name": "Guerrilla Gorilla"
@@ -901,12 +877,32 @@
           "name": "Vexing Bauble"
         },
         {
+          "count": 1,
+          "name": "Grist, the Hunger Tide"
+        },
+        {
           "count": 2,
-          "name": "Fatal Push"
+          "name": "Endurance"
+        },
+        {
+          "count": 2,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
-          "name": "Culling Ritual"
+          "name": "Collector Ouphe"
+        },
+        {
+          "count": 1,
+          "name": "Kraul Harpooner"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 2,
+          "name": "Force of Vigor"
         }
       ]
     },

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-26T00:00:00Z",
+  "updated": "2026-08-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -258,6 +258,191 @@
       ]
     },
     {
+      "name": "4c Control",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "U",
+        "B",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Consult the Star Charts"
+        },
+        {
+          "count": 1,
+          "name": "Cori Mountain Monastery"
+        },
+        {
+          "count": 2,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 2,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 2,
+          "name": "Flashback"
+        },
+        {
+          "count": 2,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 1,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 4,
+          "name": "Jeskai Revelation"
+        },
+        {
+          "count": 4,
+          "name": "Inevitable Defeat"
+        },
+        {
+          "count": 3,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 2,
+          "name": "Shattered Sanctum"
+        },
+        {
+          "count": 1,
+          "name": "Lightning Helix"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Mistrise Village"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 2,
+          "name": "No More Lies"
+        },
+        {
+          "count": 1,
+          "name": "North Wind Avatar"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Sear"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stock Up"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 1,
+          "name": "Sunbillow Verge"
+        },
+        {
+          "count": 1,
+          "name": "Sundown Pass"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 2,
+          "name": "Together as One"
+        },
+        {
+          "count": 2,
+          "name": "Day of Judgment"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Ancient Vendetta"
+        },
+        {
+          "count": 1,
+          "name": "Day of Judgment"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "Outrageous Robbery"
+        },
+        {
+          "count": 1,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 1,
+          "name": "Riverchurn Monument"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Sphinx of the Final Word"
+        },
+        {
+          "count": 2,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        }
+      ]
+    },
+    {
       "name": "Izzet Spellementals",
       "author": "MTGGoldfish",
       "colors": [
@@ -393,183 +578,6 @@
         {
           "count": 2,
           "name": "Hydro-Man, Fluid Felon"
-        }
-      ]
-    },
-    {
-      "name": "4c Control",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B",
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "North Wind Avatar"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 1,
-          "name": "Sundown Pass"
-        },
-        {
-          "count": 1,
-          "name": "Sunbillow Verge"
-        },
-        {
-          "count": 3,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 2,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 2,
-          "name": "Shattered Sanctum"
-        },
-        {
-          "count": 1,
-          "name": "Mistrise Village"
-        },
-        {
-          "count": 4,
-          "name": "Great Hall of the Biblioplex"
-        },
-        {
-          "count": 2,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 2,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 3,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Day of Judgment"
-        },
-        {
-          "count": 4,
-          "name": "Stock Up"
-        },
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 2,
-          "name": "Sear"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 1,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 2,
-          "name": "No More Lies"
-        },
-        {
-          "count": 2,
-          "name": "Get Lost"
-        },
-        {
-          "count": 4,
-          "name": "Jeskai Revelation"
-        },
-        {
-          "count": 4,
-          "name": "Inevitable Defeat"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Day of Judgment"
-        },
-        {
-          "count": 2,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Outrageous Robbery"
-        },
-        {
-          "count": 1,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 1,
-          "name": "Riverchurn Monument"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Ancient Vendetta"
-        },
-        {
-          "count": 2,
-          "name": "Get Lost"
         }
       ]
     },
@@ -1219,26 +1227,26 @@
       "main": [
         {
           "count": 4,
-          "name": "Practiced Offense"
+          "name": "Momo, Friendly Flier"
         },
         {
-          "count": 2,
-          "name": "We Say Thee Nay!"
+          "count": 3,
+          "name": "Erode"
         },
         {
           "count": 1,
-          "name": "Nurturing Pixie"
+          "name": "Flitterwing Nuisance"
         },
         {
           "count": 4,
           "name": "Quantum Riddler"
         },
         {
-          "count": 5,
+          "count": 6,
           "name": "Plains"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Steamcore Scholar"
         },
         {
@@ -1254,14 +1262,6 @@
           "name": "Starfield Shepherd"
         },
         {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
           "count": 2,
           "name": "Abandoned Air Temple"
         },
@@ -1270,34 +1270,42 @@
           "name": "Hallowed Fountain"
         },
         {
-          "count": 4,
-          "name": "Multiversal Passage"
+          "count": 3,
+          "name": "Stirring Hopesinger"
         },
         {
-          "count": 2,
-          "name": "Monica Rambeau"
+          "count": 4,
+          "name": "Multiversal Passage"
         },
         {
           "count": 4,
           "name": "Sage of the Skies"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Starting Town"
         },
         {
           "count": 4,
-          "name": "Momo, Friendly Flier"
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 2,
+          "name": "Glen Elendra Guardian"
+        },
+        {
+          "count": 4,
+          "name": "Practiced Offense"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Morningtide's Light"
+          "name": "Get Lost"
         },
         {
-          "count": 2,
-          "name": "Flashfreeze"
+          "count": 4,
+          "name": "Rest in Peace"
         },
         {
           "count": 2,
@@ -1305,19 +1313,19 @@
         },
         {
           "count": 3,
-          "name": "Rest in Peace"
+          "name": "Flashfreeze"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Spider-Sense"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Erode"
         },
         {
           "count": 2,
-          "name": "Authority of the Consuls"
+          "name": "Morningtide's Light"
         }
       ]
     }
