@@ -3619,7 +3619,9 @@ pub(super) fn handle_resolution_choice(
                         emit_reveal_until_resolved: None,
                         manifested_for_continuation: None,
                         kept_delivery: crate::types::game_state::DigKeptDeliveryOutcome::pending(
-                            state, kept, kept_zone,
+                            state,
+                            kept.clone(),
+                            kept_zone,
                         ),
                         continuation_targets: kept.clone(),
                         rest_delivery: Default::default(),
