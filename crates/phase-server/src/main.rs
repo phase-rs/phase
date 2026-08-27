@@ -8869,6 +8869,7 @@ mod state_transport_derived_tests {
             ));
         }
     }
+    #[test]
     fn turn_controller_receives_low_use_window_recommendation_instead_of_controlled_seat() {
         let controlled = PlayerId(0);
         let controller = PlayerId(1);
