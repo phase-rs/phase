@@ -16,9 +16,9 @@ use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_for_simulation, apply_interaction_with_rejection, apply_with_rejection,
-    preflight_debug_action_with_rejection, resume_restored_stack_automation,
-    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
+    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
+    resume_restored_stack_automation, RestoredStackAutomationOutcome,
+    RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::preview::{

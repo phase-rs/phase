@@ -8529,39 +8529,6 @@ fn store_direct_auto_pass_request(
     );
 }
 
-/// Stores Resolve All's existing durable "do not make me pass each frame"
-/// preference without constructing a Phase-2 direct-priority session.
-pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
-    state: &mut GameState,
-    auto_pass_owner: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
-    let WaitingFor::Priority { player } = &state.waiting_for else {
-        unreachable!("auto-pass may only be installed from a Priority window");
-    };
-    let pass_immediately = *player == auto_pass_owner;
-    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, *player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                .to_string(),
-        ));
-    }
-    store_legacy_auto_pass_request(state, auto_pass_owner, AutoPassRequest::UntilStackEmpty);
-    if !pass_immediately {
-        return Ok(ActionResult {
-            events: std::mem::take(events),
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        });
-    }
-    let waiting_for = pass_priority_once_with_pipeline(state, events, None)?.waiting_for;
-    Ok(ActionResult {
-        events: std::mem::take(events),
-        waiting_for,
-        log_entries: vec![],
-    })
-}
-
 /// Retains Resolve All's durable no-manual-priority preference when a rules
 /// guard prevents its initial immediate pass. The normal auto-pass loop resumes
 /// after that required action completes.
