@@ -244,8 +244,6 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         ClientMessage::ClientHello { .. }
         | ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
-        | ClientMessage::Action { .. }
-        | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SubscribeLobby

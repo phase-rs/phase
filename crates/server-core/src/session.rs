@@ -7,12 +7,11 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, apply_with_rejection,
+    apply_with_rejection,
     resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
     RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
-use engine::game::layers::flush_layers;
 use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
@@ -25,7 +24,7 @@ use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
+use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::log::GameLogEntry;
