@@ -49,6 +49,12 @@
     "collapse": "Réduire la progression de résolution",
     "expand": "Développer la progression de résolution"
   },
+  "restoredAutomation": {
+    "dismiss": "Fermer",
+    "noop": {"title": "Partie sauvegardée chargée", "summary_one": "Aucune automatisation de pile n’était nécessaire pour reprendre.", "summary_other": "Aucune automatisation de pile n’était nécessaire pour reprendre."},
+    "progressed": {"title": "Automatisation de la pile reprise", "summary_one": "Le moteur a effectué {{count}} résolution automatisée.", "summary_other": "Le moteur a effectué {{count}} résolutions automatisées.", "omitted_one": "{{count}} événement intermédiaire a été omis.", "omitted_other": "{{count}} événements intermédiaires ont été omis."},
+    "zeroResolutionRepair": {"title": "Automatisation de la pile réparée", "summary_one": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise.", "summary_other": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise."}
+  },
   "resolveAllConsent": {
     "eyebrow": "Tout résoudre",
     "title": "Approuver la résolution rapide ?",
