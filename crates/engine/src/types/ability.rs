@@ -15,7 +15,9 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint, TriggerSourceContext,
 };
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
@@ -26726,9 +26728,17 @@ pub struct AttachTargetBindings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct AttachTargetBindingsInner {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_attach_attachment_targets"
+    )]
     attachment_targets: Vec<ObjectIncarnationRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_attach_host_target"
+    )]
     host_target: Option<ObjectIncarnationRef>,
     /// Attachments that the immediately preceding forward-result instruction
     /// moved to the battlefield. This is distinct
@@ -26736,6 +26746,55 @@ struct AttachTargetBindingsInner {
     /// population, while the latter records the one object the player selected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attachment_candidates: Vec<ObjectIncarnationRef>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AttachObjectBindingCompat {
+    Exact(ObjectIncarnationRef),
+    Legacy(TargetRef),
+}
+
+impl AttachObjectBindingCompat {
+    fn into_object_ref<E: de::Error>(self) -> Result<Option<ObjectIncarnationRef>, E> {
+        match self {
+            Self::Exact(reference) => Ok(Some(reference)),
+            Self::Legacy(TargetRef::Object(object_id)) => Ok(Some(ObjectIncarnationRef::of(
+                object_id,
+                LEGACY_INCARNATION,
+            ))),
+            Self::Legacy(TargetRef::Player(_)) => Ok(None),
+        }
+    }
+}
+
+fn deserialize_attach_attachment_targets<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ObjectIncarnationRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<AttachObjectBindingCompat>::deserialize(deserializer)?
+        .into_iter()
+        .try_fold(Vec::new(), |mut bindings, binding| {
+            let Some(reference) = binding.into_object_ref()? else {
+                return Err(de::Error::custom("attachment role must be an object"));
+            };
+            bindings.push(reference);
+            Ok(bindings)
+        })
+}
+
+fn deserialize_attach_host_target<'de, D>(
+    deserializer: D,
+) -> Result<Option<ObjectIncarnationRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<AttachObjectBindingCompat>::deserialize(deserializer)?
+        .map(AttachObjectBindingCompat::into_object_ref)
+        .transpose()
+        .map(Option::flatten)
 }
 
 impl AttachTargetBindings {
@@ -28373,6 +28432,22 @@ mod tests {
         }))
         .expect("empty attachment bindings deserialize");
         assert!(empty.attach_target_bindings.is_empty());
+
+        let legacy: SpellContext = serde_json::from_value(serde_json::json!({
+            "attach_target_bindings": {
+                "attachment_targets": [{ "Object": 11 }],
+                "host_target": { "Object": 12 }
+            }
+        }))
+        .expect("legacy TargetRef attachment bindings deserialize");
+        assert_eq!(
+            legacy.attach_target_bindings.attachment_targets(),
+            &[ObjectIncarnationRef::of(ObjectId(11), LEGACY_INCARNATION)]
+        );
+        assert_eq!(
+            legacy.attach_target_bindings.host_target(),
+            Some(&ObjectIncarnationRef::of(ObjectId(12), LEGACY_INCARNATION))
+        );
 
         let mut populated = SpellContext::default();
         populated

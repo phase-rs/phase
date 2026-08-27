@@ -5662,6 +5662,7 @@ pub(super) fn handle_resolution_choice(
                             },
                         )
                         .expect("attachment choice child frame must push atomically");
+                    set_priority(state, player);
                     effects::attach::resolve(&mut *state, &operation, events)
                         .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                     let opened_follow_up_attach_choice =

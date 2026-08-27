@@ -110,15 +110,11 @@ fn sokka_and_suki_event_context_attaches_the_selected_equipment() {
 }
 
 #[test]
-fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
+fn gilgamesh_direct_equipment_choice_completes_to_priority() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let samurai = scenario
         .add_creature(P0, "Test Samurai", 2, 2)
-        .with_subtypes(vec!["Samurai"])
-        .id();
-    let other_samurai = scenario
-        .add_creature(P0, "Other Samurai", 2, 2)
         .with_subtypes(vec!["Samurai"])
         .id();
     let gilgamesh = scenario
@@ -148,7 +144,6 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
     cast_for_free(&mut runner, gilgamesh);
     let mut saw_dig_choice = false;
     let mut saw_optional_attach = false;
-    let mut saw_host_choice = false;
     let mut saw_attachment_choice = false;
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
@@ -188,40 +183,23 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
                 );
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
-                if !saw_host_choice {
-                    assert!(
-                        cards.contains(&samurai),
-                        "Gilgamesh's resolution-time host choice must offer the chosen Samurai"
-                    );
-                    assert!(
-                        cards.contains(&other_samurai),
-                        "Gilgamesh's host choice must offer every legal Samurai"
-                    );
-                    runner
-                        .act(GameAction::SelectCards {
-                            cards: vec![samurai],
-                        })
-                        .expect("selecting the Samurai host must be accepted");
-                    saw_host_choice = true;
-                } else {
-                    assert_eq!(
-                        cards.len(),
-                        2,
-                        "the attachment choice must be scoped to the two Equipment moved by this Dig"
-                    );
-                    assert!(cards.contains(&dug_equipment));
-                    assert!(cards.contains(&other_dug_equipment));
-                    assert!(
-                        !cards.contains(&preexisting_equipment),
-                        "a matching Equipment that was already on the battlefield is not 'one of them'"
-                    );
-                    runner
-                        .act(GameAction::SelectCards {
-                            cards: vec![other_dug_equipment],
-                        })
-                        .expect("selecting the moved Equipment must be accepted");
-                    saw_attachment_choice = true;
-                }
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "the direct attachment choice must be scoped to the two Equipment moved by this Dig"
+                );
+                assert!(cards.contains(&dug_equipment));
+                assert!(cards.contains(&other_dug_equipment));
+                assert!(
+                    !cards.contains(&preexisting_equipment),
+                    "a matching Equipment that was already on the battlefield is not 'one of them'"
+                );
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![other_dug_equipment],
+                    })
+                    .expect("selecting the moved Equipment must be accepted");
+                saw_attachment_choice = true;
             }
             other => panic!("unexpected Gilgamesh resolution prompt: {other:?}"),
         }
@@ -231,10 +209,6 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
     assert!(
         saw_optional_attach,
         "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
-    );
-    assert!(
-        saw_host_choice,
-        "the optional attachment must first prompt for a Samurai host"
     );
     assert_eq!(
         runner.state().objects[&other_dug_equipment].attached_to,
@@ -254,11 +228,15 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
 }
 
 #[test]
-fn gilgamesh_singleton_samurai_and_equipment_attach_without_zone_choice() {
+fn gilgamesh_host_choice_then_singleton_equipment_completes_to_priority() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let samurai = scenario
         .add_creature(P0, "Only Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    let other_samurai = scenario
+        .add_creature(P0, "Other Samurai", 2, 2)
         .with_subtypes(vec!["Samurai"])
         .id();
     let gilgamesh = scenario
@@ -287,10 +265,11 @@ fn gilgamesh_singleton_samurai_and_equipment_attach_without_zone_choice() {
     cast_for_free(&mut runner, gilgamesh);
     let mut saw_dig_choice = false;
     let mut saw_optional_attach = false;
+    let mut saw_host_choice = false;
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                if saw_optional_attach && runner.state().stack.is_empty() {
+                if saw_host_choice && runner.state().stack.is_empty() {
                     break;
                 }
                 runner
@@ -311,8 +290,19 @@ fn gilgamesh_singleton_samurai_and_equipment_attach_without_zone_choice() {
                     .expect("accepting Gilgamesh's optional attachment must work");
                 saw_optional_attach = true;
             }
-            WaitingFor::EffectZoneChoice { .. } => {
-                panic!("singleton Samurai and Equipment must bind deterministically")
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(
+                    !saw_host_choice,
+                    "only the Samurai host choice is interactive"
+                );
+                assert!(cards.contains(&samurai));
+                assert!(cards.contains(&other_samurai));
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![samurai],
+                    })
+                    .expect("selecting the Samurai host must consume the prompt");
+                saw_host_choice = true;
             }
             WaitingFor::TriggerTargetSelection { .. } => {
                 panic!("Gilgamesh's non-targeted Samurai choice must not be stack targeting")
@@ -326,10 +316,14 @@ fn gilgamesh_singleton_samurai_and_equipment_attach_without_zone_choice() {
         saw_optional_attach,
         "a kept Equipment entering from Gilgamesh's Dig must open the optional attachment"
     );
+    assert!(
+        saw_host_choice,
+        "multiple Samurai must require the host choice"
+    );
     assert_eq!(
         runner.state().objects[&equipment].attached_to,
         Some(AttachTarget::Object(samurai)),
-        "singleton host and event-scoped attachment candidates bind without an extra choice"
+        "the singleton Equipment must attach after its host choice without retaining a stale prompt"
     );
 }
 

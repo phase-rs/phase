@@ -117,77 +117,89 @@ pub fn resolve(
     // `ability.targets` here would steal the ParentTarget bearer (Zack Fair).
     // `Any`/`Any` pairs share one iterator so [equipment, host] slots stay ordered.
     let mut target_slots = ability.targets.iter();
-    let attachment_id = if !ability.attach_attachment_candidates().is_empty() {
+    let attachment_ids = if !ability.attach_attachment_targets().is_empty() {
         // CR 608.2d: This event-scoped Attach may resolve only the explicitly
         // selected member of its forwarded candidate set. Do not fall back to
         // a trigger event or a general ParentTarget projection.
-        resolve_bound_attachment_target(state, ability, attachment_filter)
+        resolve_bound_attachment_targets(state, ability, attachment_filter)
     } else if matches!(attachment_filter, TargetFilter::ParentTarget) {
         resolve_parent_target_attachment_from_trigger(state)
             .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
+            .into_iter()
+            .collect()
     } else if attachment_filter_uses_explicit_target_slot(attachment_filter) {
         resolve_bound_attachment_target(state, ability, attachment_filter)
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, &mut target_slots))
+            .into_iter()
+            .collect()
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
+            .into_iter()
+            .collect()
+    };
+    if attachment_ids.is_empty() {
+        return Err(EffectError::MissingParam(
+            "No attachment for Attach".to_string(),
+        ));
     }
-    .ok_or_else(|| EffectError::MissingParam("No attachment for Attach".to_string()))?;
     let target_id = resolve_attach_target(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
-    // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
-    // object it can't legally enchant, the Aura doesn't move. Delegate to the single
-    // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
-    // (protection/prohibition) + the Aura's Enchant filter + the zone gate. A bespoke
-    // Enchant-only check would silently miss zone/protection mismatches. Scoped to Aura
-    // attachments so Equipment/Fortification resolution is unchanged.
-    let attacher_is_aura = state
-        .objects
-        .get(&attachment_id)
-        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
-    if attacher_is_aura
-        && !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id)
-    {
-        // CR 303.4j: the aura doesn't move.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
-
-    // CR 701.3a + CR 614.1a: Route the attach through the replacement pipeline
-    // so an "as it becomes attached, choose …" definition on the attachment
-    // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
-    // attachment resolves — the attach-time analogue of "as ~ enters, choose".
-    let proposed = crate::types::proposed_event::ProposedEvent::Attach {
-        attachment_id,
-        target_id,
-        applied: Default::default(),
-    };
-    match crate::game::replacement::replace_event(state, proposed, events) {
-        crate::game::replacement::ReplacementResult::Execute(_) => {
-            if let Some(waiting_for) =
-                deliver_attach(state, attachment_id, target_id, source_id, events)
-            {
-                state.waiting_for = waiting_for;
-            }
-        }
-        crate::game::replacement::ReplacementResult::Prevented => {
+    for attachment_id in attachment_ids {
+        // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
+        // object it can't legally enchant, the Aura doesn't move. Delegate to the single
+        // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
+        // (protection/prohibition) + the Aura's Enchant filter + the zone gate. A bespoke
+        // Enchant-only check would silently miss zone/protection mismatches. Scoped to Aura
+        // attachments so Equipment/Fortification resolution is unchanged.
+        let attacher_is_aura = state
+            .objects
+            .get(&attachment_id)
+            .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
+        if attacher_is_aura
+            && !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id)
+        {
+            // CR 303.4j: the aura doesn't move.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id,
                 subject: None,
             });
+            continue;
         }
-        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
-            // CR 616.1: multiple "becomes attached" replacements apply — park
-            // for the ordering choice. `handle_replacement_choice`'s
-            // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
-            // the player orders them.
-            crate::game::replacement::park_waiting_for(state, player);
+
+        // CR 701.3a + CR 614.1a: Route the attach through the replacement pipeline
+        // so an "as it becomes attached, choose …" definition on the attachment
+        // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
+        // attachment resolves — the attach-time analogue of "as ~ enters, choose".
+        let proposed = crate::types::proposed_event::ProposedEvent::Attach {
+            attachment_id,
+            target_id,
+            applied: Default::default(),
+        };
+        match crate::game::replacement::replace_event(state, proposed, events) {
+            crate::game::replacement::ReplacementResult::Execute(_) => {
+                if let Some(waiting_for) =
+                    deliver_attach(state, attachment_id, target_id, source_id, events)
+                {
+                    state.waiting_for = waiting_for;
+                }
+            }
+            crate::game::replacement::ReplacementResult::Prevented => {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id,
+                    subject: None,
+                });
+            }
+            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1: multiple "becomes attached" replacements apply — park
+                // for the ordering choice. `handle_replacement_choice`'s
+                // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
+                // the player orders them.
+                crate::game::replacement::park_waiting_for(state, player);
+            }
         }
     }
 
@@ -625,29 +637,41 @@ fn resolve_bound_attachment_target(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<ObjectId> {
+    resolve_bound_attachment_targets(state, ability, filter)
+        .into_iter()
+        .next()
+}
+
+fn resolve_bound_attachment_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
     if !ability.attach_attachment_candidates().is_empty() {
         return ability
             .attach_attachment_targets()
             .iter()
-            .find_map(|target| {
+            .filter_map(|target| {
                 (target.is_current(state)
                     && ability
                         .attach_attachment_candidates()
                         .iter()
                         .any(|candidate| candidate == target))
                 .then_some(target.object_id)
-            });
+            })
+            .collect();
     }
     let ctx = FilterContext::from_ability(ability);
     let effective = crate::game::effects::resolved_object_filter(ability, filter);
     ability
         .attach_attachment_targets()
         .iter()
-        .find_map(|target| {
+        .filter_map(|target| {
             (target.is_current(state)
                 && matches_target_filter(state, target.object_id, &effective, &ctx))
             .then_some(target.object_id)
         })
+        .collect()
 }
 
 /// Resolve the host role of an attachment instruction. A
@@ -2668,6 +2692,20 @@ mod tests {
         assert_eq!(
             state.objects.get(&second).unwrap().attached_to,
             Some(AttachTarget::Object(host))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "each selected Equipment must resolve its own attachment"
         );
     }
 
