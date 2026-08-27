@@ -15,12 +15,14 @@ use crate::types::ability::{
 use crate::types::card_type::CardType;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::FormatConfig;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
+    ActionResult, CastPaymentMode, CastingVariant, PendingCast, ProductionOverride,
+    TargetSelectionProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+use crate::types::log::{GameLogEntry, LogCategory, LogSegment};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
@@ -76,6 +78,153 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
             )),
         },
     }
+}
+
+fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
+    GameLogEntry {
+        seq,
+        turn: 1,
+        phase: Phase::PreCombatMain,
+        category: LogCategory::Stack,
+        segments: vec![LogSegment::Text("automated stack resolution".to_string())],
+        presentation: Default::default(),
+    }
+}
+
+fn restored_automation_action_result(
+    events: Vec<GameEvent>,
+    log_entries: Vec<GameLogEntry>,
+) -> ActionResult {
+    ActionResult {
+        events,
+        waiting_for: WaitingFor::Priority { player: P0 },
+        log_entries,
+    }
+}
+
+#[test]
+fn restored_stack_automation_presentation_bounds_transport_but_retains_full_engine_events() {
+    let event_count = 2_001_u64;
+    let mut events: Vec<_> = (0..event_count - 1)
+        .map(|id| GameEvent::StackResolved {
+            object_id: ObjectId(id),
+        })
+        .collect();
+    events.push(GameEvent::GameOver { winner: Some(P0) });
+    let log_count = MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES as u32 + 7;
+    let logs: Vec<_> = (0..log_count).map(restored_automation_log_entry).collect();
+    let mut full_result = restored_automation_action_result(events, logs);
+    full_result.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    let resumed = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::Progressed(full_result),
+    );
+
+    assert_eq!(
+        resumed.action_result().events.len(),
+        event_count as usize,
+        "the engine keeps every event needed for lifecycle bookkeeping"
+    );
+    assert!(matches!(
+        resumed.action_result().events.last(),
+        Some(GameEvent::GameOver { winner: Some(P0) })
+    ));
+    assert!(matches!(
+        resumed.action_result().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed
+    );
+    assert_eq!(
+        resumed.presentation.automated_resolution_count,
+        event_count as u32 - 1
+    );
+    assert_eq!(resumed.presentation.omitted_event_count, event_count as u32);
+    assert_eq!(
+        resumed.presentation.log_entries.len(),
+        MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES
+    );
+    assert_eq!(
+        resumed
+            .presentation
+            .log_entries
+            .first()
+            .expect("bounded tail is non-empty")
+            .seq,
+        log_count - MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES as u32
+    );
+    assert_eq!(
+        resumed
+            .presentation
+            .log_entries
+            .last()
+            .expect("bounded tail is non-empty")
+            .seq,
+        log_count - 1
+    );
+
+    let wire = serde_json::to_value(&resumed).expect("presentation serializes");
+    assert!(
+        wire.get("result").is_none(),
+        "the unbounded internal result must never serialize"
+    );
+    assert_eq!(
+        wire["presentation"]["omittedEventCount"],
+        serde_json::json!(event_count),
+        "the transport gets an explicit lossless count instead of the event burst"
+    );
+}
+
+#[test]
+fn restored_stack_automation_presentation_distinguishes_noop_progress_and_repair() {
+    let noop = RestoredStackAutomationResume::from_completed(RestoredStackAutomationResult::Noop(
+        restored_automation_action_result(Vec::new(), Vec::new()),
+    ));
+    let progressed = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::Progressed(restored_automation_action_result(
+            vec![
+                GameEvent::PriorityPassed { player_id: P0 },
+                GameEvent::StackResolved {
+                    object_id: ObjectId(1),
+                },
+            ],
+            vec![restored_automation_log_entry(1)],
+        )),
+    );
+    let repair = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::ZeroResolutionRepair(restored_automation_action_result(
+            vec![GameEvent::PriorityPassed { player_id: P0 }],
+            Vec::new(),
+        )),
+    );
+
+    assert_eq!(
+        noop.presentation.outcome,
+        RestoredStackAutomationOutcome::Noop
+    );
+    assert_eq!(noop.presentation.automated_resolution_count, 0);
+    assert_eq!(noop.presentation.omitted_event_count, 0);
+
+    assert_eq!(
+        progressed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed
+    );
+    assert_eq!(progressed.presentation.automated_resolution_count, 1);
+    assert_eq!(progressed.presentation.omitted_event_count, 2);
+    assert_eq!(progressed.presentation.log_entries.len(), 1);
+    assert_eq!(
+        progressed.action_result().events.len(),
+        2,
+        "small results still retain their normal engine event slice"
+    );
+
+    assert_eq!(
+        repair.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair
+    );
+    assert_eq!(repair.presentation.automated_resolution_count, 0);
+    assert_eq!(repair.presentation.omitted_event_count, 1);
 }
 
 #[test]

@@ -92,6 +92,106 @@ impl RestoredStackAutomationResult {
     }
 }
 
+/// The maximum number of engine-authored log entries included in a restored
+/// automation transport presentation.
+///
+/// The full [`ActionResult`] remains available to the engine, but one resumed
+/// stack session can legitimately emit thousands of lifecycle events.  A
+/// transport boundary needs a bounded tail so it can deliver the final state
+/// rather than rejecting the whole update as oversized.
+pub const MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES: usize = 128;
+
+/// The transport-visible kind of a completed restored stack automation.
+///
+/// This intentionally carries no rules payload. The completed game state is
+/// the authority for the next interaction; the presentation only explains why
+/// one update represents an automated burst.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RestoredStackAutomationOutcome {
+    Noop,
+    Progressed,
+    ZeroResolutionRepair,
+}
+
+/// Bounded, engine-authored presentation for one restored stack automation
+/// transition.
+///
+/// `omitted_event_count` counts the complete internal event slice deliberately
+/// withheld from the transport form. `automated_resolution_count` is derived
+/// from its exact `StackResolved` events only for a progressed run; a no-op or
+/// repair is never presented as a resolution even if a malformed internal
+/// result were to carry unrelated events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredStackAutomationPresentation {
+    pub outcome: RestoredStackAutomationOutcome,
+    pub automated_resolution_count: u32,
+    pub omitted_event_count: u32,
+    pub log_entries: Vec<GameLogEntry>,
+}
+
+/// A completed restored stack automation transition and its bounded transport
+/// presentation.
+///
+/// The complete result is retained for engine-owned lifecycle work and tests,
+/// but skipped by serde so consumers cannot accidentally put an unbounded
+/// event burst on the wire. The presentation is derived exactly once, after
+/// the ordinary session runner has completed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredStackAutomationResume {
+    #[serde(skip)]
+    result: RestoredStackAutomationResult,
+    pub presentation: RestoredStackAutomationPresentation,
+}
+
+impl RestoredStackAutomationResume {
+    pub(crate) fn from_completed(result: RestoredStackAutomationResult) -> Self {
+        let (outcome, automated_resolution_count) = match &result {
+            RestoredStackAutomationResult::Noop(_) => (RestoredStackAutomationOutcome::Noop, 0),
+            RestoredStackAutomationResult::Progressed(action_result) => (
+                RestoredStackAutomationOutcome::Progressed,
+                action_result
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            ),
+            RestoredStackAutomationResult::ZeroResolutionRepair(_) => {
+                (RestoredStackAutomationOutcome::ZeroResolutionRepair, 0)
+            }
+        };
+        let action_result = result.action_result();
+        let omitted_event_count = action_result.events.len().try_into().unwrap_or(u32::MAX);
+        let log_entries = bounded_restored_stack_automation_log_tail(&action_result.log_entries);
+
+        Self {
+            result,
+            presentation: RestoredStackAutomationPresentation {
+                outcome,
+                automated_resolution_count,
+                omitted_event_count,
+                log_entries,
+            },
+        }
+    }
+
+    /// The complete, engine-internal action result for this transition.
+    pub fn action_result(&self) -> &ActionResult {
+        self.result.action_result()
+    }
+}
+
+fn bounded_restored_stack_automation_log_tail(entries: &[GameLogEntry]) -> Vec<GameLogEntry> {
+    let keep_from = entries
+        .len()
+        .saturating_sub(MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES);
+    entries[keep_from..].to_vec()
+}
+
 /// Resolves the greatest prefix which has already received every priority
 /// representative's explicit, run-scoped Resolve All consent.
 ///
@@ -399,8 +499,8 @@ pub fn recover_orphaned_resolve_all(_: &mut GameState) -> Option<ResolveAllFastF
 /// Explicitly resumes coherent persisted stack automation through the ordinary
 /// runner, or repairs an incoherent saved authorization without resolving a
 /// stack entry.
-pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackAutomationResult {
-    match classify_restored_stack_automation(state) {
+pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackAutomationResume {
+    let result = match classify_restored_stack_automation(state) {
         RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(ActionResult {
             events: Vec::new(),
             waiting_for: state.waiting_for.clone(),
@@ -416,7 +516,8 @@ pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackA
         RestoredStackAutomation::Repair => RestoredStackAutomationResult::ZeroResolutionRepair(
             repair_restored_stack_automation(state),
         ),
-    }
+    };
+    RestoredStackAutomationResume::from_completed(result)
 }
 
 fn restored_stack_resolution_session_is_coherent(

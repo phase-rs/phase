@@ -8,7 +8,7 @@ use engine::game::engine::{
     apply, classify_restored_stack_automation, pending_resolve_all_ready_requester,
     resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
     resume_restored_stack_automation, ResolveAllContinuation, ResolveAllReadyAccess,
-    RestoredStackAutomation, RestoredStackAutomationResult,
+    RestoredStackAutomation, RestoredStackAutomationOutcome,
 };
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
@@ -1383,11 +1383,13 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
         RestoredStackAutomation::ActiveSession
     );
 
-    let RestoredStackAutomationResult::Progressed(result) =
-        resume_restored_stack_automation(&mut state)
-    else {
-        panic!("a coherent session must enter the ordinary runner");
-    };
+    let resumed = resume_restored_stack_automation(&mut state);
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed,
+        "a coherent session must enter the ordinary runner"
+    );
+    let result = resumed.action_result();
     assert_eq!(
         result
             .events
@@ -1447,11 +1449,13 @@ fn explicit_restore_resume_publishes_revealed_cards_through_the_boundary_journal
         };
     }
 
-    let RestoredStackAutomationResult::Progressed(result) =
-        resume_restored_stack_automation(&mut state)
-    else {
-        panic!("a coherent reveal session must enter the runner");
-    };
+    let resumed = resume_restored_stack_automation(&mut state);
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed,
+        "a coherent reveal session must enter the runner"
+    );
+    let result = resumed.action_result();
     assert!(result.events.iter().any(|event| {
         matches!(event, GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![revealed])
     }));
@@ -1476,11 +1480,13 @@ fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() 
         .expect("fixture has a top stack entry")
         .source_id = ObjectId(99);
 
-    let RestoredStackAutomationResult::ZeroResolutionRepair(result) =
-        resume_restored_stack_automation(&mut state)
-    else {
-        panic!("a stale entry fence must repair, never advance");
-    };
+    let resumed = resume_restored_stack_automation(&mut state);
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair,
+        "a stale entry fence must repair, never advance"
+    );
+    let result = resumed.action_result();
     assert!(
         !result
             .events
@@ -1513,20 +1519,24 @@ fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
         .as_mut()
         .expect("fixture has a session")
         .cursor = entries_len;
-    let RestoredStackAutomationResult::ZeroResolutionRepair(cursor_result) =
-        resume_restored_stack_automation(&mut stale_cursor)
-    else {
-        panic!("an exhausted cursor must repair");
-    };
+    let cursor_resumed = resume_restored_stack_automation(&mut stale_cursor);
+    assert_eq!(
+        cursor_resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair,
+        "an exhausted cursor must repair"
+    );
+    let cursor_result = cursor_resumed.action_result();
     assert!(cursor_result.events.is_empty());
 
     let mut bad_overlay = restored_session_state(0);
     bad_overlay.auto_pass.remove(&P1);
-    let RestoredStackAutomationResult::ZeroResolutionRepair(overlay_result) =
-        resume_restored_stack_automation(&mut bad_overlay)
-    else {
-        panic!("a malformed overlay must repair");
-    };
+    let overlay_resumed = resume_restored_stack_automation(&mut bad_overlay);
+    assert_eq!(
+        overlay_resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair,
+        "a malformed overlay must repair"
+    );
+    let overlay_result = overlay_resumed.action_result();
     assert!(overlay_result.events.is_empty());
     assert_eq!(bad_overlay.stack.len(), 2);
 }
@@ -1649,11 +1659,13 @@ fn recovery_discharges_an_intact_latch() {
         RestoredStackAutomation::LegacyResolveAllReady,
         "generic decode recognizes but does not consume the legacy authorization"
     );
-    let RestoredStackAutomationResult::Progressed(batch) =
-        resume_restored_stack_automation(&mut state)
-    else {
-        panic!("an intact Ready latch resumes through the shared session runner");
-    };
+    let resumed = resume_restored_stack_automation(&mut state);
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed,
+        "an intact Ready latch resumes through the shared session runner"
+    );
+    let batch = resumed.action_result();
 
     assert_eq!(
         batch
@@ -1700,11 +1712,13 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
         "non-vacuity: the fixture must actually carry Ready-era slots"
     );
 
-    let RestoredStackAutomationResult::ZeroResolutionRepair(batch) =
-        resume_restored_stack_automation(&mut state)
-    else {
-        panic!("an incoherent latch must repair without resolving");
-    };
+    let resumed = resume_restored_stack_automation(&mut state);
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair,
+        "an incoherent latch must repair without resolving"
+    );
+    let batch = resumed.action_result();
 
     assert_eq!(
         batch

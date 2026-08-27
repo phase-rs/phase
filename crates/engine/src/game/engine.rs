@@ -82,7 +82,9 @@ pub use super::engine_resolve_batch::{
     recover_orphaned_resolve_all, resolve_all_fast_forward, resolve_all_ready_access,
     resolve_all_ready_prefix, resolve_all_ready_prefix_with, resume_restored_stack_automation,
     ResolveAllCallbackDecision, ResolveAllContinuation, ResolveAllFastForwardResult,
-    ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationResult,
+    ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationOutcome,
+    RestoredStackAutomationPresentation, RestoredStackAutomationResult,
+    RestoredStackAutomationResume, MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES,
 };
 
 #[derive(Debug, Clone, Error)]
