@@ -14,6 +14,7 @@ import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { isObjectReportableToViewer } from "../../viewmodel/gameStateView.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 
 // Most-relevant-first zone ordering. `Library` is intentionally absent — the
 // visibility helper hides library cards, and top-of-library reveals are out of
@@ -314,7 +315,11 @@ function CardReportRow({
   const { handlers: hoverHandlers, firedRef } = useCardHover(obj.id);
   const imageLookup = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
-  const { src: artSrc } = useCardImage(imageLookup.name, {
+  const {
+    src: artSrc,
+    rungs: artRungs,
+    advanceFailedSource,
+  } = useCardImage(imageLookup.name, {
     size: isToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
@@ -347,7 +352,14 @@ function CardReportRow({
       className="relative block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] border border-white/10 bg-black/30"
     >
       {artSrc && (
-        <img src={artSrc} alt="" draggable={false} className="h-full w-full object-cover" />
+        <img
+          src={artSrc}
+          {...getCardImageSrcSetProps(artSrc, artRungs)}
+          alt=""
+          draggable={false}
+          onError={() => advanceFailedSource?.(artSrc)}
+          className="h-full w-full object-cover"
+        />
       )}
     </span>
   );
