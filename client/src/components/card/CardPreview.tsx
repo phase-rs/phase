@@ -88,6 +88,8 @@ export interface CardHoverInfo {
   sourcePrinting?: SourcePrinting;
 }
 
+export type CardPreviewDockPosition = "top-right" | "middle-right";
+
 interface CardPreviewProps {
   cardName: string | null;
   /** In-game object whose details and art metadata belong to this preview.
@@ -104,6 +106,8 @@ interface CardPreviewProps {
    *  covering the board. Drives the "side" card-preview preference. Ignored
    *  when an explicit `position` is given or on mobile. */
   dockSide?: boolean;
+  /** Vertical placement for a side-docked desktop preview. */
+  dockPosition?: CardPreviewDockPosition;
   /** Overrides the mobile-overlay dismiss handler. Contexts that drive the
    *  preview via their own state (e.g. the deck builder's hoveredCard) pass
    *  this so a tap-to-dismiss clears THAT state; defaults to the in-game
@@ -138,6 +142,7 @@ export function CardPreview({
   scryfallId,
   sourcePrinting,
   dockSide,
+  dockPosition,
   onDismiss,
   mobileLayout = "modal",
   handSourceObjectId,
@@ -258,6 +263,7 @@ export function CardPreview({
           scryfallId={scryfallId}
           sourcePrinting={sourcePrinting}
           dockSide={dockSide}
+          dockPosition={dockPosition}
           onDismiss={onDismiss}
           mobileLayout={mobileLayout}
           handOrigin={handOrigin}
@@ -277,6 +283,7 @@ function CardPreviewInner({
   scryfallId,
   sourcePrinting,
   dockSide,
+  dockPosition,
   onDismiss,
   mobileLayout,
   handOrigin,
@@ -290,6 +297,7 @@ function CardPreviewInner({
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
   dockSide?: boolean;
+  dockPosition?: CardPreviewDockPosition;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
   handOrigin: HandPreviewOrigin | null;
@@ -479,10 +487,16 @@ function CardPreviewInner({
   const viewportHeight = typeof window === "undefined" ? 900 : window.innerHeight;
   const gap = 20;
   const margin = 16;
-  const defaultDesktopStyle: React.CSSProperties = {
-    right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
-    top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 1rem)",
-  };
+  const defaultDesktopStyle: React.CSSProperties =
+    dockSide && dockPosition === "middle-right"
+      ? {
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          top: `calc(50% - ${previewHeight / 2}px)`,
+        }
+      : {
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 1rem)",
+        };
 
   useEffect(() => {
     // `dockSide` keeps the preview pinned to `defaultDesktopStyle` (the

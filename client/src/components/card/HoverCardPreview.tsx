@@ -3,7 +3,11 @@ import { useEffect, useState } from "react";
 import { useShiftHeld } from "../../hooks/useShiftHeld.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { CardPreview, type CardHoverInfo } from "./CardPreview.tsx";
+import {
+  CardPreview,
+  type CardHoverInfo,
+  type CardPreviewDockPosition,
+} from "./CardPreview.tsx";
 
 interface HoverCardPreviewProps {
   card: CardHoverInfo | null;
@@ -12,6 +16,7 @@ interface HoverCardPreviewProps {
   /** Keep this surface's desktop preview at the side, independent of the
    * global game-board hover preference. */
   forceDockSide?: boolean;
+  dockPosition?: CardPreviewDockPosition;
 }
 
 /**
@@ -23,6 +28,7 @@ export function HoverCardPreview({
   onDismiss,
   mobileLayout,
   forceDockSide = false,
+  dockPosition,
 }: HoverCardPreviewProps) {
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs);
@@ -63,10 +69,12 @@ export function HoverCardPreview({
     // never receives their pointerleave. Clear the deck-builder-owned state on
     // the next mouse move outside every registered hover source.
     const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse") return;
       if (
-        event.pointerType === "mouse"
-        && document.querySelector("[data-deck-card-hover]:hover") == null
-      ) {
+        event.target instanceof Element
+        && event.target.closest("[data-card-preview]") != null
+      ) return;
+      if (document.querySelector("[data-deck-card-hover]:hover") == null) {
         onDismiss();
       }
     };
@@ -80,6 +88,7 @@ export function HoverCardPreview({
       scryfallId={previewCard?.scryfallId}
       sourcePrinting={previewCard?.sourcePrinting}
       dockSide={forceDockSide || cardPreviewMode === "side"}
+      dockPosition={dockPosition}
       onDismiss={onDismiss}
       mobileLayout={mobileLayout}
     />
