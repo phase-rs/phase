@@ -1621,5 +1621,4 @@ mod tests {
         assert!(!state.players[0].is_eliminated);
         assert_eq!(state.auto_pass.get(&PlayerId(0)), Some(&retained));
     }
-
 }
