@@ -49,6 +49,12 @@
     "collapse": "Comprimi avanzamento risoluzione",
     "expand": "Espandi avanzamento risoluzione"
   },
+  "restoredAutomation": {
+    "dismiss": "Chiudi",
+    "noop": {"title": "Partita salvata caricata", "summary_one": "Non è stato necessario riprendere l’automazione della pila.", "summary_other": "Non è stato necessario riprendere l’automazione della pila."},
+    "progressed": {"title": "Automazione della pila ripresa", "summary_one": "Il motore ha completato {{count}} risoluzione automatizzata.", "summary_other": "Il motore ha completato {{count}} risoluzioni automatizzate.", "omitted_one": "È stato omesso {{count}} evento intermedio.", "omitted_other": "Sono stati omessi {{count}} eventi intermedi."},
+    "zeroResolutionRepair": {"title": "Automazione della pila riparata", "summary_one": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere.", "summary_other": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere."}
+  },
   "resolveAllConsent": {
     "eyebrow": "Risolvi tutto",
     "title": "Approvare la risoluzione rapida?",
