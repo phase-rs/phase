@@ -7,7 +7,8 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
+    apply, apply_with_rejection,
+    resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
     RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
