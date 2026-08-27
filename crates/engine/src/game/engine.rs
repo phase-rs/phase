@@ -1053,9 +1053,9 @@ pub fn apply_interaction_with_rejection(
 /// session; ordinary `PassPriority` remains an ordinary player pass.
 ///
 /// The retained session is intentionally stack-local: it fences the stack as
-/// it exists now and pauses at every later priority window. Each continuation
-/// therefore requires another freshly verified decision contract; a historical
-/// pass never authorizes a different holder or a later stack entry.
+/// it exists now and may reuse only the verified representative's own pass at
+/// later priority windows. It never infers a pass for an unverified
+/// representative and never authorizes a new stack entry.
 pub fn apply_verified_ai_priority_pass(
     state: &mut GameState,
     authenticated_actor: PlayerId,
@@ -1082,7 +1082,9 @@ pub fn apply_verified_ai_priority_pass(
     }
 
     let representative = super::topology::priority_pass_representative(state, *player);
-    if let Some(session) = state.stack_resolution_session.as_ref() {
+    let inserted_verified_representative = if let Some(session) =
+        state.stack_resolution_session.as_ref()
+    {
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
             session.representatives.iter().copied(),
@@ -1102,6 +1104,12 @@ pub fn apply_verified_ai_priority_pass(
                 "AI priority pass cannot replace the active stack-resolution session".to_string(),
             ));
         }
+        state
+            .stack_resolution_session
+            .as_mut()
+            .expect("the validated active session remains installed")
+            .verified_pass_representatives
+            .insert(representative)
     } else {
         // The shared session is installed before the ordinary action boundary
         // so its explicit-pass seam can enforce the one-entry limit. A rejected
@@ -1123,6 +1131,12 @@ pub fn apply_verified_ai_priority_pass(
             StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
             baseline,
         );
+        state
+            .stack_resolution_session
+            .as_mut()
+            .expect("the newly installed session exists")
+            .verified_pass_representatives
+            .insert(representative);
         return match apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
         {
             Ok(result) => Ok(result),
@@ -1132,9 +1146,21 @@ pub fn apply_verified_ai_priority_pass(
                 Err(error)
             }
         };
-    }
+    };
 
-    apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
+    match apply_interaction(state, authenticated_actor, contract.semantic_owner, action) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            if inserted_verified_representative {
+                if let Some(session) = state.stack_resolution_session.as_mut() {
+                    session
+                        .verified_pass_representatives
+                        .remove(&representative);
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Applies a verified AI priority pass while returning the same stable rejection
@@ -7583,7 +7609,8 @@ pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> A
 #[derive(Clone, Copy)]
 enum StackResolutionSessionPassKind {
     /// The session runner is considering an implicit pass. A rechecking AI
-    /// session must pause here for a fresh engine-issued decision contract.
+    /// session may reuse only a representative who already supplied a verified
+    /// pass within this fenced stack cohort.
     Automatic,
     /// A player explicitly submitted `PassPriority`. That choice is itself the
     /// fresh decision, so it may consume the session's next authorized entry.
@@ -7593,8 +7620,9 @@ enum StackResolutionSessionPassKind {
 enum StackResolutionSessionPriorityDecision {
     NotActive,
     Pause,
-    /// A rechecking AI session is waiting on a fresh explicit decision. Keep it
-    /// intact so a newly verified pass can continue its fenced cohort.
+    /// A rechecking AI session is waiting on an unverified representative.
+    /// Keep it intact so that representative's explicit decision can continue
+    /// its fenced cohort.
     PauseRetained,
     Resolve {
         limit: u32,
@@ -7652,7 +7680,15 @@ fn stack_resolution_session_priority_decision(
                 let holder_is_representative = session.representatives.contains(&canonical_holder);
                 if matches!(pass_kind, StackResolutionSessionPassKind::Automatic) {
                     if rechecks {
-                        return StackResolutionSessionPriorityDecision::PauseRetained;
+                        return if holder_is_representative
+                            && session
+                                .verified_pass_representatives
+                                .contains(&canonical_holder)
+                        {
+                            StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+                        } else {
+                            StackResolutionSessionPriorityDecision::PauseRetained
+                        };
                     }
                     if !holder_is_representative && priority_player_has_meaningful_action(state) {
                         return StackResolutionSessionPriorityDecision::Pause;
@@ -7668,9 +7704,10 @@ fn stack_resolution_session_priority_decision(
                 let limit = matching_prefix
                     .min(remaining_budget as usize)
                     .min(u32::MAX as usize) as u32;
-                // A rechecking session consumes at most one entry per fresh
-                // explicit pass. The automatic runner always pauses above, so
-                // a historical AI decision cannot escape its original window.
+                // A verified representative may reuse its own pass only
+                // inside this exact fenced session. Each all-pass boundary
+                // still resolves one entry so a changed stack topology tears
+                // the session down before a pass can escape its cohort.
                 let limit =
                     if session.policy == StackResolutionPolicy::RecheckNoMeaningfulPriorityAction {
                         limit.min(1)

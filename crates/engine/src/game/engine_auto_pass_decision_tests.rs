@@ -2057,7 +2057,7 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_unverified_priori
 }
 
 #[test]
-fn verified_ai_pass_never_probes_or_passes_a_later_priority_window() {
+fn verified_ai_pass_cache_never_passes_an_unverified_representative() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 30_110, PlayerId(1));
     push_simple_stack_entry(&mut state, 30_111, PlayerId(1));
@@ -2070,11 +2070,11 @@ fn verified_ai_pass_never_probes_or_passes_a_later_priority_window() {
 
     assert_eq!(
         counters.priority_cast_probe_builds, 0,
-        "the automatic runner must not probe before the next verified pass"
+        "the cache must avoid a synthetic probe before the next verified pass"
     );
     assert_eq!(
         counters.priority_cast_probe_state_clones, 0,
-        "the automatic runner must not clone state for a synthetic priority probe"
+        "the cache must not clone state for a synthetic priority probe"
     );
     assert!(
         state.stack_resolution_session.is_some(),
@@ -2173,31 +2173,15 @@ fn another_canonical_representative_can_continue_a_rechecking_session() {
     )
     .expect("a second representative may supply its own fresh AI pass");
 
-    let session = state
-        .stack_resolution_session
-        .as_ref()
-        .expect("the next entry requires another fresh AI decision");
-    assert_eq!(
-        session.cursor, 1,
-        "the fresh pass consumes exactly one fenced entry"
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "once every representative has a verified pass, the fenced cohort drains"
     );
-    assert_eq!(state.stack.len(), 1);
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::Priority {
-            player: PlayerId(0)
-        }
-    ));
+    assert!(state.stack.is_empty());
     assert!(second_result.events.iter().any(|event| matches!(
         event,
         GameEvent::StackResolved {
             object_id: ObjectId(30_107)
-        }
-    )));
-    assert!(second_result.events.iter().all(|event| !matches!(
-        event,
-        GameEvent::StackResolved {
-            object_id: ObjectId(30_106)
         }
     )));
 }
