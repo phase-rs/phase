@@ -8088,13 +8088,30 @@ fn store_direct_auto_pass_request(
     mode: AutoPassRequest,
 ) {
     let representative = super::topology::priority_pass_representative(state, auto_pass_owner);
-    if let Some(session) = state.stack_resolution_session.as_ref() {
-        if session.representatives.contains(&representative) {
+    if let Some(representatives) = state
+        .stack_resolution_session
+        .as_ref()
+        .map(|session| session.representatives.clone())
+    {
+        if representatives.contains(&representative) {
             take_and_restore_stack_resolution_session(state);
         } else {
             // A different priority seat may update only its own standing
-            // preference; it cannot replace another seat's frozen cohort.
+            // preference; it cannot replace another seat's frozen cohort. The
+            // same preference becomes part of the teardown baseline so a later
+            // session stop never erases a valid intervening player choice.
             store_legacy_auto_pass_request(state, representative, mode);
+            let updated_mode = *state
+                .auto_pass
+                .get(&representative)
+                .expect("the legacy request was just stored");
+            state
+                .stack_resolution_session
+                .as_mut()
+                .expect("the nonrepresentative path preserves the live session")
+                .auto_pass_overlay
+                .baseline
+                .insert(representative, updated_mode);
             return;
         }
     }

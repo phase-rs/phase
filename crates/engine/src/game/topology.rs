@@ -310,6 +310,11 @@ mod tests {
             priority_pass_participants(&state),
             vec![PlayerId(1), PlayerId(2)]
         );
+        assert_eq!(
+            canonical_priority_representatives(&state, [PlayerId(0), PlayerId(1)]),
+            [PlayerId(1)].into_iter().collect(),
+            "a frozen session re-canonicalizes an eliminated teammate to its living team seat"
+        );
     }
 
     #[test]

@@ -4,14 +4,15 @@ use std::sync::Arc;
 use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, QuantityExpr, ResolvedAbility,
-    StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, PtValue, QuantityExpr,
+    ResolvedAbility, StaticDefinition, TargetFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, StackResolutionPolicy, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::mana::ManaColor;
 use crate::types::phase::{PhaseStop, PhaseStopScope};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -1228,6 +1229,251 @@ fn fenced_session_budget_caps_the_resolver_before_a_natural_batch_can_escape() {
 }
 
 #[test]
+fn fenced_session_caps_a_natural_token_batch_at_its_matching_prefix() {
+    let mut state = priority_state();
+    let source_id = create_object(
+        &mut state,
+        CardId(19_911),
+        PlayerId(0),
+        "Batch source".to_string(),
+        Zone::Battlefield,
+    );
+    let effect = Effect::Token {
+        name: "Insect".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string()],
+        colors: vec![ManaColor::Green],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+    for entry_id in 19_912..19_915 {
+        state.stack.push_back(StackEntry {
+            id: ObjectId(entry_id),
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ResolvedAbility::new(
+                    effect.clone(),
+                    Vec::new(),
+                    source_id,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("Landfall".to_string()),
+                source_name: "Batch source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+    }
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    if let StackEntryKind::TriggeredAbility { source_name, .. } =
+        &mut state.stack.get_mut(0).unwrap().kind
+    {
+        *source_name = "Changed captured provenance".to_string();
+    }
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the third natural batch member remains frozen out"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        2,
+        "the resolver receives the matching two-entry fence prefix, not its natural three-entry batch"
+    );
+    assert_eq!(
+        state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count(),
+        2,
+        "the true token batch ran, but its execution was capped at the authorized prefix"
+    );
+    assert!(state.stack_resolution_session.is_none());
+}
+
+#[test]
+fn fenced_session_stops_after_the_matching_top_when_a_lower_entry_changes() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_905, PlayerId(0));
+    push_simple_stack_entry(&mut state, 19_906, PlayerId(0));
+    push_simple_stack_entry(&mut state, 19_907, PlayerId(0));
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    state.stack.get_mut(1).unwrap().source_id = ObjectId(29_906);
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count(),
+        1,
+        "the still-matching top reaches the ordinary resolver"
+    );
+    assert_eq!(state.stack.len(), 2);
+    assert_eq!(state.stack.back().unwrap().id, ObjectId(19_906));
+    assert!(state.stack_resolution_session.is_none());
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
+#[test]
+fn nonrepresentative_set_auto_pass_survives_later_session_teardown() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_908, PlayerId(0));
+    add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    assert!(
+        state.stack_resolution_session.is_some(),
+        "P1's action keeps the session paused"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        },
+    )
+    .unwrap();
+
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "the exhausted cohort tears down"
+    );
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(1)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        }),
+        "the nonrepresentative's accepted standing preference merged into the restore baseline"
+    );
+}
+
+#[test]
+fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
+    let mut state = priority_state();
+    let source_id = create_object(
+        &mut state,
+        CardId(19_909),
+        PlayerId(0),
+        "Original source".to_string(),
+        Zone::Battlefield,
+    );
+    state.stack.push_back(StackEntry {
+        id: ObjectId(19_910),
+        source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            )),
+        },
+    });
+    let priority_action = add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .unwrap();
+    state.objects.remove(&priority_action);
+    let mut reused_source = state
+        .objects
+        .remove(&source_id)
+        .expect("the original source exists before reuse");
+    reused_source.name = "Reused source id".to_string();
+    state.objects.insert(source_id, reused_source);
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(state.stack.is_empty());
+    assert!(result
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+    assert!(state.stack_resolution_session.is_none());
+}
+
+#[test]
 fn until_stack_empty_stops_on_non_requester_meaningful_action() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 20_000, PlayerId(1));
@@ -1369,6 +1615,11 @@ fn until_stack_empty_stops_on_interactive_waiting_for() {
             ..
         }
     ));
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "the prompt tears down the temporary representative overlay"
+    );
 }
 
 /// CR 732.2: the halt helper pauses a runaway cascade to a settled Priority
