@@ -254,25 +254,12 @@ fn browser_partial_priority_equip_keeps_the_requesters_no_manual_resolution_inte
     let result = resolve_all_ready_prefix(&mut state, P2);
 
     assert_eq!(
-        result.items_resolved, 0,
-        "the conservative batch proof must not consume an unsettled checkpoint"
+        result.items_resolved, 1,
+        "the proof resolves nothing, but the live continuation resolves Equip through ordinary auto-pass"
     );
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::Priority { player: P1 },
-    ));
-    assert_eq!(
-        state.auto_pass.get(&P0),
-        Some(&AutoPassMode::UntilStackEmpty {
-            initial_stack_len: 1,
-        }),
-        "the failed proof becomes the requester's ordinary standing auto-pass"
-    );
-    apply(&mut state, P1, GameAction::PassPriority)
-        .expect("the next AI's ordinary pass continues the requester's auto-pass");
     assert!(
         state.stack.is_empty(),
-        "the Equip resolves without another manual P0 action"
+        "the failed proof resumes the requester's no-manual-resolution intent"
     );
     assert_eq!(
         state.objects[&equipment].attached_to,
@@ -803,7 +790,8 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     )
     .expect("second representative grants");
 
-    let result = resolve_all_ready_prefix(&mut state, P0);
+    let result =
+        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority);
 
     assert_eq!(
         result.items_resolved,
@@ -814,26 +802,9 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     );
     assert_eq!(state.stack.len(), 1, "the stack-growing item remains live");
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-    assert_eq!(
-        state.auto_pass.get(&P0),
-        Some(&AutoPassMode::UntilStackEmpty {
-            initial_stack_len: 1,
-        }),
-        "a partial proof keeps the original requester as the durable auto-pass owner"
-    );
-
-    let WaitingFor::Priority { player } = state.waiting_for else {
-        panic!("the unproved entry must return to the ordinary priority pipeline");
-    };
-    assert_ne!(
-        player, P0,
-        "the requester has already passed; another seat now owns the live priority window"
-    );
-    apply(&mut state, player, GameAction::PassPriority)
-        .expect("the ordinary priority action resumes the requester's stored auto-pass");
     assert!(
         state.auto_pass.is_empty(),
-        "a stack-growing resolution interrupts UntilStackEmpty instead of inheriting stale consent"
+        "the bounded proof continuation must not install an ordinary auto-pass session"
     );
 }
 /// Drives a two-seat run to unanimous consent and returns the latched state.
@@ -892,9 +863,8 @@ fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
         ResolveAllReadyAccess::Refused
     );
 
-    // An installed auto-pass makes the frozen priority snapshot no longer
-    // describe the live game. Entitlement is untouched by that — P0 is still a
-    // frozen submitter — so the gate must not move.
+    // A retained auto-pass is coherent: proof clones suppress only their
+    // turn-boundary entries. Entitlement and the frozen requester stay intact.
     state.auto_pass.insert(
         P1,
         AutoPassMode::UntilStackEmpty {
@@ -908,8 +878,8 @@ fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
     );
     assert_eq!(
         pending_resolve_all_ready_requester(&state),
-        None,
-        "an incoherent run authorizes no unattended consumption"
+        Some(P0),
+        "retained auto-pass does not make a Ready run incoherent"
     );
 
     // With no run at all there is no frozen submitter list, so there is nobody
@@ -1006,13 +976,9 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
     let mut state = ready_two_seat_state();
     // The run is present and epoch-matching — so the slots below really are the
     // Ready set — but the frozen priority snapshot no longer describes the live
-    // game, which is what makes the latch unconsumable.
-    state.auto_pass.insert(
-        P1,
-        AutoPassMode::UntilStackEmpty {
-            initial_stack_len: 1,
-        },
-    );
+    // game, which is what makes the latch unconsumable. Retained auto-pass is
+    // deliberately not used here because it is now coherent.
+    state.priority_pass_count += 1;
     bind_interaction_authority(
         &mut state,
         InteractionSessionId("resolve-all-restore".to_string()),
@@ -1089,20 +1055,20 @@ fn proof_stopping_ready_state() -> GameState {
 
 /// The two continuations must actually differ, and only on the remainder.
 ///
-/// A live session installs `UntilStackEmpty` so the requester's standing intent
-/// survives a proof that stopped short. A restore must not: that auto-pass
-/// resolves the rest of the stack through the ordinary pipeline, which can end
-/// the game — and a restore has no socket attached and no caller positioned to
-/// emit a ranked result or a terminal artifact, so the game would be registered
-/// live while parked in `GameOver`.
+/// A live session installs and immediately executes `UntilStackEmpty` so the
+/// requester's standing intent survives a proof that stopped short. A restore
+/// must not: that auto-pass resolves the rest of the stack through the ordinary
+/// pipeline, which can end the game — and a restore has no socket attached and
+/// no caller positioned to emit a ranked result or a terminal artifact, so the
+/// game would be registered live while parked in `GameOver`.
 #[test]
 fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
     let mut live = proof_stopping_ready_state();
     let live_batch =
         resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder);
     assert!(
-        !live.auto_pass.is_empty(),
-        "non-vacuity: this fixture must reach the proof-stopped fallback at all"
+        live.auto_pass.is_empty(),
+        "the live continuation consumes its temporary fallback when CopySpell grows the stack"
     );
 
     let mut restored = proof_stopping_ready_state();
@@ -1123,8 +1089,8 @@ fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
         "the consented prefix is collapsed either way; only the remainder differs"
     );
     assert!(
-        live_batch.items_resolved >= restored_batch.items_resolved,
-        "the live continuation may resolve more, never less"
+        live_batch.items_resolved > restored_batch.items_resolved,
+        "the live continuation runs past the bounded proof prefix"
     );
     assert!(
         restored.resolve_all_consent_run.is_none(),
