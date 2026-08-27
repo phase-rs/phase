@@ -12241,17 +12241,36 @@ fn resolve_chain_body(
         }
     }
 
+    // CR 608.2c + CR 400.7: A Dig's kept-card delivery can complete before its
+    // continuation resumes, so its enclosing resumed resolver has no local
+    // ZoneChanged event slice. Its continuation carries the settled kept cards
+    // as object targets; the mutable "this way" ledger may now describe the
+    // later rest-pile delivery. Other forward-result effects remain event-slice
+    // scoped.
+    //
     // Extract moved objects for result forwarding when forward_result is set.
     // Used for "put onto the battlefield attached to [source]" patterns where the
     // moved card becomes the sub-ability's source and the original source becomes a target.
     let forwarded_objects: Vec<ObjectId> = if ability.forward_result {
-        events[events_before..]
+        let moved: Vec<_> = events[events_before..]
             .iter()
             .filter_map(|e| match e {
                 GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                 _ => None,
             })
-            .collect()
+            .collect();
+        if moved.is_empty() && matches!(ability.effect, Effect::Dig { .. }) {
+            ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+        } else {
+            moved
+        }
     } else {
         vec![]
     };
@@ -13099,7 +13118,7 @@ fn resolve_chain_body(
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             let attachment_candidates =
-                forwarded_attachment_candidates(state, sub, &events[events_before..]);
+                forwarded_attachment_candidates(state, sub, &forwarded_objects);
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
@@ -13486,7 +13505,7 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
 fn forwarded_attachment_candidates(
     state: &GameState,
     sub: &ResolvedAbility,
-    events: &[GameEvent],
+    delivered: &[ObjectId],
 ) -> Vec<ObjectIncarnationRef> {
     let Effect::Attach {
         attachment: TargetFilter::ParentTarget,
@@ -13503,18 +13522,13 @@ fn forwarded_attachment_candidates(
         return Vec::new();
     };
     let filter_ctx = filter::FilterContext::from_ability(sub);
-    events
+    delivered
         .iter()
-        .filter_map(|event| match event {
-            GameEvent::ZoneChanged {
-                object_id,
-                to: Zone::Battlefield,
-                ..
-            } if filter::matches_target_filter(state, *object_id, filter, &filter_ctx) => state
-                .objects
-                .get(object_id)
-                .map(ObjectIncarnationRef::from_object),
-            _ => None,
+        .filter_map(|&object_id| {
+            let object = state.objects.get(&object_id)?;
+            (object.zone == Zone::Battlefield
+                && filter::matches_target_filter(state, object_id, filter, &filter_ctx))
+            .then(|| ObjectIncarnationRef::from_object(object))
         })
         .collect()
 }
