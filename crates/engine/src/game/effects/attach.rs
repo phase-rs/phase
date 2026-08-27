@@ -753,9 +753,9 @@ pub(crate) fn resolve_selected_attachment_choice(
             .attachment_choice
             .as_mut()
             .expect("Attach EffectZoneChoice owner must retain its typed operation");
-        choice.operation = Box::new(bound_operation);
+        *choice.operation = bound_operation;
         let operation = choice.operation.as_ref().clone();
-        frame.pending.chain = Box::new(operation.clone());
+        *frame.pending.chain = operation.clone();
         operation
     };
 
