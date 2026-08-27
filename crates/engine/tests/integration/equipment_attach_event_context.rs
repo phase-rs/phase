@@ -357,9 +357,11 @@ fn bound_attachments_with_a_synchronous_prefix_do_not_replay_the_final_attachmen
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("attachment spell must keep resolving"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("attachment spell must keep resolving");
+            }
             WaitingFor::NamedChoice {
                 choice_type: ChoiceType::CardName,
                 ..
