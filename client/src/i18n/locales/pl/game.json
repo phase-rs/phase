@@ -49,6 +49,12 @@
     "collapse": "Zwiń postęp rozwiązywania",
     "expand": "Rozwiń postęp rozwiązywania"
   },
+  "restoredAutomation": {
+    "dismiss": "Zamknij",
+    "noop": {"title": "Wczytano zapisaną grę", "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.", "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."},
+    "progressed": {"title": "Wznowiono automatyzację stosu", "summary_one": "Silnik ukończył {{count}} automatyczne rozpatrzenie.", "summary_other": "Silnik ukończył {{count}} automatyczne rozpatrzenia.", "omitted_one": "Pominięto {{count}} zdarzenie pośrednie.", "omitted_other": "Pominięto {{count}} zdarzeń pośrednich."},
+    "zeroResolutionRepair": {"title": "Naprawiono automatyzację stosu", "summary_one": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry.", "summary_other": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry."}
+  },
   "resolveAllConsent": {
     "eyebrow": "Rozpatrz wszystko",
     "title": "Zatwierdzić szybkie rozpatrywanie?",
