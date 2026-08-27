@@ -82,10 +82,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     gameSessionGeneration: number;
     waitingForFingerprint: string;
     playerId: number;
-    isPriority: boolean;
   }
-
-  let currentAttempt: AIAttempt | null = null;
 
   // Failure tracking on the same WaitingFor state to break infinite loops.
   // `MAX_CONSECUTIVE_FAILURES` gates the normal→fallback transition; the
@@ -177,9 +174,7 @@ export function createAIController(config: AIControllerConfig): AIController {
       gameSessionGeneration: store.gameSessionGeneration,
       waitingForFingerprint: waitingForFingerprint(waitingFor),
       playerId,
-      isPriority: waitingFor.type === "Priority",
     };
-    currentAttempt = attempt;
     pending = true;
     return attempt;
   }
@@ -198,14 +193,12 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function finishAttempt(attempt: AIAttempt): boolean {
     if (attempt.generation !== attemptGeneration) return false;
-    currentAttempt = null;
     pending = false;
     return true;
   }
 
   function invalidateAttempt(): void {
     attemptGeneration++;
-    currentAttempt = null;
     pending = false;
     if (timeoutId != null) {
       clearTimeout(timeoutId);
