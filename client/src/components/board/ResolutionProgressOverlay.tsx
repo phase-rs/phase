@@ -37,9 +37,12 @@ export function ResolutionProgressOverlay() {
                     count: presentation.automatedResolutionCount,
                   })}
                   {presentation.outcome === "progressed" && (
-                    <> {t("restoredAutomation.progressed.omitted", {
-                      count: presentation.omittedEventCount,
-                    })}</>
+                    <>
+                      {" "}
+                      {t("restoredAutomation.progressed.omitted", {
+                        count: presentation.omittedEventCount,
+                      })}
+                    </>
                   )}
                 </p>
               </div>
