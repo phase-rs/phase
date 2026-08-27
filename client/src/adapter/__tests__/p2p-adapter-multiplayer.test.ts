@@ -856,7 +856,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const send = vi.spyOn(reconnect, "send");
     emitConnection(reconnect as unknown as DataConnection);
     reconnect.fireOpen();
-    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+    await reconnect.simulateData({
+      type: "reconnect",
+      playerToken: "guest-token",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    });
     await flushPromises();
 
     expect(send).not.toHaveBeenCalled();
@@ -881,7 +885,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const reconnect = new FakeOpenableConnection();
     emitConnection(reconnect as unknown as DataConnection);
     reconnect.fireOpen();
-    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+    await reconnect.simulateData({
+      type: "reconnect",
+      playerToken: "guest-token",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    });
 
     await expect(initialize).rejects.toThrow("IndexedDB unavailable");
     await flushPromises();
@@ -928,7 +936,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const send = vi.spyOn(reconnect, "send");
     emitConnection(reconnect as unknown as DataConnection);
     reconnect.fireOpen();
-    await reconnect.simulateData({ type: "reconnect", playerToken: "guest-token" });
+    await reconnect.simulateData({
+      type: "reconnect",
+      playerToken: "guest-token",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    });
     await flushPromises();
     expect(send).not.toHaveBeenCalled();
 
