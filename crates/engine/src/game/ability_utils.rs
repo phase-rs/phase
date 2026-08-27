@@ -3951,7 +3951,7 @@ fn assign_attach_attachment_selected_slots(
                 "Missing required target".to_string(),
             ));
         }
-        for target in window.iter().flatten().cloned() {
+        for target in window.iter().flatten() {
             ability.targets.push(target.clone());
             if let Some(binding) = attach_object_binding(state, &target)? {
                 ability.bind_attach_attachment_target(binding);

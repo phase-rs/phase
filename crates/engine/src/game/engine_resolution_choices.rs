@@ -5628,7 +5628,7 @@ pub(super) fn handle_resolution_choice(
                         ));
                     };
                     let trigger_context = frame.pending.trigger_context.clone();
-                    let trigger_firing = frame.pending.trigger_firing.clone();
+                    let trigger_firing = frame.pending.trigger_firing;
                     let attachment_choice =
                         frame.pending.attachment_choice.clone().ok_or_else(|| {
                             EngineError::InvalidAction(

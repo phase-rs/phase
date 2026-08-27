@@ -245,7 +245,7 @@ fn defer_remaining_selected_attachments(
             ability.controller,
         );
     }
-    frame.pending.chain = Box::new(continuation);
+    *frame.pending.chain = continuation;
     frame.pending.attachment_choice = None;
 }
 
@@ -631,6 +631,7 @@ fn attachment_choice_bounds(
 }
 
 /// Resume an attach sub-instruction paused on `EffectZoneChoice`.
+#[cfg(test)]
 pub(crate) fn complete_resolution_attachment_choice(
     state: &mut GameState,
     ability: ResolvedAbility,
