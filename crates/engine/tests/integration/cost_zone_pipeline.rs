@@ -675,7 +675,10 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
                 .expect("the Dig completion publishes after the true batch end"),
         )
         .expect("the tracked set exists");
-    assert_eq!(tracked, &vec![kept]);
+    assert!(
+        tracked.is_empty(),
+        "the kept delivery was redirected away from the requested battlefield destination"
+    );
 }
 
 fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
