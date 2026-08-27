@@ -2985,6 +2985,25 @@ fn resolve_proven_inert_trigger_batch(
     run_len: u32,
     pipeline_invariant: Option<InertTriggerBatchPipelineInvariant>,
 ) -> Option<u32> {
+    resolve_proven_inert_trigger_batch_with_proof_hook(
+        state,
+        events,
+        run_len,
+        pipeline_invariant,
+        |_| {},
+    )
+}
+
+fn resolve_proven_inert_trigger_batch_with_proof_hook<F>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+    pipeline_invariant: Option<InertTriggerBatchPipelineInvariant>,
+    proof_hook: F,
+) -> Option<u32>
+where
+    F: FnOnce(&mut GameState),
+{
     if !priority_checkpoint_is_settled(state) {
         return None;
     }
@@ -2995,6 +3014,7 @@ fn resolve_proven_inert_trigger_batch(
     }
 
     let mut proof = state.clone();
+    proof_hook(&mut proof);
     let mut proof_events = Vec::new();
     let default_wf = WaitingFor::Priority {
         player: proof.active_player,
@@ -7472,6 +7492,7 @@ mod tests {
             AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
             StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
             StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession,
+            StackPaidSnapshot,
         };
         use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;
@@ -8059,7 +8080,14 @@ mod tests {
         /// the real post-action pipeline after each step. Returns the per-step
         /// `consumed` counts.
         fn resolve_to_empty_batched(state: &mut GameState) -> Vec<u32> {
+            resolve_to_empty_batched_with_events(state).0
+        }
+
+        fn resolve_to_empty_batched_with_events(
+            state: &mut GameState,
+        ) -> (Vec<u32>, Vec<GameEvent>) {
             let mut steps = Vec::new();
+            let mut all_events = Vec::new();
             let mut guard = 0;
             while !state.stack.is_empty() {
                 let mut events = Vec::new();
@@ -8067,24 +8095,32 @@ mod tests {
                 steps.push(consumed);
                 triggers::process_triggers(state, &events);
                 crate::game::sba::check_state_based_actions(state, &mut events);
+                all_events.extend(events);
                 guard += 1;
                 assert!(guard < 10_000, "resolution did not terminate");
             }
-            steps
+            (steps, all_events)
         }
 
         /// Drive resolution to empty via the SEQUENTIAL path (`resolve_top`),
         /// running the real post-action pipeline after each step.
         fn resolve_to_empty_sequential(state: &mut GameState) {
+            let _ = resolve_to_empty_sequential_with_events(state);
+        }
+
+        fn resolve_to_empty_sequential_with_events(state: &mut GameState) -> Vec<GameEvent> {
+            let mut all_events = Vec::new();
             let mut guard = 0;
             while !state.stack.is_empty() {
                 let mut events = Vec::new();
                 resolve_top(state, &mut events);
                 triggers::process_triggers(state, &events);
                 crate::game::sba::check_state_based_actions(state, &mut events);
+                all_events.extend(events);
                 guard += 1;
                 assert!(guard < 10_000, "resolution did not terminate");
             }
+            all_events
         }
 
         /// Test shim: gather the top `run_len` run source ids and invoke the
@@ -8215,21 +8251,55 @@ mod tests {
         }
 
         #[test]
-        fn captured_batch_member_rejects_changed_side_rows() {
-            let mut state = setup();
-            let source = add_self_counter_source(&mut state, "Battered Golem");
-            push_declined_noop_trigger(&mut state, source, life_event(PlayerId(0), 1));
-            let member = capture_batch_members(&state, 1).pop().unwrap();
-            let entry_id = state.stack.back().unwrap().id;
+        fn proof_aborts_when_a_captured_side_row_changes() {
+            let build = || {
+                let mut state = setup();
+                let source = add_self_counter_source(&mut state, "Battered Golem");
+                push_declined_noop_trigger(&mut state, source, life_event(PlayerId(0), 1));
+                push_declined_noop_trigger(&mut state, source, life_event(PlayerId(1), 2));
+                state
+            };
 
-            state
-                .stack_trigger_firings
-                .insert(entry_id, TriggerFiring::Ordinary);
-            assert!(!top_matches_captured_member(&state, &member));
-            state
-                .stack_trigger_event_batches
-                .insert(entry_id, vec![life_event(PlayerId(1), 2)]);
-            assert!(!top_matches_captured_member(&state, &member));
+            // Reach guard: this exact committed prefix is accepted by the
+            // public runner before any hostile proof mutation is introduced.
+            let mut accepted = build();
+            let mut accepted_events = Vec::new();
+            assert_eq!(resolve_next_committed(&mut accepted, &mut accepted_events), 2);
+
+            for mutation in [
+                |proof: &mut GameState, entry_id| {
+                    proof
+                        .stack_paid_facts
+                        .insert(entry_id, StackPaidSnapshot::default());
+                } as fn(&mut GameState, ObjectId),
+                |proof: &mut GameState, entry_id| {
+                    proof
+                        .stack_trigger_event_batches
+                        .insert(entry_id, vec![life_event(PlayerId(1), 9)]);
+                },
+                |proof: &mut GameState, entry_id| {
+                    proof
+                        .stack_trigger_firings
+                        .insert(entry_id, TriggerFiring::Ordinary);
+                },
+            ] {
+                let mut state = build();
+                let entry_id = state.stack.back().unwrap().id;
+                let before = state.clone();
+                let mut events = Vec::new();
+                assert!(
+                    resolve_proven_inert_trigger_batch_with_proof_hook(
+                        &mut state,
+                        &mut events,
+                        2,
+                        None,
+                        |proof| mutation(proof, entry_id),
+                    )
+                    .is_none()
+                );
+                assert_eq!(state, before, "failed proof must not touch live state");
+                assert!(events.is_empty());
+            }
         }
 
         #[test]
@@ -10064,8 +10134,8 @@ mod tests {
             let mut batched = base.clone();
             let mut sequential = base.clone();
 
-            let steps = resolve_to_empty_batched(&mut batched);
-            resolve_to_empty_sequential(&mut sequential);
+            let (steps, batched_events) = resolve_to_empty_batched_with_events(&mut batched);
+            let sequential_events = resolve_to_empty_sequential_with_events(&mut sequential);
 
             assert_eq!(
                 steps,
@@ -10090,6 +10160,10 @@ mod tests {
                     "the copy must inherit the source's landfall trigger"
                 );
             }
+            assert_eq!(
+                batched_events, sequential_events,
+                "clone proof must preserve the ordered per-source Scute event and lifecycle trace"
+            );
         }
 
         // CR 603.6a (over-permit guard) — a SelfRef copy whose copied token DOES
