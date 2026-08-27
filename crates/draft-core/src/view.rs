@@ -648,7 +648,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         PackDistribution::AllAtOnce => Some(split_by_pack_size(&pool, session)),
         PackDistribution::PickAndPass => None,
     };
-    let pool_groups = DraftPoolGroups::from_pool(&pool);
+    let pool_groups = DraftPoolGroups::from_pool(&pool, &session.config.source);
 
     let is_drafting = session.status == DraftStatus::Drafting;
 
