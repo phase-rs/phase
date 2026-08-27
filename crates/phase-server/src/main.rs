@@ -193,6 +193,91 @@ fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, St
     GameSession::from_persisted(persisted, db.as_ref())
 }
 
+/// The startup restore owner keeps a session private until this handoff has
+/// either durably fenced its one explicit automation resume or terminalized
+/// it. Only [`RestoredFullStartup::Active`] may be exposed to reconnect,
+/// lobby, or WebSocket code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoredFullStartup {
+    Active,
+    Terminal,
+}
+
+/// Re-attaches one Full snapshot to this process and commits its optional
+/// startup-only stack-automation resume before callers may publish it.
+///
+/// `SessionManager::restore_session` deliberately happens before the resume:
+/// it re-stamps process-owned hosting policy and revokes a persisted debug
+/// capability before the engine can make another transition. The session stays
+/// private behind the manager lock throughout. A changed non-terminal resume
+/// must win the database revision fence synchronously; an ended game uses the
+/// same terminal transaction as a live Full game. Either failure removes the
+/// private insertion so a later startup can recover the retained row.
+fn finish_restored_full_startup(
+    manager: &mut SessionManager,
+    game_db: &SharedGameDb,
+    snapshot: &server_core::FullPersistSnapshot,
+    session: GameSession,
+) -> Result<RestoredFullStartup, String> {
+    let game_code = session.game_code.clone();
+    if game_code != snapshot.key.game_code {
+        return Err(
+            "restored Full session game code does not match its persistence key".to_string(),
+        );
+    }
+    manager.restore_session(session);
+
+    let completion = (|| {
+        let session = manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("restored session is private to this startup handoff");
+        session.full_runtime = Some(FullRuntime {
+            key: snapshot.key.clone(),
+            activation_epoch: snapshot.activation_epoch,
+        });
+
+        let resumed = session.resume_restored_stack_automation();
+        if let engine::types::game_state::WaitingFor::GameOver { winner } =
+            &session.state.waiting_for
+        {
+            let winner = *winner;
+            let ranked_result = ranked_duel_players(session)
+                .and_then(|players| ranked_result_for_duel(game_db, &game_code, &players, winner));
+            let artifact =
+                terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)?;
+            game_db
+                .prepare_full_terminal(&artifact)
+                .map_err(|error| format!("failed to terminalize restored Full session: {error}"))?;
+            return Ok(RestoredFullStartup::Terminal);
+        }
+
+        if resumed.state_revision.is_some() {
+            let post_resume = session
+                .full_persist_snapshot()
+                .expect("restored Full session remains runtime-bound");
+            match game_db
+                .save_full_session(&post_resume)
+                .map_err(|error| format!("failed to persist restored Full session: {error}"))?
+            {
+                server_core::FullPersistDisposition::Applied => {}
+                disposition => {
+                    return Err(format!(
+                        "restored Full session persistence was superseded: {disposition:?}"
+                    ));
+                }
+            }
+        }
+
+        Ok(RestoredFullStartup::Active)
+    })();
+
+    if completion.is_err() {
+        manager.remove_session(&game_code);
+    }
+    completion
+}
+
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
     tx: &mpsc::UnboundedSender<ServerMessage>,
@@ -1431,56 +1516,90 @@ async fn serve() {
                     };
                     info!(game = %game_code, bytes = json.len(), "restoring persisted session");
                     match restore_persisted_session(&json, db.clone()) {
-                        Ok(mut session) => {
-                            session.full_runtime = Some(FullRuntime {
-                                key: snapshot.key.clone(),
-                                activation_epoch: snapshot.activation_epoch,
-                            });
-                            let lobby_meta = session.lobby_meta.clone();
-                            let is_started = session.game_started;
+                        Ok(session) => match finish_restored_full_startup(
+                            &mut mgr, &game_db, snapshot, session,
+                        ) {
+                            Ok(RestoredFullStartup::Terminal) => {
+                                info!(game = %game_code, "terminalized restored Full session");
+                            }
+                            Ok(RestoredFullStartup::Active) => {
+                                let (
+                                    lobby_meta,
+                                    is_started,
+                                    reconnect_players,
+                                    current_players,
+                                    max_players,
+                                    format_config,
+                                    match_config,
+                                ) = {
+                                    let session = mgr
+                                        .sessions
+                                        .get(game_code)
+                                        .expect("active startup handoff retains its session");
+                                    let reconnect_players = session
+                                        .player_tokens
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(index, token)| {
+                                            let player = PlayerId(index as u8);
+                                            (!token.is_empty()
+                                                && !session.ai_seats.contains(&player))
+                                            .then_some(player)
+                                        })
+                                        .collect();
+                                    (
+                                        session.lobby_meta.clone(),
+                                        session.game_started,
+                                        reconnect_players,
+                                        session.current_player_count(),
+                                        session.player_count as u32,
+                                        session.state.format_config.clone(),
+                                        session.state.match_config,
+                                    )
+                                };
 
-                            // Register all non-AI human players as disconnected
-                            // to start the 120s grace period from now
-                            let default_grace = mgr.reconnect.grace_period;
-                            for (i, token) in session.player_tokens.iter().enumerate() {
-                                let pid = PlayerId(i as u8);
-                                if !token.is_empty() && !session.ai_seats.contains(&pid) {
+                                // Register all non-AI human players as disconnected
+                                // to start the 120s grace period from now. This is
+                                // deliberately after the durable startup handoff:
+                                // a failed resume is not reconnectable.
+                                let default_grace = mgr.reconnect.grace_period;
+                                for player in reconnect_players {
                                     mgr.reconnect.record_disconnect(
-                                        &session.game_code,
-                                        pid,
+                                        game_code,
+                                        player,
                                         default_grace,
                                     );
                                 }
-                            }
 
-                            // Restore lobby entry if game hasn't started.
-                            // Persisted sessions pre-date version metadata;
-                            // restored lobbies appear without a version badge.
-                            if let Some(meta) = lobby_meta {
-                                if !is_started {
-                                    lob.register_game(
-                                        game_code,
-                                        RegisterGameRequest {
-                                            host_name: meta.host_name,
-                                            public: meta.public,
-                                            password: meta.password,
-                                            timer_seconds: meta.timer_seconds,
-                                            current_players: session.current_player_count(),
-                                            max_players: session.player_count as u32,
-                                            format_config: Some(
-                                                session.state.format_config.clone(),
-                                            ),
-                                            match_config: session.state.match_config,
-                                            ..Default::default()
-                                        },
-                                        &SysEnv,
-                                    );
+                                // Restore lobby entry if game hasn't started.
+                                // Persisted sessions pre-date version metadata;
+                                // restored lobbies appear without a version badge.
+                                if let Some(meta) = lobby_meta {
+                                    if !is_started {
+                                        lob.register_game(
+                                            game_code,
+                                            RegisterGameRequest {
+                                                host_name: meta.host_name,
+                                                public: meta.public,
+                                                password: meta.password,
+                                                timer_seconds: meta.timer_seconds,
+                                                current_players,
+                                                max_players,
+                                                format_config: Some(format_config),
+                                                match_config,
+                                                ..Default::default()
+                                            },
+                                            &SysEnv,
+                                        );
+                                    }
                                 }
-                            }
 
-                            mgr.restore_session(session);
-                            restored += 1;
-                        }
+                                restored += 1;
+                            }
+                            Err(error) => {
+                                warn!(game = %game_code, %error, "restored Full session remains private for recovery");
+                            }
+                        },
                         Err(e) => {
                             warn!(game = %game_code, error = %e, "failed to restore active session; retaining fenced row for recovery");
                         }
@@ -2129,6 +2248,253 @@ mod lifecycle_tests {
         let conns = connections.lock().await;
         assert!(!conns.contains_key("EXPIRED"));
         assert!(conns.contains_key("ACTIVE"));
+    }
+}
+
+#[cfg(test)]
+mod restored_full_startup_tests {
+    use std::sync::Arc;
+
+    use engine::database::CardDatabase;
+    use engine::game::{deck_loading::PlayerDeckPayload, engine::apply};
+    use engine::types::ability::{Effect, ResolvedAbility};
+    use engine::types::actions::{GameAction, ResolveAllConsentDecision};
+    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
+    use engine::types::identifiers::ObjectId;
+    use engine::types::player::PlayerId;
+    use server_core::{
+        FullPersistDisposition, FullPersistSnapshot, FullSessionKey, SessionManager,
+    };
+    use tempfile::NamedTempFile;
+
+    use super::{finish_restored_full_startup, persistence, RestoredFullStartup, SharedGameDb};
+
+    fn test_db() -> (NamedTempFile, SharedGameDb) {
+        let file = NamedTempFile::new().expect("temporary game database");
+        let db = Arc::new(
+            persistence::GameDb::open(file.path(), persistence::SessionRetention::Multiplayer)
+                .expect("open temporary game database"),
+        );
+        (file, db)
+    }
+
+    fn snapshot_for(
+        game_code: String,
+        generation: u64,
+        session: &server_core::GameSession,
+    ) -> FullPersistSnapshot {
+        FullPersistSnapshot {
+            key: FullSessionKey {
+                game_code,
+                generation,
+            },
+            mutation_revision: session.state_revision,
+            activation_epoch: None,
+            persisted: session.to_persisted(),
+        }
+    }
+
+    fn restore(snapshot: &FullPersistSnapshot) -> server_core::GameSession {
+        server_core::GameSession::from_persisted(
+            snapshot.persisted.clone(),
+            &CardDatabase::default(),
+        )
+        .expect("persisted test session restores")
+    }
+
+    fn resolve_all_ready_snapshot() -> FullPersistSnapshot {
+        let mut source_manager = SessionManager::new();
+        let (game_code, _) = source_manager.create_game(PlayerDeckPayload::default());
+        let session = source_manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("source session exists");
+        let ai_player = PlayerId(1);
+        let stack_object = ObjectId(1);
+        session.ai_seats.insert(ai_player);
+        session.state.active_player = ai_player;
+        session.state.priority_player = PlayerId(0);
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        session.state.priority_passes.insert(ai_player);
+        session.state.stack.push_back(StackEntry {
+            id: stack_object,
+            source_id: stack_object,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: stack_object,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    stack_object,
+                    PlayerId(0),
+                )),
+            },
+        });
+        apply(
+            &mut session.state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 1 },
+        )
+        .expect("priority holder may begin Resolve All");
+        let epoch = match session.state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref other => panic!("expected Resolve All consent, got {other:?}"),
+        };
+        apply(
+            &mut session.state,
+            ai_player,
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("AI representative may grant Resolve All");
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+
+        snapshot_for(game_code, 1, session)
+    }
+
+    #[test]
+    fn startup_resume_is_persisted_before_the_session_becomes_active() {
+        let snapshot = resolve_all_ready_snapshot();
+        let game_code = snapshot.key.game_code.clone();
+        let (_file, db) = test_db();
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("seed snapshot"),
+            FullPersistDisposition::Applied
+        );
+
+        let mut target_manager = SessionManager::new();
+        assert_eq!(
+            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
+                .expect("startup handoff commits"),
+            RestoredFullStartup::Active
+        );
+
+        let active = target_manager
+            .sessions
+            .get(&game_code)
+            .expect("only a durably resumed session becomes active");
+        assert!(active.full_runtime.is_some(), "runtime identity is rebound");
+        assert!(
+            active.state.stack.is_empty(),
+            "the authorized entry resumed"
+        );
+        assert!(active.state.resolve_all_consent_run.is_none());
+        assert_eq!(active.state_revision, snapshot.mutation_revision + 1);
+
+        let persisted = db
+            .load_active_full_sessions()
+            .expect("read post-resume row");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].mutation_revision, active.state_revision);
+        let durable = restore(&persisted[0]);
+        assert!(durable.state.stack.is_empty());
+        assert!(durable.state.resolve_all_consent_run.is_none());
+    }
+
+    #[test]
+    fn superseded_startup_resume_is_not_exposed() {
+        let snapshot = resolve_all_ready_snapshot();
+        let game_code = snapshot.key.game_code.clone();
+        let (_file, db) = test_db();
+        let mut newer = snapshot.clone();
+        newer.mutation_revision += 1;
+        assert_eq!(
+            db.save_full_session(&newer)
+                .expect("seed a newer retained revision"),
+            FullPersistDisposition::Applied
+        );
+
+        let mut target_manager = SessionManager::new();
+        let error =
+            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
+                .expect_err("an equal post-resume revision is stale");
+
+        assert!(error.contains("superseded"));
+        assert!(
+            !target_manager.sessions.contains_key(&game_code),
+            "a stale resume must never become reconnectable or publicly reachable"
+        );
+        assert_eq!(
+            db.load_active_full_sessions().expect("read retained row")[0].mutation_revision,
+            newer.mutation_revision,
+            "the recovery row is retained for a later startup"
+        );
+    }
+
+    #[test]
+    fn startup_restore_keeps_ordinary_priority_as_a_revision_preserving_noop() {
+        let mut source_manager = SessionManager::new();
+        let (game_code, _) = source_manager.create_game(PlayerDeckPayload::default());
+        let source = source_manager
+            .sessions
+            .get(&game_code)
+            .expect("source session exists");
+        let snapshot = snapshot_for(game_code.clone(), 1, source);
+        let (_file, db) = test_db();
+        db.save_full_session(&snapshot).expect("seed snapshot");
+
+        let mut target_manager = SessionManager::new();
+        assert_eq!(
+            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
+                .expect("ordinary restore remains active"),
+            RestoredFullStartup::Active
+        );
+
+        assert_eq!(
+            target_manager.sessions[&game_code].state_revision, snapshot.mutation_revision,
+            "ordinary priority is not an implicit pass"
+        );
+        assert_eq!(
+            db.load_active_full_sessions().expect("read seeded row")[0].mutation_revision,
+            snapshot.mutation_revision,
+            "a no-op does not manufacture a persistence revision"
+        );
+    }
+
+    #[test]
+    fn startup_game_over_uses_terminal_persistence_instead_of_exposure() {
+        let mut source_manager = SessionManager::new();
+        let (game_code, token) = source_manager.create_game(PlayerDeckPayload::default());
+        let source = source_manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("source session exists");
+        source.state.waiting_for = WaitingFor::GameOver { winner: None };
+        let snapshot = snapshot_for(game_code.clone(), 1, source);
+        let (_file, db) = test_db();
+        db.save_full_session(&snapshot)
+            .expect("seed terminal snapshot");
+
+        let mut target_manager = SessionManager::new();
+        assert_eq!(
+            finish_restored_full_startup(&mut target_manager, &db, &snapshot, restore(&snapshot))
+                .expect("terminal startup handoff commits"),
+            RestoredFullStartup::Terminal
+        );
+
+        assert!(
+            !target_manager.sessions.contains_key(&game_code),
+            "a terminal session is never exposed as an active game"
+        );
+        assert!(
+            db.load_active_full_sessions()
+                .expect("read active sessions")
+                .is_empty(),
+            "terminal preparation retires the active persistence row"
+        );
+        assert!(
+            db.current_terminal_delivery_for_recipient(&snapshot.key, PlayerId(0), &token)
+                .expect("read terminal delivery")
+                .is_some(),
+            "the normal terminal recovery path remains available"
+        );
     }
 }
 
