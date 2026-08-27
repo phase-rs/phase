@@ -117,9 +117,14 @@ export function VisualPackManager() {
               />
             )}
             {manager.actionError && (
-              <p role="alert" className="rounded-[12px] border border-rose-400/25 bg-rose-400/[0.08] px-3 py-2 text-sm text-rose-100">
-                {t(errorKey(manager.actionError) as never)}
-              </p>
+              <div role="alert" className="rounded-[12px] border border-rose-400/25 bg-rose-400/[0.08] px-3 py-2 text-sm text-rose-100">
+                <p>{t(errorKey(manager.actionError) as never)}</p>
+                {manager.actionErrorDetail && (
+                  <code className="mt-1 block select-text break-words font-mono text-xs text-rose-100/90">
+                    {manager.actionErrorDetail}
+                  </code>
+                )}
+              </div>
             )}
             <PackSelector
               summary={manager.summary}
@@ -144,7 +149,14 @@ export function VisualPackManager() {
           </>
         )}
         {manager.actionError && manager.availability.kind !== "ready" && (
-          <p role="alert" className="text-sm text-rose-200">{t(errorKey(manager.actionError) as never)}</p>
+          <div role="alert" className="text-sm text-rose-200">
+            <p>{t(errorKey(manager.actionError) as never)}</p>
+            {manager.actionErrorDetail && (
+              <code className="mt-1 block select-text break-words font-mono text-xs text-rose-100/90">
+                {manager.actionErrorDetail}
+              </code>
+            )}
+          </div>
         )}
       </div>
       <ConfirmDialog

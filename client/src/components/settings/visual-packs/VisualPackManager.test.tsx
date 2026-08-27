@@ -202,6 +202,19 @@ describe("VisualPackManager initialization", () => {
     expect(screen.getByRole("button", { name: /install selection/i })).toBeDisabled();
   });
 
+  it("shows the estimate failure detail beneath its user-facing error", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockRejectedValue(
+      new Error("TypeError: DecompressionStream is not a constructor"),
+    );
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    expect(await screen.findByText(/catalog operation could not be completed/i)).toBeInTheDocument();
+    expect(screen.getByText("TypeError: DecompressionStream is not a constructor")).toBeInTheDocument();
+  });
+
   it("allows unrelated estimate and verification reads to overlap", async () => {
     const fixture = backend();
     const estimate = deferred<Awaited<ReturnType<VisualPackBackend["estimateInstall"]>>>();

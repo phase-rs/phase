@@ -62,6 +62,7 @@ export interface VisualPackManagerState {
   verification: BoundVerification | null;
   removal: RemovalResponse | null;
   actionError: VisualPackErrorKind | null;
+  actionErrorDetail: string | null;
   pendingActions: ReadonlySet<string>;
   durableMutationActive: boolean;
   confirmation: FrozenConfirmation | null;
@@ -89,6 +90,11 @@ export function hasPendingVisualPackMutation(pending: ReadonlySet<string>): bool
 
 function errorKind(error: unknown): VisualPackErrorKind {
   return error instanceof VisualPackBackendError ? error.kind : "internal";
+}
+
+function errorDetail(error: unknown): string | null {
+  if (error instanceof Error) return error.message || null;
+  return typeof error === "string" && error ? error : null;
 }
 
 function selectorIdentity(selector: InstallSelector): string {
@@ -158,8 +164,18 @@ export function useVisualPackManager(): VisualPackManagerState {
   const [verification, setVerification] = useState<BoundVerification | null>(null);
   const [removal, setRemoval] = useState<RemovalResponse | null>(null);
   const [actionError, setActionError] = useState<VisualPackErrorKind | null>(null);
+  const [actionErrorDetail, setActionErrorDetail] = useState<string | null>(null);
   const [pendingActions, setPendingActions] = useState<ReadonlySet<string>>(new Set());
   const [confirmation, setConfirmation] = useState<FrozenConfirmation | null>(null);
+
+  const clearActionError = useCallback(() => {
+    setActionError(null);
+    setActionErrorDetail(null);
+  }, []);
+  const reportActionError = useCallback((error: unknown) => {
+    setActionError(errorKind(error));
+    setActionErrorDetail(errorDetail(error));
+  }, []);
 
   const beginPending = useCallback((value: string): boolean => {
     if (pendingRef.current.has(value)) return false;
@@ -201,10 +217,10 @@ export function useVisualPackManager(): VisualPackManagerState {
       acceptSummary(next);
     } catch (error) {
       if (mountedRef.current && generation === requestRef.current.summary) {
-        setActionError(errorKind(error));
+        reportActionError(error);
       }
     }
-  }, [acceptSummary]);
+  }, [acceptSummary, reportActionError]);
 
   const handleProgress = useCallback((event: ProgressEvent) => {
     if (!mountedRef.current) return;
@@ -250,12 +266,15 @@ export function useVisualPackManager(): VisualPackManagerState {
     setOperation(event.operation);
     setProgress(event);
     if (event.phase === "failed") {
-      if (event.error) setActionError(event.error);
+      if (event.error) {
+        setActionError(event.error);
+        setActionErrorDetail(null);
+      }
     } else {
-      setActionError(null);
+      clearActionError();
     }
     if (operationIsTerminal(event.operation)) void refreshSummary(event.operation.completedRevision ?? undefined);
-  }, [refreshSummary]);
+  }, [clearActionError, refreshSummary]);
 
   const beginStartEventBuffer = useCallback(() => {
     const buffer = startEventBufferRef.current;
@@ -307,7 +326,7 @@ export function useVisualPackManager(): VisualPackManagerState {
   const initialize = useCallback(async () => {
     const generation = ++requestRef.current.initialize;
     setAvailability({ kind: "loading" });
-    setActionError(null);
+    clearActionError();
     try {
       const load = backendLoadRef.current ??= loadVisualPackBackend();
       let backend: VisualPackBackend | null;
@@ -363,7 +382,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       const kind = errorKind(error);
       setAvailability(kind === "unsupported_shell" ? { kind } : { kind: "transient_failure", error: kind });
     }
-  }, [acceptSummary, handleProgress, handleRevision]);
+  }, [acceptSummary, clearActionError, handleProgress, handleRevision]);
 
   useEffect(() => {
     const requests = requestRef.current;
@@ -387,17 +406,17 @@ export function useVisualPackManager(): VisualPackManagerState {
   const refresh = useCallback(async () => {
     const backend = backendRef.current;
     if (!backend || !beginPending("refresh")) return;
-    setActionError(null);
+    clearActionError();
     const generation = ++requestRef.current.summary;
     try {
       const next = await backend.refreshCatalog();
       if (mountedRef.current && generation === requestRef.current.summary) acceptSummary(next);
     } catch (error) {
-      if (mountedRef.current && generation === requestRef.current.summary) setActionError(errorKind(error));
+      if (mountedRef.current && generation === requestRef.current.summary) reportActionError(error);
     } finally {
       if (mountedRef.current) endPending("refresh");
     }
-  }, [acceptSummary, beginPending, endPending]);
+  }, [acceptSummary, beginPending, clearActionError, endPending, reportActionError]);
 
   const estimateInstall = useCallback(async (selector: InstallSelector) => {
     const backend = backendRef.current;
@@ -407,7 +426,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     const root = current.catalogRoot;
     const revision = current.installedRevision;
     if (!beginPending("estimate")) return;
-    setActionError(null);
+    clearActionError();
     try {
       const value = await backend.estimateInstall(selector);
       const latest = summaryRef.current;
@@ -423,11 +442,11 @@ export function useVisualPackManager(): VisualPackManagerState {
       ) return;
       setEstimate({ selector, value });
     } catch (error) {
-      if (mountedRef.current && generation === requestRef.current.estimate) setActionError(errorKind(error));
+      if (mountedRef.current && generation === requestRef.current.estimate) reportActionError(error);
     } finally {
       if (mountedRef.current) endPending("estimate");
     }
-  }, [beginPending, endPending]);
+  }, [beginPending, clearActionError, endPending, reportActionError]);
 
   const trackStarted = useCallback(async (operationId: OperationStatus["operationId"], root: OperationStatus["catalogRoot"]) => {
     const backend = backendRef.current;
@@ -457,11 +476,11 @@ export function useVisualPackManager(): VisualPackManagerState {
       if (operationIsTerminal(status)) void refreshSummary(status.completedRevision ?? undefined);
     } catch (error) {
       if (mountedRef.current) {
-        setActionError(errorKind(error));
+        reportActionError(error);
         void refreshSummary();
       }
     }
-  }, [refreshSummary]);
+  }, [refreshSummary, reportActionError]);
 
   const install = useCallback(async (selector: InstallSelector) => {
     const backend = backendRef.current;
@@ -475,7 +494,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || bound.value.installedRevision !== current.installedRevision
     ) return;
     if (!beginPending("install")) return;
-    setActionError(null);
+    clearActionError();
     beginStartEventBuffer();
     try {
       const result = await backend.start({ kind: "install", selector });
@@ -489,14 +508,14 @@ export function useVisualPackManager(): VisualPackManagerState {
       }
     } catch (error) {
       if (mountedRef.current) {
-        setActionError(errorKind(error));
+        reportActionError(error);
         void refreshSummary();
       }
     } finally {
       clearStartEventBuffer();
       if (mountedRef.current) endPending("install");
     }
-  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearStartEventBuffer, endPending, estimate, refreshSummary, trackStarted]);
+  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, estimate, refreshSummary, reportActionError, trackStarted]);
 
   const cancel = useCallback(async () => {
     const backend = backendRef.current;
@@ -508,7 +527,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || progressRef.current?.phase === "failed"
       || !beginPending("cancel")
     ) return;
-    setActionError(null);
+    clearActionError();
     try {
       const status = await backend.cancel(selected.operationId);
       if (mountedRef.current && status.operationId === selected.operationId && status.catalogRoot === selected.catalogRoot) {
@@ -526,13 +545,13 @@ export function useVisualPackManager(): VisualPackManagerState {
       }
     } catch (error) {
       if (mountedRef.current) {
-        setActionError(errorKind(error));
+        reportActionError(error);
         void trackStarted(selected.operationId, selected.catalogRoot);
       }
     } finally {
       if (mountedRef.current) endPending("cancel");
     }
-  }, [beginPending, endPending, trackStarted]);
+  }, [beginPending, clearActionError, endPending, reportActionError, trackStarted]);
 
   const resume = useCallback(async () => {
     const backend = backendRef.current;
@@ -545,7 +564,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || progressRef.current?.phase !== "failed"
       || !beginPending("resume")
     ) return;
-    setActionError(null);
+    clearActionError();
     const previousOutcome = { ...progressOutcomeRef.current };
     progressOutcomeRef.current = {
       identity: `${selected.operationId}:${selected.catalogRoot}`,
@@ -572,13 +591,13 @@ export function useVisualPackManager(): VisualPackManagerState {
     } catch (error) {
       if (mountedRef.current) {
         if (progressRef.current === selectedProgress) progressOutcomeRef.current = previousOutcome;
-        setActionError(errorKind(error));
+        reportActionError(error);
         void trackStarted(selected.operationId, selected.catalogRoot);
       }
     } finally {
       if (mountedRef.current) endPending("resume");
     }
-  }, [beginPending, endPending, refreshSummary, trackStarted]);
+  }, [beginPending, clearActionError, endPending, refreshSummary, reportActionError, trackStarted]);
 
   const verify = useCallback(async (mode: VerificationMode) => {
     const backend = backendRef.current;
@@ -589,7 +608,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     const revision = current.installedRevision;
     const pendingKey = `verify:${mode}`;
     if (!beginPending(pendingKey)) return;
-    setActionError(null);
+    clearActionError();
     try {
       const result = await backend.verify(mode);
       if (
@@ -600,11 +619,11 @@ export function useVisualPackManager(): VisualPackManagerState {
         && result.revision === revision
       ) setVerification({ catalogRoot: root, installedRevision: revision, value: result });
     } catch (error) {
-      if (mountedRef.current && generation === requestRef.current.verify) setActionError(errorKind(error));
+      if (mountedRef.current && generation === requestRef.current.verify) reportActionError(error);
     } finally {
       if (mountedRef.current) endPending(pendingKey);
     }
-  }, [beginPending, endPending]);
+  }, [beginPending, clearActionError, endPending, reportActionError]);
 
   const runStart = useCallback(async (packIds: PackId[]) => {
     const backend = backendRef.current;
@@ -614,7 +633,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || operationIsDurableMutation(operationRef.current)
       || !beginPending("repair")
     ) return;
-    setActionError(null);
+    clearActionError();
     beginStartEventBuffer();
     try {
       const result = await backend.start({ kind: "repair", packIds });
@@ -628,19 +647,19 @@ export function useVisualPackManager(): VisualPackManagerState {
       }
     } catch (error) {
       if (mountedRef.current) {
-        setActionError(errorKind(error));
+        reportActionError(error);
         void refreshSummary();
       }
     } finally {
       clearStartEventBuffer();
       if (mountedRef.current) endPending("repair");
     }
-  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearStartEventBuffer, endPending, refreshSummary, trackStarted]);
+  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, refreshSummary, reportActionError, trackStarted]);
 
   const runRemoval = useCallback(async (selector: RemovalSelector, mode: RemovalMode) => {
     const backend = backendRef.current;
     if (!backend || operationIsDurableMutation(operationRef.current) || !beginPending("remove")) return;
-    setActionError(null);
+    clearActionError();
     try {
       const result = await backend.remove(selector, mode);
       if (!mountedRef.current) return;
@@ -651,13 +670,13 @@ export function useVisualPackManager(): VisualPackManagerState {
       if (errorKind(error) === "conflict" && selector.kind === "packs" && mode === "reject_dependents") {
         setConfirmation({ kind: "cascade", selector });
       } else {
-        setActionError(errorKind(error));
+        reportActionError(error);
         void refreshSummary();
       }
     } finally {
       if (mountedRef.current) endPending("remove");
     }
-  }, [beginPending, endPending, refreshSummary]);
+  }, [beginPending, clearActionError, endPending, refreshSummary, reportActionError]);
 
   const removeSelected = useCallback((packIds: PackId[]) => {
     if (packIds.length > 0) void runRemoval({ kind: "packs", packIds }, "reject_dependents");
@@ -688,6 +707,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     verification,
     removal,
     actionError,
+    actionErrorDetail,
     pendingActions,
     durableMutationActive: operationIsDurableMutation(operation),
     confirmation,
