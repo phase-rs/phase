@@ -4671,7 +4671,10 @@ mod tests {
             .expect("P0 begins the Resolve All consent run");
         record_replay_action(false, PlayerId(0), begin);
         let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {
-            panic!("P1 should be asked for consent, got {:?}", state.waiting_for);
+            panic!(
+                "P1 should be asked for consent, got {:?}",
+                state.waiting_for
+            );
         };
         let grant = GameAction::RespondResolveAllConsent {
             epoch,
@@ -4679,7 +4682,10 @@ mod tests {
         };
         apply(&mut state, PlayerId(1), grant.clone()).expect("P1 grants Resolve All consent");
         record_replay_action(false, PlayerId(1), grant);
-        assert!(matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
         GAME_STATE.with(|cell| cell.set(Some(state)));
 
         resolve_all(0, "[]", 0).expect("the Ready consumer resolves through the WASM bridge");
