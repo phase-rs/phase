@@ -11,6 +11,15 @@
         ],
         "createdAt": "2026-08-27T14:11:01.471Z",
         "reason": "Agent: src is rendered only in the !src false branch; static detector cannot infer JSX control flow."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "client/src/components/deck-builder/DeckStack.tsx"
+        ],
+        "createdAt": "2026-08-27T14:34:09.327Z",
+        "reason": "Agent: the disabled control is slate text on black; the flagged emerald color is hover-only and cannot coexist with disabled."
       }
     ]
   }
