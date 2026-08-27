@@ -14563,7 +14563,9 @@ pub enum AutoPassRequest {
 /// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
 /// armed it, the engine keeps passing until the stack empties or grows beyond
 /// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
-/// an AI decision that must be checked again at every future priority window.
+/// an AI continuation that reuses a representative's own verified pass while
+/// the exact fenced stack cohort remains active. This is an AI policy choice,
+/// not an inference that the player lacks another legal action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StackResolutionPolicy {
     #[default]
@@ -14778,6 +14780,11 @@ pub struct StackResolutionSession {
     #[serde(default)]
     pub cursor: usize,
     pub representatives: BTreeSet<PlayerId>,
+    /// AI representatives whose verified pass is a policy authorization for
+    /// later priority windows in this exact fenced cohort. Absence is
+    /// conservative: that representative must receive an explicit decision.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub verified_pass_representatives: BTreeSet<PlayerId>,
     #[serde(default)]
     pub budget: StackResolutionBudget,
     #[serde(default)]

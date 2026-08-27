@@ -7515,6 +7515,7 @@ mod tests {
                     .collect(),
                 cursor: 0,
                 representatives: BTreeSet::from([PlayerId(0)]),
+                verified_pass_representatives: BTreeSet::new(),
                 budget: StackResolutionBudget::Unlimited,
                 policy: StackResolutionPolicy::Committed,
                 auto_pass_overlay: StackResolutionAutoPassOverlay {

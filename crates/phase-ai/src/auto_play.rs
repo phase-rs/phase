@@ -526,6 +526,23 @@ mod tests {
         state
     }
 
+    fn push_no_op_stack_entry(state: &mut GameState, id: u64) {
+        state.stack.push_back(StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(id),
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(id),
+                ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(id),
+                    PlayerId(1),
+                )),
+            },
+        });
+    }
+
     fn dummy_result(state: &GameState) -> AiActionResult {
         AiActionResult {
             action: GameAction::PassPriority,
@@ -637,6 +654,43 @@ mod tests {
                 .map(|session| session.policy),
             Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
             "the native AI runner must use the verified stack-pass seam"
+        );
+    }
+
+    #[test]
+    fn verified_pass_cache_drains_a_large_ai_stack_without_action_cap() {
+        let mut state = recheck_priority_state();
+        state.objects.clear();
+        for id in 70_003..70_204 {
+            push_no_op_stack_entry(&mut state, id);
+        }
+        let ai_players = HashSet::from([PlayerId(0), PlayerId(1)]);
+        let ai_configs = HashMap::from([
+            (PlayerId(0), AiConfig::default()),
+            (PlayerId(1), AiConfig::default()),
+        ]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rng();
+
+        engine::game::perf_counters::reset();
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert!(
+            matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+            "a completed fenced stack must not hit the generic AI action cap: {:?}",
+            run.stop
+        );
+        assert_eq!(
+            run.results.len(),
+            2,
+            "each AI representative decides once; cached passes drain the remaining cohort"
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.stack_resolution_session.is_none());
+        assert_eq!(
+            counters.priority_cast_probe_builds, 0,
+            "cached verified passes must avoid the recheck probe on every stack entry"
         );
     }
 }

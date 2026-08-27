@@ -3700,6 +3700,7 @@ fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -3744,6 +3745,7 @@ fn representative_replacement_recaptures_the_restored_baseline() {
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -3813,6 +3815,7 @@ fn elimination_restores_session_baseline_before_departing_preferences_are_cleane
         entries: vec![StackResolutionEntryFence::capture(&entry)],
         cursor: 0,
         representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

@@ -6682,6 +6682,7 @@ mod tests {
             entries: vec![StackResolutionEntryFence::capture(entry)],
             cursor: 0,
             representatives: BTreeSet::from([PlayerId(0), ai_player]),
+            verified_pass_representatives: BTreeSet::new(),
             budget: StackResolutionBudget::Unlimited,
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {

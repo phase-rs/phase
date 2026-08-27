@@ -2,13 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
+use engine::ai_support::{candidate_actions, legal_actions_for_viewer, AiDecisionContract};
 use engine::game::elimination::eliminate_player;
 use engine::game::engine::{
-    apply, classify_restored_stack_automation, pending_resolve_all_ready_requester,
-    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
-    resume_restored_stack_automation, ResolveAllContinuation, ResolveAllReadyAccess,
-    RestoredStackAutomation, RestoredStackAutomationOutcome,
+    apply, apply_verified_ai_priority_pass, classify_restored_stack_automation,
+    pending_resolve_all_ready_requester, resolve_all_ready_access, resolve_all_ready_prefix,
+    resolve_all_ready_prefix_with, resume_restored_stack_automation, ResolveAllContinuation,
+    ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationOutcome,
 };
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
@@ -636,6 +636,7 @@ fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
         entries: vec![fence],
         cursor: 0,
         representatives: BTreeSet::from([P0, P1]),
+        verified_pass_representatives: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -1328,6 +1329,7 @@ fn restored_session_state(max_resolutions: u32) -> GameState {
         entries,
         cursor: 0,
         representatives: representatives.clone(),
+        verified_pass_representatives: BTreeSet::new(),
         budget: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -1416,6 +1418,73 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
     assert!(
         state.auto_pass.is_empty(),
         "teardown restores the empty baseline"
+    );
+}
+
+#[test]
+fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
+    let mut state = restored_session_state(1);
+    {
+        let session = state
+            .stack_resolution_session
+            .as_mut()
+            .expect("fixture has a session");
+        session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
+        session.verified_pass_representatives.insert(P0);
+    }
+    let stack_len = state.stack.len();
+    for mode in state.auto_pass.values_mut() {
+        *mode = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: stack_len,
+            policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        };
+    }
+    let encoded = serde_json::to_string(&PersistedGameState::capture(state))
+        .expect("the active rechecking session serializes");
+    let mut state = serde_json::from_str::<PersistedGameState>(&encoded)
+        .expect("the active rechecking session deserializes")
+        .into_game_state();
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::ActiveSession
+    );
+    let before_stack = state.stack.clone();
+
+    let resumed = resume_restored_stack_automation(&mut state);
+
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed,
+        "the restore owner did invoke the ordinary session runner"
+    );
+    assert_eq!(
+        resumed.presentation.automated_resolution_count, 0,
+        "the restored cached P0 pass advances only to P1's unverified priority window"
+    );
+    assert_eq!(
+        state.stack, before_stack,
+        "the fenced entries remain intact"
+    );
+    assert!(state.stack_resolution_session.is_some());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert!(state
+        .stack_resolution_session
+        .as_ref()
+        .expect("the paused session is retained")
+        .verified_pass_representatives
+        .contains(&P0));
+
+    let contract = AiDecisionContract::issue(&state, P1);
+    apply_verified_ai_priority_pass(&mut state, P1, &contract, GameAction::PassPriority)
+        .expect("P1's first verified pass completes the cached cohort");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the saved session budget remains in force"
     );
 }
 
@@ -1512,6 +1581,42 @@ fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() 
         })
     );
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
+fn restored_session_rejects_a_cached_nonrepresentative_without_resolving() {
+    let mut state = restored_session_state(0);
+    state
+        .stack_resolution_session
+        .as_mut()
+        .expect("fixture has a session")
+        .verified_pass_representatives
+        .insert(P1);
+    state
+        .stack_resolution_session
+        .as_mut()
+        .expect("fixture has a session")
+        .representatives = BTreeSet::from([P0]);
+    state.auto_pass.remove(&P1);
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::Repair
+    );
+    let resumed = resume_restored_stack_automation(&mut state);
+
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair
+    );
+    assert_eq!(
+        resumed.presentation.automated_resolution_count, 0,
+        "an untrusted cache entry must not pass a nonrepresentative"
+    );
+    assert_eq!(state.stack.len(), 2);
+    assert!(state.stack_resolution_session.is_none());
 }
 
 #[test]

@@ -2035,10 +2035,9 @@ fn priority_probe_false_when_only_pass_available() {
 }
 
 #[test]
-fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priority() {
+fn verified_ai_pass_installs_rechecking_session_and_pauses_for_unverified_priority() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 30_101, PlayerId(1));
-    add_non_mana_activated_artifact(&mut state, PlayerId(1));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
     let result = apply_verified_ai_priority_pass(
@@ -2058,7 +2057,7 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priori
     let session = state
         .stack_resolution_session
         .as_ref()
-        .expect("a meaningful follow-up priority window retains the AI session");
+        .expect("an unverified follow-up priority window retains the AI session");
     assert_eq!(
         session.policy,
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
@@ -2068,22 +2067,45 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_meaningful_priori
 }
 
 #[test]
-fn verified_ai_pass_internally_continues_when_no_priority_action_is_meaningful() {
+fn verified_ai_pass_cache_never_passes_an_unverified_representative() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 30_110, PlayerId(1));
     push_simple_stack_entry(&mut state, 30_111, PlayerId(1));
     let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
+    crate::game::perf_counters::reset();
     apply_verified_ai_priority_pass(&mut state, PlayerId(0), &contract, GameAction::PassPriority)
-        .expect("one verified pass continues through priority windows with no meaningful actions");
+        .expect("the issued pass starts the retained session");
+    let counters = crate::game::perf_counters::snapshot();
 
-    assert!(
-        state.stack.is_empty(),
-        "the retained session must internally pass and resolve its fenced entries"
+    assert_eq!(
+        counters.priority_cast_probe_builds, 0,
+        "the cache must avoid a synthetic probe before the next verified pass"
+    );
+    assert_eq!(
+        counters.priority_cast_probe_state_clones, 0,
+        "the cache must not clone state for a synthetic priority probe"
     );
     assert!(
-        state.stack_resolution_session.is_none(),
-        "the session restores its overlay when its fenced cohort is exhausted"
+        state.stack_resolution_session.is_some(),
+        "the fenced cohort remains available for an unverified representative"
+    );
+    assert_eq!(state.stack.len(), 2, "no entry resolves without a new pass");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(1)
+        }
+    ));
+    assert!(
+        apply_verified_ai_priority_pass(
+            &mut state,
+            PlayerId(0),
+            &contract,
+            GameAction::PassPriority,
+        )
+        .is_err(),
+        "the prior contract cannot authorize P1's distinct priority window"
     );
 }
 
@@ -2161,15 +2183,11 @@ fn another_canonical_representative_can_continue_a_rechecking_session() {
     )
     .expect("a second representative may supply its own fresh AI pass");
 
-    assert_eq!(
-        state
-            .stack_resolution_session
-            .as_ref()
-            .map(|session| session.cursor),
-        Some(1),
-        "the second representative's fresh pass must consume exactly one fenced entry"
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "once every representative has a verified pass, the fenced cohort drains"
     );
-    assert_eq!(state.stack.len(), 1);
+    assert!(state.stack.is_empty());
     assert!(second_result.events.iter().any(|event| matches!(
         event,
         GameEvent::StackResolved {

@@ -537,6 +537,11 @@ fn restored_stack_resolution_session_is_coherent(
             .budget
             .max_resolutions()
             .is_some_and(|maximum| session.cursor >= maximum as usize)
+        || !session
+            .verified_pass_representatives
+            .is_subset(&session.representatives)
+        || (session.policy != StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+            && !session.verified_pass_representatives.is_empty())
     {
         return false;
     }
