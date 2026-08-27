@@ -1,6 +1,9 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-use crate::game::layers::{compute_current_copiable_values, has_active_copy_layer_effects};
+use crate::game::layers::compute_current_copiable_values;
+#[cfg(test)]
+use crate::game::layers::has_active_copy_layer_effects;
+#[cfg(test)]
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -1247,6 +1250,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
 /// the live source at resolution time (`token_copy::resolve`), so no display
 /// `PrintedCardRef` is threaded through the batch probe (CR 707.2: not a
 /// copiable characteristic).
+#[cfg(test)]
 pub(crate) fn compute_copy_batch_prefix(
     state: &GameState,
     source_ids: &[ObjectId],

@@ -5357,6 +5357,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
     !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
 }

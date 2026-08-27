@@ -7,11 +7,12 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
+#[cfg(test)]
+use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
-    WaitingFor,
+    MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;

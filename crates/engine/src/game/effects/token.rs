@@ -2883,6 +2883,7 @@ fn copy_token_values_emit_only_etb_pair(values: &crate::types::ability::Copiable
 /// only the copiable values (CR 707.2): token art comes from the live source at
 /// resolution time (`token_copy::resolve`), so no `PrintedCardRef` is threaded
 /// through the probe.
+#[cfg(test)]
 pub(crate) fn copy_probe_spec(
     ability: &ResolvedAbility,
     values: &crate::types::ability::CopiableValues,
