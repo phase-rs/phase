@@ -89,6 +89,14 @@
       "side": "Die Vorschau dockt am Bildschirmrand an, sodass sie das Spielfeld nie verdeckt.",
       "shift": "Die Vorschau erscheint nur, solange du die Umschalttaste gedrückt hältst, wie bei Tabletop Simulator."
     },
+    "draftCardPreview": "Karten-Hover-Vorschau beim Draft",
+    "draftCardPreviewOff": "Aus",
+    "draftCardPreviewHint": "Gilt nur beim Draften und beim Erstellen deines Draftdecks.",
+    "draftDoubleClickConfirmPick": "Draft-Auswahl per Doppelklick bestätigen",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Deaktiviert",
+      "enabled": "Aktiviert"
+    },
     "cardPreviewFooter": "Vorschauinformationen",
     "showCardPreviewFooter": "Informationen unter Kartenvorschauen anzeigen",
     "cardPreviewFooterHint": "Enthält Kartenname, verfügbare aktivierte Fähigkeiten und Tastaturhinweise. Alt öffnet weiterhin die Parsedetails, wenn dies ausgeblendet ist.",

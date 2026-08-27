@@ -62,6 +62,7 @@ export type CardSizePreference = "small" | "medium" | "large";
  *  "shift"  = the preview only appears while the Shift key is held (Tabletop
  *             Simulator style), letting the player read the board uninterrupted. */
 export type CardPreviewMode = "follow" | "side" | "shift";
+export type DraftCardPreviewMode = "none" | CardPreviewMode;
 /** Card-preview hover latency bounds (milliseconds). `0` = instant (the
  *  default — the preview appears the moment the cursor lands on a card). The
  *  upper bound keeps the slider meaningful; a delay longer than ~1s defeats the
@@ -302,6 +303,8 @@ function buildDefaultPreferences(): PreferencesState {
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
+    draftCardPreviewMode: "none",
+    draftDoubleClickConfirmPick: true,
     cardPreviewHoverDelayMs: 0,
     showCardPreviewFooter: true,
     stackDockSide: "right",
@@ -387,6 +390,8 @@ interface PreferencesState {
   /** Desktop hover card-preview behavior — follow cursor, dock to the side, or
    *  only show while Shift is held. See {@link CardPreviewMode}. */
   cardPreviewMode: CardPreviewMode;
+  draftCardPreviewMode: DraftCardPreviewMode;
+  draftDoubleClickConfirmPick: boolean;
   /** Latency (ms) before the hover preview appears in the "follow"/"side"
    *  modes. `0` = instant (default). Ignored in "shift" mode, which is
    *  keypress-triggered. See {@link CARD_PREVIEW_HOVER_DELAY_MAX}. */
@@ -477,6 +482,8 @@ interface PreferencesActions {
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
+  setDraftCardPreviewMode: (mode: DraftCardPreviewMode) => void;
+  setDraftDoubleClickConfirmPick: (enabled: boolean) => void;
   setCardPreviewHoverDelayMs: (ms: number) => void;
   setShowCardPreviewFooter: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
@@ -637,6 +644,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
+      setDraftCardPreviewMode: (mode) => set({ draftCardPreviewMode: mode }),
+      setDraftDoubleClickConfirmPick: (enabled) => set({ draftDoubleClickConfirmPick: enabled }),
       setCardPreviewHoverDelayMs: (ms) =>
         set({
           cardPreviewHoverDelayMs: clamp(
@@ -795,7 +804,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 30,
+      version: 31,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -861,6 +870,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v28 → v29: Add the sacrificial-mana-aware automatic mode. Existing
       //          values remain valid; malformed persisted values normalize to
       //          the legacy automatic behavior below.
+      // v29 → v30: Add draftCardPreviewMode; legacy stores default to "none"
+      //          via the shallow merge.
+      // v30 → v31: Add draftDoubleClickConfirmPick; legacy stores default to
+      //          true via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

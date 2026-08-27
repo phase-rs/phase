@@ -85,6 +85,16 @@ pub enum DraftPoolGroupKind {
     ManaValue6Plus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftRarityGroupKind {
+    Mythic,
+    Rare,
+    Uncommon,
+    Common,
+    RarityOther,
+}
+
 /// One distinct card and the number of copies in a pool group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftPoolEntry {
@@ -121,6 +131,43 @@ pub struct DraftPoolColorCounts {
     pub green: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DraftWorkspaceCapabilities {
+    pub rarity_group_order: Option<Vec<DraftRarityGroupKind>>,
+}
+
+impl<'de> Deserialize<'de> for DraftWorkspaceCapabilities {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireCapabilities {
+            #[serde(deserialize_with = "deserialize_required_nullable")]
+            rarity_group_order: Option<Vec<DraftRarityGroupKind>>,
+        }
+
+        let wire = WireCapabilities::deserialize(deserializer)?;
+        Ok(Self {
+            rarity_group_order: wire.rarity_group_order,
+        })
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftWorkspaceRowClassification {
+    pub creature_instance_ids: Vec<String>,
+    pub noncreature_instance_ids: Vec<String>,
+}
+
 /// Pre-grouped, ordered presentation data for a player's limited pool.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftPoolGroups {
@@ -145,20 +192,46 @@ pub struct DraftPoolGroups {
     #[serde(default)]
     pub color_filter_options: Vec<DraftPoolGroupKind>,
     pub color_counts: DraftPoolColorCounts,
+    #[serde(default)]
+    pub workspace_capabilities: DraftWorkspaceCapabilities,
+    #[serde(default)]
+    pub workspace_row_classification: DraftWorkspaceRowClassification,
 }
 
 impl DraftPoolGroups {
     /// Builds the engine-owned ordering, grouping, and duplicate counts for a
     /// limited pool display.
-    pub fn from_pool(pool: &[DraftCardInstance]) -> Self {
+    pub fn from_pool(pool: &[DraftCardInstance], source: &DraftSource) -> Self {
+        let (rarity_groups, rarity_group_order) = match source {
+            DraftSource::Set { .. } => (
+                source_order_groups_for(pool, &RARITY_GROUP_ORDER, rarity_group),
+                Some(RARITY_CAPABILITY_ORDER.to_vec()),
+            ),
+            DraftSource::Cube { .. } => (Vec::new(), None),
+        };
+        let mut creature_instance_ids = Vec::new();
+        let mut noncreature_instance_ids = Vec::new();
+        for card in pool {
+            if type_memberships(card).contains(&DraftPoolGroupKind::Creature) {
+                creature_instance_ids.push(card.instance_id.clone());
+            } else {
+                noncreature_instance_ids.push(card.instance_id.clone());
+            }
+        }
+
         Self {
             color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
             type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
             cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
-            rarity_groups: groups_for(pool, &RARITY_GROUP_ORDER, rarity_group, true),
+            rarity_groups,
             type_filter_options: type_filter_options(pool),
             color_filter_options: color_filter_options(pool),
             color_counts: color_counts(pool),
+            workspace_capabilities: DraftWorkspaceCapabilities { rarity_group_order },
+            workspace_row_classification: DraftWorkspaceRowClassification {
+                creature_instance_ids,
+                noncreature_instance_ids,
+            },
         }
     }
 }
@@ -555,11 +628,15 @@ fn split_by_pack_size(
 pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerView {
     let idx = seat_index as usize;
 
-    let current_pack = session
-        .current_pack
-        .get(idx)
-        .and_then(|p| p.as_ref())
-        .map(|p| p.0.clone());
+    let current_pack =
+        session
+            .current_pack
+            .get(idx)
+            .and_then(|p| p.as_ref())
+            .map(|p| match &session.config.source {
+                DraftSource::Set { .. } => set_pack_in_rarity_order(&p.0),
+                DraftSource::Cube { .. } => p.0.clone(),
+            });
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
     let draft_effects = face_up_draft_cards(&pool);
@@ -704,6 +781,14 @@ const RARITY_GROUP_ORDER: [DraftPoolGroupKind; 5] = [
     DraftPoolGroupKind::RarityOther,
 ];
 
+const RARITY_CAPABILITY_ORDER: [DraftRarityGroupKind; 5] = [
+    DraftRarityGroupKind::Mythic,
+    DraftRarityGroupKind::Rare,
+    DraftRarityGroupKind::Uncommon,
+    DraftRarityGroupKind::Common,
+    DraftRarityGroupKind::RarityOther,
+];
+
 const CMC_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
     DraftPoolGroupKind::ManaValue0,
     DraftPoolGroupKind::ManaValue1,
@@ -734,6 +819,61 @@ fn groups_for(
                 total,
                 cards: sorted_entries(cards, sort_by_cmc),
             })
+        })
+        .collect()
+}
+
+fn source_order_groups_for(
+    pool: &[DraftCardInstance],
+    order: &[DraftPoolGroupKind],
+    classify: fn(&DraftCardInstance) -> DraftPoolGroupKind,
+) -> Vec<DraftPoolGroup> {
+    order
+        .iter()
+        .filter_map(|kind| {
+            let cards: Vec<_> = pool
+                .iter()
+                .filter(|card| classify(card) == *kind)
+                .cloned()
+                .collect();
+            let total = cards.len();
+            (!cards.is_empty()).then(|| DraftPoolGroup {
+                kind: *kind,
+                total,
+                cards: source_order_entries(cards),
+            })
+        })
+        .collect()
+}
+
+fn source_order_entries(cards: Vec<DraftCardInstance>) -> Vec<DraftPoolEntry> {
+    let mut entries: Vec<DraftPoolEntry> = Vec::new();
+    for card in cards {
+        if let Some(entry) = entries
+            .last_mut()
+            .filter(|entry| entry.card.name == card.name)
+        {
+            entry.count += 1;
+            entry.instance_ids.push(card.instance_id.clone());
+        } else {
+            let instance_ids = vec![card.instance_id.clone()];
+            entries.push(DraftPoolEntry {
+                card,
+                count: 1,
+                instance_ids,
+            });
+        }
+    }
+    entries
+}
+
+fn set_pack_in_rarity_order(pack: &[DraftCardInstance]) -> Vec<DraftCardInstance> {
+    RARITY_GROUP_ORDER
+        .iter()
+        .flat_map(|kind| {
+            pack.iter()
+                .filter(move |card| rarity_group(card) == *kind)
+                .cloned()
         })
         .collect()
 }
@@ -1140,16 +1280,15 @@ mod tests {
     fn view_contains_viewers_current_pack() {
         let (mut session, source) = test_session(8);
         session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        let actual_pack = session.current_pack[0].as_ref().unwrap().0.clone();
 
         let view = filter_for_player(&session, 0);
         let pack = view.current_pack.unwrap();
         assert_eq!(pack.len(), 14);
-
-        // Verify it matches the actual session data
-        let actual_pack = &session.current_pack[0].as_ref().unwrap().0;
-        for (i, card) in pack.iter().enumerate() {
-            assert_eq!(card.instance_id, actual_pack[i].instance_id);
-        }
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0, actual_pack);
+        assert!(actual_pack.iter().all(|card| pack
+            .iter()
+            .any(|projected| projected.instance_id == card.instance_id)));
     }
 
     #[test]
@@ -1217,7 +1356,12 @@ mod tests {
             draft_card("Field", &[], 0, "Land"),
         ];
 
-        let groups = DraftPoolGroups::from_pool(&pool);
+        let groups = DraftPoolGroups::from_pool(
+            &pool,
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
 
         assert_eq!(
             groups
@@ -1264,7 +1408,12 @@ mod tests {
         let common_a = draft_card("Adept", &["W"], 2, "Creature — Wizard");
         let common_b = draft_card("Adept", &["W"], 2, "Creature — Wizard");
 
-        let groups = DraftPoolGroups::from_pool(&[mythic, rare, special, common_a, common_b]);
+        let groups = DraftPoolGroups::from_pool(
+            &[mythic, rare, special, common_a, common_b],
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
 
         assert_eq!(
             groups
@@ -1282,6 +1431,133 @@ mod tests {
         );
         assert_eq!(groups.rarity_groups[2].cards[0].count, 2);
         assert_eq!(groups.rarity_groups[2].total, 2);
+    }
+
+    #[test]
+    fn set_and_cube_workspace_capabilities_are_source_owned() {
+        let mut adept_first = draft_card("Adept", &["W"], 2, "Artifact Creature — Wizard");
+        adept_first.instance_id = "Adept-1".to_string();
+        let bolt = draft_card("Bolt", &["R"], 1, "Instant");
+        let mut adept_second = draft_card("Adept", &["W"], 2, "Artifact Creature — Wizard");
+        adept_second.instance_id = "Adept-2".to_string();
+        let mut relic = draft_card("Relic", &[], 2, "Artifact");
+        relic.rarity = "rare".to_string();
+        let mut dragon = draft_card("Dragon", &["R"], 6, "Creature — Dragon");
+        dragon.rarity = "mythic".to_string();
+        let mut charm = draft_card("Charm", &["U"], 3, "Instant");
+        charm.rarity = "uncommon".to_string();
+        let mut oddity = draft_card("Oddity", &["U"], 4, "Sorcery");
+        oddity.rarity = "special".to_string();
+        let field = draft_card("Field", &[], 0, "Land");
+        let pack = vec![
+            adept_first.clone(),
+            relic.clone(),
+            bolt.clone(),
+            oddity.clone(),
+            dragon.clone(),
+            charm.clone(),
+        ];
+        let pool = vec![
+            adept_first,
+            bolt,
+            adept_second,
+            relic,
+            dragon,
+            charm,
+            oddity,
+            field,
+        ];
+
+        let (mut set_session, _) = test_session(1);
+        set_session.current_pack[0] = Some(DraftPack(pack.clone()));
+        set_session.pools[0] = pool.clone();
+        let set_view = filter_for_player(&set_session, 0);
+
+        assert_eq!(
+            set_view
+                .current_pack
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|card| card.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Dragon", "Relic", "Charm", "Adept-1", "Bolt", "Oddity"]
+        );
+        assert_eq!(set_session.current_pack[0].as_ref().unwrap().0, pack);
+        assert_eq!(
+            set_view
+                .pool_groups
+                .workspace_capabilities
+                .rarity_group_order,
+            Some(RARITY_CAPABILITY_ORDER.to_vec())
+        );
+        assert_eq!(
+            set_view
+                .pool_groups
+                .rarity_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            RARITY_GROUP_ORDER
+        );
+        let common = set_view
+            .pool_groups
+            .rarity_groups
+            .iter()
+            .find(|group| group.kind == DraftPoolGroupKind::Common)
+            .unwrap();
+        assert_eq!(
+            common
+                .cards
+                .iter()
+                .map(|entry| entry.card.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Adept", "Bolt", "Adept", "Field"]
+        );
+        assert_eq!(common.cards[0].instance_ids, vec!["Adept-1"]);
+        assert_eq!(common.cards[2].instance_ids, vec!["Adept-2"]);
+        assert_eq!(
+            common
+                .cards
+                .iter()
+                .flat_map(|entry| entry.instance_ids.iter().map(String::as_str))
+                .collect::<Vec<_>>(),
+            vec!["Adept-1", "Bolt", "Adept-2", "Field"]
+        );
+        assert_eq!(
+            set_view
+                .pool_groups
+                .workspace_row_classification
+                .creature_instance_ids,
+            vec!["Adept-1", "Adept-2", "Dragon"]
+        );
+        assert_eq!(
+            set_view
+                .pool_groups
+                .workspace_row_classification
+                .noncreature_instance_ids,
+            vec!["Bolt", "Relic", "Charm", "Oddity", "Field"]
+        );
+
+        let mut cube_session = set_session;
+        cube_session.config.source = DraftSource::Cube {
+            id: "cube-1".to_string(),
+            name: "Test Cube".to_string(),
+        };
+        let cube_view = filter_for_player(&cube_session, 0);
+        assert_eq!(cube_view.current_pack.unwrap(), pack);
+        assert!(cube_view.pool_groups.rarity_groups.is_empty());
+        assert_eq!(
+            cube_view
+                .pool_groups
+                .workspace_capabilities
+                .rarity_group_order,
+            None
+        );
+        assert_eq!(
+            cube_view.pool_groups.workspace_row_classification,
+            set_view.pool_groups.workspace_row_classification
+        );
     }
 
     #[test]
@@ -1426,7 +1702,12 @@ mod tests {
         // The engine-owned option list offers every membership, in engine
         // order — while the exclusive presentation axis keeps one bucket per
         // card (the Artifact Land sorts under Artifact, not Land).
-        let groups = DraftPoolGroups::from_pool(&pool);
+        let groups = DraftPoolGroups::from_pool(
+            &pool,
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
         assert_eq!(
             groups.type_filter_options,
             vec![
@@ -1483,7 +1764,12 @@ mod tests {
 
         // The option list offers every membership; the sorted display keeps
         // its exclusive shape (Charm sorts under Multicolor alone).
-        let groups = DraftPoolGroups::from_pool(&pool);
+        let groups = DraftPoolGroups::from_pool(
+            &pool,
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
         assert_eq!(
             groups.color_filter_options,
             vec![
@@ -1594,6 +1880,14 @@ mod tests {
         let groups: DraftPoolGroups = serde_json::from_str(old).expect("old shape deserializes");
         assert!(groups.rarity_groups.is_empty());
         assert!(groups.type_groups[0].cards[0].instance_ids.is_empty());
+        assert_eq!(
+            groups.workspace_capabilities,
+            DraftWorkspaceCapabilities::default()
+        );
+        assert_eq!(
+            groups.workspace_row_classification,
+            DraftWorkspaceRowClassification::default()
+        );
     }
 
     #[test]
@@ -1607,7 +1901,12 @@ mod tests {
         rare.instance_id = "adept-rare".to_string();
         rare.rarity = "rare".to_string();
 
-        let groups = DraftPoolGroups::from_pool(&[common, rare]);
+        let groups = DraftPoolGroups::from_pool(
+            &[common, rare],
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
 
         assert_eq!(
             groups
@@ -1628,6 +1927,14 @@ mod tests {
             vec!["adept-common".to_string(), "adept-rare".to_string()]
         );
         assert_eq!(groups.type_groups[0].cards[0].count, 2);
+        assert_eq!(
+            groups.workspace_row_classification.creature_instance_ids,
+            vec!["adept-common", "adept-rare"]
+        );
+        assert!(groups
+            .workspace_row_classification
+            .noncreature_instance_ids
+            .is_empty());
     }
 
     #[test]

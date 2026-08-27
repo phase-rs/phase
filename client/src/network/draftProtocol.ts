@@ -17,9 +17,15 @@
 
 import type {
   DraftPlayerView,
+  DraftRarityGroupKind,
   SeatPublicView,
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
+import {
+  MAX_DRAFT_WORKSPACE_NETWORK_PLACEMENTS,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
 import type {
   DraftIntergameCommand,
   DraftIntergameCommandAck,
@@ -119,8 +125,11 @@ import type {
  *       the singular fields could no longer name the answer. The engine takes
  *       the union in `draft_set_concessions_for`; the client still never learns
  *       which sets grant what.
+ *
+ *  21 — complete, validated per-seat workspace snapshots and workspace pool
+ *       metadata. This is additive and retains the v13–20 contract.
  */
-export const DRAFT_PROTOCOL_VERSION = 20 as const;
+export const DRAFT_PROTOCOL_VERSION = 21 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -249,7 +258,7 @@ export type DraftMatchLaunch =
  *
  * Flow:
  *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
- *                 `draft_request_advance`
+ *                 `draft_request_advance`, `draft_workspace_update`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
  *                 `draft_kicked`, `draft_pairing`, `draft_match_result`,
@@ -291,6 +300,10 @@ export type DraftP2PMessage =
        */
       commanders: string[];
     }
+  | {
+      type: "draft_workspace_update";
+      workspaceState: DraftWorkspaceState;
+    }
   // ── Host → Guest ───────────────────────────────────────────────────
   | {
       type: "draft_welcome";
@@ -303,6 +316,7 @@ export type DraftP2PMessage =
       view: DraftPlayerView;
       /** Draft code for display / persistence key. */
       draftCode: string;
+      workspaceState: DraftWorkspaceState | null;
     }
   | {
       type: "draft_reconnect_ack";
@@ -310,6 +324,7 @@ export type DraftP2PMessage =
       seatIndex: number;
       view: DraftPlayerView;
       draftCode: string;
+      workspaceState: DraftWorkspaceState | null;
     }
   | {
       type: "draft_reconnect_rejected";
@@ -491,6 +506,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_pick",
   "draft_pick_with_draft_effect",
   "draft_submit_deck",
+  "draft_workspace_update",
   "draft_welcome",
   "draft_reconnect_ack",
   "draft_reconnect_rejected",
@@ -699,6 +715,51 @@ function normalizePoolGroup(raw: unknown): Record<string, unknown> {
   };
 }
 
+const VALID_DRAFT_RARITY_GROUP_KINDS = new Set<DraftRarityGroupKind>([
+  "mythic",
+  "rare",
+  "uncommon",
+  "common",
+  "rarity_other",
+]);
+
+function validateWorkspaceCapabilities(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Invalid draft message: workspace_capabilities must be an object");
+  }
+  const capabilities = raw as Record<string, unknown>;
+  if (!("rarity_group_order" in capabilities)) {
+    throw new Error("Invalid draft message: workspace_capabilities requires rarity_group_order");
+  }
+  const order = capabilities.rarity_group_order;
+  if (
+    order !== null
+    && (!Array.isArray(order)
+      || !order.every((kind) =>
+        typeof kind === "string"
+        && VALID_DRAFT_RARITY_GROUP_KINDS.has(kind as DraftRarityGroupKind)))
+  ) {
+    throw new Error("Invalid draft message: rarity_group_order is malformed");
+  }
+  return capabilities;
+}
+
+function validateWorkspaceRowClassification(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Invalid draft message: workspace_row_classification must be an object");
+  }
+  const rows = raw as Record<string, unknown>;
+  for (const field of ["creature_instance_ids", "noncreature_instance_ids"] as const) {
+    if (!(field in rows)) {
+      throw new Error(`Invalid draft message: workspace_row_classification requires ${field}`);
+    }
+    if (!Array.isArray(rows[field]) || !rows[field].every((id) => typeof id === "string")) {
+      throw new Error(`Invalid draft message: ${field} must be a string array`);
+    }
+  }
+  return rows;
+}
+
 /** v10 → v11: fill the missing rarity axis (empty — the old host never
  * classified it) and upgrade every group entry. */
 function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined {
@@ -715,6 +776,12 @@ function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined 
     rarity_groups: normalizeArrayField(groups, "rarity_groups").map(normalizePoolGroup),
     type_filter_options: normalizeArrayField(groups, "type_filter_options"),
     color_filter_options: normalizeArrayField(groups, "color_filter_options"),
+    workspace_capabilities: "workspace_capabilities" in groups
+      ? validateWorkspaceCapabilities(groups.workspace_capabilities)
+      : { rarity_group_order: null },
+    workspace_row_classification: "workspace_row_classification" in groups
+      ? validateWorkspaceRowClassification(groups.workspace_row_classification)
+      : { creature_instance_ids: [], noncreature_instance_ids: [] },
   };
 }
 
@@ -733,6 +800,31 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
     draft_effects: normalizeArrayField(view, "draft_effects"),
     seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
   } as unknown as DraftPlayerView;
+}
+
+function requireWorkspaceState(
+  raw: Record<string, unknown>,
+  nullable: false,
+): DraftWorkspaceState;
+function requireWorkspaceState(
+  raw: Record<string, unknown>,
+  nullable: true,
+): DraftWorkspaceState | null;
+function requireWorkspaceState(
+  raw: Record<string, unknown>,
+  nullable: boolean,
+): DraftWorkspaceState | null {
+  if (!("workspaceState" in raw)) {
+    throw new Error("Invalid draft message: missing workspaceState");
+  }
+  if (raw.workspaceState === null && nullable) return null;
+  const validated = validateWorkspaceState(raw.workspaceState, {
+    maxPlacementCount: MAX_DRAFT_WORKSPACE_NETWORK_PLACEMENTS,
+  });
+  if ("error" in validated) {
+    throw new Error(`Invalid draft message: ${validated.error}`);
+  }
+  return validated;
 }
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
@@ -776,9 +868,6 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_reconnect_rejected") {
     const rejection = raw as Record<string, unknown>;
-    // Pre-v13 frames carried only a string reason. They are never a capability-revocation
-    // signal: normalize it to the safe terminal outcome that preserves the
-    // guest's recovery records and asks the user to refresh.
     if (rejection.kind === undefined && typeof rejection.reason === "string") {
       return {
         ...rejection,
@@ -797,11 +886,25 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
     }
     return rejection as DraftP2PMessage;
   }
+  if (msg.type === "draft_workspace_update") {
+    const update = raw as Record<string, unknown>;
+    if ("seat" in update || "seatIndex" in update) {
+      throw new Error("Invalid draft message: workspace update must not include a seat");
+    }
+    return {
+      type: "draft_workspace_update",
+      workspaceState: requireWorkspaceState(update, false),
+    };
+  }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    const workspaceState = msg.type === "draft_welcome" || msg.type === "draft_reconnect_ack"
+      ? requireWorkspaceState(raw as Record<string, unknown>, true)
+      : undefined;
     return {
       ...viewMessage,
       view: normalizeDraftPlayerView(viewMessage.view),
+      ...(workspaceState !== undefined ? { workspaceState } : {}),
     } as DraftP2PMessage;
   }
   if (msg.type === "draft_lobby_update") {

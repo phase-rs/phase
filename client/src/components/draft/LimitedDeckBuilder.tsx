@@ -5,7 +5,9 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { useLongPress } from "../../hooks/useLongPress";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 import { useDraftStore } from "../../stores/draftStore";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
   commanderPartnerCandidates,
@@ -36,6 +38,17 @@ import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 import type { CardHoverInfo } from "../card/CardPreview";
 import { HoverCardPreview } from "../card/HoverCardPreview";
 import { ManaCurve } from "./ManaCurve";
+import { DeckStatistics } from "./DeckStatistics";
+import { DraftWorkspace } from "./workspace/DraftWorkspace";
+import { useDraftWorkspaceDrag } from "./workspace/useDraftWorkspaceDrag";
+import type { DraftWorkspaceState } from "./workspace/types";
+import {
+  type DraftWorkspacePreferences,
+  type ResponsiveDraftLayout,
+} from "./workspace/workspacePreferences";
+import {
+  projectDeckNames,
+} from "./workspace/workspaceProjection";
 
 // Shared enter/exit for cards moving between the pool and the deck.
 const CARD_MOTION = {
@@ -81,6 +94,16 @@ const LAND_COLOR_CLASSES: Record<string, string> = {
   Forest: "bg-green-500",
   Wastes: "bg-neutral-300",
 };
+
+// Stable empty defaults so the controlled path's memo dependencies do not
+// churn on every render when a caller omits a facade prop.
+const EMPTY_MAIN_DECK: string[] = [];
+const EMPTY_LAND_COUNTS: Record<string, number> = {};
+const DECKBUILDING_INTERACTION = {
+  interactionGeneration: 0,
+  pickInteractionLocked: false,
+  pendingPickIntent: null,
+} as const;
 
 // ── Card image tile ─────────────────────────────────────────────────────
 
@@ -260,9 +283,60 @@ interface LimitedDeckBuilderProps {
   onSubmitDeck?: (commanders: string[]) => Promise<void> | void;
   submissionError?: string | null;
   showSuggestions?: boolean;
+  local?: WorkspaceDeckBuilderController;
+  responsiveLayout?: ResponsiveDraftLayout;
+  responsiveHeightMode?: "viewport" | "container";
 }
 
-export function LimitedDeckBuilder({
+// Local (Quick/Cube/Sealed) deckbuilding drives one authoritative workspace
+// instance. The store owns all mutation and identity; this controller only
+// forwards intent and the derived board back to the store.
+interface WorkspaceDeckBuilderControllerBase {
+  view: DraftPlayerView;
+  workspace: DraftWorkspaceState;
+  preferences: DraftWorkspacePreferences;
+  interactionLocked: boolean;
+  onWorkspaceChange: (next: DraftWorkspaceState) => void;
+  onPreferencesChange: (next: DraftWorkspacePreferences) => void;
+  onSubmitDeck: () => void | Promise<void>;
+  onCardHover?: (info: CardHoverInfo | null) => void;
+}
+
+export type LocalDeckBuilderController = WorkspaceDeckBuilderControllerBase & {
+  capabilities?: { kind: "editable-pool"; suggestions: boolean };
+  onAddBasicLand: (name: string) => void;
+  onRemoveBasicLand: (name: string) => void;
+  onAutoSuggestDeck?: () => void | Promise<void>;
+  onAutoSuggestLands?: () => void | Promise<void>;
+};
+
+export type WorkspaceDeckBuilderController = LocalDeckBuilderController
+  | (WorkspaceDeckBuilderControllerBase & { capabilities: { kind: "fixed-pool" } });
+
+function isEditableWorkspaceController(
+  controller: WorkspaceDeckBuilderController,
+): controller is LocalDeckBuilderController {
+  return controller.capabilities?.kind !== "fixed-pool";
+}
+
+export function LimitedDeckBuilder(props: LimitedDeckBuilderProps = {}) {
+  if (props.local) {
+    return (
+      <WorkspaceDeckBuilder
+        controller={props.local}
+        submissionError={props.submissionError ?? null}
+        showSuggestions={props.showSuggestions ?? true}
+        responsiveLayout={props.responsiveLayout ?? "desktop"}
+        responsiveHeightMode={props.responsiveHeightMode ?? "viewport"}
+      />
+    );
+  }
+  return <ControlledDeckBuilder {...props} />;
+}
+
+// Name-count controlled path retained unchanged for Pod/Traditional callers
+// that still supply their own deck/land facades and mutation callbacks.
+function ControlledDeckBuilder({
   view: viewOverride,
   mainDeck: mainDeckOverride,
   landCounts: landCountsOverride,
@@ -275,21 +349,17 @@ export function LimitedDeckBuilder({
 }: LimitedDeckBuilderProps = {}) {
   const { t } = useTranslation("draft");
   const quickView = useDraftStore((s) => s.view);
-  const quickMainDeck = useDraftStore((s) => s.mainDeck);
-  const quickLandCounts = useDraftStore((s) => s.landCounts);
-  const quickAddToDeck = useDraftStore((s) => s.addToDeck);
-  const quickRemoveFromDeck = useDraftStore((s) => s.removeFromDeck);
-  const quickSetLandCount = useDraftStore((s) => s.setLandCount);
   const autoSuggestDeck = useDraftStore((s) => s.autoSuggestDeck);
   const autoSuggestLands = useDraftStore((s) => s.autoSuggestLands);
   const quickSubmitDeck = useDraftStore((s) => s.submitDeck);
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
 
   const view = viewOverride !== undefined ? viewOverride : quickView;
-  const mainDeck = mainDeckOverride ?? quickMainDeck;
-  const landCounts = landCountsOverride ?? quickLandCounts;
-  const addToDeck = onAddToDeck ?? quickAddToDeck;
-  const removeFromDeck = onRemoveFromDeck ?? quickRemoveFromDeck;
-  const setLandCount = onSetLandCount ?? quickSetLandCount;
+  const mainDeck = mainDeckOverride ?? EMPTY_MAIN_DECK;
+  const landCounts = landCountsOverride ?? EMPTY_LAND_COUNTS;
+  const addToDeck: (cardName: string) => void = onAddToDeck ?? (() => {});
+  const removeFromDeck: (cardName: string) => void = onRemoveFromDeck ?? (() => {});
+  const setLandCount: (landName: string, count: number) => void = onSetLandCount ?? (() => {});
   const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
@@ -648,6 +718,8 @@ export function LimitedDeckBuilder({
     <div className="flex h-full flex-col gap-4">
       <HoverCardPreview
         card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -878,6 +950,306 @@ export function LimitedDeckBuilder({
   );
 }
 
+// ── Workspace-backed local deckbuilder ──────────────────────────────────
+
+function WorkspaceDeckBuilder({
+  controller,
+  submissionError,
+  showSuggestions,
+  responsiveLayout,
+  responsiveHeightMode,
+}: {
+  controller: WorkspaceDeckBuilderController;
+  submissionError: string | null;
+  showSuggestions: boolean;
+  responsiveLayout: ResponsiveDraftLayout;
+  responsiveHeightMode: "viewport" | "container";
+}) {
+  const { t } = useTranslation("draft");
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
+  const {
+    view,
+    workspace,
+    preferences,
+    interactionLocked,
+    onWorkspaceChange,
+    onPreferencesChange,
+    onSubmitDeck,
+    onCardHover,
+  } = controller;
+  const editableController = isEditableWorkspaceController(controller) ? controller : null;
+  const poolChangesEnabled = editableController !== null;
+  const suggestionsEnabled = showSuggestions && editableController !== null
+    && (editableController.capabilities?.suggestions ?? true);
+
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+  const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
+  const [landMenuOpen, setLandMenuOpen] = useState(false);
+  const [snowCovered, setSnowCovered] = useState(false);
+  const [requestedLands, setRequestedLands] = useState<Record<string, number>>({});
+
+  const pool = view.pool;
+  // Deck status, curve, land controls and validation all read the one
+  // authoritative instance workspace — never a separate name-count facade.
+  const deckCards = useMemo(
+    () => pool.filter((card) => workspace.placements[card.instance_id]?.zone === "deck"),
+    [pool, workspace],
+  );
+  const deckVirtualBasics = useMemo(
+    () => workspace.virtualBasics.filter(
+      (card) => workspace.placements[card.instanceId]?.zone === "deck",
+    ),
+    [workspace],
+  );
+  const spellNames = useMemo(() => [
+    ...deckCards.filter((card) => !/\bland\b/i.test(card.type_line)).map((card) => card.name),
+    ...deckVirtualBasics.filter((card) => !BASIC_LAND_NAMES.has(card.name)).map((card) => card.name),
+  ], [deckCards, deckVirtualBasics]);
+  const deckNames = useMemo(() => projectDeckNames(workspace, pool), [workspace, pool]);
+  const totalLands = useMemo(
+    () => deckCards.filter((card) => /\bland\b/i.test(card.type_line)).length
+      + deckVirtualBasics.filter((card) => BASIC_LAND_NAMES.has(card.name)).length,
+    [deckCards, deckVirtualBasics],
+  );
+  const minDeckSize = view.min_deck_size ?? 40;
+  const deckValid = deckNames.length >= minDeckSize;
+  const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+
+  const displayedSubmissionError = submissionError ?? localSubmissionError;
+  const dragController = useDraftWorkspaceDrag({
+    enabled: !interactionLocked,
+    readPickInteraction: () => DECKBUILDING_INTERACTION,
+    subscribePickInteraction: () => () => {},
+    onDrop: (request) => ({
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome: Promise.resolve({ status: "rejected", reason: "invalid-request" }),
+    }),
+    resolveCollapsedSideboardColumn: (instanceId) => Math.min(
+      preferences.sideboard.columnCount - 1,
+      Math.max(0, workspace.placements[instanceId]?.column ?? 0),
+    ),
+  });
+
+  useEffect(() => {
+    setLocalSubmissionError(null);
+  }, [workspace]);
+
+  const handleHover = (info: CardHoverInfo | null) => {
+    setHoveredCard(info);
+    onCardHover?.(info);
+  };
+
+  const handleSubmit = async () => {
+    setLocalSubmissionError(null);
+    try {
+      await onSubmitDeck();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
+    }
+  };
+
+  const requestedLandTotal = Object.values(requestedLands).reduce((sum, count) => sum + count, 0);
+  const handleAddLands = () => {
+    if (editableController === null || requestedLandTotal === 0) return;
+    for (const land of BASIC_LANDS) {
+      const count = requestedLands[land.name] ?? 0;
+      const name = snowCovered ? `Snow-Covered ${land.name}` : land.name;
+      for (let index = 0; index < count; index += 1) {
+        editableController.onAddBasicLand(name);
+      }
+    }
+    setRequestedLands({});
+    setLandMenuOpen(false);
+  };
+
+  const landControls = poolChangesEnabled ? (
+    <div className="relative inline-flex items-center gap-2">
+      <button
+        type="button"
+        aria-expanded={landMenuOpen}
+        aria-haspopup="dialog"
+        onClick={() => setLandMenuOpen((open) => !open)}
+        className={menuButtonClass({ tone: "neutral", size: "xs" })}
+      >
+        {t("limitedDeck.addLands")}
+      </button>
+      {suggestionsEnabled && editableController?.onAutoSuggestLands && (
+        <button
+          type="button"
+          onClick={() => void editableController.onAutoSuggestLands?.()}
+          className={menuButtonClass({ tone: "neutral", size: "xs" })}
+        >
+          {t("limitedDeck.autoLands")}
+        </button>
+      )}
+      {landMenuOpen && (
+        <div
+          role="dialog"
+          aria-label={t("limitedDeck.addLands")}
+          className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-72 rounded-[8px] border border-hairline bg-slate-950 p-4 shadow-panel"
+        >
+          <div className="flex flex-col gap-2">
+            {BASIC_LANDS.map((land) => (
+              <LandRow
+                key={land.name}
+                name={land.name}
+                colorClass={land.colorClass}
+                count={requestedLands[land.name] ?? 0}
+                onDecrement={() => setRequestedLands((counts) => ({
+                  ...counts,
+                  [land.name]: Math.max(0, (counts[land.name] ?? 0) - 1),
+                }))}
+                onIncrement={() => setRequestedLands((counts) => ({
+                  ...counts,
+                  [land.name]: (counts[land.name] ?? 0) + 1,
+                }))}
+              />
+            ))}
+          </div>
+          <label className="mt-4 flex min-h-9 items-center gap-2 text-sm text-white/70">
+            <input
+              type="checkbox"
+              checked={snowCovered}
+              onChange={(event) => setSnowCovered(event.target.checked)}
+              className="accent-jade"
+            />
+            {t("limitedDeck.snowCovered")}
+          </label>
+          <button
+            type="button"
+            disabled={requestedLandTotal === 0}
+            onClick={handleAddLands}
+            className={menuButtonClass({
+              tone: "emerald",
+              size: "sm",
+              disabled: requestedLandTotal === 0,
+              className: "mt-3 w-full",
+            })}
+          >
+            {t("limitedDeck.addLands")}
+          </button>
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  return (
+    <div
+      data-responsive-builder-layout={responsiveLayout}
+      className={phoneLayout
+        ? "flex h-[calc(100dvh_-_4rem)] min-h-0 flex-col gap-4 overflow-hidden pb-[67px]"
+        : tabletLayout
+          ? responsiveHeightMode === "container"
+            ? "flex h-full min-h-0 flex-col gap-4 overflow-hidden"
+            : "flex h-[calc(100dvh_-_8rem)] min-h-0 flex-col gap-4 overflow-hidden"
+          : "flex h-full flex-col gap-4"}
+    >
+      <HoverCardPreview
+        card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
+        mobileLayout="compact"
+        onDismiss={() => handleHover(null)}
+      />
+      {!phoneLayout && <DeckStatus spells={spellNames.length} lands={totalLands} min={minDeckSize} />}
+
+      <div className="flex min-h-0 flex-1 flex-col gap-6 xl:flex-row">
+        {/* Primary board: exact-instance deck/sideboard placement authority. */}
+        <div className="flex min-h-0 w-full min-w-0 flex-[7] flex-col overflow-hidden">
+          <DraftWorkspace
+            pool={pool}
+            poolGroups={view.pool_groups}
+            workspace={workspace}
+            preferences={preferences}
+            interactionLocked={interactionLocked}
+            dragController={dragController}
+            deckControls={landControls}
+            responsiveLayout={responsiveLayout}
+            responsiveContext="builder"
+            onWorkspaceChange={onWorkspaceChange}
+            onPreferencesChange={onPreferencesChange}
+            onCardHover={handleHover}
+          />
+        </div>
+
+        {/* Right column: deck analysis, suggestions and submission. */}
+        <div className={`${phoneLayout ? "hidden" : "flex"} w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto`}>
+          {suggestionsEnabled && editableController?.onAutoSuggestDeck && (
+            <section>
+              <button
+                type="button"
+                onClick={() => void editableController.onAutoSuggestDeck?.()}
+                className={menuButtonClass({ tone: "neutral", size: "sm", className: "w-full" })}
+              >
+                {t("limitedDeck.suggestDeck")}
+              </button>
+            </section>
+          )}
+
+          <section>
+            <ManaCurve pool={pool} cards={spellNames} />
+          </section>
+
+          <section className="flex flex-col gap-4">
+            <DeckStatistics
+              cards={deckCards}
+              virtualCardNames={deckVirtualBasics.map((card) => card.name)}
+            />
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!deckValid}
+              className={menuButtonClass({
+                tone: "emerald",
+                size: "md",
+                disabled: !deckValid,
+                className: "w-full",
+              })}
+            >
+              {t("limitedDeck.submitDeck")}
+            </button>
+            {displayedSubmissionError && (
+              <p
+                role="alert"
+                className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-100"
+              >
+                <span className="font-medium">{t("limitedDeck.validationTitle")}: </span>
+                {displayedSubmissionError}
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
+      {phoneLayout && (
+        <div
+          data-mobile-builder-submit-dock
+          className="fixed inset-x-[9px] bottom-0 z-40 flex min-h-[calc(59px_+_env(safe-area-inset-bottom))] items-center gap-2.5 border-t border-jade/30 bg-slate-950 px-2.5 py-[7px] shadow-[0_-12px_30px_rgba(0,0,0,0.42)]"
+        >
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
+            <strong className="shrink-0 text-xs text-fg">{t("workspace.count.deck", { count: deckNames.length })}</strong>
+            <span data-mobile-deck-remaining className="truncate text-[9px] text-fg-muted">
+              {deckValid
+                ? t("limitedDeck.readyToSubmit")
+                : t("limitedDeck.moreNeeded", { count: minDeckSize - deckNames.length })}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleSubmit()}
+            disabled={!deckValid}
+            className={menuButtonClass({ tone: "emerald", size: "md", disabled: !deckValid })}
+          >
+            {t("limitedDeck.submitDeck")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Deck status bar ─────────────────────────────────────────────────────
 
 function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min: number }) {
@@ -888,7 +1260,7 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
   const pct = Math.min(100, (total / min) * 100);
 
   return (
-    <div className="rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md">
+    <div data-deck-status className="rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md">
       <div className="flex items-baseline justify-between">
         <span className="text-sm font-medium text-white">
           {total} <span className="text-white/40">{t("limitedDeck.cardCount", { min })}</span>

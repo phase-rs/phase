@@ -93,6 +93,14 @@
       "side": "The preview docks to the edge of the screen so it never covers the board.",
       "shift": "The preview only appears while you hold Shift, like Tabletop Simulator."
     },
+    "draftCardPreview": "Draft Card Hover Preview",
+    "draftCardPreviewOff": "Off",
+    "draftCardPreviewHint": "Applies only while drafting and building your draft deck.",
+    "draftDoubleClickConfirmPick": "Draft Double-click Confirm Pick",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Disabled",
+      "enabled": "Enabled"
+    },
     "cardPreviewFooter": "Preview Information",
     "showCardPreviewFooter": "Show information below card previews",
     "cardPreviewFooterHint": "Includes the card name, available activated abilities, and keyboard hints. Alt still opens parse details when this is hidden.",

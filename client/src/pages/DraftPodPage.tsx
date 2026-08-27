@@ -16,6 +16,8 @@ import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { useDraftShellChrome, type DraftShellPhoneAction } from "../components/chrome/ShellContext";
+import { usePreferencesStore } from "../stores/preferencesStore";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
@@ -23,16 +25,37 @@ import { DraftProgress } from "../components/draft/DraftProgress";
 import { EliminationBracket } from "../components/draft/EliminationBracket";
 import { HostControls } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
-import { PackDisplay } from "../components/draft/PackDisplay";
+import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
-import { PodErrorBanner } from "../components/draft/PodErrorBanner";
+import { COMMANDER_DRAFT_ENTRY, type DraftKind } from "../components/draft/draftKind";
+import { distinctJoined } from "../adapter/draft-adapter";
+import { PodIcon } from "../components/draft/PodIcon";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
-import { COMMANDER_DRAFT_ENTRY, type DraftKind } from "../components/draft/draftKind";
-import { distinctJoined } from "../adapter/draft-adapter";
+import { PodErrorBanner } from "../components/draft/PodErrorBanner";
+import {
+  getResponsiveDraftLayout,
+  loadDraftWorkspacePreferences,
+  repairDraftWorkspacePackScale,
+  saveDraftWorkspacePreferences,
+  type DraftWorkspacePreferences,
+  type ResponsiveDraftLayout,
+} from "../components/draft/workspace/workspacePreferences";
+import { DraftWorkspace } from "../components/draft/workspace/DraftWorkspace";
+import { resolveWorkspacePickPlacement } from "../components/draft/workspace/workspacePlacement";
+import {
+  useDraftWorkspaceDrag,
+  type DraftDropRequest,
+  type DraftPickInteractionSnapshot,
+} from "../components/draft/workspace/useDraftWorkspaceDrag";
+import {
+  countProjectedNames,
+  projectWorkspacePartition,
+} from "../components/draft/workspace/workspaceProjection";
+import { DialogShell } from "../components/modal/DialogShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import {
@@ -42,12 +65,31 @@ import {
   type DraftPodScreen,
   type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
+import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
 
 type SetupMode = "choose" | "host" | "join";
 
+function readPickInteraction(): DraftPickInteractionSnapshot {
+  const state = useMultiplayerDraftStore.getState();
+  return {
+    interactionGeneration: state.interactionGeneration,
+    pickInteractionLocked: state.pickInteractionLocked,
+    pendingPickIntent: state.pendingPickIntent,
+  };
+}
+
+function subscribePickInteraction(listener: () => void): () => void {
+  return useMultiplayerDraftStore.subscribe((state, previous) => {
+    if (
+      state.interactionGeneration !== previous.interactionGeneration
+      || state.pickInteractionLocked !== previous.pickInteractionLocked
+      || state.pendingPickIntent !== previous.pendingPickIntent
+    ) listener();
+  });
+}
 
 function PodSetup() {
   const { t } = useTranslation("draft");
@@ -83,7 +125,7 @@ function PodSetup() {
   // blank line under the radios. Values are already-resolved strings because
   // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
   // lookup would not typecheck.
-  const kindDescription: Record<DraftKind, string> = {
+  const kindDescription: Record<Exclude<DraftKind, "Quick">, string> = {
     Premier: t("podSetup.kindPremierDesc"),
     Traditional: t("podSetup.kindTraditionalDesc"),
     Sealed: t("podSetup.kindSealedDesc"),
@@ -486,6 +528,7 @@ function PairingPhaseView() {
 
 function MatchInProgressView() {
   const { t } = useTranslation("draft");
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
   const navigate = useNavigate();
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const startMatch = useMultiplayerDraftStore((s) => s.startMatch);
@@ -551,6 +594,8 @@ function MatchInProgressView() {
       </div>
       <HoverCardPreview
         card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -580,17 +625,31 @@ function RoundCompleteView() {
 
 // ── Between Games View (Bo3) ─────────────────────────────────────────
 
-function BetweenGamesView({ onDismiss }: { onDismiss: () => void }) {
+function BetweenGamesView({
+  responsiveLayout,
+  onDismiss,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  onDismiss: () => void;
+}) {
   const { t } = useTranslation("draft");
   const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
   const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
   const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
   const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
   const submitSideboard = useMultiplayerDraftStore((s) => s.submitSideboard);
+  const setIntergameWorkspaceState = useMultiplayerDraftStore((s) => s.setIntergameWorkspaceState);
   const choosePlayDraw = useMultiplayerDraftStore((s) => s.choosePlayDraw);
   const timerRemainingMs = useMultiplayerDraftStore((s) => s.timerRemainingMs);
-  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
   const submittedDeck = useMultiplayerDraftStore((s) => s.submittedDeck);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const intergameWorkspace = useMultiplayerDraftStore((s) => s.intergameWorkspaceState);
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
 
   // Play/draw choice prompt (shown to the loser of the previous game)
   if (playDrawPrompt) {
@@ -651,13 +710,14 @@ function BetweenGamesView({ onDismiss }: { onDismiss: () => void }) {
   }
 
   // Sideboard editing (reuse deck from submitted or current mainDeck)
-  if (sideboardPrompt) {
+  if (sideboardPrompt && view && intergameWorkspace) {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
-    const currentDeck = submittedDeck.length > 0 ? submittedDeck : mainDeck;
 
     return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 py-8">
-        <PodErrorBanner />
+      <div className={tabletLayout
+        ? "mx-auto flex h-[calc(100dvh_-_8rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
+        : "mx-auto flex w-full max-w-4xl flex-col gap-4 py-8"}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-medium text-white">
@@ -672,20 +732,30 @@ function BetweenGamesView({ onDismiss }: { onDismiss: () => void }) {
         <p className="text-sm text-white/50">
           {t("betweenGames.sideboardHint")}
         </p>
-        {/* Reuse the LimitedDeckBuilder for sideboard editing */}
-        <LimitedDeckBuilder />
-        <button
-          onClick={() => {
-            // Submit current deck state as sideboard submission
-            submitSideboard(sideboardPrompt.matchId, currentDeck, []);
-          }}
-          className={menuButtonClass({ tone: "emerald", size: "md" })}
-        >
-          {t("betweenGames.submitSideboard")}
-        </button>
-        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
-          {t("betweenGames.hideOverlay")}
-        </button>
+        <div className={tabletLayout ? "min-h-0 flex-1 overflow-hidden" : undefined}>
+          <LimitedDeckBuilder
+            local={{
+              view,
+              workspace: intergameWorkspace,
+              preferences: workspacePreferences,
+              interactionLocked: false,
+              capabilities: { kind: "fixed-pool" },
+              onWorkspaceChange: setIntergameWorkspaceState,
+              onPreferencesChange: handlePreferencesChange,
+              onSubmitDeck: () => {
+                const partition = projectWorkspacePartition(intergameWorkspace, view.pool);
+                submitSideboard(
+                  sideboardPrompt.matchId,
+                  partition.mainDeck,
+                  countProjectedNames(partition.sideboard),
+                );
+              },
+            }}
+            showSuggestions={false}
+            responsiveLayout={responsiveLayout}
+            responsiveHeightMode={tabletLayout ? "container" : "viewport"}
+          />
+        </div>
       </div>
     );
   }
@@ -706,18 +776,134 @@ function BetweenGamesView({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
-function DraftingPhaseContent() {
+function DraftingPhaseContent({
+  responsiveLayout,
+  phoneLayout,
+  mobileWorkspaceOpen,
+  setMobileWorkspaceOpen,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  phoneLayout: boolean;
+  mobileWorkspaceOpen: boolean;
+  setMobileWorkspaceOpen: (open: boolean) => void;
+}) {
   const { t } = useTranslation("draft");
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
+  const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick);
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
   const view = useMultiplayerDraftStore((s) => s.view);
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
+  const workspaceState = useMultiplayerDraftStore((s) => s.workspaceState);
+  const pendingPickIntent = useMultiplayerDraftStore((s) => s.pendingPickIntent);
+  const interactionGeneration = useMultiplayerDraftStore((s) => s.interactionGeneration);
+  const pickInteractionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
-  const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
-  const submitPickWithDraftEffect = useMultiplayerDraftStore((s) => s.submitPickWithDraftEffect);
-  const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
+  const phoneToolbarPinned = phoneLayout && !mobileWorkspaceOpen;
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    if (useMultiplayerDraftStore.getState().pickInteractionLocked) return;
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
+  const setPackScale = useCallback((next: number) => {
+    setWorkspacePreferences((current) => {
+      const updated = { ...current, packScale: repairDraftWorkspacePackScale(next) };
+      saveDraftWorkspacePreferences(updated);
+      return updated;
+    });
+  }, []);
+  const handleDrop = useCallback((request: DraftDropRequest) => {
+    const state = useMultiplayerDraftStore.getState();
+    const outcome = request.source.kind === "pick"
+      ? state.submitPick(request.source.instanceIds[0], request.destination, request.placementHint)
+      : state.submitPickWithDraftEffect(
+        request.source.authorityId,
+        request.source.instanceIds,
+        request.destination,
+        request.placementHint,
+      );
+    return {
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome,
+    };
+  }, []);
+  const resolveCollapsedSideboardColumn = useCallback((sourceInstanceId: string) => {
+    const placement = useMultiplayerDraftStore.getState().workspaceState?.placements[sourceInstanceId];
+    return Math.min(
+      workspacePreferences.sideboard.columnCount - 1,
+      Math.max(0, placement?.column ?? 0),
+    );
+  }, [workspacePreferences.sideboard.columnCount]);
+  const interactionLocked = paused || pickInteractionLocked;
+  const dragController = useDraftWorkspaceDrag({
+    enabled: introDismissed && !interactionLocked,
+    readPickInteraction,
+    subscribePickInteraction,
+    onDrop: handleDrop,
+    resolveCollapsedSideboardColumn,
+  });
+  const handleConfirmPick = useCallback((
+    destination: DraftPickDestination,
+    placementHint?: DraftPickPlacementHint,
+  ) => {
+    const state = useMultiplayerDraftStore.getState();
+    if (placementHint !== undefined || destination !== "deck") {
+      return state.confirmPick(destination, placementHint);
+    }
+    const card = state.view?.current_pack?.find((entry) => entry.instance_id === state.selectedCard);
+    const resolvedPlacement = card !== undefined && state.view !== null && state.workspaceState !== null
+      ? resolveWorkspacePickPlacement(
+        card,
+        destination,
+        state.view.pool,
+        state.view.pool_groups,
+        state.workspaceState,
+        workspacePreferences.deck,
+      )
+      : { column: 0 };
+    return state.confirmPick(destination, resolvedPlacement);
+  }, [workspacePreferences.deck]);
+  const handleAutoPick = useCallback(() => {
+    const state = useMultiplayerDraftStore.getState();
+    const { view: currentView, workspaceState } = state;
+    const placementHints = currentView !== null && currentView.current_pack !== null && workspaceState !== null
+      ? Object.fromEntries(currentView.current_pack.map((card) => [
+        card.instance_id,
+        resolveWorkspacePickPlacement(
+          card,
+          "deck",
+          currentView.pool,
+          currentView.pool_groups,
+          workspaceState,
+          workspacePreferences.deck,
+        ),
+      ]))
+      : undefined;
+    return state.autoPickCard(placementHints);
+  }, [workspacePreferences.deck]);
+  const packController = useMemo<PackDisplayController>(() => ({
+    kind: "local-workspace",
+    view,
+    selectedCard,
+    pendingIntent: pendingPickIntent,
+    interactionGeneration,
+    interactionLocked,
+    doubleClickPick: draftDoubleClickConfirmPick,
+    dragController,
+    selectCard,
+    pickCard: (instanceId, destination, placementHint) => useMultiplayerDraftStore.getState().submitPick(instanceId, destination, placementHint),
+    pickCardStep: (instanceIds, destination, placementHint) => useMultiplayerDraftStore.getState().submitPickStep(instanceIds, destination, placementHint),
+    confirmPick: handleConfirmPick,
+    pickCardWithDraftEffect: (effectInstanceId, instanceIds, destination, placementHint) => useMultiplayerDraftStore.getState().submitPickWithDraftEffect(effectInstanceId, instanceIds, destination, placementHint),
+    autoPickCard: handleAutoPick,
+  }), [
+    dragController, handleAutoPick, handleConfirmPick, interactionGeneration, interactionLocked, pendingPickIntent,
+    selectCard, selectedCard, view, draftDoubleClickConfirmPick,
+  ]);
 
   if (!introDismissed) {
     // CR 903.13a/b: the Commander procedure differs from the other pod kinds, so the
@@ -755,51 +941,99 @@ function DraftingPhaseContent() {
           ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
         </div>
       )}
-      <div className="flex flex-col gap-4 lg:flex-row">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <SeatStatusRing />
+      <div
+        data-responsive-draft-layout={responsiveLayout}
+        className={responsiveLayout === "desktop"
+          ? "flex w-full min-w-0 flex-col gap-4"
+          : responsiveLayout === "phone-portrait"
+            ? "relative flex h-[calc(100dvh_-_11rem)] min-h-0 w-full min-w-0 flex-col"
+            : responsiveLayout === "phone-landscape"
+              ? "relative block h-[calc(100dvh_-_4rem)] w-full min-w-0 overflow-hidden pb-[58px]"
+              : responsiveLayout === "tablet-portrait"
+                ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
+                : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
+      >
+        <div className={responsiveLayout === "desktop"
+          ? "w-full min-w-0"
+          : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+          {!phoneLayout && <SeatStatusRing />}
+          {responsiveLayout === "desktop" && <DraftProgress view={view} />}
           <PickTimer />
-          <DraftProgress view={view} />
           <PackDisplay
-            view={view}
-            selectedCard={selectedCard}
-            onSelectCard={selectCard}
-            onConfirmPick={confirmPick}
-            onPickWithDraftEffect={submitPickWithDraftEffect}
+            controller={packController}
+            presentation={{ packScale: workspacePreferences.packScale, setPackScale }}
             enableDraftEffects
-            showAutoPick
-            onAutoPick={autoPickCard}
             onCardHover={setHoveredCard}
+            responsiveLayout={responsiveLayout}
+            phoneToolbarPinned={phoneToolbarPinned}
+            mobileWorkspaceOpen={mobileWorkspaceOpen}
           />
         </div>
-        <PoolPanel view={view} onCardHover={setHoveredCard} />
+        {view && workspaceState && (
+          <div className={responsiveLayout === "desktop"
+            ? "w-full min-w-0"
+            : phoneLayout
+              ? "h-0 min-h-0 w-full min-w-0"
+              : "h-full min-h-0 w-full min-w-0"}>
+            <DraftWorkspace
+              pool={view.pool}
+              poolGroups={view.pool_groups}
+              workspace={workspaceState}
+              preferences={workspacePreferences}
+              interactionLocked={interactionLocked}
+              dragController={dragController}
+              onWorkspaceChange={(next) => useMultiplayerDraftStore.getState().setWorkspaceState(next)}
+              onPreferencesChange={handlePreferencesChange}
+              onCardHover={setHoveredCard}
+              responsiveLayout={responsiveLayout}
+              mobileOverlay
+              mobileWorkspaceOpen={mobileWorkspaceOpen}
+              onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
+              mobileSummaryAccessory={<HostControls presentation="integrated" />}
+            />
+          </div>
+        )}
       </div>
-      <HoverCardPreview card={hoveredCard} />
+      <HoverCardPreview
+        card={hoveredCard}
+        mode={draftCardPreviewMode}
+        hoverDelayMs={0}
+      />
     </>
   );
 }
 
-function PodDeckBuilder() {
+function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
   const view = useMultiplayerDraftStore((s) => s.view);
-  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
-  const landCounts = useMultiplayerDraftStore((s) => s.landCounts);
-  const addToDeck = useMultiplayerDraftStore((s) => s.addToDeck);
-  const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
-  const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
+  const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
+  const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
+  const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    setPreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
+
+  if (!view || !workspace) return null;
 
   return (
     <LimitedDeckBuilder
-      view={view}
-      mainDeck={mainDeck}
-      landCounts={landCounts}
-      onAddToDeck={addToDeck}
-      onRemoveFromDeck={removeFromDeck}
-      onSetLandCount={setLandCount}
-      onSubmitDeck={submitDeck}
+      local={{
+        view,
+        workspace,
+        preferences,
+        interactionLocked,
+        capabilities: { kind: "editable-pool", suggestions: false },
+        onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
+        onPreferencesChange: handlePreferencesChange,
+        onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
+        onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+        onSubmitDeck: submitDeck,
+      }}
       submissionError={submissionError}
       showSuggestions={false}
+      responsiveLayout={responsiveLayout}
     />
   );
 }
@@ -887,6 +1121,10 @@ function PodErrorView({
 function phaseContent(
   screen: DraftPodScreen,
   onLeave: () => void,
+  responsiveLayout: ResponsiveDraftLayout,
+  phoneLayout: boolean,
+  mobileWorkspaceOpen: boolean,
+  setMobileWorkspaceOpen: (open: boolean) => void,
   onDismissOverlay: () => void,
   onRetry: () => void,
 ): React.ReactNode {
@@ -899,11 +1137,18 @@ function phaseContent(
     case "lobby":
       return <DraftPodLobby onLeave={onLeave} />;
     case "drafting":
-      return <DraftingPhaseContent />;
+      return (
+        <DraftingPhaseContent
+          responsiveLayout={responsiveLayout}
+          phoneLayout={phoneLayout}
+          mobileWorkspaceOpen={mobileWorkspaceOpen}
+          setMobileWorkspaceOpen={setMobileWorkspaceOpen}
+        />
+      );
     case "deckbuilding":
-      return <PodDeckBuilder />;
+      return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
     case "betweenGames":
-      return <BetweenGamesView onDismiss={onDismissOverlay} />;
+      return <BetweenGamesView responsiveLayout={responsiveLayout} onDismiss={onDismissOverlay} />;
     case "pairing":
       return <PairingPhaseView />;
     case "matchInProgress":
@@ -926,11 +1171,13 @@ export function DraftPodPage() {
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const screen = useMultiplayerDraftStore(draftPodScreen);
   const promptKey = useMultiplayerDraftStore(intergamePromptKey);
-  // Selects the banner's copy and nothing else. A fourth primitive selector
-  // rather than a substring test on `promptKey`, whose shape is
-  // `intergamePromptKey`'s business.
   const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
   const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
+  const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
+  const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
+  const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const intergameWorkspace = useMultiplayerDraftStore((s) => s.intergameWorkspaceState);
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
@@ -945,6 +1192,76 @@ export function DraftPodPage() {
   const entryMode = entry === "host" || entry === "guest" || entry === "auto"
     ? entry
     : searchParams.get("resume") === "1" ? "host" : "auto";
+  const [responsiveViewport, setResponsiveViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const [podStatusOpen, setPodStatusOpen] = useState(false);
+  const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
+
+  const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
+    responsiveViewport.width,
+    responsiveViewport.height,
+  );
+  const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const phoneDrafting = phase === "drafting" && phoneLayout;
+  const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const betweenGamesEditorActive = screen === "betweenGames"
+    && sideboardPrompt !== null
+    && view !== null
+    && intergameWorkspace !== null
+    && !sideboardSubmitted
+    && playDrawPrompt === null;
+  const tabletDeckbuilding = tabletLayout && (phase === "deckbuilding" || betweenGamesEditorActive);
+
+  useEffect(() => {
+    const refreshViewport = () => setResponsiveViewport({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    window.addEventListener("resize", refreshViewport);
+    window.addEventListener("orientationchange", refreshViewport);
+    return () => {
+      window.removeEventListener("resize", refreshViewport);
+      window.removeEventListener("orientationchange", refreshViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!phoneLayout) {
+      setPodStatusOpen(false);
+      setMobileWorkspaceOpen(false);
+    }
+  }, [phoneLayout]);
+
+  const handleOpenPodStatus = useCallback(() => {
+    setPodStatusOpen(true);
+  }, []);
+
+  const phoneAction: DraftShellPhoneAction | undefined = useMemo(() => {
+    if (!phoneDrafting) return undefined;
+    return {
+      icon: <PodIcon className="h-6 w-6 opacity-70" />,
+      label: t("landing.podInProgress"),
+      onClick: handleOpenPodStatus,
+    };
+  }, [phoneDrafting, handleOpenPodStatus, t]);
+
+  useDraftShellChrome(
+    phoneDrafting
+      ? "phone-drafting"
+      : phoneDeckbuilding
+        ? "phone-deckbuilding"
+        : tabletDeckbuilding
+          ? "tablet-deckbuilding"
+        : tabletLayout && phase === "drafting"
+          ? "tablet-drafting"
+          : "default",
+    phoneAction,
+    "pod",
+    !(phase === "drafting" && responsiveLayout === "phone-portrait"),
+  );
 
   useEffect(() => {
     const generation = entryGeneration;
@@ -1026,40 +1343,58 @@ export function DraftPodPage() {
   const showBack = phase === "idle" || phase === "connecting";
 
   return (
-    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${phoneDrafting ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={showBack ? handleLeave : undefined} />
 
       {/* Centered MenuShell column — same responsive framing as every other
           out-of-match surface. Each phase view renders its own heading, so no
           MenuShell title is passed. */}
-      <MenuShell layout="stacked">
-        {/* Gated on `screen`, not `visibleScreen`, so it appears exactly while a
-            live overlay is being suppressed and disappears the instant either
-            conjunct releases — no separate teardown. `draftPodScreen` answers
-            `"betweenGames"` only when `phase === "matchInProgress"`, so the
-            screen underneath is provably `MatchInProgressView` and nothing else. */}
-        {screen === "betweenGames" && overlayDismissed && (
-          <div
-            role="status"
-            className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2"
-          >
-            <span className="text-sm text-white/70">
-              {t(playDrawPending ? "betweenGames.hiddenNoticePlayDraw" : "betweenGames.hiddenNotice")}
-            </span>
-            <button
-              onClick={() => setDismissedPromptKey(null)}
-              className={menuButtonClass({ tone: "neutral", size: "xs" })}
-            >
-              {t("betweenGames.showOverlay")}
-            </button>
-          </div>
-        )}
+      <MenuShell
+        layout="stacked"
+        contentWidthClass="max-w-none"
+        compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+      >
         <div className="flex w-full flex-col">
-          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey), retryGuestRecovery)}
+          {screen === "betweenGames" && overlayDismissed && (
+            <div
+              role="status"
+              className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2"
+            >
+              <span className="text-sm text-white/70">
+                {t(playDrawPending ? "betweenGames.hiddenNoticePlayDraw" : "betweenGames.hiddenNotice")}
+              </span>
+              <button
+                onClick={() => setDismissedPromptKey(null)}
+                className={menuButtonClass({ tone: "neutral", size: "xs" })}
+              >
+                {t("betweenGames.showOverlay")}
+              </button>
+            </div>
+          )}
+          {phaseContent(
+            visibleScreen,
+            handleLeave,
+            responsiveLayout,
+            phoneLayout,
+            mobileWorkspaceOpen,
+            setMobileWorkspaceOpen,
+            () => setDismissedPromptKey(promptKey),
+            retryGuestRecovery,
+          )}
         </div>
       </MenuShell>
 
-      <HostControls />
+      {podStatusOpen && (
+        <DialogShell
+          title={t("landing.podInProgress")}
+          onClose={() => setPodStatusOpen(false)}
+          size="sm"
+        >
+          <SeatStatusRing />
+        </DialogShell>
+      )}
+
+      {!phoneDrafting && <HostControls />}
     </div>
   );
 }

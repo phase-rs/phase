@@ -23,6 +23,23 @@ import type {
 } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
 import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/types";
+import type { DraftCardPlacement, DraftWorkspaceState } from "../components/draft/workspace/types";
+import {
+  createDraftWorkspaceState,
+  makeInteractiveVirtualBasicInstanceId,
+  reconcileWorkspaceState,
+  updateWorkspacePlacement,
+} from "../components/draft/workspace/workspacePlacement";
+import {
+  addVirtualBasic,
+  countProjectedNames,
+  projectWorkspaceLandCounts,
+  projectWorkspaceMainDeck,
+  projectWorkspacePartition,
+  removeVirtualBasic,
+  type DraftWorkspacePartition,
+} from "../components/draft/workspace/workspaceProjection";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
@@ -66,6 +83,13 @@ import {
   type DraftIntergameCommandAck,
   type DraftIntergameCommandPayload,
 } from "../services/intergameCommandLedger";
+import type {
+  DraftAutoPickPlacementHints,
+  DraftPickDestination,
+  DraftPickOutcome,
+  DraftPickPlacementHint,
+  PendingDraftPickIntent,
+} from "./draftStore";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -205,6 +229,11 @@ interface MultiplayerDraftState {
   /** Recovery-only failure semantics, retained for an explicit retry CTA. */
   guestRecoveryFailure: DraftGuestRecoveryFailure | null;
   selectedCard: string | null;
+  workspaceState: DraftWorkspaceState | null;
+  pendingPickIntent: PendingDraftPickIntent | null;
+  interactionGeneration: number;
+  pickInteractionLocked: boolean;
+  workspaceSyncError: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
   timerRemainingMs: number | null;
@@ -214,6 +243,9 @@ interface MultiplayerDraftState {
   pairings: PairingView[];
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
+  submittedWorkspaceState: DraftWorkspaceState | null;
+  submittedPartition: DraftWorkspacePartition | null;
+  intergameWorkspaceState: DraftWorkspaceState | null;
   matchPairing: DraftMatchLaunch | null;
   matchAdapter: unknown | null;
   /** Bo3: sideboard prompt state between games. */
@@ -236,6 +268,8 @@ interface MultiplayerDraftState {
 }
 
 interface MultiplayerDraftActions {
+  /** Dismiss the current phase-scoped error banner. */
+  clearError: () => void;
   /** Host: create a new draft pod and start accepting guests. */
   /** `true` only after the current adapter initialized and remains owned. */
   hostDraft: (config: DraftPodHostConfig) => Promise<boolean>;
@@ -245,30 +279,26 @@ interface MultiplayerDraftActions {
   resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
-  /** Both: submit one whole CR 903.13b pick step — every card this seat drafts now. */
-  submitPick: (cardInstanceIds: string[]) => Promise<void>;
+  /** Both: submit a pick. */
+  submitPick: (cardInstanceId: string, destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
+  /** Both: submit one complete engine-defined pick step. */
+  submitPickStep: (cardInstanceIds: readonly string[], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: submit a pick using a drafted card's draft-time effect. */
-  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
+  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: readonly [string, string], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
-  /** Both: dismiss the current error banner. */
-  clearError: () => void;
-  /** Both: confirm one whole CR 903.13b pick step — every card the player selected. */
-  confirmPick: (cardInstanceIds: string[]) => Promise<void>;
+  /** Both: confirm the currently selected card as pick. */
+  confirmPick: (destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: pick a card from the current pack using a deterministic draft heuristic. */
-  autoPickCard: () => Promise<void>;
-  /** Both: add a card to the deck during deckbuilding. */
-  addToDeck: (cardName: string) => void;
-  /** Both: remove a card from the deck during deckbuilding. */
-  removeFromDeck: (cardName: string) => void;
-  /** Both: set land count for a specific basic land. */
-  setLandCount: (landName: string, count: number) => void;
-  /**
-   * Both: submit the built deck, with the CR 903.3 commander designation(s).
-   * CR 903.1 scopes the designation to the Commander variant, so `[]` is the
-   * correct value for every other kind.
-   */
-  submitDeck: (commanders: string[]) => Promise<void>;
+  autoPickCard: (placementHints?: DraftAutoPickPlacementHints) => Promise<DraftPickOutcome>;
+  setWorkspaceState: (next: DraftWorkspaceState) => void;
+  setWorkspacePlacement: (instanceId: string, placement: DraftCardPlacement) => void;
+  addBasicLand: (name: string) => void;
+  removeBasicLand: (name: string) => void;
+  retryWorkspaceSync: () => Promise<void>;
+  setIntergameWorkspaceState: (next: DraftWorkspaceState) => void;
+  /** Both: submit the built deck. */
+  submitDeck: (commanders?: string[]) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -337,6 +367,260 @@ const retainedDraftSessionTeardowns = new Map<string, Promise<void>>();
 let activeMatchController: GameLoopController | null = null;
 const intergameControllers = new Map<string, IntergameCommandController>();
 const DRAFT_MATCH_FORMAT_CONFIG = FORMAT_DEFAULTS.Limited;
+let lifecycleGeneration = 0;
+let workspaceRevision = 0;
+let exclusivePickToken: symbol | null = null;
+let restoredWorkspace: { generation: number; state: DraftWorkspaceState | null } | null = null;
+let pendingGuestPick: {
+  generation: number;
+  resolve: (view: DraftPlayerView | null) => void;
+} | null = null;
+
+function cloneWorkspace(state: DraftWorkspaceState): DraftWorkspaceState {
+  return {
+    ...state,
+    placements: Object.fromEntries(
+      Object.entries(state.placements).map(([instanceId, placement]) => [instanceId, { ...placement }]),
+    ),
+    virtualBasics: state.virtualBasics.map((basic) => ({ ...basic })),
+  };
+}
+
+function beginDraftLifecycle(): number {
+  lifecycleGeneration += 1;
+  workspaceRevision = 0;
+  exclusivePickToken = null;
+  restoredWorkspace = null;
+  pendingGuestPick?.resolve(null);
+  pendingGuestPick = null;
+  return lifecycleGeneration;
+}
+
+function workspaceFacades(workspace: DraftWorkspaceState, view: DraftPlayerView) {
+  return {
+    mainDeck: projectWorkspaceMainDeck(workspace, view.pool),
+    landCounts: projectWorkspaceLandCounts(workspace),
+  };
+}
+
+function activeWorkspaceAdapter(): DraftPodHostAdapter | DraftPodGuestAdapter | null {
+  const role = useMultiplayerDraftStore.getState().role;
+  return role === "host" ? activeHostAdapter : role === "guest" ? activeGuestAdapter : null;
+}
+
+function publishWorkspace(workspace: DraftWorkspaceState): Promise<void> {
+  const adapter = activeWorkspaceAdapter();
+  if (!adapter) return Promise.resolve();
+  const generation = lifecycleGeneration;
+  const revision = ++workspaceRevision;
+  return adapter.updateWorkspace(workspace).then(
+    () => {
+      if (generation === lifecycleGeneration && revision === workspaceRevision
+        && activeWorkspaceAdapter() === adapter) {
+        useMultiplayerDraftStore.setState({ workspaceSyncError: null });
+      }
+    },
+    (error: unknown) => {
+      if (generation === lifecycleGeneration && revision === workspaceRevision
+        && activeWorkspaceAdapter() === adapter) {
+        useMultiplayerDraftStore.setState({
+          workspaceSyncError: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  );
+}
+
+function installWorkspace(input: {
+  view: DraftPlayerView;
+  base: DraftWorkspaceState;
+  publish: boolean;
+  patch?: Partial<MultiplayerDraftState>;
+}): DraftWorkspaceState {
+  const workspace = reconcileWorkspaceState(input.base, input.view.pool);
+  const current = useMultiplayerDraftStore.getState();
+  const next = {
+    ...input.patch,
+    ...workspaceFacades(workspace, input.view),
+    view: input.view,
+    workspaceState: workspace,
+  };
+  useMultiplayerDraftStore.setState(
+    next.phase !== undefined && next.phase !== current.phase
+      ? { error: null, ...next }
+      : next,
+  );
+  if (input.publish) void publishWorkspace(workspace);
+  return workspace;
+}
+
+function applyDestination(
+  workspace: DraftWorkspaceState,
+  pool: DraftPlayerView["pool"],
+  instanceIds: readonly string[],
+  destination: DraftPickDestination,
+  placementHint?: DraftPickPlacementHint,
+): DraftWorkspaceState {
+  let next = workspace;
+  for (const instanceId of instanceIds) {
+    const placement = next.placements[instanceId];
+    if (!placement) continue;
+    next = updateWorkspacePlacement(next, pool, instanceId, {
+      ...placement,
+      zone: destination,
+      column: placementHint?.column ?? placement.column,
+      row: placementHint?.row ?? placement.row,
+    });
+  }
+  return next;
+}
+
+function poolMultiplicity(pool: DraftPlayerView["pool"]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const card of pool) counts.set(card.instance_id, (counts.get(card.instance_id) ?? 0) + 1);
+  return counts;
+}
+
+function exactAddedIds(
+  before: ReadonlyMap<string, number>,
+  after: ReadonlyMap<string, number>,
+): string[] | null {
+  const added: string[] = [];
+  for (const instanceId of new Set([...before.keys(), ...after.keys()])) {
+    const previous = before.get(instanceId) ?? 0;
+    const current = after.get(instanceId) ?? 0;
+    if (current === previous) continue;
+    if (previous !== 0 || current !== 1) return null;
+    added.push(instanceId);
+  }
+  return added;
+}
+
+type MultiplayerPickRequest =
+  | { kind: "pick"; instanceIds: readonly string[]; destination: DraftPickDestination; placementHint?: DraftPickPlacementHint }
+  | { kind: "draft-effect"; effectCardInstanceId: string; instanceIds: readonly [string, string]; destination: DraftPickDestination; placementHint?: DraftPickPlacementHint }
+  | {
+      kind: "auto-pick";
+      instanceIds: readonly string[];
+      destination: "deck";
+      placementHints?: DraftAutoPickPlacementHints;
+    };
+
+function intentForPick(request: MultiplayerPickRequest): PendingDraftPickIntent {
+  switch (request.kind) {
+    case "pick":
+      return { kind: "pick", instanceIds: request.instanceIds, destination: request.destination, placementHint: request.placementHint };
+    case "draft-effect":
+      return { kind: "draft-effect", instanceIds: request.instanceIds, destination: request.destination, placementHint: request.placementHint };
+    case "auto-pick":
+      return { kind: "auto-pick", destination: "deck" };
+  }
+}
+
+async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOutcome> {
+  if (exclusivePickToken) return { status: "ignored", reason: "busy" };
+  if (request.kind === "pick" && (request.instanceIds.length === 0 || request.instanceIds.some((instanceId) => instanceId.length === 0))) {
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  if (request.kind === "auto-pick" && request.instanceIds.length === 0) {
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  if (request.kind === "draft-effect" && (request.instanceIds[0] === request.instanceIds[1]
+    || request.instanceIds.some((instanceId) => instanceId.length === 0))) {
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  const state = useMultiplayerDraftStore.getState();
+  const adapter = activeWorkspaceAdapter();
+  if (!adapter || !state.view || !state.workspaceState) return { status: "rejected", reason: "invalid-request" };
+
+  const token = Symbol("pick");
+  exclusivePickToken = token;
+  const generation = lifecycleGeneration;
+  const before = poolMultiplicity(state.view.pool);
+  const intent = intentForPick(request);
+  useMultiplayerDraftStore.setState({ pendingPickIntent: intent, pickInteractionLocked: true });
+  const isFresh = () => generation === lifecycleGeneration
+    && exclusivePickToken === token
+    && activeWorkspaceAdapter() === adapter;
+  const cleanup = () => {
+    if (exclusivePickToken !== token) return;
+    exclusivePickToken = null;
+    pendingGuestPick = null;
+    useMultiplayerDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
+  };
+
+  try {
+    let acknowledgedView: DraftPlayerView | null;
+    if (state.role === "host" && activeHostAdapter === adapter) {
+      acknowledgedView = request.kind === "draft-effect"
+        ? await adapter.submitPickWithDraftEffect(request.effectCardInstanceId, [...request.instanceIds])
+        : await adapter.submitPick([...request.instanceIds]);
+    } else if (state.role === "guest" && activeGuestAdapter === adapter) {
+      const acknowledgement = new Promise<DraftPlayerView | null>((resolve) => {
+        pendingGuestPick = { generation, resolve };
+      });
+      if (request.kind === "draft-effect") {
+        await adapter.submitPickWithDraftEffect(request.effectCardInstanceId, [...request.instanceIds]);
+      } else {
+        await adapter.submitPick([...request.instanceIds]);
+      }
+      acknowledgedView = await acknowledgement;
+    } else {
+      acknowledgedView = null;
+    }
+    if (!isFresh()) return { status: "ignored", reason: "stale" };
+    if (!acknowledgedView) {
+      cleanup();
+      return { status: "rejected", reason: "adapter" };
+    }
+    const added = exactAddedIds(before, poolMultiplicity(acknowledgedView.pool));
+    const expected = request.instanceIds;
+    const valid = added !== null
+      && added.length === expected.length
+      && expected.every((instanceId) => added.includes(instanceId));
+    if (!valid) {
+      cleanup();
+      return { status: "rejected", reason: "unacknowledged" };
+    }
+    let workspace = reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool);
+    workspace = request.kind === "auto-pick"
+      ? request.instanceIds.reduce(
+        (next, instanceId) => applyDestination(
+          next,
+          acknowledgedView.pool,
+          [instanceId],
+          request.destination,
+          request.placementHints?.[instanceId],
+        ),
+        workspace,
+      )
+      : applyDestination(
+        workspace,
+        acknowledgedView.pool,
+        request.instanceIds,
+        request.destination,
+        request.placementHint,
+      );
+    exclusivePickToken = null;
+    pendingGuestPick = null;
+    installWorkspace({
+      view: acknowledgedView,
+      base: workspace,
+      publish: true,
+      patch: {
+        phase: phaseForDraftViewStatus(acknowledgedView.status),
+        selectedCard: null,
+        pendingPickIntent: null,
+        pickInteractionLocked: false,
+      },
+    });
+    return { status: "acknowledged" };
+  } catch {
+    if (!isFresh()) return { status: "ignored", reason: "stale" };
+    cleanup();
+    return { status: "rejected", reason: "adapter" };
+  }
+}
 
 interface DetachedDraftAdapters {
   host: DraftPodHostAdapter | null;
@@ -526,6 +810,29 @@ function winnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null
 
 function winnerSeatForGameResult(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
   return gameWinner === null ? null : seatForLaunchGamePlayer(launch, gameWinner);
+}
+
+function localLaunchDeck(launch: DraftMatchLaunch) {
+  switch (launch.type) {
+    case "HumanHost":
+    case "Bot":
+      return launch.deckPayload.player;
+    case "HumanGuest":
+      return launch.localDeck;
+  }
+}
+
+function nameMultiset(names: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+  return counts;
+}
+
+function sameNameMultiset(left: readonly string[], right: readonly string[]): boolean {
+  const leftCounts = nameMultiset(left);
+  const rightCounts = nameMultiset(right);
+  return leftCounts.size === rightCounts.size
+    && [...leftCounts].every(([name, count]) => rightCounts.get(name) === count);
 }
 
 function disposeMatchController(): void {
@@ -725,6 +1032,11 @@ const initialState: MultiplayerDraftState = {
   error: null,
   guestRecoveryFailure: null,
   selectedCard: null,
+  workspaceState: null,
+  pendingPickIntent: null,
+  interactionGeneration: 0,
+  pickInteractionLocked: false,
+  workspaceSyncError: null,
   mainDeck: [],
   landCounts: {},
   timerRemainingMs: null,
@@ -733,6 +1045,9 @@ const initialState: MultiplayerDraftState = {
   nextPairingRound: 1,
   pairings: [],
   submittedDeck: [],
+  submittedWorkspaceState: null,
+  submittedPartition: null,
+  intergameWorkspaceState: null,
   matchPairing: null,
   matchAdapter: null,
   sideboardPrompt: null,
@@ -817,6 +1132,8 @@ export const useMultiplayerDraftStore = create<
 >()(phaseScopedError((set, get) => ({
   ...initialState,
 
+  clearError: () => set({ error: null }),
+
   hostDraft: async (config) => {
     const epoch = ++draftAdapterEpoch;
     const previous = detachDraftAdapters();
@@ -826,6 +1143,7 @@ export const useMultiplayerDraftStore = create<
     if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
     if (epoch !== draftAdapterEpoch || config.signal?.aborted) return false;
 
+    const generation = beginDraftLifecycle();
     const adapter = new DraftPodHostAdapter();
     const controller = new AbortController();
     activeHostAdapter = adapter;
@@ -833,7 +1151,7 @@ export const useMultiplayerDraftStore = create<
     activeHostPersistenceId = config.persistenceId ?? null;
 
     activeHostEventUnsub = adapter.onEvent((event) => {
-      if (activeHostAdapter === adapter && epoch === draftAdapterEpoch) {
+      if (generation === lifecycleGeneration && activeHostAdapter === adapter && epoch === draftAdapterEpoch) {
         handleHostEvent(event, set);
       }
     });
@@ -856,6 +1174,7 @@ export const useMultiplayerDraftStore = create<
       role: "host",
       phase: "connecting",
       seatIndex: 0,
+      interactionGeneration: generation,
     });
 
     let initialized = false;
@@ -909,13 +1228,14 @@ export const useMultiplayerDraftStore = create<
     if (previous.host || previous.guest) await previousTeardown;
     if (epoch !== draftAdapterEpoch || config.signal?.aborted) return;
 
+    const generation = beginDraftLifecycle();
     const adapter = new DraftPodGuestAdapter();
     const controller = new AbortController();
     activeGuestAdapter = adapter;
     activeGuestAbort = controller;
 
     activeGuestEventUnsub = adapter.onEvent((event) => {
-      if (activeGuestAdapter === adapter && epoch === draftAdapterEpoch) {
+      if (generation === lifecycleGeneration && activeGuestAdapter === adapter && epoch === draftAdapterEpoch) {
         handleGuestEvent(event, set);
       }
     });
@@ -937,6 +1257,7 @@ export const useMultiplayerDraftStore = create<
       ...initialState,
       role: "guest",
       phase: "connecting",
+      interactionGeneration: generation,
     });
 
     let initialized = false;
@@ -1017,93 +1338,133 @@ export const useMultiplayerDraftStore = create<
     await activeHostAdapter.startDraft(botFillEmptySeats);
   },
 
-  submitPick: async (cardInstanceIds) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      const view = await activeHostAdapter.submitPick(cardInstanceIds);
-      set({ view, selectedCard: null });
-    } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitPick(cardInstanceIds);
-      set({ selectedCard: null });
+  submitPick: (cardInstanceId, destination = "deck", placementHint) => performPick({
+    kind: "pick", instanceIds: [cardInstanceId], destination, placementHint,
+  }),
+
+  submitPickStep: (cardInstanceIds, destination = "deck", placementHint) => {
+    const { view } = get();
+    const selected = [...cardInstanceIds];
+    const pack = view?.current_pack ?? [];
+    if (
+      !view
+      || view.required_pick_count <= 0
+      || selected.length !== view.required_pick_count
+      || new Set(selected).size !== selected.length
+      || selected.some((instanceId) => !pack.some((card) => card.instance_id === instanceId))
+    ) {
+      return Promise.resolve({ status: "rejected", reason: "invalid-request" });
     }
+    return performPick({ kind: "pick", instanceIds: selected, destination, placementHint });
   },
 
-  submitPickWithDraftEffect: async (effectCardInstanceId, cardInstanceIds) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      const view = await activeHostAdapter.submitPickWithDraftEffect(
-        effectCardInstanceId,
-        cardInstanceIds,
-      );
-      set({ view, selectedCard: null });
-    } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
-      set({ selectedCard: null });
-    }
-  },
+  submitPickWithDraftEffect: (effectCardInstanceId, cardInstanceIds, destination = "deck", placementHint) => performPick({
+    kind: "draft-effect", effectCardInstanceId, instanceIds: cardInstanceIds, destination, placementHint,
+  }),
 
   selectCard: (cardInstanceId) => {
     set({ selectedCard: cardInstanceId });
   },
 
-  clearError: () => set({ error: null }),
-
-  confirmPick: async (cardInstanceIds) => {
-    // The caller owns the whole step. `selectedCard` is only the PRIMARY
-    // selection (it drives the seat-ring highlight); the additional slots live
-    // in PackDisplay, which is why the ids arrive as an argument rather than
-    // being read back out of the store.
-    if (cardInstanceIds.length === 0) return;
-    const { submitPick } = get();
-    await submitPick(cardInstanceIds);
+  confirmPick: (destination = "deck", placementHint) => {
+    const { selectedCard } = get();
+    if (!selectedCard) return Promise.resolve({ status: "rejected", reason: "invalid-request" });
+    return performPick({ kind: "pick", instanceIds: [selectedCard], destination, placementHint });
   },
 
-  autoPickCard: async () => {
-    const { view, submitPick } = get();
-    const cardInstanceIds = chooseAutoPickCards(view);
-    if (cardInstanceIds.length === 0) return;
-    await submitPick(cardInstanceIds);
-  },
-
-  addToDeck: (cardName) => {
-    set((prev) => ({ mainDeck: [...prev.mainDeck, cardName] }));
-  },
-
-  removeFromDeck: (cardName) => {
-    set((prev) => {
-      const idx = prev.mainDeck.indexOf(cardName);
-      if (idx === -1) return prev;
-      const next = [...prev.mainDeck];
-      next.splice(idx, 1);
-      return { mainDeck: next };
+  autoPickCard: (placementHints) => {
+    const { view } = get();
+    const instanceIds = chooseAutoPickCards(view);
+    if (instanceIds.length === 0) return Promise.resolve({ status: "rejected", reason: "invalid-request" });
+    return performPick({
+      kind: "auto-pick",
+      instanceIds,
+      destination: "deck",
+      placementHints,
     });
   },
 
-  setLandCount: (landName, count) => {
-    set((prev) => ({
-      landCounts: { ...prev.landCounts, [landName]: Math.max(0, count) },
-    }));
+  setWorkspaceState: (next) => {
+    const state = get();
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    const reconciled = reconcileWorkspaceState(next, state.view.pool);
+    if (reconciled === state.workspaceState) return;
+    installWorkspace({ view: state.view, base: reconciled, publish: true });
   },
 
-  submitDeck: async (commanders) => {
-    const { role, mainDeck, landCounts } = get();
-    const landCards: string[] = [];
-    for (const [name, count] of Object.entries(landCounts)) {
-      for (let i = 0; i < count; i++) {
-        landCards.push(name);
-      }
-    }
-    const fullDeck = [...mainDeck, ...landCards];
+  setWorkspacePlacement: (instanceId, placement) => {
+    const state = get();
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    const next = updateWorkspacePlacement(state.workspaceState, state.view.pool, instanceId, placement);
+    if (next === state.workspaceState) return;
+    installWorkspace({ view: state.view, base: next, publish: true });
+  },
+
+  addBasicLand: (name) => {
+    const state = get();
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState
+      || state.workspaceState.virtualBasics.length >= MAX_MATERIALIZED_VIRTUAL_BASICS) return;
+    const instanceId = makeInteractiveVirtualBasicInstanceId(state.workspaceState, state.view.pool);
+    installWorkspace({
+      view: state.view,
+      base: addVirtualBasic(state.workspaceState, state.view.pool, { instanceId, name }),
+      publish: true,
+    });
+  },
+
+  removeBasicLand: (name) => {
+    const state = get();
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    const target = [...state.workspaceState.virtualBasics].reverse().find(
+      (basic) => basic.name === name && state.workspaceState!.placements[basic.instanceId]?.zone === "deck",
+    );
+    if (!target) return;
+    installWorkspace({
+      view: state.view,
+      base: removeVirtualBasic(state.workspaceState, target.instanceId),
+      publish: true,
+    });
+  },
+
+  retryWorkspaceSync: async () => {
+    const state = get();
+    if (!state.view || !state.workspaceState) return;
+    await publishWorkspace(reconcileWorkspaceState(state.workspaceState, state.view.pool));
+  },
+
+  setIntergameWorkspaceState: (next) => {
+    const state = get();
+    if (draftPodScreen(state) !== "betweenGames" || !state.view || !state.intergameWorkspaceState) return;
+    const workspace = reconcileWorkspaceState(next, state.view.pool);
+    if (workspace === state.intergameWorkspaceState) return;
+    set({ intergameWorkspaceState: workspace });
+  },
+
+  submitDeck: async (commanders = []) => {
+    const { role, view, workspaceState } = get();
+    if (!view || !workspaceState) return;
+    const workspace = reconcileWorkspaceState(workspaceState, view.pool);
+    const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const view = await activeHostAdapter.submitDeck(fullDeck, commanders);
-      set({ view, submittedDeck: fullDeck });
+      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+      installWorkspace({
+        view: nextView,
+        base: workspace,
+        publish: false,
+        patch: {
+          submittedDeck: partition.mainDeck,
+          submittedWorkspaceState: cloneWorkspace(workspace),
+          submittedPartition: partition,
+        },
+      });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(fullDeck, commanders);
-      // The guest adapter resolves only on `draft_deck_submit_ack`, not after
-      // a DataChannel write.  This keeps the deck builder honest across a
-      // reload between submit and host durability.
-      set({ submittedDeck: fullDeck });
+      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      set({
+        submittedDeck: partition.mainDeck,
+        submittedWorkspaceState: cloneWorkspace(workspace),
+        submittedPartition: partition,
+      });
     }
   },
 
@@ -1394,12 +1755,22 @@ export const useMultiplayerDraftStore = create<
   },
 
   submitSideboard: (matchId, mainDeck, sideboard) => {
-    void matchId;
-    const counts = new Map<string, number>();
-    for (const name of mainDeck) counts.set(name, (counts.get(name) ?? 0) + 1);
+    const launch = get().matchPairing;
+    if (!launch || launch.matchId !== matchId) return;
+    const submittedNames = [
+      ...mainDeck,
+      ...sideboard.flatMap(({ name, count }) => (
+        Number.isSafeInteger(count) && count >= 0 ? Array<string>(count).fill(name) : []
+      )),
+    ];
+    const registered = localLaunchDeck(launch);
+    if (!sameNameMultiset(submittedNames, [...registered.main_deck, ...registered.sideboard])) {
+      set({ error: "Sideboard submission does not match the registered match pool" });
+      return;
+    }
     void get().submitIntergameCommand({
       type: "SubmitSideboard",
-      main: [...counts].map(([name, count]) => ({ name, count })),
+      main: countProjectedNames(mainDeck),
       sideboard,
     });
   },
@@ -1475,11 +1846,29 @@ export const useMultiplayerDraftStore = create<
   },
 
   handleBetweenGamesPrompt: (prompt) => {
-    // No `phase` write: entering the overlay is not a phase transition. The pod
-    // session is already `matchInProgress` here (`startMatch` writes it before
-    // the match adapter that emits this prompt exists), and the screen is
-    // derived by `draftPodScreen` from this prompt.
+    const state = get();
+    const source = state.intergameWorkspaceState ?? state.submittedWorkspaceState;
+    const launch = state.matchPairing;
+    const view = state.view;
+    let intergameWorkspaceState: DraftWorkspaceState | null = null;
+    let error = state.error;
+    if (source && launch && view) {
+      const candidate = reconcileWorkspaceState(cloneWorkspace(source), view.pool);
+      const partition = projectWorkspacePartition(candidate, view.pool);
+      const registered = localLaunchDeck(launch);
+      if (sameNameMultiset(
+        [...partition.mainDeck, ...partition.sideboard],
+        [...registered.main_deck, ...registered.sideboard],
+      )) {
+        intergameWorkspaceState = candidate;
+      } else {
+        error = "Submitted deck partition does not match the registered match pool";
+      }
+    }
     set({
+      phase: "matchInProgress",
+      intergameWorkspaceState,
+      error,
       sideboardPrompt: {
         matchId: prompt.matchId,
         gameNumber: prompt.gameNumber,
@@ -1494,27 +1883,28 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveSession = false) => {
-    const epoch = ++draftAdapterEpoch;
+    beginDraftLifecycle();
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
 
-    const detached = detachDraftAdapters();
-    const teardown = disposeDetachedDraftAdapters(detached, preserveSession);
-    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-    await teardown;
-    if (epoch !== draftAdapterEpoch) return;
-    if (detached.host && !preserveSession) clearActiveDraftPod();
-    set(initialState);
+    if (activeHostAdapter) {
+      await activeHostAdapter.dispose({ preserveSession });
+      activeHostAdapter = null;
+      if (!preserveSession) {
+        clearActiveDraftPod();
+      }
+    }
+    if (activeGuestAdapter) {
+      await activeGuestAdapter.dispose();
+      activeGuestAdapter = null;
+    }
+    set({ ...initialState, interactionGeneration: lifecycleGeneration });
   },
 
   reset: () => {
-    ++draftAdapterEpoch;
+    beginDraftLifecycle();
     disposeMatchAdapter(set);
-    const detached = detachDraftAdapters();
-    const teardown = disposeDetachedDraftAdapters(detached, true);
-    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-    void teardown;
-    set(initialState);
+    set({ ...initialState, interactionGeneration: lifecycleGeneration });
   },
 })));
 
@@ -1576,8 +1966,38 @@ type SetFn = (
     | ((state: MultiplayerDraftState) => Partial<MultiplayerDraftState>),
 ) => void;
 
+function installEventView(view: DraftPlayerView): void {
+  if (exclusivePickToken) return;
+  const state = useMultiplayerDraftStore.getState();
+  const restored = restoredWorkspace?.generation === lifecycleGeneration ? restoredWorkspace : null;
+  restoredWorkspace = null;
+  const base = restored?.state ?? state.workspaceState ?? createDraftWorkspaceState();
+  const workspace = reconcileWorkspaceState(base, view.pool);
+  const publish = restored !== null
+    ? (restored.state === null ? view.pool.length > 0 : workspace !== base)
+    : workspace !== state.workspaceState;
+  installWorkspace({
+    view,
+    base: workspace,
+    publish,
+    patch: {
+      phase: phaseForDraftViewStatus(view.status),
+      timerRemainingMs: view.timer_remaining_ms ?? null,
+      standings: view.standings ?? [],
+      currentRound: view.current_round ?? 0,
+      pairings: view.pairings ?? [],
+    },
+  });
+}
+
 function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
   switch (event.type) {
+    case "workspaceRestored":
+      restoredWorkspace = {
+        generation: lifecycleGeneration,
+        state: event.workspaceState ? cloneWorkspace(event.workspaceState) : null,
+      };
+      break;
     case "statusChanged":
       set({ phase: hostStatusToPhase(event.status) });
       {
@@ -1590,15 +2010,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       updateActiveDraftPod({ roomCode: event.roomCode });
       break;
     case "viewUpdated":
-      set({
-        phase: phaseForDraftViewStatus(event.view.status),
-        view: event.view,
-        timerRemainingMs: event.view.timer_remaining_ms ?? null,
-        standings: event.view.standings ?? [],
-        currentRound: event.view.current_round ?? 0,
-        nextPairingRound: event.view.next_pairing_round ?? 1,
-        pairings: event.view.pairings ?? [],
-      });
+      installEventView(event.view);
       {
         const activePhase = activePhaseForDraftViewStatus(event.view.status);
         if (activePhase) saveDraftPodProgress(activePhase, event.view);
@@ -1611,7 +2023,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "draftStarted": {
       const activePhase = activePhaseForDraftViewStatus(event.view.status);
-      set({ view: event.view, phase: phaseForDraftViewStatus(event.view.status) });
+      installEventView(event.view);
       if (activePhase) saveDraftPodProgress(activePhase, event.view);
       break;
     }
@@ -1692,20 +2104,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       saveDraftPodProgress("matchInProgress");
       break;
     case "bo3SideboardPrompt":
-      // No `phase` write — see `draftPodScreen`. The pod session is already
-      // `matchInProgress` when a prompt arrives.
-      set({
-        sideboardPrompt: {
-          matchId: event.matchId,
-          gameNumber: event.gameNumber,
-          score: event.score,
-          loserSeat: event.loserSeat,
-          timerMs: event.timerMs,
-        },
-        sideboardSubmitted: false,
-        playDrawPrompt: null,
-        timerRemainingMs: event.timerMs > 0 ? event.timerMs : null,
-      });
+      useMultiplayerDraftStore.getState().handleBetweenGamesPrompt(event);
       break;
     case "bo3ChoosePlayDraw":
       set({
@@ -1734,6 +2133,12 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
 
 function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
   switch (event.type) {
+    case "workspaceRestored":
+      restoredWorkspace = {
+        generation: lifecycleGeneration,
+        state: event.workspaceState ? cloneWorkspace(event.workspaceState) : null,
+      };
+      break;
     case "statusChanged":
       set({ phase: guestStatusToPhase(event.status) });
       break;
@@ -1748,18 +2153,14 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ seatIndex: event.seatIndex });
       break;
     case "viewUpdated":
-      set({
-        phase: phaseForDraftViewStatus(event.view.status),
-        view: event.view,
-        timerRemainingMs: event.view.timer_remaining_ms ?? null,
-        standings: event.view.standings ?? [],
-        currentRound: event.view.current_round ?? 0,
-        nextPairingRound: event.view.next_pairing_round ?? 1,
-        pairings: event.view.pairings ?? [],
-      });
+      installEventView(event.view);
       break;
     case "pickAcknowledged":
-      set({ view: event.view });
+      if (pendingGuestPick?.generation === lifecycleGeneration) {
+        const pending = pendingGuestPick;
+        pendingGuestPick = null;
+        pending.resolve(event.view);
+      }
       break;
     case "lobbyUpdate":
       set({ seats: event.seats, joined: event.joined, total: event.total });
@@ -1807,6 +2208,11 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ phase: "hostLeft", error: event.reason });
       break;
     case "error":
+      if (pendingGuestPick?.generation === lifecycleGeneration) {
+        const pending = pendingGuestPick;
+        pendingGuestPick = null;
+        pending.resolve(null);
+      }
       set({ error: event.message });
       break;
     case "reconnecting":
@@ -1815,20 +2221,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ error: event.failure.message, guestRecoveryFailure: event.failure });
       break;
     case "bo3SideboardPrompt":
-      // No `phase` write — see `draftPodScreen`. The pod session is already
-      // `matchInProgress` when a prompt arrives.
-      set({
-        sideboardPrompt: {
-          matchId: event.matchId,
-          gameNumber: event.gameNumber,
-          score: event.score,
-          loserSeat: event.loserSeat,
-          timerMs: event.timerMs,
-        },
-        sideboardSubmitted: false,
-        playDrawPrompt: null,
-        timerRemainingMs: event.timerMs > 0 ? event.timerMs : null,
-      });
+      useMultiplayerDraftStore.getState().handleBetweenGamesPrompt(event);
       break;
     case "bo3ChoosePlayDraw":
       set({

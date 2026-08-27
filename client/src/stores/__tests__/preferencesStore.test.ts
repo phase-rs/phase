@@ -16,6 +16,7 @@ describe("preferencesStore", () => {
         vfxQuality: "full",
         animationSpeedMultiplier: 1.0,
         showCardPreviewFooter: true,
+        draftDoubleClickConfirmPick: true,
         pacingMultipliers: { effects: 1.0, combat: 1.0, banners: 1.0 },
         priorityPassingMode: "Standard",
         masterVolume: 100,
@@ -48,6 +49,7 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getInitialState().multiplayerSplitLayoutNudgeDismissed).toBe(true);
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
     expect(state.priorityPassingMode).toBe("Standard");
+    expect(state.draftDoubleClickConfirmPick).toBe(true);
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -245,6 +247,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setMasterVolume(20);
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
       usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
+      usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
     });
 
     act(() => {
@@ -256,6 +259,7 @@ describe("preferencesStore", () => {
     expect(state.masterVolume).toBe(100);
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
     expect(state.priorityPassingMode).toBe("Standard");
+    expect(state.draftDoubleClickConfirmPick).toBe(true);
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -276,7 +280,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("small");
       usePreferencesStore.getState().setFollowActiveOpponent(true);
       usePreferencesStore.getState().setAiSeatDifficulty(0, "VeryHard");
-      usePreferencesStore.getState().setMultiplayerBoardLayout("auto");
+      usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
     });
 
     // Zustand persist writes to localStorage
@@ -287,7 +291,7 @@ describe("preferencesStore", () => {
     expect(parsed.state.cardSize).toBe("small");
     expect(parsed.state.followActiveOpponent).toBe(true);
     expect(parsed.state.aiSeats[0].difficulty).toBe("VeryHard");
-    expect(parsed.state.multiplayerBoardLayout).toBe("auto");
+    expect(parsed.state.draftDoubleClickConfirmPick).toBe(false);
   });
 
   it("migrates v1 enum animationSpeed='instant' to multiplier 0", () => {
@@ -624,55 +628,35 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
 
-  it("uses auto when a v30 persisted profile has no layout preference", () => {
+  it("v29 → v30 migration defaults draft card previews to none", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { cardSize: "large" }, version: 30 }),
+      JSON.stringify({
+        state: { cardPreviewMode: "follow" },
+        version: 29,
+      }),
     );
 
     act(() => {
       usePreferencesStore.persist.rehydrate();
     });
 
-    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
+    expect(usePreferencesStore.getState().draftCardPreviewMode).toBe("none");
   });
 
-  it.each(["focused", "split"] as const)(
-    "preserves the explicit v30 %s layout",
-    (multiplayerBoardLayout) => {
-      localStorage.setItem(
-        "phase-preferences",
-        JSON.stringify({ state: { multiplayerBoardLayout }, version: 30 }),
-      );
+  it("v30 → v31 migration enables draft double-click confirmation", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { draftCardPreviewMode: "none" },
+        version: 30,
+      }),
+    );
 
-      act(() => {
-        usePreferencesStore.persist.rehydrate();
-      });
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
 
-      expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe(multiplayerBoardLayout);
-    },
-  );
-
-  it.each([
-    ["focused", false],
-    ["split", true],
-  ] as const)(
-    "v29 → v30 preserves raw %s layout and sets nudge dismissal to %s",
-    (multiplayerBoardLayout, multiplayerSplitLayoutNudgeDismissed) => {
-      localStorage.setItem(
-        "phase-preferences",
-        JSON.stringify({ state: { multiplayerBoardLayout }, version: 29 }),
-      );
-
-      act(() => {
-        usePreferencesStore.persist.rehydrate();
-      });
-
-      const state = usePreferencesStore.getState();
-      expect(state.multiplayerBoardLayout).toBe(multiplayerBoardLayout);
-      expect(state.multiplayerSplitLayoutNudgeDismissed).toBe(
-        multiplayerSplitLayoutNudgeDismissed,
-      );
-    },
-  );
+    expect(usePreferencesStore.getState().draftDoubleClickConfirmPick).toBe(true);
+  });
 });

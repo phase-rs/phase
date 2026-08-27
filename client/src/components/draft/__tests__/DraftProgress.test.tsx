@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   DraftProgressFields,
@@ -126,6 +126,61 @@ describe("DraftProgress — CR 903.13b pick steps", () => {
 
     expect(pipCount(container)).toBe(7);
     expect(screen.getByText("/7")).toBeInTheDocument();
+  });
+});
+
+describe("DraftProgress", () => {
+  it("labels_each_pack_and_renders_text_free_pick_bars", () => {
+    const { container } = render(
+      <DraftProgress
+        view={{
+          current_pack_number: 1,
+          pick_number: 2,
+          cards_per_pack: 4,
+          pick_steps_per_pack: 4,
+          pack_count: 3,
+          pass_direction: "Left",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("P1")).toBeInTheDocument();
+    expect(screen.getByText("P2")).toBeInTheDocument();
+    expect(screen.getByText("P3")).toBeInTheDocument();
+    expect(container.querySelector("[data-draft-progress]")).toHaveClass(
+      "border-hairline",
+      "bg-white/[0.035]",
+      "py-1.5",
+      "shadow-[inset_0_-1px_0_rgba(0,0,0,0.28)]",
+    );
+    for (const label of ["P1", "P2", "P3"]) {
+      expect(screen.getByText(label)).toHaveClass(
+        "font-display",
+        "text-xs",
+        "font-semibold",
+        "tracking-[-0.02em]",
+        "text-fg",
+      );
+    }
+    const pickCells = container.querySelectorAll<HTMLElement>("[data-pick-number]");
+    expect(pickCells).toHaveLength(12);
+    expect([...pickCells].every((cell) => cell.textContent === "")).toBe(true);
+    for (const cell of pickCells) {
+      expect(cell).toHaveClass("relative", "h-2");
+      expect(cell).not.toHaveClass("flex", "h-6");
+    }
+    expect(container.querySelector("[data-draft-progress] > div"))
+      .toHaveClass("flex-col", "sm:flex-row");
+    const packOne = container.querySelectorAll<HTMLElement>('[data-pick-number][data-pack-number="1"]');
+    const packTwo = container.querySelectorAll<HTMLElement>('[data-pick-number][data-pack-number="2"]');
+    const packThree = container.querySelectorAll<HTMLElement>('[data-pick-number][data-pack-number="3"]');
+    for (const cell of packOne) expect(cell).toHaveClass("bg-amber-400/50");
+    expect(packTwo[0]).toHaveClass("bg-amber-400/50");
+    expect(packTwo[1]).toHaveClass("bg-amber-400/90");
+    expect(packTwo[2]).toHaveClass("bg-white/8");
+    expect(packTwo[3]).toHaveClass("bg-white/8");
+    for (const cell of packThree) expect(cell).toHaveClass("bg-white/4");
+    expect(screen.getByText((_content, element) => element?.textContent === "3/4")).toBeInTheDocument();
   });
 });
 

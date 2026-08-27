@@ -16,6 +16,7 @@ import {
   ACTIVE_DECK_KEY,
   DECK_FOLDERS_KEY,
   DECK_METADATA_KEY,
+  DRAFT_WORKSPACE_PREFERENCES_KEY,
   FEED_DECK_ORIGINS_KEY,
   FEED_SUBSCRIPTIONS_KEY,
   isUserOwnedStorageKey,
@@ -31,6 +32,8 @@ export interface PhaseBackupV1 {
   exportedAt: string;
   /** Raw JSON of the preferences store (`phase-preferences` key), or null. */
   preferences: string | null;
+  /** Raw JSON of personal draft workspace preferences, or null. */
+  draftWorkspacePreferences?: string | null;
   /** Map from deck name → raw JSON of the ParsedDeck. */
   decks: Record<string, string>;
   /** Raw JSON of the deck metadata store, or null. */
@@ -238,6 +241,7 @@ export function buildBackup(): PhaseBackupV1 {
     version: 1,
     exportedAt: new Date().toISOString(),
     preferences: localStorage.getItem(PREFERENCES_KEY),
+    draftWorkspacePreferences: localStorage.getItem(DRAFT_WORKSPACE_PREFERENCES_KEY),
     decks,
     deckMetadata: localStorage.getItem(DECK_METADATA_KEY),
     deckFolders: localStorage.getItem(DECK_FOLDERS_KEY),
@@ -282,6 +286,7 @@ function isBackupV1(value: unknown): value is PhaseBackupV1 {
     field === undefined || stringOrNull(field);
   return (
     stringOrNull(v.preferences) &&
+    optionalStringOrNull(v.draftWorkspacePreferences) &&
     stringOrNull(v.deckMetadata) &&
     optionalStringOrNull(v.deckFolders) &&
     stringOrNull(v.activeDeck) &&
@@ -374,6 +379,11 @@ export function applyBackup(
   const preferencesReplaced = writeValidated(
     PREFERENCES_KEY,
     backup.preferences,
+    true,
+  );
+  writeValidated(
+    DRAFT_WORKSPACE_PREFERENCES_KEY,
+    backup.draftWorkspacePreferences ?? null,
     true,
   );
   writeValidated(DECK_METADATA_KEY, backup.deckMetadata, true);

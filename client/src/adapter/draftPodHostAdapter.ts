@@ -19,6 +19,7 @@ import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, Dra
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
+import type { DraftWorkspaceState } from "../components/draft/workspace/types";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ export type DraftPodHostStatus =
 export type DraftPodHostEvent =
   | { type: "statusChanged"; status: DraftPodHostStatus }
   | { type: "roomCreated"; roomCode: string }
+  | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
@@ -303,6 +305,7 @@ export class DraftPodHostAdapter {
           abortIfRequested();
           if (view) {
             this.setStatus(hostStatusForView(view));
+            this.emit({ type: "workspaceRestored", workspaceState: host.getHostWorkspaceState() });
             this.emit({ type: "viewUpdated", view });
           }
         }
@@ -510,6 +513,11 @@ export class DraftPodHostAdapter {
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.submitHostDeck(mainDeck, commanders);
+  }
+
+  async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.updateHostWorkspace(state);
   }
 
   async getHostView(): Promise<DraftPlayerView> {

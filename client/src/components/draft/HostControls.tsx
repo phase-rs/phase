@@ -22,10 +22,13 @@ function winnerChoiceClass(selected: boolean): string {
  * Floating host-only control panel for tournament management.
  * Renders nothing when the local player is not the host.
  */
-export function HostControls() {
+export function HostControls({ presentation = "floating" }: {
+  presentation?: "floating" | "integrated";
+}) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
   const [endingDraft, setEndingDraft] = useState(false);
+  const [integratedOpen, setIntegratedOpen] = useState(false);
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
@@ -81,6 +84,54 @@ export function HostControls() {
       setEndingDraft(false);
     }
   };
+
+  if (presentation === "integrated") {
+    if (phase !== "drafting") return null;
+    return (
+      <div
+        data-integrated-host-controls
+        className="flex w-full flex-col overflow-hidden rounded-[8px] border border-hairline bg-slate-950/95 text-fg shadow-panel"
+      >
+        <button
+          type="button"
+          aria-expanded={integratedOpen}
+          onClick={() => setIntegratedOpen((open) => !open)}
+          className="flex min-h-9 w-full items-center justify-between gap-2 px-3 text-left text-[0.68rem] font-semibold uppercase text-fg-muted"
+        >
+          <span>{t("hostControls.title")}</span>
+          <span aria-hidden="true">{integratedOpen ? "▼" : "▲"}</span>
+        </button>
+        {integratedOpen && (
+          <div className="flex flex-col gap-2 border-t border-hairline p-2">
+            <button
+              type="button"
+              onClick={paused ? requestResume : requestPause}
+              className={menuButtonClass({
+                tone: paused ? "emerald" : "neutral",
+                size: "sm",
+                className: "w-full",
+              })}
+            >
+              {paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleEndDraft()}
+              disabled={endingDraft}
+              className={menuButtonClass({
+                tone: "red",
+                size: "sm",
+                disabled: endingDraft,
+                className: "w-full",
+              })}
+            >
+              {t("hostControls.endDraft")}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (
     !showPauseResume &&

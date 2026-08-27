@@ -16,10 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DraftPodHostAdapter } from "../draftPodHostAdapter";
 import type { DraftPodHostEvent } from "../draftPodHostAdapter";
+import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
 const mockLoadCardDatabase = vi.fn(async () => 0);
+const mockHostInitialize = vi.fn(async () => {});
+const mockHostUpdateWorkspace = vi.fn(async (_state: DraftWorkspaceState) => {});
 
 vi.mock("../draft-adapter", () => ({
   DraftAdapter: vi.fn().mockImplementation(function () {
@@ -47,7 +50,9 @@ vi.mock("../p2p-draft-host", () => ({
   P2PDraftHost: vi.fn().mockImplementation(function () {
     return {
       onEvent: vi.fn(() => vi.fn()),
-      initialize: vi.fn(async () => {}),
+      initialize: mockHostInitialize,
+      updateHostWorkspace: mockHostUpdateWorkspace,
+      getHostWorkspaceState: vi.fn(() => null),
       dispose: vi.fn(),
       terminateDraft: vi.fn(async () => {}),
     };
@@ -108,30 +113,52 @@ describe("DraftPodHostAdapter cube-mode initialize", () => {
 
     expect(globalThis.fetch).toHaveBeenCalledOnce();
     expect(mockLoadCardDatabase).toHaveBeenCalledOnce();
+    expect(mockLoadCardDatabase.mock.invocationCallOrder[0])
+      .toBeLessThan(mockHostInitialize.mock.invocationCallOrder[0]);
     expect(adapter.status).toBe("lobby");
   });
 
-  it("populates CARD_DB for a Set-pool Commander pod", async () => {
+  it("delegates Cube workspace updates after database load and host initialization", async () => {
+    const state: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: {
+        "cube-z": { zone: "sideboard", row: 0, column: 2, order: 0 },
+        "cube-a": { zone: "deck", row: 1, column: 0, order: 1 },
+      },
+      virtualBasics: [],
+    };
     await adapter.initialize({
-      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
-      kind: "CommanderDraft",
+      poolInput: {
+        type: "Cube",
+        data: {
+          cube_list_text: "1 Lightning Bolt\n",
+          cube_name: "Test Cube",
+          cube_draft_settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+      },
+      kind: "Premier",
       podSize: 2,
       hostDisplayName: "Host",
       tournamentFormat: "Swiss",
       podPolicy: "Competitive",
     });
 
-    expect(globalThis.fetch).toHaveBeenCalledOnce();
-    expect(mockLoadCardDatabase).toHaveBeenCalledOnce();
-    // The same terminal-state assertion both landed rows make, so a fixture
-    // that threw before reaching the branch cannot pass as a load.
-    expect(adapter.status).toBe("lobby");
+    await adapter.updateWorkspace(state);
+
+    expect(mockLoadCardDatabase.mock.invocationCallOrder[0])
+      .toBeLessThan(mockHostInitialize.mock.invocationCallOrder[0]);
+    expect(mockHostInitialize.mock.invocationCallOrder[0])
+      .toBeLessThan(mockHostUpdateWorkspace.mock.invocationCallOrder[0]);
+    expect(mockHostUpdateWorkspace).toHaveBeenCalledWith(state);
+    expect(Object.keys(mockHostUpdateWorkspace.mock.calls[0][0].placements)).toEqual(["cube-z", "cube-a"]);
   });
 
-  // Its negative sibling, LANDED, and it must stay green: the fixture below
-  // differs from the one above in exactly one field, `kind`, so the pair
-  // isolates the gate and neither can pass for the other's reason. An
-  // unconditional widening to all Set pools would turn it red.
   it("skips the CARD_DB fetch for Set pods", async () => {
     await adapter.initialize({
       poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },

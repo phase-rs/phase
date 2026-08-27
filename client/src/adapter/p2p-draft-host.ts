@@ -40,6 +40,12 @@ import {
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import {
+  MAX_MATERIALIZED_VIRTUAL_BASICS,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
+import { reconcileWorkspaceState } from "../components/draft/workspace/workspacePlacement";
 import { assertNever } from "../utils/assertNever";
 
 function matchConfigForView(view: DraftPlayerView): MatchConfig {
@@ -217,6 +223,29 @@ function deckSubmission(deck: DraftDeckPayload): { main: DeckCardCount[]; sidebo
   };
 }
 
+function workspaceStatesEqual(
+  left: DraftWorkspaceState,
+  right: DraftWorkspaceState,
+): boolean {
+  const leftPlacements = Object.entries(left.placements);
+  const rightPlacements = Object.entries(right.placements);
+  return left.schemaVersion === right.schemaVersion
+    && leftPlacements.length === rightPlacements.length
+    && leftPlacements.every(([instanceId, placement]) => {
+      const candidate = right.placements[instanceId];
+      return candidate !== undefined
+        && candidate.zone === placement.zone
+        && candidate.row === placement.row
+        && candidate.column === placement.column
+        && candidate.order === placement.order;
+    })
+    && left.virtualBasics.length === right.virtualBasics.length
+    && left.virtualBasics.every((basic, index) => {
+      const candidate = right.virtualBasics[index];
+      return candidate.instanceId === basic.instanceId && candidate.name === basic.name;
+    });
+}
+
 /** Sideboarding may move cards between zones, but cannot change a player's pool. */
 function preservesDeckPool(
   deck: DraftDeckPayload,
@@ -335,6 +364,7 @@ export class P2PDraftHost {
   private pendingMutations = 0;
   /** Admissions mutate token state before their durability fence, so serialize them. */
   private admissionQueue = Promise.resolve();
+  private perSeatWorkspaceSnapshots = new Map<number, DraftWorkspaceState>();
   private persistenceClosed = false;
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
@@ -574,7 +604,7 @@ export class P2PDraftHost {
       return;
     }
     session.onMessage((msg) => {
-      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg));
+      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg, session));
     });
 
     // Send welcome with empty view (draft hasn't started)
@@ -587,6 +617,7 @@ export class P2PDraftHost {
       seatIndex: seat,
       view: emptyView,
       draftCode: this.draftCode || "pending",
+      workspaceState: null,
     });
 
     // `send` yields for wire encoding. A close during that await runs the
@@ -652,7 +683,7 @@ export class P2PDraftHost {
     const stopWatching = session.onDisconnect?.(() => { live = false; }) ?? (() => {});
     try {
       // Keep the old grace record and do not install an action handler while
-      // the recovered connection is merely tentative.  A close between the
+      // the recovered connection is merely tentative. A close between the
       // engine update and durable save is rolled back below rather than
       // producing a connected-looking, unrecoverable seat.
       if (this.draftStarted) await this.adapter.setSeatConnected(reconnectSeat, true);
@@ -664,7 +695,6 @@ export class P2PDraftHost {
         }
         return;
       }
-
       const grace = this.disconnectedSeats.get(reconnectSeat);
       if (!grace) {
         if (this.draftStarted) {
@@ -678,18 +708,26 @@ export class P2PDraftHost {
       this.disconnectedSeats.delete(reconnectSeat);
       this.guestSessions.set(reconnectSeat, session);
       session.onMessage((msg) => {
-        this.runDetachedMutation("guest message", () => this.handleGuestMessage(reconnectSeat, msg));
+        this.runDetachedMutation("guest message", () => this.handleGuestMessage(reconnectSeat, msg, session));
       });
 
       const view = this.draftStarted
         ? await this.adapter.getViewForSeat(reconnectSeat)
         : this.buildLobbyView();
+      // Fetching a view yields to the transport. A close or grace expiry that
+      // occurs meanwhile must not publish a recovered workspace or ack.
+      if (!live || this.guestSessions.get(reconnectSeat) !== session) {
+        throw new Error("Reconnect session ended before acknowledgement");
+      }
+      const reconciliation = this.reconcileRetainedWorkspace(reconnectSeat, view.pool);
+      if (reconciliation.changed) await this.persistSessionStrict();
       await session.send({
         type: "draft_reconnect_ack",
         draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
         seatIndex: reconnectSeat,
         view,
         draftCode: this.draftCode,
+        workspaceState: reconciliation.workspaceState,
       });
       if (this.draftStarted) await this.broadcastViews();
       if (view.status === "MatchInProgress") await this.dispatchMatchLaunchesForSeat(view, reconnectSeat);
@@ -737,7 +775,11 @@ export class P2PDraftHost {
 
   // ── Message handling ───────────────────────────────────────────────
 
-  private async handleGuestMessage(seat: number, msg: DraftP2PMessage): Promise<void> {
+  private async handleGuestMessage(
+    seat: number,
+    msg: DraftP2PMessage,
+    originatingSession = this.guestSessions.get(seat),
+  ): Promise<void> {
     switch (msg.type) {
       case "draft_pick": {
         if (!this.canGuestPick(seat)) return;
@@ -764,6 +806,17 @@ export class P2PDraftHost {
           return;
         }
         await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId);
+        break;
+      }
+      case "draft_workspace_update": {
+        try {
+          await this.applyWorkspaceUpdate(seat, msg.workspaceState, originatingSession);
+        } catch (err) {
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          const reason = err instanceof Error ? err.message : String(err);
+          const errorSend = originatingSession?.send({ type: "draft_error", reason });
+          if (errorSend) void errorSend.catch(() => undefined);
+        }
         break;
       }
       case "draft_match_result": {
@@ -908,6 +961,51 @@ export class P2PDraftHost {
       )?.[0];
       return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID());
     });
+  }
+
+  updateHostWorkspace(state: DraftWorkspaceState): Promise<void> {
+    return this.enqueueAuthoritativeMutation(() => this.applyWorkspaceUpdate(0, state));
+  }
+
+  getHostWorkspaceState(): DraftWorkspaceState | null {
+    return this.perSeatWorkspaceSnapshots.get(0) ?? null;
+  }
+
+  private async applyWorkspaceUpdate(
+    seat: number,
+    state: DraftWorkspaceState,
+    sourceSession?: DraftPeerSession,
+  ): Promise<void> {
+    const view = await this.adapter.getViewForSeat(seat);
+    // The adapter view await is a transport boundary: a superseded guest may
+    // not mutate its replacement's retained state after it returns.
+    if (sourceSession && this.guestSessions.get(seat) !== sourceSession) return;
+    const validated = validateWorkspaceState(state, {
+      maxPlacementCount: view.pool.length + MAX_MATERIALIZED_VIRTUAL_BASICS,
+    });
+    if ("error" in validated) throw new Error(validated.error);
+    const reconciled = reconcileWorkspaceState(validated, view.pool);
+    this.perSeatWorkspaceSnapshots.set(seat, reconciled);
+    await this.persistSessionStrict();
+  }
+
+  private reconcileRetainedWorkspace(
+    seat: number,
+    pool: DraftPlayerView["pool"],
+  ): { workspaceState: DraftWorkspaceState | null; changed: boolean } {
+    const state = this.perSeatWorkspaceSnapshots.get(seat);
+    if (!state) return { workspaceState: null, changed: false };
+    const validated = validateWorkspaceState(state);
+    if ("error" in validated) {
+      this.perSeatWorkspaceSnapshots.delete(seat);
+      return { workspaceState: null, changed: true };
+    }
+    const reconciled = reconcileWorkspaceState(validated, pool);
+    if (!workspaceStatesEqual(reconciled, state)) {
+      this.perSeatWorkspaceSnapshots.set(seat, reconciled);
+      return { workspaceState: reconciled, changed: true };
+    }
+    return { workspaceState: reconciled, changed: false };
   }
 
   private assertPickAllowed(): void {
@@ -2447,6 +2545,7 @@ export class P2PDraftHost {
       deckSubmissionReceipts: [...this.deckSubmissionReceipts.entries()].map(
         ([submissionId, receipt]) => ({ submissionId, ...receipt }),
       ),
+      perSeatWorkspaceSnapshots: Object.fromEntries(this.perSeatWorkspaceSnapshots),
     };
   }
 
@@ -2492,6 +2591,12 @@ export class P2PDraftHost {
    * Called before `initialize()` to rehydrate a crashed host.
    */
   async restoreFromPersisted(session: PersistedDraftHostSession): Promise<DraftPlayerView | null> {
+    this.perSeatWorkspaceSnapshots = new Map(
+      Object.entries(session.perSeatWorkspaceSnapshots ?? {}).map(([seat, state]) => [
+        Number(seat),
+        state,
+      ]),
+    );
     for (const [seatStr, token] of Object.entries(session.seatTokens)) {
       this.seatTokens.set(Number(seatStr), token);
     }
@@ -2557,6 +2662,7 @@ export class P2PDraftHost {
 
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);
+      if (this.reconcileRetainedWorkspace(0, view.pool).changed) this.persistSession();
       await this.recoverSettlementOutbox(view);
 
       this.reconcileEffectivePause();

@@ -22,6 +22,11 @@ const { draftState } = vi.hoisted(() => ({
     seatIndex: 0,
     view: { tournament_format: "Swiss" },
     matchPairing: null,
+    workspaceState: {
+      schemaVersion: 1,
+      placements: {},
+      virtualBasics: [],
+    },
     startMatch: vi.fn(),
     leave: vi.fn(),
     mainDeck: [],
@@ -44,9 +49,10 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
 // literal here would be a second copy of the same fact.
 vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../stores/draftPodStore")>()),
-  useDraftPodStore: (selector: (state: { reset: () => void; resumeHostedPod: () => void }) => unknown) => selector({
+  useDraftPodStore: (selector: (state: { reset: () => void; resumeHostedPod: () => void; enterKind: () => void }) => unknown) => selector({
     reset: vi.fn(),
     resumeHostedPod: vi.fn(),
+    enterKind: vi.fn(),
   }),
 }));
 

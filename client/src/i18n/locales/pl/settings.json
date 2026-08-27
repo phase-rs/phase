@@ -89,6 +89,14 @@
       "side": "Podgląd dokuje się przy krawędzi ekranu, więc nigdy nie zasłania pola bitwy.",
       "shift": "Podgląd pojawia się tylko wtedy, gdy przytrzymasz klawisz Shift, tak jak w Tabletop Simulator."
     },
+    "draftCardPreview": "Podgląd kart podczas draftu",
+    "draftCardPreviewOff": "Wyłączony",
+    "draftCardPreviewHint": "Dotyczy tylko draftu i budowania talii draftowej.",
+    "draftDoubleClickConfirmPick": "Potwierdzanie wyboru podwójnym kliknięciem w drafcie",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "Wyłączone",
+      "enabled": "Włączone"
+    },
     "cardPreviewFooter": "Informacje podglądu",
     "showCardPreviewFooter": "Pokazuj informacje pod podglądem karty",
     "cardPreviewFooterHint": "Obejmuje nazwę karty, dostępne zdolności aktywowane i podpowiedzi klawiaturowe. Alt nadal otwiera szczegóły parsowania, gdy opcja jest ukryta.",

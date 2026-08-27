@@ -68,6 +68,13 @@ const VIEW: DraftPlayerView = {
     type_filter_options: [],
     color_filter_options: [],
     color_counts: { white: 1, blue: 0, black: 0, red: 1, green: 0 },
+    workspace_capabilities: {
+      rarity_group_order: ["mythic", "rare", "uncommon", "common", "rarity_other"],
+    },
+    workspace_row_classification: {
+      creature_instance_ids: ["creature"],
+      noncreature_instance_ids: ["instant"],
+    },
   },
   sealed_packs: [],
   seats: [],

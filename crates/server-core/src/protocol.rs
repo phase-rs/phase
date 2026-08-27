@@ -2324,7 +2324,12 @@ mod tests {
             draft_effect: None,
         };
         let pool = vec![first_pull.clone(), second_pull.clone()];
-        let pool_groups = DraftPoolGroups::from_pool(&pool);
+        let pool_groups = DraftPoolGroups::from_pool(
+            &pool,
+            &DraftSource::Set {
+                code: "TST".to_string(),
+            },
+        );
         let view = DraftPlayerView {
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
@@ -2369,6 +2374,28 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
+                assert_eq!(
+                    v.pool_groups.workspace_capabilities.rarity_group_order,
+                    Some(vec![
+                        draft_core::view::DraftRarityGroupKind::Mythic,
+                        draft_core::view::DraftRarityGroupKind::Rare,
+                        draft_core::view::DraftRarityGroupKind::Uncommon,
+                        draft_core::view::DraftRarityGroupKind::Common,
+                        draft_core::view::DraftRarityGroupKind::RarityOther,
+                    ])
+                );
+                assert_eq!(
+                    v.pool_groups
+                        .workspace_row_classification
+                        .creature_instance_ids,
+                    vec!["pack-1-card-1"]
+                );
+                assert_eq!(
+                    v.pool_groups
+                        .workspace_row_classification
+                        .noncreature_instance_ids,
+                    vec!["pack-2-card-1"]
+                );
                 assert_eq!(v.draft_effects, view.draft_effects);
                 assert_eq!(
                     v.sealed_packs
@@ -2385,6 +2412,104 @@ mod tests {
                 );
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn draft_pool_groups_nested_workspace_metadata_is_strict_and_legacy_compatible() {
+        use draft_core::types::DraftSource;
+        use draft_core::view::{
+            DraftPoolGroups, DraftWorkspaceCapabilities, DraftWorkspaceRowClassification,
+        };
+
+        let source = DraftSource::Set {
+            code: "TST".to_string(),
+        };
+        let value = serde_json::to_value(DraftPoolGroups::from_pool(&[], &source)).unwrap();
+
+        let mut legacy = value.clone();
+        let legacy_object = legacy.as_object_mut().unwrap();
+        legacy_object.remove("workspace_capabilities");
+        legacy_object.remove("workspace_row_classification");
+        let legacy_groups: DraftPoolGroups = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            legacy_groups.workspace_capabilities,
+            DraftWorkspaceCapabilities::default()
+        );
+        assert_eq!(
+            legacy_groups.workspace_row_classification,
+            DraftWorkspaceRowClassification::default()
+        );
+
+        let malformed = [
+            (
+                "empty capabilities",
+                "workspace_capabilities",
+                serde_json::json!({}),
+            ),
+            (
+                "missing rarity order",
+                "workspace_capabilities",
+                serde_json::json!({"other": []}),
+            ),
+            (
+                "invalid rarity kind",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": ["legendary"]}),
+            ),
+            (
+                "non-rarity group kind",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": ["creature"]}),
+            ),
+            (
+                "non-array rarity order",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": "common"}),
+            ),
+            (
+                "empty row classification",
+                "workspace_row_classification",
+                serde_json::json!({}),
+            ),
+            (
+                "missing creature ids",
+                "workspace_row_classification",
+                serde_json::json!({"noncreature_instance_ids": []}),
+            ),
+            (
+                "missing noncreature ids",
+                "workspace_row_classification",
+                serde_json::json!({"creature_instance_ids": []}),
+            ),
+            (
+                "non-array row",
+                "workspace_row_classification",
+                serde_json::json!({
+                    "creature_instance_ids": "card-1",
+                    "noncreature_instance_ids": []
+                }),
+            ),
+            (
+                "non-string row id",
+                "workspace_row_classification",
+                serde_json::json!({
+                    "creature_instance_ids": [],
+                    "noncreature_instance_ids": [1]
+                }),
+            ),
+        ];
+
+        for (label, field, malformed_value) in malformed {
+            let mut candidate = value.clone();
+            candidate
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), malformed_value);
+            assert!(
+                serde_json::from_value::<DraftPoolGroups>(candidate).is_err(),
+                "{label} must reject"
+            );
         }
     }
 

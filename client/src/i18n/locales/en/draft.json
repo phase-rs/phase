@@ -103,12 +103,22 @@
   },
   "pack": {
     "confirmPick": "Confirm Pick",
+    "selected": "Selected",
     "draftEffects": "Draft effects:",
     "waitingNext": "Waiting for next pack...",
-    "cardsInPack": "{{count}} cards in pack",
+    "cardsInPack_one": "{{count}} card in pack",
+    "cardsInPack_few": "{{count}} cards in pack",
+    "cardsInPack_many": "{{count}} cards in pack",
+    "cardsInPack_other": "{{count}} cards in pack",
+    "currentPick": "Pack {{pack}} Pick {{pick}}",
     "picking": "Picking…",
     "autoPick": "Auto-pick",
-    "selectionProgress": "{{selected}} of {{required}} selected"
+    "scale": "Pack scale",
+    "scaleDecrease": "Decrease pack scale",
+    "scaleReset": "Reset pack scale",
+    "scaleIncrease": "Increase pack scale",
+    "pickToDeck": "Pick {{card}} to Deck",
+    "pickToSideboard": "Pick {{card}} to Sideboard"
   },
   "sealedOpening": {
     "title": "Open your sealed pool",
@@ -120,11 +130,17 @@
     "nextPack": "Next pack",
     "viewPool": "View your pool",
     "poolTitle": "Your sealed pool",
-    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "poolSubtitle_one": "All {{count}} card, grouped by type.",
+    "poolSubtitle_few": "All {{count}} cards, grouped by type.",
+    "poolSubtitle_many": "All {{count}} cards, grouped by type.",
+    "poolSubtitle_other": "All {{count}} cards, grouped by type.",
     "buildDeck": "Build deck"
   },
   "pool": {
-    "cardsDrafted": "{{count}} cards drafted",
+    "cardsDrafted_one": "{{count}} card drafted",
+    "cardsDrafted_few": "{{count}} cards drafted",
+    "cardsDrafted_many": "{{count}} cards drafted",
+    "cardsDrafted_other": "{{count}} cards drafted",
     "empty": "No cards drafted yet",
     "sortColor": "Color",
     "sortType": "Type",
@@ -160,6 +176,87 @@
       "manaValue6Plus": "6+ CMC"
     }
   },
+  "workspace": {
+    "locked": "Pick in progress.",
+    "shell": { "label": "Deck workspace", "show": "Show Deck workspace", "hide": "Hide deck workspace", "title": "Build your deck" },
+    "view": { "label": "Workspace view", "board": "Board", "compact": "Compact" },
+    "preview": { "label": "Card preview", "none": "None", "follow": "Follow", "side": "Side", "shift": "Shift" },
+    "count": {
+      "deck_one": "Deck ({{count}} card)",
+      "deck_few": "Deck ({{count}} cards)",
+      "deck_many": "Deck ({{count}} cards)",
+      "deck_other": "Deck ({{count}} cards)",
+      "sideboard_one": "Sideboard ({{count}} card)",
+      "sideboard_few": "Sideboard ({{count}} cards)",
+      "sideboard_many": "Sideboard ({{count}} cards)",
+      "sideboard_other": "Sideboard ({{count}} cards)"
+    },
+    "empty": { "sideboard": "No cards in the sideboard" },
+    "sideboard": {
+      "expand_one": "Show sideboard ({{count}} card)",
+      "expand_few": "Show sideboard ({{count}} cards)",
+      "expand_many": "Show sideboard ({{count}} cards)",
+      "expand_other": "Show sideboard ({{count}} cards)",
+      "collapse": "Hide sideboard"
+    },
+    "pool": {
+      "label": "Card pool",
+      "filterLabel": "Pool zone filter",
+      "sortLabel": "Pool sort",
+      "empty": "No cards in this view",
+      "filter": {
+        "combined_one": "All ({{count}})",
+        "combined_few": "All ({{count}})",
+        "combined_many": "All ({{count}})",
+        "combined_other": "All ({{count}})",
+        "deck_one": "Deck ({{count}})",
+        "deck_few": "Deck ({{count}})",
+        "deck_many": "Deck ({{count}})",
+        "deck_other": "Deck ({{count}})",
+        "sideboard_one": "Sideboard ({{count}})",
+        "sideboard_few": "Sideboard ({{count}})",
+        "sideboard_many": "Sideboard ({{count}})",
+        "sideboard_other": "Sideboard ({{count}})"
+      }
+    },
+    "compact": { "sideboardRegion": "Compact sideboard" },
+    "toolbar": { "label": "Board layout" },
+    "layout": { "label": "Layout", "columns": "Columns", "maxPerRow": "Max columns per row", "decreaseMaxPerRow": "Decrease max columns per row", "increaseMaxPerRow": "Increase max columns per row" },
+    "sort": { "label": "Sort board", "cmc": "Mana value", "color": "Color", "rarity": "Rarity", "type": "Type" },
+    "rows": { "label": "Board rows", "one": "One row", "two": "Two rows" },
+    "rowHeaders": { "creatures": "Creatures", "nonCreatures": "Non-Creatures" },
+    "columns": { "label": "Board columns", "add": "Add column", "removeFinal": "Remove final column", "removeHeader": "Remove column {{column}}" },
+    "headers": {
+      "compact": "Headers",
+      "show": "Show headers",
+      "addedBasics": "Added basics",
+      "unclassified": "Unclassified",
+      "emptyOrdinal": "Empty column {{column}}",
+      "accessible_one": "Column {{column}}: {{labels}}, {{count}} card",
+      "accessible_few": "Column {{column}}: {{labels}}, {{count}} cards",
+      "accessible_many": "Column {{column}}: {{labels}}, {{count}} cards",
+      "accessible_other": "Column {{column}}: {{labels}}, {{count}} cards"
+    },
+    "card": {
+      "inspect": "Inspect {{card}}",
+      "moveToZone": "Move {{card}} to {{zone}}"
+    },
+    "zone": { "deck": "Deck", "sideboard": "Sideboard" },
+    "drop": { "zone": "Drop into this zone", "column": "Drop into this column", "row": "Drop into this row" },
+    "drag": {
+      "started": "Dragging {{card}}.",
+      "target": "Drop in {{zone}}, column {{column}}.",
+      "success": "Picked {{card}}.",
+      "moved": "Moved {{card}}.",
+      "cancelled": "Pick cancelled.",
+      "rejected": "Could not pick {{card}}. It was restored.",
+      "dispatchError": "Could not submit {{card}}. Try again."
+    },
+    "announcement": {
+      "moved": "Moved {{card}} to {{zone}}, column {{column}}, position {{position}}.",
+      "columnRemoved": "Removed column {{column}} and rebuilt the board."
+    }
+  },
   "standings": {
     "title": "Standings — Round {{round}}",
     "rank": "#",
@@ -179,7 +276,17 @@
     "emptyDeckHint": "Click cards from the pool to add them to your deck.",
     "addableCards": "Addable Cards",
     "searchAddableCards": "Search addable cards...",
+    "addLands": "Add Lands",
+    "snowCovered": "Snow-covered",
     "autoLands": "Auto Lands",
+    "averageManaCost": "Average Mana Cost",
+    "manaColor": "Mana Color",
+    "countInCost": "Count in Cost",
+    "type": "Type",
+    "count": "Count",
+    "percent": "%",
+    "basicLand": "Basic Land",
+    "total": "Total",
     "suggestDeck": "Suggest Deck",
     "submitDeck": "Submit Deck",
     "validationTitle": "Deck needs attention",
@@ -188,8 +295,12 @@
     "addCard": "Add {{name}}",
     "cardCount": "/ {{min}} cards",
     "spellCount_one": "{{count}} spell",
+    "spellCount_few": "{{count}} spells",
+    "spellCount_many": "{{count}} spells",
     "spellCount_other": "{{count}} spells",
     "landCount_one": "{{count}} land",
+    "landCount_few": "{{count}} lands",
+    "landCount_many": "{{count}} lands",
     "landCount_other": "{{count}} lands",
     "readyToSubmit": "ready to submit",
     "moreNeeded": "{{count}} more needed",

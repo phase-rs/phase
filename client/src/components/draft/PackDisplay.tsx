@@ -1,209 +1,434 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { flushSync } from "react-dom";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import { useCardImage } from "../../hooks/useCardImage";
-import { useDraftStore } from "../../stores/draftStore";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import { useLongPress } from "../../hooks/useLongPress";
+import type {
+  DraftPickDestination,
+  DraftPickOutcome,
+  DraftPickPlacementHint,
+  PendingDraftPickIntent,
+} from "../../stores/draftStore";
 import type { CardHoverInfo } from "../card/CardPreview";
-import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
+import { menuButtonClass } from "../menu/buttonStyles";
+import { useDraftCardFace } from "./DraftCardFace.tsx";
+import {
+  DRAFT_PACK_CARD_BASE_WIDTH_PX,
+  DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
+  DRAFT_WORKSPACE_PACK_SCALE_MAX,
+  DRAFT_WORKSPACE_PACK_SCALE_MIN,
+  DRAFT_WORKSPACE_PACK_SCALE_STEP,
+  repairDraftWorkspacePackScale,
+  type ResponsiveDraftLayout,
+} from "./workspace/workspacePreferences";
 
-const EMPTY_DRAFT_EFFECTS: DraftCardInstance[] = [];
+export type PackDropSettlement =
+  | { readonly kind: "outcome"; readonly outcome: DraftPickOutcome }
+  | { readonly kind: "conflict" }
+  | { readonly kind: "error" };
 
-// ── Card tile ───────────────────────────────────────────────────────────
-
-interface PackCardProps {
-  card: DraftCardInstance;
-  isSelected: boolean;
-  onSelect: (instanceId: string) => void;
-  onConfirm: () => void;
-  confirmDisabled?: boolean;
-  onHover: (info: CardHoverInfo | null) => void;
+export interface PackDropAdmission {
+  readonly kind: "dispatch";
+  readonly requestToken: string;
+  readonly interactionGeneration: number;
 }
 
+interface PackDropSourceCommon {
+  readonly authorityId: string;
+  readonly cards: readonly DraftCardInstance[];
+  readonly sourceIndices: readonly number[];
+  readonly interactionGeneration: number;
+  readonly previewWidth: number;
+  readonly previewHeight: number;
+  readonly onAdmission: (admission: PackDropAdmission) => void;
+  readonly onSettled: (result: PackDropSettlement) => void;
+}
+
+export type PackDropSource = PackDropSourceCommon & (
+  | { readonly kind: "pick"; readonly instanceIds: readonly [string] }
+  | { readonly kind: "draft-effect"; readonly instanceIds: readonly [string, string] }
+);
+
+export interface PackCompatibilityActivation {
+  readonly kind: "click" | "double-click";
+  readonly detail: number;
+  readonly pointerType?: string;
+}
+
+export interface PackDragController {
+  handlePointerDown(
+    event: ReactPointerEvent<HTMLElement>,
+    source: PackDropSource,
+    allowTouchPackDrag?: boolean,
+  ): void;
+  handlePointerMove(event: ReactPointerEvent<HTMLElement>): void;
+  handlePointerUp(event: ReactPointerEvent<HTMLElement>): void;
+  handlePointerCancel(event: ReactPointerEvent<HTMLElement>): void;
+  handleLostPointerCapture(event: ReactPointerEvent<HTMLElement>): void;
+  consumeCompatibilityActivation(activation: PackCompatibilityActivation): boolean;
+}
+
+function compatibilityActivation(event: ReactMouseEvent<HTMLElement>, kind: PackCompatibilityActivation["kind"]): PackCompatibilityActivation {
+  const pointerType = (event.nativeEvent as MouseEvent & { readonly pointerType?: string }).pointerType;
+  return { kind, detail: event.detail, ...(pointerType === undefined ? {} : { pointerType }) };
+}
+
+export interface WorkspacePackController {
+  readonly kind: "local-workspace";
+  readonly view: DraftPlayerView | null;
+  readonly selectedCard: string | null;
+  readonly pendingIntent: PendingDraftPickIntent | null;
+  readonly interactionGeneration: number;
+  readonly interactionLocked: boolean;
+  readonly doubleClickPick: boolean;
+  readonly dragController: PackDragController;
+  selectCard(instanceId: string | null): void;
+  pickCard(instanceId: string, destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
+  pickCardStep(instanceIds: readonly string[], destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
+  confirmPick(destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
+  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: readonly [string, string], destination: DraftPickDestination, placementHint?: DraftPickPlacementHint): Promise<DraftPickOutcome>;
+  autoPickCard(): Promise<DraftPickOutcome>;
+}
+
+export type LocalWorkspaceController = WorkspacePackController;
+
+interface PodSingleConfirmController {
+  readonly kind: "pod-single-confirm";
+  readonly view: DraftPlayerView | null;
+  readonly selectedCard: string | null;
+  readonly interactionLocked: boolean;
+  selectCard(instanceId: string | null): void;
+  confirmPick(): Promise<void> | void;
+  pickCardWithDraftEffect(effectCardInstanceId: string, instanceIds: [string, string]): Promise<void> | void;
+  autoPickCard(): Promise<void> | void;
+}
+
+export type PackDisplayController = WorkspacePackController | PodSingleConfirmController;
+
+export interface PackDisplayPresentation {
+  readonly packScale: number;
+  setPackScale(next: number): void;
+}
+
+interface PackDisplayProps {
+  controller: PackDisplayController;
+  presentation: PackDisplayPresentation;
+  onCardHover: (info: CardHoverInfo | null) => void;
+  enableDraftEffects?: boolean;
+  responsiveLayout?: ResponsiveDraftLayout;
+  phoneToolbarPinned?: boolean;
+  mobileWorkspaceOpen?: boolean;
+}
+
+type CardVisualState = "leaving" | "submitting" | "waiting" | "failure-restored" | "selected" | "default";
+
+interface RetainedCard {
+  readonly card: DraftCardInstance;
+  readonly sourceIndex: number;
+  readonly requestOrder: number;
+  readonly width: number;
+  readonly height: number;
+  readonly token: string;
+  readonly generation: number;
+}
+
+interface CardVisualRecord {
+  readonly state: CardVisualState;
+  readonly token: string;
+  readonly generation: number;
+}
+
+interface ScheduledVisual {
+  readonly handle: ReturnType<typeof setTimeout>;
+  readonly instanceId: string;
+}
+
+const DOUBLE_TAP_DELAY_MS = 350;
+const TOUCH_TAP_MOVE_THRESHOLD_PX = 10;
+
+const cardInfo = (card: DraftCardInstance): CardHoverInfo => ({
+  name: card.name,
+  sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
+});
+
 function PackCard({
-  card,
-  isSelected,
-  onSelect,
-  onConfirm,
-  confirmDisabled = false,
-  onHover,
-}: PackCardProps) {
+  card, state, width, locked, local, doubleTapPickEnabled, allowTouchPackDrag, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
+}: {
+  card: DraftCardInstance;
+  state: CardVisualState;
+  width: number;
+  locked: boolean;
+  local: LocalWorkspaceController | null;
+  doubleTapPickEnabled: boolean;
+  allowTouchPackDrag: boolean;
+  onSelect(): void;
+  onDestination(destination: DraftPickDestination): void;
+  onDoubleClickPick(): void;
+  onHover(info: CardHoverInfo | null): void;
+  makeDropSource(): PackDropSource | null;
+}) {
   const { t } = useTranslation("draft");
-  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(card.name, {
-    size: "normal",
-    sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
-  });
+  const { src, isLoading, displayName, hasAlternateFace, toggleFace, advanceFailedSource } = useDraftCardFace(
+    card.name,
+    { setCode: card.set_code, collectorNumber: card.collector_number },
+  );
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  const touchMoved = useRef(false);
+  const lastTouchTapAt = useRef<number | null>(null);
+  const ignoreCompatibilityClickUntil = useRef(0);
+  const imageLoaded = src !== null && loadedSrc === src;
+  const longPress = useLongPress(() => onHover(cardInfo(card)), { delay: 500 });
 
   return (
-    <div
-      className={`relative cursor-pointer overflow-hidden rounded-[14px] transition-all duration-150 ${
-        isSelected
-          ? "z-10 scale-105 ring-2 ring-amber-400 shadow-lg shadow-amber-400/20"
-          : "ring-1 ring-white/10 hover:scale-[1.02] hover:ring-white/20"
-      }`}
-      onMouseEnter={() => onHover({ name: card.name, sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number } })}
+    <motion.div
+      data-instance-id={card.instance_id}
+      data-visual-state={state}
+      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 transition-all duration-150 ${locked ? "" : "cursor-pointer hover:scale-[1.02]"} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_4px_2px_rgb(3,139,6)]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
+      style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
+      onMouseEnter={() => onHover(cardInfo(card))}
       onMouseLeave={() => onHover(null)}
+      onPointerDown={(event) => {
+        if (event.pointerType === "touch") {
+          if (!locked) {
+            touchStart.current = { x: event.clientX, y: event.clientY };
+            touchMoved.current = false;
+            longPress.handlers.onPointerDown(event);
+            const source = allowTouchPackDrag ? makeDropSource() : null;
+            if (source !== null) local?.dragController.handlePointerDown(event, source, true);
+          }
+        } else {
+          if (!locked && event.isPrimary && event.button === 0) onSelect();
+          const source = makeDropSource();
+          if (source !== null) local?.dragController.handlePointerDown(event, source);
+        }
+      }}
+      onPointerMove={(event) => {
+        if (event.pointerType !== "touch") {
+          local?.dragController.handlePointerMove(event);
+          return;
+        }
+        const start = touchStart.current;
+        if (start !== null) {
+          const deltaX = event.clientX - start.x;
+          const deltaY = event.clientY - start.y;
+          if (deltaX * deltaX + deltaY * deltaY > TOUCH_TAP_MOVE_THRESHOLD_PX ** 2) {
+            touchMoved.current = true;
+          }
+        }
+        if (allowTouchPackDrag) local?.dragController.handlePointerMove(event);
+        longPress.handlers.onPointerMove(event);
+      }}
+      onPointerUp={(event) => {
+        if (event.pointerType !== "touch") {
+          local?.dragController.handlePointerUp(event);
+          return;
+        }
+        const longPressFired = longPress.firedRef.current;
+        if (allowTouchPackDrag) local?.dragController.handlePointerUp(event);
+        longPress.handlers.onPointerUp(event);
+        touchStart.current = null;
+        ignoreCompatibilityClickUntil.current = Date.now() + 500;
+        if (locked || longPressFired || touchMoved.current) return;
+
+        const now = Date.now();
+        if (
+          doubleTapPickEnabled
+          && lastTouchTapAt.current !== null
+          && now - lastTouchTapAt.current <= DOUBLE_TAP_DELAY_MS
+        ) {
+          lastTouchTapAt.current = null;
+          onDoubleClickPick();
+          return;
+        }
+        lastTouchTapAt.current = now;
+        onSelect();
+      }}
+      onPointerCancel={(event) => {
+        if (event.pointerType === "touch") {
+          touchStart.current = null;
+          touchMoved.current = false;
+          if (allowTouchPackDrag) local?.dragController.handlePointerCancel(event);
+          longPress.handlers.onPointerCancel(event);
+        } else {
+          local?.dragController.handlePointerCancel(event);
+        }
+      }}
+      onLostPointerCapture={(event) => local?.dragController.handleLostPointerCapture(event)}
+      onContextMenu={longPress.handlers.onContextMenu}
+      onDoubleClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;
+        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click")) && local?.doubleClickPick) onDoubleClickPick();
+      }}
     >
       <button
-        onClick={() => onSelect(card.instance_id)}
-        className="w-full"
+        type="button"
+        data-pack-card-activation
+        disabled={locked}
+        onClick={(event) => {
+          if (Date.now() < ignoreCompatibilityClickUntil.current) return;
+          if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click"))) onSelect();
+        }}
+        className="block h-full w-full overflow-hidden rounded-md disabled:cursor-not-allowed"
       >
         {isLoading || !src ? (
-          <div className="flex aspect-[488/680] animate-pulse items-center justify-center bg-white/5">
-            <span className="px-2 text-center text-xs text-white/40">{card.name}</span>
-          </div>
+          <span className="flex h-full items-center justify-center bg-white/5 px-2 text-center text-xs text-white/50">{card.name}</span>
         ) : (
           <img
             src={src}
-            {...getCardImageSrcSetProps(src, rungs)}
-            alt={card.name}
+            alt={displayName}
             draggable={false}
-            onError={() => advanceFailedSource?.(src)}
-            className="aspect-[488/680] w-full object-cover"
+            className="h-full w-full object-contain"
+            onLoad={() => setLoadedSrc(src)}
+            onError={() => {
+              setLoadedSrc(null);
+              advanceFailedSource?.(src);
+            }}
           />
         )}
       </button>
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2">
-        {isSelected ? (
-          <button
-            onClick={onConfirm}
-            disabled={confirmDisabled}
-            className="w-full rounded-lg bg-amber-500 py-0.5 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t("pack.confirmPick")}
-          </button>
-        ) : (
-          <span className="line-clamp-1 text-[10px] leading-tight text-white/80">
-            {card.name}
-          </span>
-        )}
-      </div>
-    </div>
+      {hasAlternateFace && (
+        <button
+          type="button"
+          aria-label={`Show other face of ${card.name}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleFace();
+          }}
+          className="absolute -right-2 -top-2 rounded bg-black/75 px-1.5 py-1 text-xs text-white hover:bg-black"
+        >
+          ↺
+        </button>
+      )}
+      {!imageLoaded && (
+        <div className="absolute inset-x-1 bottom-1 flex items-center gap-1 rounded bg-black/80 p-1">
+          <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-white/85">{card.name}</span>
+        </div>
+      )}
+      {local !== null && (
+        <>
+          <button type="button" disabled={locked} onClick={() => onDestination("deck")} aria-label={t("pack.pickToDeck", { card: card.name })} className="sr-only">{t("workspace.zone.deck")}</button>
+          <button type="button" disabled={locked} onClick={() => onDestination("sideboard")} aria-label={t("pack.pickToSideboard", { card: card.name })} className="sr-only">{t("workspace.zone.sideboard")}</button>
+        </>
+      )}
+    </motion.div>
   );
-}
-
-// ── Rarity helpers ─────────────────────────────────────────────────────
-
-const RARITY_ORDER = ["mythic", "rare", "uncommon", "common"] as const;
-
-const RARITY_LABELS: Record<string, string> = {
-  mythic: "Mythic Rare",
-  rare: "Rare",
-  uncommon: "Uncommon",
-  common: "Common",
-};
-
-// Distinct hues per rarity (mythic burnt-orange vs rare pale-gold reads at a glance),
-// with a matching left-rule accent on the section header.
-const RARITY_STYLES: Record<string, { text: string; accent: string }> = {
-  mythic: { text: "text-orange-400", accent: "border-orange-400/55" },
-  rare: { text: "text-amber-200", accent: "border-amber-300/45" },
-  uncommon: { text: "text-slate-300", accent: "border-slate-300/30" },
-  common: { text: "text-white/45", accent: "border-white/15" },
-};
-
-const RARITY_STYLE_FALLBACK = { text: "text-white/45", accent: "border-white/15" } as const;
-
-function groupByRarity(cards: DraftCardInstance[]) {
-  const groups: [string, DraftCardInstance[]][] = [];
-  for (const rarity of RARITY_ORDER) {
-    const matched = cards.filter((c) => c.rarity === rarity);
-    if (matched.length > 0) groups.push([rarity, matched]);
-  }
-  const unmatched = cards.filter(
-    (c) => !RARITY_ORDER.includes(c.rarity as (typeof RARITY_ORDER)[number]),
-  );
-  if (unmatched.length > 0) groups.push(["other", unmatched]);
-  return groups;
-}
-
-// ── Main component ──────────────────────────────────────────────────────
-
-interface PackDisplayProps {
-  onCardHover: (info: CardHoverInfo | null) => void;
-  /** Show the "Auto-pick" button when the active draft mode supports it. */
-  showAutoPick?: boolean;
-  /** Show draft-effect controls for the local Draft page. */
-  enableDraftEffects?: boolean;
-  view?: DraftPlayerView | null;
-  selectedCard?: string | null;
-  onSelectCard?: (instanceId: string | null) => void;
-  /** Receives one whole CR 903.13b pick step: every selected card, primary first. */
-  onConfirmPick?: (cardInstanceIds: string[]) => Promise<void> | void;
-  onPickWithDraftEffect?: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void> | void;
-  onAutoPick?: () => Promise<void> | void;
 }
 
 export function PackDisplay({
+  controller,
+  presentation,
   onCardHover,
-  showAutoPick = false,
   enableDraftEffects = false,
-  view: viewOverride,
-  selectedCard: selectedCardOverride,
-  onSelectCard,
-  onConfirmPick,
-  onPickWithDraftEffect,
-  onAutoPick,
+  responsiveLayout = "desktop",
+  phoneToolbarPinned = false,
+  mobileWorkspaceOpen = false,
 }: PackDisplayProps) {
   const { t } = useTranslation("draft");
-  const quickView = useDraftStore((s) => s.view);
-  const quickSelectedCard = useDraftStore((s) => s.selectedCard);
-  const quickSelectCard = useDraftStore((s) => s.selectCard);
-  const quickConfirmPick = useDraftStore((s) => s.confirmPick);
-  const quickPickCardWithDraftEffect = useDraftStore((s) => s.pickCardWithDraftEffect);
-  const quickAutoPickCard = useDraftStore((s) => s.autoPickCard);
-  const [autoPicking, setAutoPicking] = useState(false);
+  const reduceMotion = useReducedMotion();
+  const [activeEffect, setActiveEffect] = useState<string | null>(null);
+  const [additionalCards, setAdditionalCards] = useState<readonly string[]>([]);
+  const [states, setStates] = useState<Readonly<Record<string, CardVisualRecord>>>({});
+  const [retained, setRetained] = useState<readonly RetainedCard[]>([]);
+  const statesRef = useRef<Readonly<Record<string, CardVisualRecord>>>({});
+  const viewRef = useRef(controller.view);
+  const requestOrder = useRef(0);
+  const timers = useRef(new Map<string, ScheduledVisual>());
+  const packSequenceRef = useRef<HTMLDivElement>(null);
+  const responsiveScaleInitialized = useRef(false);
+  const setPackScaleRef = useRef(presentation.setPackScale);
+  const localGeneration = controller.kind === "local-workspace" ? controller.interactionGeneration : 0;
+  const generationRef = useRef(localGeneration);
+  viewRef.current = controller.view;
+  setPackScaleRef.current = presentation.setPackScale;
 
-  const view = viewOverride !== undefined ? viewOverride : quickView;
-  const selectedCard = selectedCardOverride !== undefined
-    ? selectedCardOverride
-    : quickSelectedCard;
-  // The primary is a selection only while the card it names is still in the
-  // pack on screen. Its owner (the store) nulls it ONLY when this client
-  // submits, so a step advanced from the outside — a server auto-pick on
-  // timeout, the documented default under `PodPolicy::Competitive`, or the P2P
-  // host's timer sweep — pushes a new view with the old id left behind. At
-  // `requiredCount > 1` that stale id is unrecoverable by clicking: the deselect
-  // arm below is unsatisfiable for every card in the new pack, so every click
-  // lands in an additional slot and the step can only ever dispatch the dead id.
-  // The gate is pack membership rather than step identity because membership is
-  // the total condition — it also covers a pack replaced within one step and a
-  // primary invalidated by any other cause — and it routes the stale case into
-  // the same `!primaryCard` arm the guest's post-submit window already uses.
-  const primaryCard =
-    selectedCard && view?.current_pack?.some((card) => card.instance_id === selectedCard)
-      ? selectedCard
-      : null;
-  const selectCard = onSelectCard ?? quickSelectCard;
-  const confirmPick = onConfirmPick ?? quickConfirmPick;
-  const pickCardWithDraftEffect = onPickWithDraftEffect ?? quickPickCardWithDraftEffect;
-  const autoPickCard = onAutoPick ?? quickAutoPickCard;
-  const [activeDraftEffect, setActiveDraftEffect] = useState<string | null>(null);
-  // Selections beyond the primary `selectedCard`, in click order. A list, not a
-  // nullable single: a Commander pick step takes two (CR 903.13b) and a draft
-  // effect takes two, and the shipped `string | null` was the N = 2 special case.
-  const [additionalCards, setAdditionalCards] = useState<string[]>([]);
-
-  useEffect(() => {
-    if (view?.current_pack?.length === 1 && !primaryCard) {
-      selectCard(view.current_pack[0].instance_id);
+  const cancelTimersFor = (instanceIds: readonly string[]) => {
+    const ids = new Set(instanceIds);
+    for (const [key, entry] of timers.current) {
+      if (!ids.has(entry.instanceId)) continue;
+      clearTimeout(entry.handle);
+      timers.current.delete(key);
     }
-  }, [view?.current_pack, primaryCard, selectCard]);
-
-  const draftEffects = view?.draft_effects ?? EMPTY_DRAFT_EFFECTS;
-
-  useEffect(() => {
-    if (
-      activeDraftEffect &&
-      !draftEffects.some((card) => card.instance_id === activeDraftEffect)
-    ) {
-      setActiveDraftEffect(null);
+  };
+  const schedule = (purpose: "departure" | "failure", token: string, generation: number, instanceIds: readonly string[], delay: 0 | 180 | 1500, callback: (instanceId: string) => void) => {
+    for (const instanceId of instanceIds) {
+      const key = `${purpose}:${generation}:${token}:${instanceId}`;
+      const previous = timers.current.get(key);
+      if (previous !== undefined) clearTimeout(previous.handle);
+      const handle = setTimeout(() => {
+        timers.current.delete(key);
+        callback(instanceId);
+      }, delay);
+      timers.current.set(key, { handle, instanceId });
     }
-  }, [activeDraftEffect, draftEffects]);
+  };
+  useEffect(() => () => {
+    for (const entry of timers.current.values()) clearTimeout(entry.handle);
+    timers.current.clear();
+  }, []);
+
+  const view = controller.view;
+  const selectedCard = controller.selectedCard;
+  const locked = controller.interactionLocked;
+  const pack = view?.current_pack ?? [];
+  const draftEffects = view?.draft_effects ?? [];
+  const local = controller.kind === "local-workspace" ? controller : null;
 
   useEffect(() => {
-    if (!activeDraftEffect) setAdditionalCards([]);
-  }, [activeDraftEffect]);
+    const live = new Set(controller.view?.current_pack?.map((card) => card.instance_id) ?? []);
+    setRetained((current) => {
+      const reappeared = current.filter((entry) => live.has(entry.card.instance_id));
+      if (reappeared.length > 0) cancelTimersFor(reappeared.map((entry) => entry.card.instance_id));
+      return current.filter((entry) => !live.has(entry.card.instance_id));
+    });
+  }, [controller.view?.current_pack]);
+  useEffect(() => {
+    if (generationRef.current === localGeneration) return;
+    generationRef.current = localGeneration;
+    for (const entry of timers.current.values()) clearTimeout(entry.handle);
+    timers.current.clear();
+    statesRef.current = {};
+    setStates({});
+    setRetained([]);
+  }, [localGeneration]);
+  useEffect(() => {
+    if (pack.length === 1 && selectedCard === null && !locked) controller.selectCard(pack[0].instance_id);
+  }, [controller, locked, pack, selectedCard]);
+  useEffect(() => {
+    if (activeEffect !== null && !draftEffects.some((card) => card.instance_id === activeEffect)) {
+      setActiveEffect(null);
+      setAdditionalCards([]);
+    }
+  }, [activeEffect, draftEffects]);
+
+  useLayoutEffect(() => {
+    if (responsiveScaleInitialized.current || responsiveLayout === "desktop" || view === null) return;
+    const sequenceWidth = packSequenceRef.current?.getBoundingClientRect().width ?? 0;
+    if (sequenceWidth <= 0) return;
+
+    // Entry scale mirrors each mockup target; auto-fill/flex owns all later card counts.
+    const columnCount = responsiveLayout === "phone-portrait"
+      ? 2
+      : responsiveLayout === "tablet-portrait"
+        ? 5
+        : 4;
+    const gap = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape"
+      ? 7
+      : 8;
+    const phoneGutter = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape"
+      ? 8
+      : 0;
+    const initialCardWidth = (sequenceWidth - phoneGutter - gap * (columnCount - 1)) / columnCount;
+    const initialScale = Math.floor(
+      initialCardWidth / DRAFT_PACK_CARD_BASE_WIDTH_PX / DRAFT_WORKSPACE_PACK_SCALE_STEP,
+    ) * DRAFT_WORKSPACE_PACK_SCALE_STEP;
+    responsiveScaleInitialized.current = true;
+    setPackScaleRef.current(repairDraftWorkspacePackScale(initialScale));
+  }, [responsiveLayout, view]);
 
   // The step's identity is the engine's `(pack number, pick number)`, never
   // `current_pack`'s array identity: a guest receives a fresh array object on
@@ -214,164 +439,332 @@ export function PackDisplay({
   }, [view?.current_pack_number, view?.pick_number]);
 
   if (!view) return null;
+  if (pack.length === 0 && retained.length === 0) return <div className="flex justify-center py-12 text-white/40">{t("pack.waitingNext")}</div>;
 
-  const pack = view.current_pack;
-
-  // CR 903.13b's per-seat pick-step count, read from the engine and never
-  // re-derived: `view.required_pick_count` is `min(cards_per_pick, pack size)`,
-  // so it is 1 for the four CR 905.1a kinds, 2 for a Commander pod, and 1 again
-  // on an odd pack's final step — a distinction no per-kind lookup can make.
-  //
-  // A draft effect is the one case that is NOT the procedure's count: the engine
-  // hard-bounds `apply_pick_with_effect_inner` at two cards and
-  // `validateDraftEffectPick` requires exactly two, so the effect branch keeps
-  // that authority rather than borrowing the published one.
-  const requiredCount = activeDraftEffect ? 2 : view.required_pick_count;
-  // Primary first, then the additional slots in click order — the order
-  // `apply_pick_inner` receives. The additionals can never outlive their
-  // primary, so a null primary means nothing is selected.
-  const selectedIds = primaryCard ? [primaryCard, ...additionalCards] : [];
-
-  if (!pack || pack.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-12 text-white/40">
-        {t("pack.waitingNext")}
-      </div>
-    );
-  }
-
-  const handleAutoPick = async () => {
-    setAutoPicking(true);
-    try {
-      await autoPickCard();
-    } finally {
-      setAutoPicking(false);
-    }
+  const updateStates = (update: (current: Readonly<Record<string, CardVisualRecord>>) => Readonly<Record<string, CardVisualRecord>>) => {
+    const next = update(statesRef.current);
+    statesRef.current = next;
+    setStates(next);
   };
-
-  const handleConfirmPick = async () => {
-    // The engine enforces the exact count (`apply_pick_inner`); this gate only
-    // keeps the UI from dispatching a submission it already knows is wrong.
-    if (selectedIds.length !== requiredCount) return;
-    if (activeDraftEffect) {
-      await pickCardWithDraftEffect(activeDraftEffect, selectedIds);
-      setActiveDraftEffect(null);
-      setAdditionalCards([]);
+  const beginRequest = (ids: readonly string[], token: string, generation: number) => {
+    cancelTimersFor(ids);
+    const replaced = new Set(ids);
+    setRetained((current) => current.filter((entry) => !replaced.has(entry.card.instance_id)));
+    updateStates((current) => {
+      const next = { ...current };
+      for (const id of ids) next[id] = { state: "submitting", token, generation };
+      return next;
+    });
+  };
+  const requestIsCurrent = (ids: readonly string[], token: string, generation: number) => ids.every((id) => {
+    const record = statesRef.current[id];
+    return record?.token === token && record.generation === generation;
+  });
+  const setCardStates = (ids: readonly string[], token: string, generation: number, state: CardVisualState | null) => updateStates((current) => {
+    if (!requestIsCurrent(ids, token, generation)) return current;
+    const next = { ...current };
+    for (const id of ids) {
+      if (state === null) delete next[id];
+      else next[id] = { state, token, generation };
+    }
+    return next;
+  });
+  const settle = (token: string, generation: number, cards: readonly DraftCardInstance[], indices: readonly number[], sizes: readonly { width: number; height: number }[], result: PackDropSettlement) => {
+    const ids = cards.map((card) => card.instance_id);
+    if (!requestIsCurrent(ids, token, generation)) return;
+    if (result.kind !== "outcome") {
+      setCardStates(ids, token, generation, null);
       return;
     }
-    await confirmPick(selectedIds);
-  };
-
-  const handleSelectCard = (instanceId: string) => {
-    // A one-card step re-selects rather than toggling, which is exactly today's
-    // behaviour for the four CR 905.1a kinds — and `<=` rather than `===` so a
-    // published 0 (which no engine invariant forbids the client receiving) takes
-    // the same path instead of silently falling into multi-select.
-    if (requiredCount <= 1) {
-      selectCard(instanceId);
-      return;
+    switch (result.outcome.status) {
+      case "acknowledged": {
+        const live = new Set(viewRef.current?.current_pack?.map((card) => card.instance_id) ?? []);
+        const departed = cards.flatMap((card, index): RetainedCard[] => live.has(card.instance_id) ? [] : [{
+          card, sourceIndex: indices[index], requestOrder: requestOrder.current,
+          width: sizes[index]?.width ?? 0, height: sizes[index]?.height ?? 0, token, generation,
+        }]);
+        setCardStates(ids, token, generation, null);
+        if (departed.length > 0) {
+          setRetained((current) => [...current, ...departed]);
+          schedule("departure", token, generation, departed.map((entry) => entry.card.instance_id), reduceMotion ? 0 : 180, (instanceId) => setRetained((current) => current.filter((entry) => entry.token !== token || entry.generation !== generation || entry.card.instance_id !== instanceId)));
+        }
+        break;
+      }
+      case "rejected":
+        setCardStates(ids, token, generation, "failure-restored");
+        schedule("failure", token, generation, ids, 1500, (instanceId) => setCardStates([instanceId], token, generation, null));
+        break;
+      case "ignored":
+        setCardStates(ids, token, generation, null);
+        break;
     }
-    if (primaryCard === instanceId) {
-      selectCard(null);
+  };
+  const selectedCards = selectedCard === null
+    ? []
+    : pack.filter((card) => card.instance_id === selectedCard || additionalCards.includes(card.instance_id));
+  const requiredCount = activeEffect === null ? Math.max(1, view.required_pick_count) : 2;
+  const chosenCards = (fallback: DraftCardInstance): readonly DraftCardInstance[] => {
+    if (activeEffect === null && requiredCount === 1) return [fallback];
+    return selectedCards.length === requiredCount && selectedCards.some((card) => card.instance_id === fallback.instance_id)
+      ? selectedCards
+      : [];
+  };
+  const request = async (cards: readonly DraftCardInstance[], destination: DraftPickDestination) => {
+    if (local === null || locked || cards.length !== requiredCount) return;
+    const token = crypto.randomUUID();
+    requestOrder.current += 1;
+    const generation = local.interactionGeneration;
+    const ids = cards.map((card) => card.instance_id);
+    const indices = cards.map((card) => pack.indexOf(card));
+    beginRequest(ids, token, generation);
+    const outcome = activeEffect !== null
+      ? await local.pickCardWithDraftEffect(activeEffect, [ids[0], ids[1]], destination)
+      : ids.length === 1
+        ? await local.pickCard(ids[0], destination)
+        : await local.pickCardStep(ids, destination);
+    settle(token, generation, cards, indices, cards.map(() => ({ width: 0, height: 0 })), { kind: "outcome", outcome });
+  };
+  const select = (id: string) => {
+    if (locked) return;
+    cancelTimersFor([id]);
+    updateStates((current) => {
+      if (current[id] === undefined) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    if (activeEffect === null && requiredCount <= 1) controller.selectCard(id);
+    else if (selectedCard === id) {
+      if (requiredCount <= 1) controller.selectCard(null);
+    } else if (additionalCards.includes(id)) {
+      setAdditionalCards((current) => current.filter((cardId) => cardId !== id));
+    } else if (selectedCard === null) {
+      controller.selectCard(id);
       setAdditionalCards([]);
-    } else if (additionalCards.includes(instanceId)) {
-      setAdditionalCards((current) => current.filter((id) => id !== instanceId));
-    } else if (!primaryCard) {
-      // A fresh primary starts a fresh step: the store can null `selectedCard`
-      // on a completed pick (multiplayerDraftStore's guest branch) before the
-      // engine's next view arrives, and it can still be holding a card from a
-      // step someone else advanced, so additionals must not survive either gap.
-      selectCard(instanceId);
-      setAdditionalCards([]);
+    } else if (additionalCards.length + 1 < requiredCount) {
+      setAdditionalCards((current) => [...current, id]);
     } else {
-      // Full slots slide: the newest click evicts the oldest additional. At the
-      // shipped capacity of one this is exactly today's unconditional replace.
-      setAdditionalCards((current) =>
-        [...current, instanceId].slice(-(requiredCount - 1)),
-      );
+      setAdditionalCards((current) => [...current.slice(1), id]);
     }
   };
 
-  const handleToggleDraftEffect = (instanceId: string) => {
-    setAdditionalCards([]);
-    setActiveDraftEffect((current) => (current === instanceId ? null : instanceId));
-  };
+  const width = DRAFT_PACK_CARD_BASE_WIDTH_PX * presentation.packScale;
+  const responsiveGrid = responsiveLayout === "phone-portrait"
+    || responsiveLayout === "tablet-portrait"
+    || responsiveLayout === "tablet-landscape";
+  const canConfirmPick = local !== null
+    && activeEffect === null
+    && selectedCards.length === requiredCount;
+  const slots = [
+    ...pack.map((card, sourceIndex) => ({ kind: "live" as const, card, sourceIndex, requestOrder: -1 })),
+    ...retained.map((entry) => ({ kind: "retained" as const, ...entry })),
+  ].sort((left, right) => left.sourceIndex - right.sourceIndex || left.requestOrder - right.requestOrder);
 
-  const sections = groupByRarity(pack);
+  const mobileLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const selectedPackCard = selectedCard === null
+    ? null
+    : pack.find((card) => card.instance_id === selectedCard) ?? null;
 
   return (
-    <div className="flex flex-col gap-4">
+    <section
+      data-responsive-pack-layout={responsiveLayout}
+      className={responsiveLayout === "desktop"
+        ? "flex flex-col gap-4 pt-3"
+        : `flex h-full min-h-0 flex-col overflow-hidden ${phoneToolbarPinned ? "gap-0 pt-0" : "gap-2 pt-2"}`}
+      aria-label={t("pack.label")}
+    >
       {enableDraftEffects && draftEffects.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-amber-300/15 bg-amber-300/[0.04] px-3 py-2">
-          <span className="shrink-0 text-xs font-semibold text-amber-100">
-            {t("pack.draftEffects")}
+        <div className="flex flex-wrap items-center gap-3 border border-amber-300/20 px-3 py-2">
+          <span className="text-xs font-semibold text-amber-100">{t("pack.draftEffects")}</span>
+          {draftEffects.map((card) => (
+            <label key={card.instance_id} className="flex min-h-11 items-center gap-2 text-xs text-white/75">
+              <input type="checkbox" disabled={locked} checked={activeEffect === card.instance_id} onChange={() => {
+                setAdditionalCards([]);
+                setActiveEffect((current) => current === card.instance_id ? null : card.instance_id);
+              }} />
+              {card.name}
+            </label>
+          ))}
+        </div>
+      )}
+      <div
+        data-pack-toolbar
+        className={`flex min-w-0 shrink-0 flex-nowrap items-center gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${phoneToolbarPinned ? "sticky top-0 z-20 bg-slate-950 py-1" : ""}`}
+      >
+        <div data-pack-status-controls className="flex shrink-0 items-center gap-2">
+          <span className="text-sm text-fg">
+            {t("pack.currentPick", {
+              pack: view.current_pack_number + 1,
+              pick: view.pick_number + 1,
+            })}
           </span>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            {draftEffects.map((card) => (
-              <label
-                key={card.instance_id}
-                className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-white/75"
-              >
-                <input
-                  type="checkbox"
-                  checked={activeDraftEffect === card.instance_id}
-                  onChange={() => handleToggleDraftEffect(card.instance_id)}
-                  className="h-4 w-4 accent-amber-400"
-                />
-                <span>{card.name}</span>
-              </label>
-            ))}
+          {canConfirmPick && !mobileLayout && (
+            <button
+              type="button"
+              data-confirm-pick
+              disabled={locked}
+              onClick={() => void (requiredCount === 1
+                ? local.confirmPick("deck")
+                : local.pickCardStep(selectedCards.map((card) => card.instance_id), "deck"))}
+              className={menuButtonClass({
+                tone: "emerald",
+                size: "sm",
+                disabled: locked,
+                className: "!min-h-9 select-none !py-0 caret-transparent",
+              })}
+            >
+              {t("pack.confirmPick")}
+            </button>
+          )}
+        </div>
+        {mobileLayout ? (
+          <div data-pack-scale-controls className="ml-auto flex shrink-0 items-center gap-1.5">
+            <button type="button" disabled={locked} aria-label={t("pack.scaleDecrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale - 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>−</button>
+            <label className="flex items-center">
+              <span className="sr-only">{t("pack.scale")}</span>
+              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} />
+            </label>
+            <button type="button" disabled={locked} aria-label={t("pack.scaleIncrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale + 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>+</button>
+          </div>
+        ) : (
+          <div data-pack-scale-controls className="ml-auto flex shrink-0 items-center gap-2">
+            <label className="flex items-center gap-2 text-xs text-white/70">
+              {t("pack.scale")}
+              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} />
+            </label>
+            <button type="button" disabled={locked} aria-label={t("pack.scaleDecrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale - 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>−</button>
+            <button type="button" disabled={locked} aria-label={t("pack.scaleReset")} onClick={() => presentation.setPackScale(DRAFT_WORKSPACE_PACK_SCALE_DEFAULT)} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>
+              <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5" aria-hidden="true">
+                <path d="M5.75 3.5a3.25 3.25 0 0 0-3.25 3.25.75.75 0 0 0 1.5 0A1.75 1.75 0 0 1 5.75 5h6.69l-1.22 1.22a.75.75 0 1 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 1 0-1.06 1.06L12.44 3.5H5.75Zm8.25 9.75A1.75 1.75 0 0 1 12.25 15H5.56l1.22-1.22a.75.75 0 1 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06-1.06L5.56 16.5h6.69a3.25 3.25 0 0 0 3.25-3.25.75.75 0 0 0-1.5 0Z" />
+              </svg>
+            </button>
+            <button type="button" disabled={locked} aria-label={t("pack.scaleIncrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale + 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>+</button>
+          </div>
+        )}
+      </div>
+      <div
+        ref={packSequenceRef}
+        data-testid="pack-sequence"
+        style={!responsiveGrid
+          ? undefined
+          : {
+              gridTemplateColumns: `repeat(auto-fill, ${width}px)`,
+              justifyContent: "safe center",
+            }}
+        className={responsiveLayout === "phone-portrait"
+          ? "grid min-h-0 flex-1 content-start gap-[7px] overflow-auto p-1"
+          : responsiveLayout === "phone-landscape"
+            ? "flex min-h-0 flex-1 flex-nowrap justify-start gap-[7px] overflow-x-auto overflow-y-hidden p-1"
+            : responsiveLayout === "tablet-portrait"
+              ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
+              : responsiveLayout === "tablet-landscape"
+                ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
+                : "flex flex-wrap justify-center gap-3 overflow-visible"}
+      >
+        <AnimatePresence initial={false}>
+          {slots.map((slot) => {
+            if (slot.kind === "retained") return (
+              <motion.div key={`retained:${slot.token}:${slot.card.instance_id}`} data-instance-id={slot.card.instance_id} data-visual-state="leaving" initial={false} style={{ width: slot.width || width, height: slot.height || undefined, flexBasis: slot.width || width, aspectRatio: "488 / 680" }} className="shrink-0 rounded-md ring-1 ring-amber-300/50">
+                <span className="flex h-full items-center justify-center text-xs text-white/60">{slot.card.name}</span>
+              </motion.div>
+            );
+            const card = slot.card;
+            const selected = selectedCard === card.instance_id || additionalCards.includes(card.instance_id);
+            const waiting = local?.pendingIntent?.kind !== "auto-pick" && local?.pendingIntent?.instanceIds.includes(card.instance_id);
+            const state = waiting
+              ? "waiting"
+              : states[card.instance_id]?.state ?? (selected ? "selected" : "default");
+            return <PackCard
+              key={card.instance_id}
+              card={card}
+              state={state}
+              width={width}
+              locked={locked}
+              local={local}
+              doubleTapPickEnabled={local?.doubleClickPick ?? false}
+              allowTouchPackDrag={responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape"}
+              onSelect={() => select(card.instance_id)}
+              onDestination={(destination) => void request(chosenCards(card), destination)}
+              onDoubleClickPick={() => {
+                if (activeEffect === null && requiredCount === 1) void local?.confirmPick("deck");
+                else void request(chosenCards(card), "deck");
+              }}
+              onHover={onCardHover}
+              makeDropSource={() => {
+                if (local === null || locked) return null;
+                const cards = chosenCards(card);
+                if (cards.length !== 1 && cards.length !== 2) return null;
+                if (activeEffect === null && requiredCount !== 1) return null;
+                const ids = cards.map((candidate) => candidate.instance_id);
+                const indices = cards.map((candidate) => pack.indexOf(candidate));
+                const generation = local.interactionGeneration;
+                let admission: PackDropAdmission | null = null;
+                return {
+                  kind: cards.length === 2 ? "draft-effect" : "pick",
+                  authorityId: cards.length === 2 ? activeEffect! : ids[0],
+                  instanceIds: cards.length === 2 ? [ids[0], ids[1]] : [ids[0]],
+                  cards,
+                  sourceIndices: indices,
+                  interactionGeneration: generation,
+                  previewWidth: width,
+                  previewHeight: width * 680 / 488,
+                  onAdmission: (nextAdmission) => {
+                    admission = nextAdmission;
+                    requestOrder.current += 1;
+                    flushSync(() => beginRequest(ids, nextAdmission.requestToken, nextAdmission.interactionGeneration));
+                  },
+                  onSettled: (result) => {
+                    if (admission === null) return;
+                    settle(admission.requestToken, admission.interactionGeneration, cards, indices, cards.map(() => ({ width, height: width * 680 / 488 })), result);
+                  },
+                } as PackDropSource;
+              }}
+            />;
+          })}
+        </AnimatePresence>
+      </div>
+      {mobileLayout && local !== null && (
+        <div
+          data-mobile-pick-dock
+          className={responsiveLayout === "phone-portrait"
+            ? "fixed inset-x-[9px] bottom-0 z-40 grid min-h-[calc(73px_+_env(safe-area-inset-bottom))] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t border-jade/30 bg-slate-950 px-2.5 py-2 shadow-[0_-12px_30px_rgba(0,0,0,0.42)]"
+            : "fixed bottom-0 left-[32.5%] right-[9px] z-40 grid min-h-[58px] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-t border-jade/30 bg-slate-950 px-2.5 py-[7px] shadow-[0_-12px_30px_rgba(0,0,0,0.42)]"}
+        >
+          <div data-mobile-selected-copy className="min-w-0">
+            {selectedPackCard !== null && (
+              <>
+                <span className="block text-[9px] font-bold uppercase text-jade">{t("pack.selected")}</span>
+                <strong className="block truncate text-xs text-fg">{selectedPackCard.name}</strong>
+              </>
+            )}
+          </div>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              data-mobile-deck-action
+              disabled={!canConfirmPick || locked || mobileWorkspaceOpen}
+              onClick={() => void (requiredCount === 1
+                ? local.confirmPick("deck")
+                : local.pickCardStep(selectedCards.map((card) => card.instance_id), "deck"))}
+              className={menuButtonClass({ tone: "emerald", size: "sm", disabled: !canConfirmPick || locked || mobileWorkspaceOpen })}
+            >
+              {t("workspace.zone.deck")}
+            </button>
+            <button
+              type="button"
+              data-mobile-sideboard-action
+              disabled={!canConfirmPick || locked || mobileWorkspaceOpen}
+              onClick={() => void (requiredCount === 1
+                ? local.confirmPick("sideboard")
+                : local.pickCardStep(selectedCards.map((card) => card.instance_id), "sideboard"))}
+              className={menuButtonClass({ tone: "emerald", size: "sm", disabled: !canConfirmPick || locked || mobileWorkspaceOpen })}
+            >
+              {t("workspace.zone.sideboard")}
+            </button>
           </div>
         </div>
       )}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-white/40">{t("pack.cardsInPack", { count: pack.length })}</span>
-          {requiredCount > 1 && (
-            <span aria-live="polite" className="text-xs font-medium text-amber-200">
-              {t("pack.selectionProgress", {
-                selected: selectedIds.length,
-                required: requiredCount,
-              })}
-            </span>
-          )}
-        </div>
-        {showAutoPick && (
-          <button
-            type="button"
-            onClick={handleAutoPick}
-            disabled={autoPicking || activeDraftEffect !== null}
-            className="rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1 text-xs font-medium text-white/80 transition-colors hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {autoPicking ? t("pack.picking") : t("pack.autoPick")}
-          </button>
-        )}
-      </div>
-      {sections.map(([rarity, cards]) => {
-        const rarityStyle = RARITY_STYLES[rarity] ?? RARITY_STYLE_FALLBACK;
-        return (
-          <div key={rarity}>
-            <h3
-              className={`mb-2 border-l-2 pl-2 text-xs font-semibold uppercase tracking-wider ${rarityStyle.text} ${rarityStyle.accent}`}
-            >
-              {RARITY_LABELS[rarity] ?? rarity}
-            </h3>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-              {cards.map((card) => (
-                <PackCard
-                  key={card.instance_id}
-                  card={card}
-                  isSelected={selectedIds.includes(card.instance_id)}
-                  onSelect={handleSelectCard}
-                  onConfirm={handleConfirmPick}
-                  confirmDisabled={selectedIds.length !== requiredCount}
-                  onHover={onCardHover}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
+      <div className="sr-only" aria-live="polite" aria-atomic="true" />
+    </section>
   );
 }

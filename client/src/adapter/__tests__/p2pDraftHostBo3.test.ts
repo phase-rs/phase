@@ -15,6 +15,7 @@ import { P2PDraftHost } from "../p2p-draft-host";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftP2PMessage } from "../../network/draftProtocol";
 import type { DraftPlayerView, PairingView } from "../draft-adapter";
 import { draftIntergameDigest, type DraftIntergameCommand } from "../../services/intergameCommandLedger";
+import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 
 describe("P2PDraftHost Bo3", () => {
   describe("durable intergame ledger", () => {
@@ -445,5 +446,98 @@ describe("P2PDraftHost Bo3", () => {
         { type: "draft_error", reason: "Unauthorized match settlement" },
       ]);
     });
+  });
+
+  it("keeps Traditional authorities independent from recoverable workspace updates", async () => {
+    const host = new P2PDraftHost(
+      { id: "host" } as never,
+      () => () => {},
+      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      "Traditional",
+      8,
+      "Host",
+      "Swiss",
+      "Competitive",
+    );
+    const privateHost = host as unknown as {
+      adapter: { getViewForSeat: (seat: number) => Promise<DraftPlayerView> };
+      bo3State: Map<string, unknown>;
+      launchDigests: Map<string, Map<number, string>>;
+      matchDecks: Map<string, Map<number, { main_deck: string[]; sideboard: string[]; commander: string[] }>>;
+      intergameCommands: {
+        hold: (command: Omit<DraftIntergameCommand, "status" | "payloadDigest">) => DraftIntergameCommand;
+        snapshot: () => DraftIntergameCommand[];
+      };
+      timerContext: "pick" | "sideboard" | "playdraw" | null;
+      persistSessionStrict: () => Promise<void>;
+      perSeatWorkspaceSnapshots: Map<number, DraftWorkspaceState>;
+    };
+    privateHost.adapter = {
+      getViewForSeat: vi.fn(async () => ({
+        pool: [{
+          instance_id: "pool-card",
+          name: "Pool Card",
+          set_code: "TST",
+          collector_number: "1",
+          rarity: "common",
+          colors: [],
+          cmc: 1,
+          type_line: "Creature",
+        }],
+      } as unknown as DraftPlayerView)),
+    };
+    privateHost.bo3State.set("bo3-1", {
+      seatA: 0,
+      seatB: 1,
+      submittedA: false,
+      submittedB: false,
+      loserSeat: 0,
+      gameNumber: 2,
+      score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+      decks: [],
+    });
+    privateHost.launchDigests.set("bo3-1", new Map([[0, "launch-digest"]]));
+    privateHost.matchDecks.set("bo3-1", new Map([[
+      0,
+      { main_deck: ["Pool Card"], sideboard: [], commander: [] },
+    ]]));
+    privateHost.intergameCommands.hold({
+      commandId: "held-1",
+      matchId: "bo3-1",
+      gameNumber: 2,
+      seat: 0,
+      payload: { type: "ChoosePlayDraw", playFirst: true },
+      launchPayload: { matchId: "bo3-1", seat: 0 },
+      launchDigest: "launch-digest",
+    });
+    privateHost.timerContext = "sideboard";
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    const authorityBefore = {
+      bo3: structuredClone([...privateHost.bo3State]),
+      launch: structuredClone([...privateHost.launchDigests]),
+      decks: structuredClone([...privateHost.matchDecks]),
+      commands: privateHost.intergameCommands.snapshot(),
+      timer: privateHost.timerContext,
+    };
+    const valid = (): DraftWorkspaceState => ({
+      schemaVersion: 1,
+      placements: {},
+      virtualBasics: [],
+    });
+
+    await host.updateHostWorkspace(valid());
+    expect(privateHost.perSeatWorkspaceSnapshots.get(0)?.placements).toHaveProperty("pool-card");
+    await expect(host.updateHostWorkspace({
+      ...valid(),
+      placements: { bad: { zone: "deck", row: 2, column: 0, order: 0 } },
+    })).rejects.toThrow("invalid row");
+    await host.updateHostWorkspace(valid());
+
+    expect(privateHost.bo3State).toEqual(new Map(authorityBefore.bo3));
+    expect(privateHost.launchDigests).toEqual(new Map(authorityBefore.launch));
+    expect(privateHost.matchDecks).toEqual(new Map(authorityBefore.decks));
+    expect(privateHost.intergameCommands.snapshot()).toEqual(authorityBefore.commands);
+    expect(privateHost.timerContext).toBe(authorityBefore.timer);
+    expect(privateHost.persistSessionStrict).toHaveBeenCalledTimes(2);
   });
 });

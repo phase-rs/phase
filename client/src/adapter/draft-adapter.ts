@@ -44,6 +44,13 @@ export type DraftPoolGroupKind =
   | "mana_value5"
   | "mana_value6_plus";
 
+export type DraftRarityGroupKind =
+  | "mythic"
+  | "rare"
+  | "uncommon"
+  | "common"
+  | "rarity_other";
+
 export interface DraftPoolEntry {
   card: DraftCardInstance;
   count: number;
@@ -65,6 +72,15 @@ export interface DraftPoolColorCounts {
   black: number;
   red: number;
   green: number;
+}
+
+export interface DraftWorkspaceCapabilities {
+  rarity_group_order: DraftRarityGroupKind[] | null;
+}
+
+export interface DraftWorkspaceRowClassification {
+  creature_instance_ids: string[];
+  noncreature_instance_ids: string[];
 }
 
 /** Typed filter contract mirroring `draft_core::view::PoolFilter` (#7546):
@@ -99,6 +115,8 @@ export interface DraftPoolGroups {
    * presentation shape. */
   color_filter_options: DraftPoolGroupKind[];
   color_counts: DraftPoolColorCounts;
+  workspace_capabilities: DraftWorkspaceCapabilities;
+  workspace_row_classification: DraftWorkspaceRowClassification;
 }
 
 /** Empty engine-shaped pool data for a lobby before a draft session exists. */
@@ -110,6 +128,11 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
   type_filter_options: [],
   color_filter_options: [],
   color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+  workspace_capabilities: { rarity_group_order: null },
+  workspace_row_classification: {
+    creature_instance_ids: [],
+    noncreature_instance_ids: [],
+  },
 };
 
 // @sync-with: crates/draft-core/src/view.rs
@@ -190,16 +213,16 @@ export interface DraftProgressFields {
   /** Cards in the booster being drafted right now. */
   cards_per_pack: number;
   /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
-  pack_sizes: number[];
+  pack_sizes?: number[];
   /** The set filling each booster, in pack order. */
-  pack_set_codes: string[];
+  pack_set_codes?: string[];
   /**
    * CR 903.13b: pick STEPS in each booster, in pack order — the per-pack
    * counterpart of `pick_steps_per_pack`. A progress display measures each
    * booster against this, never against `pack_sizes`: the two differ whenever
    * a kind takes more than one card per step.
    */
-  pack_pick_steps: number[];
+  pack_pick_steps?: number[];
   /**
    * CR 903.13b: how many pick STEPS this session's pack contains —
    * `cards_per_pack.div_ceil(cards_per_pick)`, computed by the engine's
@@ -251,16 +274,16 @@ export interface SpectatorDraftView {
   /** Cards in the booster being drafted right now, not a session-wide size. */
   cards_per_pack: number;
   /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
-  pack_sizes: number[];
+  pack_sizes?: number[];
   /** The set filling each booster, in pack order. */
-  pack_set_codes: string[];
+  pack_set_codes?: string[];
   /**
    * CR 903.13b: pick STEPS in each booster, in pack order — the per-pack
    * counterpart of `pick_steps_per_pack`. A progress display measures each
    * booster against this, never against `pack_sizes`: the two differ whenever
    * a kind takes more than one card per step.
    */
-  pack_pick_steps: number[];
+  pack_pick_steps?: number[];
   /** CR 903.13b: mirrors `DraftPlayerView.pick_steps_per_pack`; see that one. */
   pick_steps_per_pack: number;
   pack_count: number;
@@ -313,16 +336,16 @@ export interface DraftPlayerView {
   /** Cards in the booster being drafted right now, not a session-wide size. */
   cards_per_pack: number;
   /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
-  pack_sizes: number[];
+  pack_sizes?: number[];
   /** The set filling each booster, in pack order. */
-  pack_set_codes: string[];
+  pack_set_codes?: string[];
   /**
    * CR 903.13b: pick STEPS in each booster, in pack order — the per-pack
    * counterpart of `pick_steps_per_pack`. A progress display measures each
    * booster against this, never against `pack_sizes`: the two differ whenever
    * a kind takes more than one card per step.
    */
-  pack_pick_steps: number[];
+  pack_pick_steps?: number[];
   /**
    * CR 903.13b: how many pick STEPS this session's pack contains —
    * `cards_per_pack.div_ceil(cards_per_pick)`, computed by the engine's
@@ -384,7 +407,7 @@ export type MultiplayerSeatDescriptor =
  * upgrade — nothing new should ever write it.
  */
 export type PoolInput =
-  | { type: "Set"; data: SetPackSequence }
+  | { type: "Set"; data: SetPackSequence | { set_pool_json: string } }
   | {
       type: "Cube";
       data: {
@@ -480,6 +503,190 @@ async function ensureDraftWasm(): Promise<typeof DraftWasm> {
   return wasmModule;
 }
 
+export class DraftEngineOperationLease {
+  constructor(private readonly wasm: typeof DraftWasm) {}
+
+  initialize(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
+    return this.wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  filterPoolListing(listing: DraftCardInstance[], filter: PoolFilter): string[] {
+    return this.wasm.filter_pool_listing(
+      JSON.stringify(listing),
+      JSON.stringify(filter),
+    ) as string[];
+  }
+
+  poolFilterOptions(pool: DraftCardInstance[]): PoolFilterOptions {
+    return this.wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
+  }
+
+  initializeSealed(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
+    return this.wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  initializeCube(
+    cubeListText: string,
+    cubeName: string,
+    settings: CubeDraftSettings,
+    difficulty: number,
+    seed: number,
+  ): DraftPlayerView {
+    return this.wasm.start_quick_cube_draft(
+      cubeListText,
+      cubeName,
+      JSON.stringify(settings),
+      difficulty,
+      seed,
+    ) as DraftPlayerView;
+  }
+
+  submitPick(cardInstanceId: string): DraftPlayerView {
+    return this.wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): DraftPlayerView {
+    return this.wasm.submit_pick_with_draft_effect(
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
+  }
+
+  autoPick(): DraftPlayerView {
+    return this.wasm.auto_pick() as DraftPlayerView;
+  }
+
+  getView(): DraftPlayerView {
+    return this.wasm.get_view() as DraftPlayerView;
+  }
+
+  submitDeck(mainDeck: string[], commanders: string[]): DraftPlayerView {
+    return this.wasm.submit_deck(
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+    ) as DraftPlayerView;
+  }
+
+  suggestDeck(): SuggestedDeck {
+    return this.wasm.suggest_deck() as SuggestedDeck;
+  }
+
+  suggestLands(spells: string[]): Record<string, number> {
+    return this.wasm.suggest_lands(JSON.stringify(spells)) as Record<string, number>;
+  }
+
+  getBotDeck(botSeat: number): SuggestedDeck {
+    return this.wasm.get_bot_deck(botSeat) as SuggestedDeck;
+  }
+
+  loadCardDatabase(json: string): number {
+    return this.wasm.load_card_database(json);
+  }
+
+  createMultiplayerDraft(
+    poolInput: PoolInput,
+    seats: MultiplayerSeatDescriptor[],
+    kind: Exclude<DraftKind, "Quick">,
+    seed: number,
+    draftCode: string,
+    tournamentFormat: TournamentFormat,
+    podPolicy: PodPolicy,
+  ): DraftPlayerView {
+    return this.wasm.create_multiplayer_draft(
+      JSON.stringify(poolInput),
+      JSON.stringify(seats),
+      DRAFT_KIND_WIRE_NUMBER[kind],
+      seed,
+      draftCode,
+      tournamentFormat,
+      podPolicy,
+    ) as DraftPlayerView;
+  }
+
+  submitPickForSeat(seat: number, cardInstanceIds: string[]): DraftPlayerView {
+    return this.wasm.submit_pick_for_seat(
+      seat,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
+  }
+
+  submitPickWithDraftEffectForSeat(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): DraftPlayerView {
+    return this.wasm.submit_pick_with_draft_effect_for_seat(
+      seat,
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
+  }
+
+  submitDeckForSeat(
+    seat: number,
+    mainDeck: string[],
+    commanders: string[],
+  ): DraftPlayerView {
+    return this.wasm.submit_deck_for_seat(
+      seat,
+      JSON.stringify(mainDeck),
+      JSON.stringify(commanders),
+    ) as DraftPlayerView;
+  }
+
+  getViewForSeat(seat: number): DraftPlayerView {
+    return this.wasm.get_view_for_seat(seat) as DraftPlayerView;
+  }
+
+  setSeatConnected(seat: number, connected: boolean): DraftPlayerView {
+    return this.wasm.set_seat_connected(seat, connected) as DraftPlayerView;
+  }
+
+  exportSession(): string {
+    return this.wasm.export_draft_session();
+  }
+
+  importSession(json: string, difficulty: number): DraftPlayerView {
+    return this.wasm.import_draft_session(json, difficulty) as DraftPlayerView;
+  }
+
+  allPicksSubmitted(): boolean {
+    return this.wasm.all_picks_submitted();
+  }
+
+  draftProcedure(kind: Exclude<DraftKind, "Quick">): DraftProcedure {
+    return this.wasm.draft_procedure(DRAFT_KIND_WIRE_NUMBER[kind]) as DraftProcedure;
+  }
+
+  applyActionAndGetHostView(actionJson: string): DraftPlayerView {
+    this.wasm.apply_draft_action(actionJson);
+    return this.wasm.get_view_for_seat(0) as DraftPlayerView;
+  }
+}
+
+let draftEngineOperationTail: Promise<void> = Promise.resolve();
+
+export function withDraftEngineOperation<T>(
+  work: (lease: DraftEngineOperationLease) => Promise<T> | T,
+): Promise<T> {
+  const operation = draftEngineOperationTail.then(async () => {
+    const wasm = await ensureDraftWasm();
+    return work(new DraftEngineOperationLease(wasm));
+  });
+  draftEngineOperationTail = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+export async function drainDraftEngineOperations(): Promise<void> {
+  await draftEngineOperationTail;
+}
+
 // ── DraftAdapter ────────────────────────────────────────────────────────
 
 /**
@@ -495,12 +702,9 @@ export class DraftAdapter {
     difficulty: number,
     seed: number,
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.start_quick_draft(
-      JSON.stringify(selection),
-      difficulty,
-      seed,
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.initialize(JSON.stringify(selection), difficulty, seed),
+    );
   }
 
   /**
@@ -514,11 +718,7 @@ export class DraftAdapter {
     listing: DraftCardInstance[],
     filter: PoolFilter,
   ): Promise<string[]> {
-    const wasm = await ensureDraftWasm();
-    return wasm.filter_pool_listing(
-      JSON.stringify(listing),
-      JSON.stringify(filter),
-    ) as string[];
+    return withDraftEngineOperation((lease) => lease.filterPoolListing(listing, filter));
   }
 
   /**
@@ -527,8 +727,7 @@ export class DraftAdapter {
    * (review round 5). Never reconstructed in the display layer.
    */
   async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
-    const wasm = await ensureDraftWasm();
-    return wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
+    return withDraftEngineOperation((lease) => lease.poolFilterOptions(pool));
   }
 
   async initializeSealed(
@@ -536,12 +735,9 @@ export class DraftAdapter {
     difficulty: number,
     seed: number,
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.start_sealed_draft(
-      JSON.stringify(selection),
-      difficulty,
-      seed,
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.initializeSealed(JSON.stringify(selection), difficulty, seed),
+    );
   }
 
   async initializeCube(
@@ -551,69 +747,51 @@ export class DraftAdapter {
     difficulty: number,
     seed: number,
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.start_quick_cube_draft(
-      cubeListText,
-      cubeName,
-      JSON.stringify(settings),
-      difficulty,
-      seed,
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.initializeCube(cubeListText, cubeName, settings, difficulty, seed),
+    );
   }
 
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.submitPick(cardInstanceId));
   }
 
   async submitPickWithDraftEffect(
     effectCardInstanceId: string,
     cardInstanceIds: string[],
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_pick_with_draft_effect(
-      effectCardInstanceId,
-      JSON.stringify(cardInstanceIds),
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds),
+    );
   }
 
   /** Let the bot AI pick the best card from the current pack for the player. */
   async autoPick(): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.auto_pick() as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.autoPick());
   }
 
   async getView(): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.get_view() as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.getView());
   }
 
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_deck(
-      JSON.stringify(mainDeck),
-      JSON.stringify(commanders),
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.submitDeck(mainDeck, commanders));
   }
 
   async suggestDeck(): Promise<SuggestedDeck> {
-    const wasm = await ensureDraftWasm();
-    return wasm.suggest_deck() as SuggestedDeck;
+    return withDraftEngineOperation((lease) => lease.suggestDeck());
   }
 
   async suggestLands(spells: string[]): Promise<Record<string, number>> {
-    const wasm = await ensureDraftWasm();
-    return wasm.suggest_lands(JSON.stringify(spells)) as Record<string, number>;
+    return withDraftEngineOperation((lease) => lease.suggestLands(spells));
   }
 
   async getBotDeck(botSeat: number): Promise<SuggestedDeck> {
-    const wasm = await ensureDraftWasm();
-    return wasm.get_bot_deck(botSeat) as SuggestedDeck;
+    return withDraftEngineOperation((lease) => lease.getBotDeck(botSeat));
   }
 
   async loadCardDatabase(json: string): Promise<number> {
-    const wasm = await ensureDraftWasm();
-    return wasm.load_card_database(json);
+    return withDraftEngineOperation((lease) => lease.loadCardDatabase(json));
   }
 
   // ── Multi-seat API (P2P Tournament Host) ─────────────────────────────
@@ -627,43 +805,30 @@ export class DraftAdapter {
     tournamentFormat: TournamentFormat,
     podPolicy: PodPolicy,
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.create_multiplayer_draft(
-      JSON.stringify(poolInput),
-      JSON.stringify(seats),
-      DRAFT_KIND_WIRE_NUMBER[kind],
-      seed,
-      draftCode,
-      tournamentFormat,
-      podPolicy,
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.createMultiplayerDraft(
+        poolInput,
+        seats,
+        kind,
+        seed,
+        draftCode,
+        tournamentFormat,
+        podPolicy,
+      ),
+    );
   }
 
   /**
-   * Submit one whole CR 903.13b pick step for a seat — every card that seat
-   * drafts this step. One id for the four CR 905.1a kinds, two for
-   * CommanderDraft; the engine's `apply_pick_inner` owns the count.
-   *
-   * The JSON encoding mirrors `submitPickWithDraftEffectForSeat` below. Both
-   * sides of this boundary are `string` and the call is positional, so `tsc`
-   * cannot catch a half-applied change here — see the paired assertions in
-   * `draft-wasm`'s `submit_pick_for_seat_refuses_a_bare_id` and in
-   * `__tests__/p2pDraftEffectPick.test.ts`.
+   * Submit one whole CR 903.13b pick step for a seat. The engine owns the
+   * session-specific cardinality; this boundary serializes the full step.
    */
   async submitPickForSeat(seat: number, cardInstanceIds: string[]): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_pick_for_seat(seat, JSON.stringify(cardInstanceIds)) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.submitPickForSeat(seat, cardInstanceIds));
   }
 
-  /**
-   * The engine-owned per-kind axes for a draft kind. The display layer reads
-   * these; it never re-derives them (CLAUDE.md: the frontend is a display
-   * layer, not a logic layer).
-   */
-  // @sync-with: crates/draft-wasm/src/lib.rs
+  /** The engine-owned per-kind procedure axes; never re-derived by the UI. */
   async draftProcedure(kind: Exclude<DraftKind, "Quick">): Promise<DraftProcedure> {
-    const wasm = await ensureDraftWasm();
-    return wasm.draft_procedure(DRAFT_KIND_WIRE_NUMBER[kind]) as DraftProcedure;
+    return withDraftEngineOperation((lease) => lease.draftProcedure(kind));
   }
 
   async submitPickWithDraftEffectForSeat(
@@ -671,12 +836,9 @@ export class DraftAdapter {
     effectCardInstanceId: string,
     cardInstanceIds: string[],
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_pick_with_draft_effect_for_seat(
-      seat,
-      effectCardInstanceId,
-      JSON.stringify(cardInstanceIds),
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) =>
+      lease.submitPickWithDraftEffectForSeat(seat, effectCardInstanceId, cardInstanceIds),
+    );
   }
 
   async submitDeckForSeat(
@@ -684,17 +846,11 @@ export class DraftAdapter {
     mainDeck: string[],
     commanders: string[],
   ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.submit_deck_for_seat(
-      seat,
-      JSON.stringify(mainDeck),
-      JSON.stringify(commanders),
-    ) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.submitDeckForSeat(seat, mainDeck, commanders));
   }
 
   async getViewForSeat(seat: number): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.get_view_for_seat(seat) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.getViewForSeat(seat));
   }
 
   /**
@@ -702,31 +858,25 @@ export class DraftAdapter {
    * `seats[*].connected` field on subsequent views.
    */
   async setSeatConnected(seat: number, connected: boolean): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.set_seat_connected(seat, connected) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.setSeatConnected(seat, connected));
   }
 
   async exportSession(): Promise<string> {
-    const wasm = await ensureDraftWasm();
-    return wasm.export_draft_session();
+    return withDraftEngineOperation((lease) => lease.exportSession());
   }
 
   async importSession(json: string, difficulty: number): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.import_draft_session(json, difficulty) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.importSession(json, difficulty));
   }
 
   async allPicksSubmitted(): Promise<boolean> {
-    const wasm = await ensureDraftWasm();
-    return wasm.all_picks_submitted();
+    return withDraftEngineOperation((lease) => lease.allPicksSubmitted());
   }
 
   // ── Tournament actions (route through apply_draft_action → get host view) ──
 
   private async applyActionAndGetHostView(actionJson: string): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    wasm.apply_draft_action(actionJson);
-    return wasm.get_view_for_seat(0) as DraftPlayerView;
+    return withDraftEngineOperation((lease) => lease.applyActionAndGetHostView(actionJson));
   }
 
   async generatePairings(): Promise<DraftPlayerView> {

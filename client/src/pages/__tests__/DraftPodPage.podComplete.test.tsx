@@ -159,6 +159,13 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
         seat_index: seat,
         current_round: 1,
         pairings: [],
+        pool_groups: {
+          color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
+          type_filter_options: [], color_filter_options: [],
+          color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+          workspace_capabilities: { rarity_group_order: null },
+          workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
+        },
         // `saveDraftPodProgress` dereferences `view?.pool.length` — the `?.`
         // guards `view`, NOT `pool`. A missing `pool` throws inside the store,
         // synchronously under `broadcastViews`' host emit, whose surrounding

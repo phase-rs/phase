@@ -188,6 +188,8 @@ const TEST_VIEW: BuilderView = {
     type_filter_options: [],
     color_filter_options: [],
     color_counts: { white: 0, blue: 1, black: 0, red: 0, green: 0 },
+    workspace_capabilities: { rarity_group_order: [] },
+    workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
   },
   seats: [],
   cards_per_pack: 14,

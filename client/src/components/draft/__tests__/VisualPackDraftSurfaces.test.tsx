@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DraftCardInstance, DraftPlayerView } from "../../../adapter/draft-adapter.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder.tsx";
-import { PackDisplay } from "../PackDisplay.tsx";
+import { PackDisplay, type PackDisplayController } from "../PackDisplay.tsx";
 import { SealedPackOpening } from "../SealedPackOpening.tsx";
 
 const imageMock = vi.hoisted(() => ({
@@ -104,6 +104,8 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
       type_filter_options: ["creature"],
       color_filter_options: ["blue"],
       color_counts: { white: 0, blue: 1, black: 0, red: 0, green: 0 },
+      workspace_capabilities: { rarity_group_order: ["common"] },
+      workspace_row_classification: { creature_instance_ids: ["same-a", "same-b"], noncreature_instance_ids: [] },
     },
     sealed_packs: [[PRINTING_A]],
     seats: [],
@@ -124,6 +126,31 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
     pairings: [],
     match_config: { match_type: "Bo1" },
     ...overrides,
+  };
+}
+
+const packPresentation = { packScale: 1, setPackScale: vi.fn() };
+
+function packController(packView: DraftPlayerView): Extract<PackDisplayController, { kind: "local-workspace" }> {
+  return {
+    kind: "local-workspace",
+    view: packView,
+    selectedCard: null,
+    pendingIntent: null,
+    interactionGeneration: 0,
+    interactionLocked: false,
+    doubleClickPick: false,
+    dragController: {
+      handlePointerDown: vi.fn(), handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+    },
+    selectCard: vi.fn(),
+    pickCard: vi.fn(async () => ({ status: "acknowledged" as const })),
+    pickCardStep: vi.fn(async () => ({ status: "acknowledged" as const })),
+    confirmPick: vi.fn(async () => ({ status: "acknowledged" as const })),
+    pickCardWithDraftEffect: vi.fn(async () => ({ status: "acknowledged" as const })),
+    autoPickCard: vi.fn(async () => ({ status: "acknowledged" as const })),
   };
 }
 
@@ -209,7 +236,7 @@ describe("visual-pack draft and sealed surfaces", () => {
     const packView = view({ pool: [], current_pack: [PRINTING_B] });
 
     const { rerender } = render(
-      <PackDisplay view={packView} onCardHover={onHover} />,
+      <PackDisplay controller={packController(packView)} presentation={packPresentation} onCardHover={onHover} />,
     );
     expect(vi.mocked(useCardImage)).toHaveBeenCalledWith(
       PRINTING_B.name,
@@ -227,7 +254,7 @@ describe("visual-pack draft and sealed surfaces", () => {
     expect(advance).toHaveBeenCalledWith("pack-first-normal.png");
 
     imageMock.results.set(PRINTING_B.name, result("pack-next"));
-    rerender(<PackDisplay view={packView} onCardHover={onHover} />);
+    rerender(<PackDisplay controller={packController(packView)} presentation={packPresentation} onCardHover={onHover} />);
     expect(screen.getByAltText(PRINTING_B.name)).toHaveAttribute(
       "src",
       "pack-next-normal.png",

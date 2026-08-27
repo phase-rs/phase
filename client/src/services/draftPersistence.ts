@@ -13,6 +13,11 @@
 import { createStore, del, get, set } from "idb-keyval";
 
 import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
+import {
+  isPlainRecord,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
@@ -88,6 +93,8 @@ export interface PersistedDraftHostSession {
     submissionId: string;
     payloadFingerprint: string;
   }>;
+  /** Complete, validated workspace state per authoritative seat. */
+  perSeatWorkspaceSnapshots?: Record<number, DraftWorkspaceState>;
 }
 
 /**
@@ -227,7 +234,28 @@ export async function loadDraftHostSession(
       getDraftStore(),
     );
     if (!s) return null;
-    return isPersistedDraftHostSession(s) ? s : null;
+    if (!isPersistedDraftHostSession(s)) return null;
+
+    const snapshots: Record<number, DraftWorkspaceState> = {};
+    if (s.perSeatWorkspaceSnapshots !== undefined) {
+      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return null;
+      const rawSnapshots = s.perSeatWorkspaceSnapshots as unknown as Record<PropertyKey, unknown>;
+      for (const key of Reflect.ownKeys(rawSnapshots)) {
+        if (
+          typeof key !== "string"
+          || !Object.prototype.propertyIsEnumerable.call(rawSnapshots, key)
+        ) {
+          return null;
+        }
+        const seat = Number(key);
+        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return null;
+        const snapshot = validateWorkspaceState(rawSnapshots[key]);
+        if ("error" in snapshot) return null;
+        snapshots[seat] = snapshot;
+      }
+    }
+
+    return { ...s, perSeatWorkspaceSnapshots: snapshots };
   } catch {
     return null;
   }

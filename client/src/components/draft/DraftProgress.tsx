@@ -32,20 +32,27 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
   const mixedSets = new Set(pack_set_codes ?? []).size > 1;
 
   return (
-    <div className="flex items-center gap-4 rounded-[16px] border border-white/10 bg-black/18 px-4 py-2.5 backdrop-blur-md">
-      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+    <div data-draft-progress className="flex items-center rounded-[16px] border border-hairline bg-white/[0.035] px-4 py-1.5 shadow-[inset_0_-1px_0_rgba(0,0,0,0.28)]">
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
         {Array.from({ length: pack_count }, (_, packIdx) => {
           const isComplete = packIdx < current_pack_number;
           const isCurrent = packIdx === current_pack_number;
 
           return (
-            <div key={packIdx} className="flex min-w-0 flex-1 items-end gap-1.5">
+            <div key={packIdx} className="flex w-full min-w-0 items-center gap-1.5 sm:w-auto sm:flex-1">
               {packIdx > 0 && (
                 <span className="shrink-0 pb-0.5 text-[10px] text-white/20">{directionArrow}</span>
               )}
+              <span
+                data-pack-number={packIdx + 1}
+                className="shrink-0 font-display text-xs font-semibold tracking-[-0.02em] tabular-nums text-fg"
+              >
+                P{packIdx + 1}
+              </span>
               <PackSegment
                 pickCount={packSteps(packIdx)}
                 filledPicks={isComplete ? packSteps(packIdx) : isCurrent ? pick_number : 0}
+                packNumber={packIdx + 1}
                 isCurrent={isCurrent}
                 setCode={mixedSets ? pack_set_codes?.[packIdx] : undefined}
               />
@@ -53,7 +60,6 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
           );
         })}
       </div>
-
       <div className="shrink-0 text-xs tabular-nums text-white/45">
         <span className="font-semibold text-white">{pick_number + 1}</span>
         <span>/{packSteps(current_pack_number)}</span>
@@ -63,11 +69,13 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
 }
 
 function PackSegment({
+  packNumber,
   pickCount,
   filledPicks,
   isCurrent,
   setCode,
 }: {
+  packNumber: number;
   pickCount: number;
   filledPicks: number;
   isCurrent: boolean;
@@ -104,7 +112,9 @@ function PackSegment({
           return (
             <div
               key={i}
-              className={`h-2 min-w-0 flex-1 first:rounded-l-full last:rounded-r-full ${bg} transition-colors duration-200`}
+              data-pack-number={packNumber}
+              data-pick-number={i + 1}
+              className={`relative h-2 min-w-0 flex-1 first:rounded-l-full last:rounded-r-full ${bg} transition-colors duration-200`}
             />
           );
         })}

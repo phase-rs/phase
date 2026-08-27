@@ -14,6 +14,8 @@ interface ChromeControlsProps {
   /** Controlled settings-modal state (e.g. board context-menu deep-link). */
   settingsOpen?: boolean;
   onSettingsOpenChange?: (open: boolean) => void;
+  hideVolume?: boolean;
+  hideLanguage?: boolean;
 }
 
 function SettingsIcon() {
@@ -42,6 +44,8 @@ function SettingsIcon() {
 export function ChromeControls({
   settingsOpen,
   onSettingsOpenChange,
+  hideVolume = false,
+  hideLanguage = false,
 }: ChromeControlsProps) {
   const { t } = useTranslation();
   const language = usePreferencesStore((s) => s.language);
@@ -59,22 +63,24 @@ export function ChromeControls({
       {/* Account + Volume + Settings — upper-right. Fullscreen lives lower-right
           (below) to keep this cluster uncrowded. */}
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-40 flex gap-2">
-        <VolumeControl variant="chrome" />
+        {!hideVolume && <VolumeControl variant="chrome" />}
         <AccountControl />
-        <motion.button
-          className={menuButtonClass({
-            tone: "neutral",
-            size: "chrome",
-            className: "text-white/46 hover:text-white/72",
-          })}
-          whileHover={{ y: -1 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={() => setShowSettings(true)}
-          aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
-          title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
-        >
-          <LanguageFlag lng={language} className="h-3.5 w-5 rounded-sm" />
-        </motion.button>
+        {!hideLanguage && (
+          <motion.button
+            className={menuButtonClass({
+              tone: "neutral",
+              size: "chrome",
+              className: "text-white/46 hover:text-white/72",
+            })}
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => setShowSettings(true)}
+            aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
+            title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
+          >
+            <LanguageFlag lng={language} className="h-3.5 w-5 rounded-sm" />
+          </motion.button>
+        )}
         <motion.button
           className={menuButtonClass({
             tone: "neutral",

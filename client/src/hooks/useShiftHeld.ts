@@ -3,6 +3,14 @@ import { useEffect } from "react";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 
+let enabledRegistrationCount = 0;
+
+function clearShiftHeldWithoutEnabledRegistrations(): void {
+  if (enabledRegistrationCount === 0) {
+    useUiStore.getState().setShiftHeld(false);
+  }
+}
+
 /**
  * Tracks whether the Shift key is currently held in `uiStore.shiftHeld`, used by
  * the "shift" card-preview mode (preview shows only while Shift is down,
@@ -16,15 +24,17 @@ import { useUiStore } from "../stores/uiStore";
  * Listeners are only attached when the preference is set to "shift", so players
  * on the default mode pay no per-keystroke store-update cost.
  */
-export function useShiftHeld(): void {
-  const enabled = usePreferencesStore((s) => s.cardPreviewMode === "shift");
+export function useShiftHeld(explicitEnabled?: boolean): void {
+  const globallyEnabled = usePreferencesStore((s) => s.cardPreviewMode === "shift");
+  const enabled = explicitEnabled ?? globallyEnabled;
 
   useEffect(() => {
     if (!enabled) {
-      // Mode changed away from "shift" — clear any stale held flag.
-      useUiStore.getState().setShiftHeld(false);
+      clearShiftHeldWithoutEnabledRegistrations();
       return undefined;
     }
+
+    enabledRegistrationCount += 1;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Shift") useUiStore.getState().setShiftHeld(true);
@@ -41,7 +51,8 @@ export function useShiftHeld(): void {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
-      useUiStore.getState().setShiftHeld(false);
+      enabledRegistrationCount = Math.max(0, enabledRegistrationCount - 1);
+      clearShiftHeldWithoutEnabledRegistrations();
     };
   }, [enabled]);
 }

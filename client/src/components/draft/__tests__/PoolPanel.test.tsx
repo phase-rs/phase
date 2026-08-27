@@ -117,7 +117,7 @@ describe("PoolPanel — CR 903.13e granted filler", () => {
     render(<PoolPanel view={TEST_VIEW} />);
 
     // Reach-guard: the panel rendered at all.
-    expect(screen.getByText("1 cards drafted")).toBeInTheDocument();
+    expect(screen.getByText("1 card drafted")).toBeInTheDocument();
     expect(screen.queryByText(GRANTED)).toBeNull();
   });
 
@@ -140,7 +140,7 @@ describe("PoolPanel — CR 903.13e granted filler", () => {
     );
 
     // Reach-guard: the collapsed header still renders.
-    expect(screen.getByText("1 cards drafted")).toBeInTheDocument();
+    expect(screen.getByText("1 card drafted")).toBeInTheDocument();
     expect(screen.queryByText(GRANTED)).toBeNull();
   });
 });

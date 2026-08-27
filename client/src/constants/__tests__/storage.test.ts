@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createFolder,
   deleteFolder,
+  DRAFT_WORKSPACE_PREFERENCES_KEY,
   getDeckMeta,
+  isUserOwnedStorageKey,
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
@@ -21,6 +23,16 @@ import { expandParsedDeck } from "../../services/deckParser";
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+describe("user-owned storage keys", () => {
+  it("owns only the exact draft workspace preference key", () => {
+    expect(DRAFT_WORKSPACE_PREFERENCES_KEY).toBe("phase-draft-workspace-preferences");
+    expect(isUserOwnedStorageKey(DRAFT_WORKSPACE_PREFERENCES_KEY)).toBe(true);
+    expect(isUserOwnedStorageKey(`${DRAFT_WORKSPACE_PREFERENCES_KEY}-copy`)).toBe(false);
+    expect(isUserOwnedStorageKey(`copy-${DRAFT_WORKSPACE_PREFERENCES_KEY}`)).toBe(false);
+    expect(isUserOwnedStorageKey(DRAFT_WORKSPACE_PREFERENCES_KEY.toUpperCase())).toBe(false);
+  });
 });
 
 describe("saved-deck bracket sidecar", () => {

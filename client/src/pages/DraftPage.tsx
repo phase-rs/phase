@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
-import { useDraftStore } from "../stores/draftStore";
-import type { DraftPackChoice } from "../stores/draftStore";
+import {
+  useDraftStore,
+  type DraftPackChoice,
+  type DraftPickDestination,
+  type DraftPickPlacementHint,
+} from "../stores/draftStore";
 import { setPackSequence } from "../adapter/draft-adapter";
+import { usePreferencesStore } from "../stores/preferencesStore";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
@@ -13,12 +18,27 @@ import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftSteps } from "../components/draft/DraftSteps";
 import { SetSelector } from "../components/draft/SetSelector";
-import { PackDisplay } from "../components/draft/PackDisplay";
-import { PoolPanel } from "../components/draft/PoolPanel";
+import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
+import { DraftWorkspace } from "../components/draft/workspace/DraftWorkspace";
+import { resolveWorkspacePickPlacement } from "../components/draft/workspace/workspacePlacement";
+import {
+  useDraftWorkspaceDrag,
+  type DraftDropRequest,
+  type DraftPickInteractionSnapshot,
+} from "../components/draft/workspace/useDraftWorkspaceDrag";
+import {
+  getResponsiveDraftLayout,
+  loadDraftWorkspacePreferences,
+  repairDraftWorkspacePackScale,
+  saveDraftWorkspacePreferences,
+  type DraftWorkspacePreferences,
+  type ResponsiveDraftLayout,
+} from "../components/draft/workspace/workspacePreferences";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { useDraftShellChrome } from "../components/chrome/ShellContext";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { runLimits } from "../services/quickDraftPersistence";
@@ -38,6 +58,24 @@ type DraftSetupMode = "quick" | "sealed" | "cube";
 const SEALED_PACK_COUNT = 6;
 /** Boosters a draft opens by default; the player may line up a different count. */
 const DRAFT_PACK_COUNT = 3;
+function readPickInteraction(): DraftPickInteractionSnapshot {
+  const state = useDraftStore.getState();
+  return {
+    interactionGeneration: state.interactionGeneration,
+    pickInteractionLocked: state.pickInteractionLocked,
+    pendingPickIntent: state.pendingPickIntent,
+  };
+}
+
+function subscribePickInteraction(listener: () => void): () => void {
+  return useDraftStore.subscribe((state, previous) => {
+    if (
+      state.interactionGeneration !== previous.interactionGeneration
+      || state.pickInteractionLocked !== previous.pickInteractionLocked
+      || state.pendingPickIntent !== previous.pendingPickIntent
+    ) listener();
+  });
+}
 
 function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
   const { t } = useTranslation("draft");
@@ -309,6 +347,13 @@ export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
   const draftView = useDraftStore((s) => s.view);
+  const selectedCard = useDraftStore((s) => s.selectedCard);
+  const workspaceState = useDraftStore((s) => s.workspaceState);
+  const pendingPickIntent = useDraftStore((s) => s.pendingPickIntent);
+  const interactionGeneration = useDraftStore((s) => s.interactionGeneration);
+  const pickInteractionLocked = useDraftStore((s) => s.pickInteractionLocked);
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
+  const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -316,11 +361,57 @@ export function DraftPage() {
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
+  const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const [responsiveViewport, setResponsiveViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
     requestedSetupMode === "cube" || requestedSetupMode === "sealed"
       ? requestedSetupMode
       : "quick",
   );
+  const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
+    responsiveViewport.width,
+    responsiveViewport.height,
+  );
+  const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
+  const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const responsiveDrafting = phase === "drafting" && responsiveLayout !== "desktop";
+  const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const tabletDeckbuilding = phase === "deckbuilding" && tabletLayout;
+  const compactSteps = responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding;
+  useDraftShellChrome(
+    phoneLayout && phase === "drafting"
+      ? "phone-drafting"
+      : phoneDeckbuilding
+        ? "phone-deckbuilding"
+        : tabletDeckbuilding
+          ? "tablet-deckbuilding"
+        : responsiveDrafting
+          ? "tablet-drafting"
+        : "default",
+  );
+
+  useEffect(() => {
+    const refreshViewport = () => setResponsiveViewport({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    window.addEventListener("resize", refreshViewport);
+    window.addEventListener("orientationchange", refreshViewport);
+    return () => {
+      window.removeEventListener("resize", refreshViewport);
+      window.removeEventListener("orientationchange", refreshViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (responsiveLayout !== "phone-portrait" && responsiveLayout !== "phone-landscape") {
+      setMobileWorkspaceOpen(false);
+    }
+  }, [responsiveLayout]);
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -391,28 +482,150 @@ export function DraftPage() {
     navigate("/draft");
   }, [navigate]);
 
+  const handleWorkspacePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
+    if (useDraftStore.getState().pickInteractionLocked) return;
+    setWorkspacePreferences(next);
+    saveDraftWorkspacePreferences(next);
+  }, []);
+
+  const handleDrop = useCallback((request: DraftDropRequest) => {
+    const state = useDraftStore.getState();
+    const outcome = request.source.kind === "pick"
+      ? state.pickCard(request.source.instanceIds[0], request.destination, request.placementHint)
+      : state.pickCardWithDraftEffect(
+        request.source.authorityId,
+        request.source.instanceIds,
+        request.destination,
+        request.placementHint,
+      );
+    return {
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome,
+    };
+  }, []);
+
+  const resolveCollapsedSideboardColumn = useCallback((sourceInstanceId: string) => {
+    const placement = useDraftStore.getState().workspaceState?.placements[sourceInstanceId];
+    return Math.min(
+      workspacePreferences.sideboard.columnCount - 1,
+      Math.max(0, placement?.column ?? 0),
+    );
+  }, [workspacePreferences.sideboard.columnCount]);
+
+  const dragController = useDraftWorkspaceDrag({
+    enabled: phase === "drafting" && introDismissed && !pickInteractionLocked,
+    readPickInteraction,
+    subscribePickInteraction,
+    onDrop: handleDrop,
+    resolveCollapsedSideboardColumn,
+  });
+
+  const handleConfirmPick = useCallback((
+    destination: DraftPickDestination,
+    placementHint?: DraftPickPlacementHint,
+  ) => {
+    const state = useDraftStore.getState();
+    if (placementHint !== undefined || destination !== "deck") {
+      return state.confirmPick(destination, placementHint);
+    }
+    const card = state.view?.current_pack?.find((entry) => entry.instance_id === state.selectedCard);
+    const resolvedPlacement = card !== undefined && state.view !== null && state.workspaceState !== null
+      ? resolveWorkspacePickPlacement(
+        card,
+        destination,
+        state.view.pool,
+        state.view.pool_groups,
+        state.workspaceState,
+        workspacePreferences.deck,
+      )
+      : { column: 0 };
+    return state.confirmPick(destination, resolvedPlacement);
+  }, [workspacePreferences.deck]);
+
+  const handleAutoPick = useCallback(() => {
+    const state = useDraftStore.getState();
+    const { view, workspaceState } = state;
+    const placementHints = view !== null && view.current_pack !== null && workspaceState !== null
+      ? Object.fromEntries(view.current_pack.map((card) => [
+        card.instance_id,
+        resolveWorkspacePickPlacement(
+          card,
+          "deck",
+          view.pool,
+          view.pool_groups,
+          workspaceState,
+          workspacePreferences.deck,
+        ),
+      ]))
+      : undefined;
+    return state.autoPickCard("deck", placementHints);
+  }, [workspacePreferences.deck]);
+
+  const packController = useMemo<PackDisplayController>(() => ({
+    kind: "local-workspace",
+    view: draftView,
+    selectedCard,
+    pendingIntent: pendingPickIntent,
+    interactionGeneration,
+    interactionLocked: pickInteractionLocked,
+    doubleClickPick: draftDoubleClickConfirmPick,
+    dragController,
+    selectCard: (instanceId) => useDraftStore.getState().selectCard(instanceId),
+    pickCard: (instanceId, destination, placementHint) => useDraftStore.getState().pickCard(instanceId, destination, placementHint),
+    pickCardStep: (instanceIds, destination, placementHint) => instanceIds.length === 1
+      ? useDraftStore.getState().pickCard(instanceIds[0], destination, placementHint)
+      : Promise.resolve({ status: "rejected", reason: "invalid-request" }),
+    confirmPick: handleConfirmPick,
+    pickCardWithDraftEffect: (effectInstanceId, instanceIds, destination, placementHint) => useDraftStore.getState().pickCardWithDraftEffect(effectInstanceId, instanceIds, destination, placementHint),
+    autoPickCard: handleAutoPick,
+  }), [
+    draftView, dragController, handleAutoPick, handleConfirmPick, interactionGeneration, pendingPickIntent, pickInteractionLocked,
+    selectedCard, draftDoubleClickConfirmPick,
+  ]);
+
+  const packPresentation = useMemo(() => ({
+    packScale: workspacePreferences.packScale,
+    setPackScale: (next: number) => handleWorkspacePreferencesChange({
+      ...workspacePreferences,
+      packScale: repairDraftWorkspacePackScale(next),
+    }),
+  }), [handleWorkspacePreferencesChange, workspacePreferences]);
+
   return (
-    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${phoneLayout && phase === "drafting" && introDismissed ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" && introDismissed ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
-        <HoverCardPreview card={hoveredCard} />
+        <HoverCardPreview
+          card={hoveredCard}
+          mode={draftCardPreviewMode}
+          hoverDelayMs={0}
+        />
       )}
 
-      {/* Centered MenuShell column — identical framing to home/setup/online so
-          the draft flow sits in the same responsive, centered container. The
-          per-phase blocks below render their own headings, so no MenuShell
-          title is passed. */}
-      <MenuShell layout="stacked">
+        {/* Keep the shell's responsive padding while allowing card-heavy draft
+          phases to use all available width. Narrow setup phases retain their
+          own local max-widths. */}
+        <MenuShell
+          layout="stacked"
+          contentWidthClass="max-w-none"
+          compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+        >
         <div className="flex w-full flex-col">
         {resumeLoading ? (
           <div className="flex items-center justify-center py-24">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" />
           </div>
-        ) : (
-          <div className="mb-12">
+        ) : !compactSteps ? (
+          <div
+            className={phase === "drafting" && introDismissed
+                ? "mb-4"
+                : "mb-12"}
+            data-draft-steps-spacing
+          >
             <DraftSteps phase={phase} />
           </div>
-        )}
+        ) : null}
 
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
@@ -479,23 +692,77 @@ export function DraftPage() {
         )}
 
         {phase === "drafting" && introDismissed && (
-          <div className="flex gap-4">
-            <div className="flex-1">
-              <div className="mb-4">
+          <div
+            data-responsive-draft-layout={responsiveLayout}
+            className={responsiveLayout === "desktop"
+              ? "flex w-full min-w-0 flex-col gap-4"
+              : responsiveLayout === "phone-portrait"
+                ? "relative flex h-[calc(100dvh_-_11rem)] min-h-0 w-full min-w-0 flex-col"
+                : responsiveLayout === "phone-landscape"
+                  ? "relative block h-[calc(100dvh_-_4rem)] w-full min-w-0 overflow-hidden pb-[58px]"
+                  : responsiveLayout === "tablet-portrait"
+                    ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
+                    : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
+          >
+            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+              {responsiveLayout === "desktop" && (
                 <DraftProgress />
-              </div>
+              )}
               <PackDisplay
+                controller={packController}
+                presentation={packPresentation}
                 onCardHover={setHoveredCard}
-                showAutoPick
+                responsiveLayout={responsiveLayout}
+                phoneToolbarPinned={phoneLayout && !mobileWorkspaceOpen}
+                mobileWorkspaceOpen={mobileWorkspaceOpen}
                 enableDraftEffects
               />
             </div>
-            <PoolPanel onCardHover={setHoveredCard} />
+            {draftView && workspaceState && (
+              <div className={responsiveLayout === "desktop"
+                ? "w-full min-w-0"
+                : phoneLayout
+                  ? "h-0 min-h-0 w-full min-w-0"
+                  : "h-full min-h-0 w-full min-w-0"}
+              >
+                <DraftWorkspace
+                  pool={draftView.pool}
+                  poolGroups={draftView.pool_groups}
+                  workspace={workspaceState}
+                  preferences={workspacePreferences}
+                  interactionLocked={pickInteractionLocked}
+                  dragController={dragController}
+                  responsiveLayout={responsiveLayout}
+                  mobileOverlay
+                  mobileWorkspaceOpen={mobileWorkspaceOpen}
+                  onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
+                  onWorkspaceChange={(next) => useDraftStore.getState().setWorkspaceState(next)}
+                  onPreferencesChange={handleWorkspacePreferencesChange}
+                  onCardHover={setHoveredCard}
+                />
+              </div>
+            )}
           </div>
         )}
 
-        {phase === "deckbuilding" && (
-          <LimitedDeckBuilder />
+        {phase === "deckbuilding" && draftView && workspaceState && (
+          <LimitedDeckBuilder
+            responsiveLayout={responsiveLayout}
+            local={{
+              view: draftView,
+              workspace: workspaceState,
+              preferences: workspacePreferences,
+              interactionLocked: pickInteractionLocked,
+              onWorkspaceChange: (next) => useDraftStore.getState().setWorkspaceState(next),
+              onPreferencesChange: handleWorkspacePreferencesChange,
+              onAddBasicLand: (name) => useDraftStore.getState().addBasicLand(name),
+              onRemoveBasicLand: (name) => useDraftStore.getState().removeBasicLand(name),
+              onAutoSuggestDeck: () => useDraftStore.getState().autoSuggestDeck(),
+              onAutoSuggestLands: () => useDraftStore.getState().autoSuggestLands(),
+              onSubmitDeck: () => useDraftStore.getState().submitDeck(),
+              onCardHover: setHoveredCard,
+            }}
+          />
         )}
 
         {phase === "opening" && draftView && (

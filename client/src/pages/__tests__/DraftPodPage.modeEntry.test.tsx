@@ -36,7 +36,7 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
   useMultiplayerDraftStore: Object.assign(
     (selector: (state: typeof mocks.multiplayerState) => unknown) =>
       selector(mocks.multiplayerState),
-    { getState: () => mocks.multiplayerState },
+    { getState: () => mocks.multiplayerState, subscribe: () => () => {} },
   ),
 }));
 

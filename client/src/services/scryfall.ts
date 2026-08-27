@@ -231,6 +231,42 @@ export function resolveOracleIdSync(cardName: string): string | null {
   return lookupEntryByName(cardName)?.oracle_id ?? null;
 }
 
+export interface AlternateCardFace {
+  name: string;
+  faceIndex: number;
+  side: "front" | "back";
+}
+
+const PHYSICAL_MULTI_FACE_LAYOUTS = new Set([
+  "transform",
+  "modal_dfc",
+  "meld",
+  "double_faced_token",
+  "reversible_card",
+]);
+
+export function resolveAlternateCardFaceSync(
+  cardName: string,
+): AlternateCardFace | null | undefined {
+  if (!scryfallDataResolved) return undefined;
+  const entry = lookupEntryByName(cardName);
+  if (!entry) return undefined;
+  if (entry.faces.length < 2 || !entry.layout || !PHYSICAL_MULTI_FACE_LAYOUTS.has(entry.layout)) {
+    return null;
+  }
+
+  const normalizedName = normalizeCardName(cardName).toLowerCase();
+  const currentFaceIndex = entry.face_names.indexOf(normalizedName);
+  const activeFaceIndex = currentFaceIndex >= 0 ? currentFaceIndex : 0;
+  const alternateFaceIndex = activeFaceIndex === 0 ? 1 : 0;
+  const displayFaceNames = entry.name.split(" // ");
+  return {
+    name: displayFaceNames[alternateFaceIndex] ?? entry.face_names[alternateFaceIndex],
+    faceIndex: alternateFaceIndex,
+    side: alternateFaceIndex === 0 ? "front" : "back",
+  };
+}
+
 /**
  * Resolve the numeric Scryfall face index for an engine-reported `faceName`.
  *

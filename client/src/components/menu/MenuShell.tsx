@@ -18,6 +18,8 @@ interface MenuShellProps {
    *  home dashboard's `max-w-[1180px]` so every pane centers identically as the
    *  viewport widens. Override per-pane (e.g. a narrow lobby form). */
   contentWidthClass?: string;
+  /** Reduce embedded top padding when page progress already lives in shell chrome. */
+  compactTopPadding?: boolean;
 }
 
 export function MenuShell({
@@ -29,6 +31,7 @@ export function MenuShell({
   children,
   layout = "split",
   contentWidthClass,
+  compactTopPadding = false,
 }: MenuShellProps) {
   // Inside the modern shell every pane reads left-aligned and top-anchored, the
   // way the design-system handoff embeds them (Scene's `embedded ? flex-start :
@@ -51,7 +54,11 @@ export function MenuShell({
       className={[
         "relative z-10 mx-auto flex w-full flex-col justify-start",
         widthClass,
-        embedded ? "px-6 py-9 lg:px-9" : "min-h-screen px-6 py-16 lg:px-10",
+        embedded
+          ? compactTopPadding
+            ? "px-6 pb-9 pt-1 lg:px-9"
+            : "px-6 py-9 lg:px-9"
+          : "min-h-screen px-6 py-16 lg:px-10",
       ].join(" ")}
     >
       <div

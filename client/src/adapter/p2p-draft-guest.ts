@@ -41,12 +41,17 @@ import type {
   DraftIntergameCommand,
   DraftIntergameCommandAck,
 } from "../services/intergameCommandLedger";
+import {
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type DraftGuestEvent =
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
+  | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
@@ -400,6 +405,13 @@ export class P2PDraftGuest {
     return { roomCode, draftToken: this.draftToken };
   }
 
+  async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
+    const validated = validateWorkspaceState(state);
+    if ("error" in validated) throw new Error(validated.error);
+    if (!this.session) throw new Error("Not connected to draft host");
+    await this.session.send({ type: "draft_workspace_update", workspaceState: validated });
+  }
+
   sendMatchSettlement(settlement: DraftMatchSettlement): void {
     if (!this.session) return;
     void this.session.send({ type: "draft_match_settlement", settlement });
@@ -465,6 +477,7 @@ export class P2PDraftGuest {
         }
 
         this.resolveHandshake(session);
+        this.emit({ type: "workspaceRestored", workspaceState: msg.workspaceState });
         this.emit({ type: "joined", seatIndex: msg.seatIndex, draftCode: msg.draftCode });
         this.emit({ type: "viewUpdated", view: msg.view });
         void this.replayDeckSubmission();
@@ -491,6 +504,7 @@ export class P2PDraftGuest {
         }
 
         this.resolveHandshake(session);
+        this.emit({ type: "workspaceRestored", workspaceState: msg.workspaceState });
         this.emit({ type: "reconnected", seatIndex: msg.seatIndex });
         this.emit({ type: "viewUpdated", view: msg.view });
         void this.replayDeckSubmission();

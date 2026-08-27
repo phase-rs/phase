@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock idb-keyval before importing the module under test
 const mockStore = new Map<string, unknown>();
+const idb = vi.hoisted(() => ({
+  set: vi.fn<(key: string, value: unknown) => Promise<void>>(),
+}));
 vi.mock("idb-keyval", () => ({
   createStore: vi.fn(() => "mock-store"),
   get: vi.fn((key: string) => Promise.resolve(mockStore.get(key) ?? undefined)),
-  set: vi.fn((key: string, value: unknown) => {
-    mockStore.set(key, value);
-    return Promise.resolve();
-  }),
+  set: idb.set,
   del: vi.fn((key: string) => {
     mockStore.delete(key);
     return Promise.resolve();
@@ -42,11 +42,29 @@ import {
 } from "../draftPersistence";
 import { draftIntergameDigest } from "../intergameCommandLedger";
 import type { PersistedDraftHostSession } from "../draftPersistence";
+import {
+  MAX_MATERIALIZED_VIRTUAL_BASICS,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../../components/draft/workspace/types";
+
+const validWorkspace = (): DraftWorkspaceState => ({
+  schemaVersion: 1 as const,
+  placements: {
+    "card-1": { zone: "deck" as const, row: 0, column: 0, order: 0 },
+  },
+  virtualBasics: [{ instanceId: "basic-1", name: "Island" }],
+});
 
 describe("draftPersistence", () => {
   beforeEach(() => {
     mockStore.clear();
     localStorage.clear();
+    idb.set.mockReset();
+    idb.set.mockImplementation((key, value) => {
+      mockStore.set(key, value);
+      return Promise.resolve();
+    });
   });
 
   describe("host session", () => {
@@ -70,12 +88,19 @@ describe("draftPersistence", () => {
     it("saves and loads a host session", async () => {
       await saveDraftHostSession("test-draft-1", testSession);
       const loaded = await loadDraftHostSession("test-draft-1");
-      expect(loaded).toEqual(testSession);
+      expect(loaded).toEqual({ ...testSession, perSeatWorkspaceSnapshots: {} });
     });
 
     it("returns null for non-existent session", async () => {
       const loaded = await loadDraftHostSession("nonexistent");
       expect(loaded).toBeNull();
+    });
+
+    it("rethrows a host write failure so callers cannot continue on a lost receipt", async () => {
+      idb.set.mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+
+      await expect(saveDraftHostSession("write-failure", testSession))
+        .rejects.toThrow("IndexedDB unavailable");
     });
 
     it("clears a host session", async () => {
@@ -97,7 +122,10 @@ describe("draftPersistence", () => {
       const lobby = { ...testSession, draftStarted: false, draftSessionJson: null, draftCode: "" };
       await saveDraftHostSession(lobby.persistenceId, lobby);
 
-      await expect(loadDraftHostSession(lobby.persistenceId)).resolves.toEqual(lobby);
+      await expect(loadDraftHostSession(lobby.persistenceId)).resolves.toEqual({
+        ...lobby,
+        perSeatWorkspaceSnapshots: {},
+      });
       expect(persistedDraftHostSessionState(lobby)).toBe("live");
     });
 
@@ -137,8 +165,23 @@ describe("draftPersistence", () => {
       };
       await saveDraftHostSession("cube-1", cubeSession);
       const loaded = await loadDraftHostSession("cube-1");
-      expect(loaded).toEqual(cubeSession);
+      expect(loaded).toEqual({ ...cubeSession, perSeatWorkspaceSnapshots: {} });
       expect(loaded?.poolInput.type).toBe("Cube");
+    });
+
+    it("retains durable deck-submission receipts alongside workspace snapshots", async () => {
+      const session = {
+        ...testSession,
+        deckSubmissionReceipts: [{
+          seat: 1,
+          submissionId: "submission-1",
+          payloadFingerprint: "[[\\\"Island\\\",1]]",
+        }],
+        perSeatWorkspaceSnapshots: { 1: validWorkspace() },
+      };
+      await saveDraftHostSession("receipt-and-workspace", session);
+
+      await expect(loadDraftHostSession("receipt-and-workspace")).resolves.toEqual(session);
     });
 
     it("rejects persisted Set and Cube snapshots missing data used by resume", async () => {
@@ -204,6 +247,67 @@ describe("draftPersistence", () => {
 
       await expect(loadDraftHostSession("empty-seq")).resolves.toBeNull();
       await expect(loadDraftHostSession("bad-seq")).resolves.toBeNull();
+    });
+
+    it("round-trips per-seat workspace snapshots", async () => {
+      const session = {
+        ...testSession,
+        perSeatWorkspaceSnapshots: { 0: validWorkspace() },
+      };
+      await saveDraftHostSession("workspace", session);
+
+      const loaded = await loadDraftHostSession("workspace");
+
+      expect(loaded?.perSeatWorkspaceSnapshots).toEqual(session.perSeatWorkspaceSnapshots);
+      expect(loaded).not.toBe(session);
+    });
+
+    it("normalizes a missing workspace map without mutating the stored session", async () => {
+      mockStore.set("phase-draft-host:missing-workspace", testSession);
+
+      const loaded = await loadDraftHostSession("missing-workspace");
+
+      expect(loaded?.perSeatWorkspaceSnapshots).toEqual({});
+      expect(testSession.perSeatWorkspaceSnapshots).toBeUndefined();
+    });
+
+    it.each([
+      ["array map", []],
+      ["custom-prototype map", Object.create({ inherited: true })],
+      ["invalid snapshot", { 0: { ...validWorkspace(), schemaVersion: 2 } }],
+    ])("returns null for a malformed workspace map: %s", async (_label, value) => {
+      mockStore.set("phase-draft-host:malformed-workspace", {
+        ...testSession,
+        perSeatWorkspaceSnapshots: value,
+      });
+
+      expect(await loadDraftHostSession("malformed-workspace")).toBeNull();
+    });
+
+    it.each(["", " ", "-1", "+1", "01", "1.0", "1e0", "0.5", "abc", String(Number.MAX_SAFE_INTEGER + 1)])(
+      "returns null for non-canonical workspace seat key %j",
+      async (key) => {
+        const snapshots = Object.create(null) as Record<string, unknown>;
+        snapshots[key] = validWorkspace();
+        mockStore.set("phase-draft-host:bad-seat", {
+          ...testSession,
+          perSeatWorkspaceSnapshots: snapshots,
+        });
+
+        expect(await loadDraftHostSession("bad-seat")).toBeNull();
+      },
+    );
+
+    it("accepts the largest canonical safe-integer seat key", async () => {
+      const key = String(Number.MAX_SAFE_INTEGER);
+      mockStore.set("phase-draft-host:max-seat", {
+        ...testSession,
+        perSeatWorkspaceSnapshots: { [key]: validWorkspace() },
+      });
+
+      const loaded = await loadDraftHostSession("max-seat");
+
+      expect(loaded?.perSeatWorkspaceSnapshots?.[Number.MAX_SAFE_INTEGER]).toEqual(validWorkspace());
     });
 
     it("saves and loads active host resume metadata", () => {
@@ -292,6 +396,126 @@ describe("draftPersistence", () => {
       localStorage.setItem("phase-active-draft-pod", JSON.stringify({ id: "draft", roomCode: "lower", updatedAt: 1 }));
 
       expect(inspectActiveDraftPod()).toMatchObject({ type: "invalid" });
+    });
+  });
+
+  describe("validateWorkspaceState", () => {
+    it("accepts exact state and preserves nonblank whitespace", () => {
+      const raw = {
+        schemaVersion: 1,
+        placements: {
+          " card-1 ": { zone: "sideboard", row: 1, column: 19, order: Number.MAX_SAFE_INTEGER },
+        },
+        virtualBasics: [{ instanceId: " basic-1 ", name: " Island " }],
+      };
+
+      const result = validateWorkspaceState(raw);
+
+      expect("error" in result).toBe(false);
+      if (!("error" in result)) {
+        expect(result.placements[" card-1 "].order).toBe(Number.MAX_SAFE_INTEGER);
+        expect(result.virtualBasics[0]).toEqual({ instanceId: " basic-1 ", name: " Island " });
+      }
+    });
+
+    it("accepts a virtual instance that also has a placement", () => {
+      const raw = validWorkspace();
+      raw.placements["basic-1"] = { zone: "deck", row: 0, column: 0, order: 1 };
+
+      expect("error" in validateWorkspaceState(raw)).toBe(false);
+    });
+
+    it("accepts more placements than the virtual-instance limit", () => {
+      const placements = Object.fromEntries(
+        Array.from({ length: MAX_MATERIALIZED_VIRTUAL_BASICS + 1 }, (_, index) => [
+          `card-${index}`,
+          { zone: "deck", row: 0, column: 0, order: index },
+        ]),
+      );
+
+      expect("error" in validateWorkspaceState({
+        schemaVersion: 1,
+        placements,
+        virtualBasics: [],
+      })).toBe(false);
+    });
+
+    it("rejects a placement overflow before inspecting any placement values", () => {
+      const placements: Record<string, unknown> = {
+        first: { zone: "deck", row: 0, column: 0, order: 0 },
+        second: { zone: "deck", row: 0, column: 0, order: 1 },
+      };
+      Object.defineProperty(placements, "overflow", {
+        enumerable: true,
+        get: () => {
+          throw new Error("placement value was read");
+        },
+      });
+
+      expect(validateWorkspaceState({
+        schemaVersion: 1,
+        placements,
+        virtualBasics: [],
+      }, { maxPlacementCount: 2 })).toEqual({ error: "placements cannot exceed 2 entries" });
+    });
+
+    it("accepts the virtual-instance limit and rejects one more", () => {
+      const virtualBasics = Array.from(
+        { length: MAX_MATERIALIZED_VIRTUAL_BASICS },
+        (_, index) => ({ instanceId: `basic-${index}`, name: "Island" }),
+      );
+
+      expect("error" in validateWorkspaceState({
+        schemaVersion: 1,
+        placements: {},
+        virtualBasics,
+      })).toBe(false);
+      expect(validateWorkspaceState({
+        schemaVersion: 1,
+        placements: {},
+        virtualBasics: [...virtualBasics, { instanceId: "too-many", name: "Island" }],
+      })).toHaveProperty("error");
+    });
+
+    it.each([
+      ["wrong schema", { ...validWorkspace(), schemaVersion: 2 }],
+      ["extra workspace field", { ...validWorkspace(), extra: true }],
+      ["array placements", { ...validWorkspace(), placements: [] }],
+      ["blank placement key", { ...validWorkspace(), placements: { " ": { zone: "deck", row: 0, column: 0, order: 0 } } }],
+      ["extra placement field", { ...validWorkspace(), placements: { card: { zone: "deck", row: 0, column: 0, order: 0, extra: true } } }],
+      ["invalid zone", { ...validWorkspace(), placements: { card: { zone: "hand", row: 0, column: 0, order: 0 } } }],
+      ["invalid row", { ...validWorkspace(), placements: { card: { zone: "deck", row: 2, column: 0, order: 0 } } }],
+      ["invalid column", { ...validWorkspace(), placements: { card: { zone: "deck", row: 0, column: 20, order: 0 } } }],
+      ["unsafe order", { ...validWorkspace(), placements: { card: { zone: "deck", row: 0, column: 0, order: Number.MAX_SAFE_INTEGER + 1 } } }],
+      ["blank virtual ID", { ...validWorkspace(), virtualBasics: [{ instanceId: "\t", name: "Island" }] }],
+      ["blank virtual name", { ...validWorkspace(), virtualBasics: [{ instanceId: "basic", name: "\n" }] }],
+      ["duplicate virtual ID", { ...validWorkspace(), virtualBasics: [{ instanceId: "basic", name: "Island" }, { instanceId: "basic", name: "Plains" }] }],
+      ["extra virtual field", { ...validWorkspace(), virtualBasics: [{ instanceId: "basic", name: "Island", extra: true }] }],
+    ])("rejects malformed state: %s", (_label, raw) => {
+      expect(validateWorkspaceState(raw)).toHaveProperty("error");
+    });
+
+    it("rejects custom prototypes, symbols, and non-enumerable extras", () => {
+      const custom = Object.create({ custom: true });
+      Object.assign(custom, validWorkspace());
+      expect(validateWorkspaceState(custom)).toHaveProperty("error");
+
+      const symbolState = validWorkspace() as unknown as Record<PropertyKey, unknown>;
+      symbolState[Symbol("extra")] = true;
+      expect(validateWorkspaceState(symbolState)).toHaveProperty("error");
+
+      const hiddenState = validWorkspace();
+      Object.defineProperty(hiddenState, "hidden", { value: true });
+      expect(validateWorkspaceState(hiddenState)).toHaveProperty("error");
+    });
+
+    it("does not mutate the supplied state", () => {
+      const raw = validWorkspace();
+      const before = structuredClone(raw);
+
+      validateWorkspaceState(raw);
+
+      expect(raw).toEqual(before);
     });
   });
 

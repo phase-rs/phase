@@ -489,6 +489,41 @@ describe("ServerDraftAdapter", () => {
     expect(result.pick_number).toBe(2);
   });
 
+  it("DraftStateUpdate preserves workspace presentation metadata", async () => {
+    const pickPromise = adapter.submitPick("card-003");
+    const workspaceMetadata: Pick<
+      DraftPlayerView["pool_groups"],
+      "workspace_capabilities" | "workspace_row_classification"
+    > = {
+      workspace_capabilities: {
+        rarity_group_order: ["mythic", "rare", "uncommon", "common", "rarity_other"],
+      },
+      workspace_row_classification: {
+        creature_instance_ids: ["creature-1", "creature-2"],
+        noncreature_instance_ids: ["instant-1"],
+      },
+    };
+    const view = createMockDraftView({
+      pick_number: 3,
+      pool_groups: {
+        ...EMPTY_DRAFT_POOL_GROUPS,
+        ...workspaceMetadata,
+      },
+    });
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftStateUpdate",
+        data: { view },
+      }),
+    );
+
+    const result = await pickPromise;
+    expect(result.pool_groups).toMatchObject(workspaceMetadata);
+    expect(adapter.currentDraftView?.pool_groups).toMatchObject(workspaceMetadata);
+  });
+
   it("DraftTimerSync emits timerSync event", () => {
     const listener = vi.fn();
     adapter.onEvent(listener);

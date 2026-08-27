@@ -31,6 +31,8 @@ interface PopoverMenuTriggerArgs {
 
 interface PopoverMenuProps {
   ariaLabel: string;
+  /** The default menu preserves existing action-menu semantics. */
+  variant?: "menu" | "dialog";
   /** Menu panel width in px — the menu is wider than the kebab trigger. */
   menuWidthPx?: number;
   /** Extra classes on the default kebab trigger button (ignored when
@@ -56,6 +58,7 @@ interface PopoverMenuProps {
  */
 export function PopoverMenu({
   ariaLabel,
+  variant = "menu",
   menuWidthPx = 224,
   triggerClassName,
   renderTrigger,
@@ -65,6 +68,7 @@ export function PopoverMenu({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const restoreFocusAfterCloseRef = useRef(false);
   const [style, setStyle] = useState<PopoverMenuStyle>({
     top: 0,
     bottom: "auto",
@@ -81,13 +85,17 @@ export function PopoverMenu({
     },
     [onOpenChange],
   );
-  const close = useCallback(() => changeOpen(false), [changeOpen]);
+  const close = useCallback(() => {
+    if (variant === "dialog") restoreFocusAfterCloseRef.current = true;
+    changeOpen(false);
+  }, [changeOpen, variant]);
   const toggle = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
-      changeOpen(!open);
+      if (open) close();
+      else changeOpen(true);
     },
-    [changeOpen, open],
+    [changeOpen, close, open],
   );
 
   const position = useCallback(() => {
@@ -116,6 +124,17 @@ export function PopoverMenu({
     if (open) position();
   }, [open, position]);
 
+  useLayoutEffect(() => {
+    if (open && variant === "dialog") {
+      menuRef.current?.focus();
+      return;
+    }
+    if (!open && restoreFocusAfterCloseRef.current) {
+      restoreFocusAfterCloseRef.current = false;
+      if (triggerRef.current?.isConnected) triggerRef.current.focus();
+    }
+  }, [open, variant]);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -126,7 +145,7 @@ export function PopoverMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         close();
-        triggerRef.current?.focus();
+        if (variant === "menu") triggerRef.current?.focus();
       }
     };
     window.addEventListener("pointerdown", onPointerDown, true);
@@ -139,7 +158,7 @@ export function PopoverMenu({
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [open, close, position]);
+  }, [open, close, position, variant]);
 
   return (
     <>
@@ -168,8 +187,9 @@ export function PopoverMenu({
         createPortal(
           <div
             ref={menuRef}
-            role="menu"
+            role={variant}
             aria-label={ariaLabel}
+            tabIndex={variant === "dialog" ? -1 : undefined}
             // Seal the whole pointer/click family so a menu interaction never
             // leaks through the React tree to whatever ancestor rendered this
             // menu. The portal escapes the DOM subtree, but React synthetic

@@ -277,6 +277,22 @@ describe("fetchCardData — combined multi-face names", () => {
         color_identity: ["W", "U"],
         keywords: [],
       },
+      "bonecrusher giant": {
+        oracle_id: "bonecrusher-oracle",
+        face_names: ["bonecrusher giant", "stomp"],
+        faces: [
+          { normal: "https://img.example/bonecrusher.jpg", art_crop: "https://img.example/bonecrusher-art.jpg" },
+          { normal: "https://img.example/bonecrusher.jpg", art_crop: "https://img.example/bonecrusher-art.jpg" },
+        ],
+        layout: "adventure",
+        name: "Bonecrusher Giant // Stomp",
+        mana_cost: "{2}{R}",
+        cmc: 3,
+        type_line: "Creature — Giant",
+        colors: ["R"],
+        color_identity: ["R"],
+        keywords: [],
+      },
     };
     return new Response(JSON.stringify(map), {
       status: 200,
@@ -303,15 +319,39 @@ describe("fetchCardData — combined multi-face names", () => {
     expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
   });
 
+  it("resolves_an_alternate_face_from_a_cube_front_face_name", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { loadScryfallData, resolveAlternateCardFaceSync } = await loadScryfallModule();
+    expect(resolveAlternateCardFaceSync("Peter Parker")).toBeUndefined();
+    await loadScryfallData();
+
+    expect(resolveAlternateCardFaceSync("Peter Parker")).toEqual({
+      name: "The Amazing Spider-Man",
+      faceIndex: 1,
+      side: "back",
+    });
+  });
+
   it("does not mis-split a single-faced card whose name contains \"//\" (issue #4790)", async () => {
     global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
 
-    const { fetchCardData } = await loadScryfallModule();
+    const { fetchCardData, resolveAlternateCardFaceSync } = await loadScryfallModule();
     const card = await fetchCardData("SP//dr, Piloted by Peni");
 
     // Its own name is a primary key, so the exact match wins before any split.
     expect(card.name).toBe("SP//dr, Piloted by Peni");
     expect(card.type_line).toContain("Spider Hero");
+    expect(resolveAlternateCardFaceSync("SP//dr, Piloted by Peni")).toBeNull();
+  });
+
+  it("does_not_treat_adventure_components_as_physical_card_faces", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { loadScryfallData, resolveAlternateCardFaceSync } = await loadScryfallModule();
+    await loadScryfallData();
+
+    expect(resolveAlternateCardFaceSync("Bonecrusher Giant")).toBeNull();
   });
 });
 

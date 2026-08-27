@@ -30,6 +30,8 @@ export function ManaCurve({ pool, cards }: ManaCurveProps) {
     for (const bucket of CMC_BUCKETS) buckets.set(bucket, 0);
 
     for (const name of cards) {
+      const card = pool.find((entry) => entry.name === name);
+      if (card === undefined || /\bland\b/i.test(card.type_line)) continue;
       const cmc = cmcByName.get(name) ?? 0;
       const key = cmc >= 6 ? "6+" : String(cmc);
       buckets.set(key, (buckets.get(key) ?? 0) + 1);

@@ -70,6 +70,9 @@ export const DRAFT_RUN_KEY_PREFIX = "phase-draft-run:";
 /** localStorage key for the Zustand-persisted preferences store. */
 export const PREFERENCES_KEY = "phase-preferences";
 
+/** localStorage key for personal draft workspace preferences. */
+export const DRAFT_WORKSPACE_PREFERENCES_KEY = "phase-draft-workspace-preferences";
+
 /**
  * Single authority for "is this localStorage key part of the user's portable
  * profile?" — the decks, preferences, metadata, active-deck pointer, and feed
@@ -83,6 +86,7 @@ export const PREFERENCES_KEY = "phase-preferences";
 export function isUserOwnedStorageKey(key: string): boolean {
   return (
     key === PREFERENCES_KEY ||
+    key === DRAFT_WORKSPACE_PREFERENCES_KEY ||
     key === DECK_METADATA_KEY ||
     key === DECK_FOLDERS_KEY ||
     key === ACTIVE_DECK_KEY ||

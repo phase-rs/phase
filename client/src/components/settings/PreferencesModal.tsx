@@ -32,6 +32,7 @@ import type {
   CardPreviewMode,
   CardSizePreference,
   CommandZoneDisplay,
+  DraftCardPreviewMode,
   LogDefaultState,
   MultiplayerBoardLayout,
   SpellPaymentMode,
@@ -75,6 +76,8 @@ const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
+const DRAFT_CARD_PREVIEW_MODES: DraftCardPreviewMode[] = ["none", ...CARD_PREVIEW_MODES];
+const DRAFT_DOUBLE_CLICK_CONFIRM_PICK_OPTIONS: Array<"disabled" | "enabled"> = ["disabled", "enabled"];
 const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
@@ -204,6 +207,10 @@ export function PreferencesModal({
   const setBattlefieldPeekOnHover = usePreferencesStore((s) => s.setBattlefieldPeekOnHover);
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode) ?? "follow";
   const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
+  const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode) ?? "none";
+  const setDraftCardPreviewMode = usePreferencesStore((s) => s.setDraftCardPreviewMode);
+  const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick) ?? true;
+  const setDraftDoubleClickConfirmPick = usePreferencesStore((s) => s.setDraftDoubleClickConfirmPick);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs) ?? 0;
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
   const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
@@ -544,6 +551,29 @@ export function PreferencesModal({
                     <p className="mt-1.5 text-xs text-slate-400">
                       {t(`visual.cardPreviewHint.${cardPreviewMode}`)}
                     </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.draftCardPreview")}>
+                    <SegmentedControl
+                      options={DRAFT_CARD_PREVIEW_MODES}
+                      value={draftCardPreviewMode}
+                      onChange={setDraftCardPreviewMode}
+                      renderLabel={(option) => option === "none"
+                        ? t("visual.draftCardPreviewOff")
+                        : t(`visual.cardPreviewOptions.${option}`)}
+                    />
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.draftCardPreviewHint")}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.draftDoubleClickConfirmPick")}>
+                    <SegmentedControl
+                      options={DRAFT_DOUBLE_CLICK_CONFIRM_PICK_OPTIONS}
+                      value={draftDoubleClickConfirmPick ? "enabled" : "disabled"}
+                      onChange={(option) => setDraftDoubleClickConfirmPick(option === "enabled")}
+                      renderLabel={(option) => t(`visual.draftDoubleClickConfirmPickOptions.${option}`)}
+                    />
                   </SettingGroup>
 
                   {/* Hover latency only applies to the hover-driven modes; the
