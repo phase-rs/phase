@@ -2372,6 +2372,15 @@ pub struct CommanderDamageEntry {
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
 ///
+/// The exact resolution-time Attach instruction that owns an
+/// `EffectZoneChoice`. The operation stays typed across a host choice followed
+/// by an attachment choice; its enclosing continuation frame carries only the
+/// later printed chain tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttachmentChoice {
+    pub operation: Box<ResolvedAbility>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -2393,6 +2402,10 @@ pub struct PendingContinuation {
     /// paused, then restored before the continuation resumes resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) trigger_firing: Option<TriggerFiring>,
+    /// A child Attach choice owns this operation while its normal continuation
+    /// parent retains only the following instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_choice: Option<PendingAttachmentChoice>,
 }
 
 impl PendingContinuation {
@@ -2406,6 +2419,7 @@ impl PendingContinuation {
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
+            attachment_choice: None,
         }
     }
 
@@ -2424,6 +2438,7 @@ impl PendingContinuation {
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
+            attachment_choice: None,
         }
     }
 }
@@ -5364,18 +5379,90 @@ impl DigKeptDeliveryOutcome {
     }
 }
 
+/// The settled subset of a Dig's unkept rest pile. This is deliberately
+/// independent from [`DigKeptDeliveryOutcome`]: the two zone-change groups can
+/// settle at different times and replacements can redirect either group.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigRestDeliveryOutcome {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
+}
+
+impl DigRestDeliveryOutcome {
+    pub fn pending(state: &GameState, selected: Vec<ObjectId>, destination: Zone) -> Self {
+        Self {
+            selected: selected
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect(),
+            completed: Vec::new(),
+            destination: Some(destination),
+            settled: false,
+        }
+    }
+
+    pub fn settle_from_logical_group(&mut self, state: &GameState, group: &LogicalZoneChangeGroup) {
+        let Some(destination) = self.destination.filter(|_| !self.settled) else {
+            return;
+        };
+        let moved: BTreeSet<_> = group
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| match &occurrence.event {
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination
+                        && state
+                            .objects
+                            .get(object_id)
+                            .is_some_and(|object| object.zone == destination) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.completed = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|identity| moved.contains(&identity.object_id))
+            .collect();
+        self.settled = true;
+    }
+
+    pub fn completed_ids(&self) -> Vec<ObjectId> {
+        self.completed
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+}
+
 /// Stamp a Dig delivery completion with its exact settled zone-change members.
 /// Only the zone pipeline owns a complete logical group, so this is the single
 /// seam where a selected pile becomes an actual delivery outcome.
-pub(crate) fn settle_dig_kept_delivery_outcome(
+pub(crate) fn settle_dig_delivery_outcome(
     completion: &mut BatchCompletion,
     state: &GameState,
     group: &LogicalZoneChangeGroup,
 ) {
     match completion {
-        BatchCompletion::DigKeptDeliveryComplete { kept_delivery, .. }
-        | BatchCompletion::RevealRestPile { kept_delivery, .. } => {
+        BatchCompletion::DigKeptDeliveryComplete { kept_delivery, .. } => {
             kept_delivery.settle_from_logical_group(state, group);
+        }
+        BatchCompletion::RevealRestPile { rest_delivery, .. } => {
+            rest_delivery.settle_from_logical_group(state, group);
         }
         _ => {}
     }
@@ -5618,6 +5705,16 @@ pub enum BatchCompletion {
         /// re-parks the rest-pile completion. Empty for non-Dig callers.
         #[serde(default)]
         kept_delivery: DigKeptDeliveryOutcome,
+        /// Dig's ParentTarget continuation inputs. They stay separate from the
+        /// publish set because the latter can intentionally address the rest
+        /// pile while ParentTarget still refers to the kept delivery.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        continuation_targets: Vec<ObjectId>,
+        /// The exact unkept rest identities that completed their requested
+        /// delivery. It is separate from the kept delivery because its logical
+        /// zone-change group can settle later, after a replacement-choice park.
+        #[serde(default)]
+        rest_delivery: DigRestDeliveryOutcome,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,

@@ -814,7 +814,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             search_attach_host,
             trigger_context,
             trigger_firing,
+            attachment_choice,
         } = cont;
+        debug_assert!(
+            attachment_choice.is_none(),
+            "an attachment choice must be consumed by its EffectZoneChoice handler"
+        );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
         let source_id = chain.source_id;
@@ -1830,6 +1835,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             search_attach_host,
             trigger_context,
             trigger_firing,
+            attachment_choice,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -1842,6 +1848,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 // re-latched to whatever is live at splice time.
                 trigger_context,
                 trigger_firing,
+                attachment_choice,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -12912,6 +12919,17 @@ fn resolve_chain_body(
         if matches!(ability.effect, Effect::PayCost { .. })
             && typed_effect_pay_cost_root
             && waits_for_resolution_choice(&state.waiting_for)
+        {
+            return Ok(());
+        }
+        // An Attach choice already split this node's trailing instructions into
+        // the parent continuation below its typed child. The generic pause path
+        // must not prepend the same tail onto the child operation, or a host
+        // choice followed by an Equipment choice would duplicate that tail.
+        if matches!(ability.effect, Effect::Attach { .. })
+            && state
+                .active_ability_continuation()
+                .is_some_and(|pending| pending.attachment_choice.is_some())
         {
             return Ok(());
         }

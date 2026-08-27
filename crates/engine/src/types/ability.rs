@@ -26727,9 +26727,9 @@ pub struct AttachTargetBindings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct AttachTargetBindingsInner {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    attachment_targets: Vec<TargetRef>,
+    attachment_targets: Vec<ObjectIncarnationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    host_target: Option<TargetRef>,
+    host_target: Option<ObjectIncarnationRef>,
     /// Attachments that the immediately preceding forward-result instruction
     /// moved to the battlefield. This is distinct
     /// from `attachment_targets`: the former is the finite event-scoped choice
@@ -26747,26 +26747,26 @@ impl AttachTargetBindings {
         })
     }
 
-    pub(crate) fn attachment_targets(&self) -> &[TargetRef] {
+    pub(crate) fn attachment_targets(&self) -> &[ObjectIncarnationRef] {
         self.inner
             .as_deref()
             .map_or(&[], |inner| inner.attachment_targets.as_slice())
     }
 
-    pub(crate) fn host_target(&self) -> Option<&TargetRef> {
+    pub(crate) fn host_target(&self) -> Option<&ObjectIncarnationRef> {
         self.inner
             .as_deref()
             .and_then(|inner| inner.host_target.as_ref())
     }
 
-    pub(crate) fn bind_attachment(&mut self, target: TargetRef) {
+    pub(crate) fn bind_attachment(&mut self, target: ObjectIncarnationRef) {
         self.inner
             .get_or_insert_default()
             .attachment_targets
             .push(target);
     }
 
-    pub(crate) fn bind_host(&mut self, target: TargetRef) {
+    pub(crate) fn bind_host(&mut self, target: ObjectIncarnationRef) {
         self.inner.get_or_insert_default().host_target = Some(target);
     }
 
@@ -27225,11 +27225,11 @@ impl ResolvedAbility {
         }
     }
 
-    pub(crate) fn bind_attach_attachment_target(&mut self, target: TargetRef) {
+    pub(crate) fn bind_attach_attachment_target(&mut self, target: ObjectIncarnationRef) {
         self.context.attach_target_bindings.bind_attachment(target);
     }
 
-    pub(crate) fn bind_attach_host_target(&mut self, target: TargetRef) {
+    pub(crate) fn bind_attach_host_target(&mut self, target: ObjectIncarnationRef) {
         self.context.attach_target_bindings.bind_host(target);
     }
 
@@ -27242,11 +27242,11 @@ impl ResolvedAbility {
             .bind_attachment_candidates(candidates);
     }
 
-    pub(crate) fn attach_attachment_targets(&self) -> &[TargetRef] {
+    pub(crate) fn attach_attachment_targets(&self) -> &[ObjectIncarnationRef] {
         self.context.attach_target_bindings.attachment_targets()
     }
 
-    pub(crate) fn attach_host_target(&self) -> Option<&TargetRef> {
+    pub(crate) fn attach_host_target(&self) -> Option<&ObjectIncarnationRef> {
         self.context.attach_target_bindings.host_target()
     }
 
@@ -28377,21 +28377,21 @@ mod tests {
         let mut populated = SpellContext::default();
         populated
             .attach_target_bindings
-            .bind_attachment(TargetRef::Object(ObjectId(11)));
+            .bind_attachment(ObjectIncarnationRef::of(ObjectId(11), 1));
         populated
             .attach_target_bindings
-            .bind_host(TargetRef::Object(ObjectId(12)));
+            .bind_host(ObjectIncarnationRef::of(ObjectId(12), 2));
         populated
             .attach_target_bindings
             .bind_attachment_candidates(vec![ObjectIncarnationRef::of(ObjectId(13), 2)]);
         let wire = serde_json::to_value(&populated).expect("attachment bindings serialize");
         assert_eq!(
             wire["attach_target_bindings"]["attachment_targets"],
-            serde_json::json!([{ "Object": 11 }])
+            serde_json::json!([{ "object_id": 11, "incarnation": 1 }])
         );
         assert_eq!(
             wire["attach_target_bindings"]["host_target"],
-            serde_json::json!({ "Object": 12 })
+            serde_json::json!({ "object_id": 12, "incarnation": 2 })
         );
         assert_eq!(
             wire["attach_target_bindings"]["attachment_candidates"],

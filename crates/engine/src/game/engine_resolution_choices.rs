@@ -814,7 +814,7 @@ pub(crate) fn route_rest_partition(
     route_rest_partition_then(state, &ordered_ids, rest_zone, source_id, None, events)
 }
 
-fn route_rest_partition_then(
+pub(crate) fn route_rest_partition_then(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
@@ -1862,6 +1862,8 @@ pub(super) fn handle_resolution_choice(
                             // publishes instead, once the entry completed.
                             manifested_for_continuation: Some(manifest_id),
                             kept_delivery: Default::default(),
+                            continuation_targets: Vec::new(),
+                            rest_delivery: Default::default(),
                         },
                     );
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -2113,6 +2115,8 @@ pub(super) fn handle_resolution_choice(
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -2179,6 +2183,8 @@ pub(super) fn handle_resolution_choice(
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
+                    continuation_targets: Vec::new(),
+                    rest_delivery: Default::default(),
                 }),
                 events,
             ) {
@@ -3540,6 +3546,8 @@ pub(super) fn handle_resolution_choice(
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3642,40 +3650,44 @@ pub(super) fn handle_resolution_choice(
                 .active_ability_continuation()
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
             if !defer_rest_routing {
-                match route_rest_partition(
-                    state,
-                    &unkept,
-                    rest_destination.unwrap_or(Zone::Graveyard),
-                    rest_order,
-                    dig_source_id,
-                    events,
-                ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        // CR 701.20e + CR 616.1: `route_rest_partition` has
-                        // parked the undelivered suffix. Its cleanup tail owns
-                        // the publication and continuation work, so the drain
-                        // performs it exactly once only after the true batch end.
-                        crate::game::zone_pipeline::defer_completion_on_pause(
-                            state,
-                            crate::types::game_state::BatchCompletion::RevealRestPile {
-                                player,
-                                source_id: dig_source_id,
-                                rest_cards: Vec::new(),
-                                rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
-                                rest_order,
-                                clear_markers: Vec::new(),
-                                publish_tracked_set: Some(publish_set),
-                                emit_reveal_until_resolved: None,
-                                manifested_for_continuation: None,
-                                kept_delivery: Default::default(),
-                            },
-                        );
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
+                let rest_destination = rest_destination.unwrap_or(Zone::Graveyard);
+                let mut ordered_unkept = unkept.clone();
+                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
+                    ordered_unkept.shuffle(&mut state.rng);
                 }
+                let completion = crate::types::game_state::BatchCompletion::RevealRestPile {
+                    player,
+                    source_id: dig_source_id,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    rest_order,
+                    clear_markers: Vec::new(),
+                    publish_tracked_set: Some(publish_set),
+                    emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
+                    kept_delivery: Default::default(),
+                    continuation_targets: Vec::new(),
+                    rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                        state,
+                        ordered_unkept.clone(),
+                        rest_destination,
+                    ),
+                };
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    match route_rest_partition_then(
+                        state,
+                        &ordered_unkept,
+                        rest_destination,
+                        dig_source_id,
+                        Some(completion),
+                        events,
+                    ) {
+                        crate::game::zone_pipeline::BatchMoveResult::Done
+                        | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                            state.waiting_for.clone()
+                        }
+                    },
+                ));
             }
             effects::publish_fresh_tracked_set(state, publish_set);
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -5615,23 +5627,43 @@ pub(super) fn handle_resolution_choice(
                             "Attach EffectZoneChoice missing stashed ability".to_string(),
                         ));
                     };
-                    let crate::types::game_state::PendingContinuation {
-                        chain,
-                        trigger_context,
-                        trigger_firing,
-                        ..
-                    } = frame.pending;
+                    let trigger_context = frame.pending.trigger_context.clone();
+                    let trigger_firing = frame.pending.trigger_firing.clone();
+                    let attachment_choice =
+                        frame.pending.attachment_choice.clone().ok_or_else(|| {
+                            EngineError::InvalidAction(
+                                "Attach EffectZoneChoice missing typed attachment operation"
+                                    .to_string(),
+                            )
+                        })?;
                     effects::restore_continuation_trigger_firing(state, trigger_firing);
                     let trigger_snapshot = trigger_context.as_ref().map(|context| {
                         crate::game::triggers::push_resolving_trigger_context(state, context)
                     });
-                    effects::attach::complete_resolution_attachment_choice(
-                        &mut *state,
-                        *chain,
+                    let operation = effects::attach::bind_resolution_attachment_choice(
+                        &*state,
+                        *attachment_choice.operation,
                         &chosen,
-                        events,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                    let mut child = frame;
+                    child.pending.chain = Box::new(operation.clone());
+                    child.pending.attachment_choice =
+                        Some(crate::types::game_state::PendingAttachmentChoice {
+                            operation: Box::new(operation.clone()),
+                        });
+                    state
+                        .resolve_and_apply_frame_transition(
+                            crate::types::resolved_commands::ResolvedFrameTransition::Push {
+                                frame:
+                                    crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                                        child,
+                                    ),
+                            },
+                        )
+                        .expect("attachment choice child frame must push atomically");
+                    effects::attach::resolve(&mut *state, &operation, events)
+                        .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                     let opened_follow_up_attach_choice =
                         state.active_ability_continuation().is_some()
                             && matches!(
@@ -5649,6 +5681,10 @@ pub(super) fn handle_resolution_choice(
                             state.waiting_for.clone(),
                         ));
                     }
+                    state
+                        .take_active_ability_continuation()
+                        .expect("completed attachment child must remain active")
+                        .expect("completed attachment child must exist");
                     set_priority(state, player);
                     resume_with_error_propagation(state, events)?;
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -7328,6 +7364,8 @@ fn route_kept_card_or_defer(
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
+                    continuation_targets: Vec::new(),
+                    rest_delivery: Default::default(),
                 },
             );
             Some(ResolutionChoiceOutcome::WaitingFor(
@@ -7903,32 +7941,36 @@ pub(crate) fn run_batch_completion(
             kept_delivery,
         } => {
             if !rest_cards.is_empty() {
-                match route_rest_partition(
-                    state,
-                    &rest_cards,
+                let mut ordered_rest_cards = rest_cards.clone();
+                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
+                    ordered_rest_cards.shuffle(&mut state.rng);
+                }
+                let completion = BatchCompletion::RevealRestPile {
+                    player,
+                    source_id,
+                    rest_cards: Vec::new(),
                     rest_destination,
                     rest_order,
+                    clear_markers: Vec::new(),
+                    publish_tracked_set: Some(publish_tracked_set),
+                    emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
+                    kept_delivery,
+                    continuation_targets,
+                    rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                        state,
+                        ordered_rest_cards.clone(),
+                        rest_destination,
+                    ),
+                };
+                return route_rest_partition_then(
+                    state,
+                    &ordered_rest_cards,
+                    rest_destination,
                     source_id,
+                    Some(completion),
                     events,
-                ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        crate::game::zone_pipeline::defer_completion_on_pause(
-                            state,
-                            BatchCompletion::DigKeptDeliveryComplete {
-                                player,
-                                source_id,
-                                rest_cards: Vec::new(),
-                                rest_destination,
-                                rest_order,
-                                publish_tracked_set,
-                                continuation_targets,
-                                kept_delivery,
-                            },
-                        );
-                        return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
-                    }
-                }
+                );
             }
             let completed = kept_delivery.completed_ids();
             effects::publish_fresh_tracked_set(state, publish_tracked_set);
@@ -8006,41 +8048,45 @@ pub(crate) fn run_batch_completion(
             emit_reveal_until_resolved,
             manifested_for_continuation,
             kept_delivery,
+            continuation_targets,
+            rest_delivery,
         } => {
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
             // reveal-until path routes through `move_rest_then`, including
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
-            if publish_tracked_set.is_some() {
-                match route_rest_partition(
-                    state,
-                    &rest_cards,
+            if publish_tracked_set.is_some() && !rest_cards.is_empty() {
+                let mut ordered_rest_cards = rest_cards.clone();
+                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
+                    ordered_rest_cards.shuffle(&mut state.rng);
+                }
+                let cleanup = BatchCompletion::RevealRestPile {
+                    player,
+                    source_id,
+                    rest_cards: Vec::new(),
                     rest_destination,
                     rest_order,
+                    clear_markers,
+                    publish_tracked_set,
+                    emit_reveal_until_resolved,
+                    manifested_for_continuation,
+                    kept_delivery,
+                    continuation_targets,
+                    rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                        state,
+                        ordered_rest_cards.clone(),
+                        rest_destination,
+                    ),
+                };
+                return route_rest_partition_then(
+                    state,
+                    &ordered_rest_cards,
+                    rest_destination,
                     source_id,
+                    Some(cleanup),
                     events,
-                ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        crate::game::zone_pipeline::defer_completion_on_pause(
-                            state,
-                            BatchCompletion::RevealRestPile {
-                                player,
-                                source_id,
-                                rest_cards: Vec::new(),
-                                rest_destination,
-                                rest_order,
-                                clear_markers,
-                                publish_tracked_set,
-                                emit_reveal_until_resolved,
-                                manifested_for_continuation,
-                                kept_delivery,
-                            },
-                        );
-                        return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
-                    }
-                }
+                );
             } else if !rest_cards.is_empty() {
                 // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
                 // pipeline-owned, including Library-bottom placement. If a
@@ -8058,6 +8104,8 @@ pub(crate) fn run_batch_completion(
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
+                    continuation_targets,
+                    rest_delivery,
                 };
                 return effects::reveal_until::move_rest_then(
                     state,
@@ -8075,20 +8123,58 @@ pub(crate) fn run_batch_completion(
                     ResolvedInformationEdit::Hide,
                 )
                 .expect("reveal-rest cleanup must reference live card occurrences");
-            let completed = kept_delivery.completed_ids();
+            let kept_completed = kept_delivery.completed_ids();
+            let rest_completed = rest_delivery.completed_ids();
             if let Some(kept) = publish_tracked_set {
-                effects::publish_fresh_tracked_set(state, kept.clone());
+                let published = if rest_delivery.destination.is_some()
+                    && kept.iter().all(|id| {
+                        rest_delivery
+                            .selected
+                            .iter()
+                            .any(|selected| selected.object_id == *id)
+                    }) {
+                    rest_completed.clone()
+                } else if kept_delivery.destination.is_some()
+                    && kept.iter().all(|id| {
+                        kept_delivery
+                            .selected
+                            .iter()
+                            .any(|selected| selected.object_id == *id)
+                    })
+                {
+                    kept_completed.clone()
+                } else {
+                    kept
+                };
+                effects::publish_fresh_tracked_set(state, published.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.targets =
-                        kept.iter().map(|&id| TargetRef::Object(id)).collect();
-                    frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
+                    let continuation = if continuation_targets.is_empty() {
+                        published
+                    } else {
+                        continuation_targets
+                            .iter()
+                            .filter(|id| kept_completed.contains(id))
+                            .copied()
+                            .collect()
+                    };
+                    frame.pending.chain.targets = continuation
+                        .iter()
+                        .map(|&id| TargetRef::Object(id))
+                        .collect();
+                    frame.pending.chain.context.optional_effect_performed =
+                        !continuation.is_empty();
                 }
             }
-            if kept_delivery.destination.is_some() {
+            if rest_delivery.destination.is_some() {
+                // The rest delivery is the final logical group in this path;
+                // its settled members are therefore the current "this way"
+                // population, independent from the kept-side continuation.
+                state.last_zone_changed_ids = rest_completed;
+            } else if kept_delivery.destination.is_some() {
                 // A Dig completion replaces the ledger even when every selected
                 // move was prevented or redirected; retaining an older value
                 // would let a later `ZoneChangedThisWay` read a stale delivery.
-                state.last_zone_changed_ids = completed;
+                state.last_zone_changed_ids = kept_completed;
             }
             if let Some(source_id) = emit_reveal_until_resolved {
                 events.push(crate::types::events::GameEvent::EffectResolved {

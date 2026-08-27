@@ -1196,7 +1196,7 @@ pub(crate) fn move_objects_simultaneously_then(
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |mut completion| {
-                crate::types::game_state::settle_dig_kept_delivery_outcome(
+                crate::types::game_state::settle_dig_delivery_outcome(
                     &mut completion,
                     state,
                     &logical_zone_change_group,
@@ -1626,7 +1626,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     // prompt + fresh BatchDelivery frame, not via
                     // this return value. Witnessed by the compound double-pause
                     // test (miss batch redirect, then hit-delivery redirect).
-                    crate::types::game_state::settle_dig_kept_delivery_outcome(
+                    crate::types::game_state::settle_dig_delivery_outcome(
                         &mut completion,
                         state,
                         &logical_zone_change_group,

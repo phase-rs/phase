@@ -417,7 +417,12 @@ fn prompt_forwarded_attachment_choice(
             0 => return Ok(true),
             1 => {
                 let mut bound = ability.clone();
-                bound.bind_attach_host_target(TargetRef::Object(hosts[0]));
+                let host = state
+                    .objects
+                    .get(&hosts[0])
+                    .map(ObjectIncarnationRef::from_object)
+                    .expect("resolved attachment host must exist");
+                bound.bind_attach_host_target(host);
                 return prompt_forwarded_attachment_choice(state, &bound, events);
             }
             _ => {
@@ -441,7 +446,12 @@ fn prompt_forwarded_attachment_choice(
         (0, _, _) | (_, 0, 0) => Ok(true),
         (1, 1, 1) => {
             let mut bound = ability.clone();
-            bound.bind_attach_attachment_target(TargetRef::Object(candidates[0]));
+            let attachment = state
+                .objects
+                .get(&candidates[0])
+                .map(ObjectIncarnationRef::from_object)
+                .expect("resolved attachment candidate must exist");
+            bound.bind_attach_attachment_target(attachment);
             resolve(state, &bound, events)?;
             Ok(true)
         }
@@ -453,31 +463,74 @@ fn prompt_forwarded_attachment_choice(
 }
 
 /// Park the exact Attach instruction that owns a resolution-time choice. The
-/// eventual resume distinguishes host and attachment choices from the bindings
-/// already present on this continuation, so `EffectZoneChoice` needs no
-/// cross-cutting role field.
+/// child frame retains only that Attach operation; its parent owns the printed
+/// chain tail, so resolving either a host or attachment choice cannot discard
+/// or duplicate later instructions.
 fn park_resolution_attachment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     cards: Vec<ObjectId>,
     bounds: MultiTargetBounds,
 ) {
-    // Replace any stale continuation (e.g. a deferred optional sub stashed by
-    // the parent chain walker) with this exact attach instruction.
-    let continuation =
-        crate::types::game_state::PendingContinuation::new(Box::new(ability.clone()), state);
-    if state.active_ability_continuation().is_some() {
-        state
-            .replace_active_ability_continuation(
-                crate::types::resolution::AbilityContinuationFrame {
-                    pending: continuation,
-                    choose_zone_trigger_context: None,
-                },
-            )
-            .expect("attach prompt replaces its active continuation");
-    } else {
-        state.park_ability_continuation(continuation);
+    let mut operation = ability.clone();
+    let tail = operation.sub_ability.take();
+
+    if let Some(active) = state.active_ability_continuation_frame() {
+        if active.pending.attachment_choice.is_some() {
+            debug_assert!(
+                tail.is_none(),
+                "a re-parked attachment operation must already have split off its tail"
+            );
+            let mut child = active.clone();
+            child.pending.chain = Box::new(operation.clone());
+            child.pending.attachment_choice =
+                Some(crate::types::game_state::PendingAttachmentChoice {
+                    operation: Box::new(operation),
+                });
+            state
+                .resolve_and_apply_frame_transition(
+                    crate::types::resolved_commands::ResolvedFrameTransition::ReplaceActive {
+                        frame: crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                            child,
+                        ),
+                    },
+                )
+                .expect("attachment choice child frame must re-park atomically");
+            return;
+        }
     }
+
+    if let Some(tail) = tail {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            // The active frame is the continuation this Attach was resolving.
+            // Preserve every frame-owned context while replacing only its
+            // executable chain with the exact following tail.
+            frame.pending.chain = tail;
+            frame.pending.attachment_choice = None;
+        } else {
+            state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
+                tail, state,
+            ));
+        }
+    }
+
+    let mut child =
+        crate::types::game_state::PendingContinuation::new(Box::new(operation.clone()), state);
+    child.attachment_choice = Some(crate::types::game_state::PendingAttachmentChoice {
+        operation: Box::new(operation),
+    });
+    state
+        .resolve_and_apply_frame_transition(
+            crate::types::resolved_commands::ResolvedFrameTransition::Push {
+                frame: crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                    crate::types::resolution::AbilityContinuationFrame {
+                        pending: child,
+                        choose_zone_trigger_context: None,
+                    },
+                ),
+            },
+        )
+        .expect("attachment choice child frame must push atomically");
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player: ability.controller,
         cards,
@@ -529,20 +582,38 @@ pub(crate) fn complete_resolution_attachment_choice(
     attachment_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let choice_ability = bind_resolution_attachment_choice(state, ability, attachment_ids)?;
+    resolve(state, &choice_ability, events)
+}
+
+/// Bind the answer to a resolution-time attachment choice before the child
+/// operation is resumed. The binding records exact object incarnations, so a
+/// later re-park cannot attach a new object that reused the selected id.
+pub(crate) fn bind_resolution_attachment_choice(
+    state: &GameState,
+    ability: ResolvedAbility,
+    attachment_ids: &[ObjectId],
+) -> Result<ResolvedAbility, EffectError> {
     let selecting_host = !ability.attach_attachment_candidates().is_empty()
         && ability.attach_host_target().is_none();
+    let mut choice_ability = ability;
+    choice_ability.sub_ability = None;
     for &selected_id in attachment_ids {
-        let mut choice_ability = ability.clone();
-        choice_ability.sub_ability = None;
         choice_ability.targets.push(TargetRef::Object(selected_id));
+        let selected = state
+            .objects
+            .get(&selected_id)
+            .map(ObjectIncarnationRef::from_object)
+            .ok_or_else(|| {
+                EffectError::MissingParam("Selected attachment choice left play".to_string())
+            })?;
         if selecting_host {
-            choice_ability.bind_attach_host_target(TargetRef::Object(selected_id));
+            choice_ability.bind_attach_host_target(selected);
         } else {
-            choice_ability.bind_attach_attachment_target(TargetRef::Object(selected_id));
+            choice_ability.bind_attach_attachment_target(selected);
         }
-        resolve(state, &choice_ability, events)?;
     }
-    Ok(())
+    Ok(choice_ability)
 }
 
 /// Resolve an explicitly chosen attachment through its role binding before the
@@ -558,18 +629,13 @@ fn resolve_bound_attachment_target(
         return ability
             .attach_attachment_targets()
             .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id)
-                    if ability
+            .find_map(|target| {
+                (target.is_current(state)
+                    && ability
                         .attach_attachment_candidates()
                         .iter()
-                        .any(|candidate| {
-                            candidate.object_id == *id && candidate.is_current(state)
-                        }) =>
-                {
-                    Some(*id)
-                }
-                TargetRef::Object(_) | TargetRef::Player(_) => None,
+                        .any(|candidate| candidate == target))
+                .then_some(target.object_id)
             });
     }
     let ctx = FilterContext::from_ability(ability);
@@ -577,14 +643,10 @@ fn resolve_bound_attachment_target(
     ability
         .attach_attachment_targets()
         .iter()
-        .find_map(|target| match target {
-            TargetRef::Object(id)
-                if ability.target_pin_is_current(*id, state)
-                    && matches_target_filter(state, *id, &effective, &ctx) =>
-            {
-                Some(*id)
-            }
-            _ => None,
+        .find_map(|target| {
+            (target.is_current(state)
+                && matches_target_filter(state, target.object_id, &effective, &ctx))
+            .then_some(target.object_id)
         })
 }
 
@@ -600,26 +662,26 @@ fn resolve_attach_target<'a>(
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
     if !ability.attach_attachment_candidates().is_empty() {
-        let TargetRef::Object(host_id) = ability.attach_host_target()? else {
-            return None;
-        };
-        if !ability.target_pin_is_current(*host_id, state) {
+        let host = ability.attach_host_target()?;
+        if !host.is_current(state) {
             return None;
         }
         if matches!(filter, TargetFilter::ParentTarget) {
-            return Some(*host_id);
+            return Some(host.object_id);
         }
         let ctx = FilterContext::from_ability(ability);
         let effective = crate::game::effects::resolved_object_filter(ability, filter);
-        return matches_target_filter(state, *host_id, &effective, &ctx).then_some(*host_id);
+        return matches_target_filter(state, host.object_id, &effective, &ctx)
+            .then_some(host.object_id);
     }
 
     match filter {
         TargetFilter::ParentTarget => {
-            if let Some(TargetRef::Object(id)) = ability.attach_host_target() {
-                if ability.target_pin_is_current(*id, state) {
-                    return Some(*id);
-                }
+            if let Some(host) = ability
+                .attach_host_target()
+                .filter(|host| host.is_current(state))
+            {
+                return Some(host.object_id);
             }
             let attachment_ids = attachment_target_ids(ability);
             ability
@@ -642,10 +704,7 @@ fn attachment_target_ids(ability: &ResolvedAbility) -> Vec<ObjectId> {
     ability
         .attach_attachment_targets()
         .iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
+        .map(|target| target.object_id)
         .collect()
 }
 
@@ -1901,7 +1960,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AttachmentKind, ControllerRef, FilterProp, StaticDefinition, TargetFilter, TargetRef,
-        TypedFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
@@ -2947,6 +3006,50 @@ mod tests {
             Some(AttachTarget::Object(host))
         );
         assert!(state.objects.get(&first).unwrap().attached_to.is_none());
+    }
+
+    #[test]
+    fn attachment_role_binding_rejects_a_reincarnated_selected_equipment() {
+        let mut state = setup();
+        let equipment = spawn_equipment(&mut state, "Rod", 10);
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.bind_attach_attachment_target(ObjectIncarnationRef::from_object(
+            state
+                .objects
+                .get(&equipment)
+                .expect("selected Equipment exists"),
+        ));
+        state
+            .objects
+            .get_mut(&equipment)
+            .expect("selected Equipment remains addressable")
+            .incarnation += 1;
+
+        assert_eq!(
+            resolve_bound_attachment_target(
+                &state,
+                &ability,
+                &TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+            ),
+            None,
+            "a selected role pin cannot attach a later incarnation sharing its object id"
+        );
     }
 
     #[test]

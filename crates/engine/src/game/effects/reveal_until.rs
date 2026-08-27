@@ -266,6 +266,8 @@ pub fn resolve(
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -319,6 +321,8 @@ pub fn resolve(
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -355,6 +359,8 @@ pub fn resolve(
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -398,6 +404,8 @@ pub fn resolve(
                     emit_reveal_until_resolved: Some(ability.source_id),
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
+                    continuation_targets: Vec::new(),
+                    rest_delivery: Default::default(),
                 },
             );
             return Ok(());

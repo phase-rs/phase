@@ -17,7 +17,7 @@ use crate::types::game_state::{
     GameState, PtDirection, TargetEffectDetail, TargetSelectionConstraint, TargetSelectionProgress,
     TargetSelectionSlot,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -3953,7 +3953,9 @@ fn assign_attach_attachment_selected_slots(
         }
         for target in window.iter().flatten().cloned() {
             ability.targets.push(target.clone());
-            ability.bind_attach_attachment_target(target);
+            if let Some(binding) = attach_object_binding(state, &target)? {
+                ability.bind_attach_attachment_target(binding);
+            }
         }
         *next_slot = end_slot;
     } else {
@@ -3965,7 +3967,9 @@ fn assign_attach_attachment_selected_slots(
         match selected_slot {
             Some(target) => {
                 ability.targets.push(target.clone());
-                ability.bind_attach_attachment_target(target.clone());
+                if let Some(binding) = attach_object_binding(state, target)? {
+                    ability.bind_attach_attachment_target(binding);
+                }
             }
             None if allow_skip => {}
             None => {
@@ -4027,7 +4031,9 @@ fn assign_attach_attachment_declared_targets(
         for slot_index in 0..attachment_window {
             if let Some(target) = targets.get(*next_target) {
                 ability.targets.push(target.clone());
-                ability.bind_attach_attachment_target(target.clone());
+                if let Some(binding) = attach_object_binding(state, target)? {
+                    ability.bind_attach_attachment_target(binding);
+                }
                 *next_target += 1;
             } else if slot_index < bounds.min {
                 return Err(EngineError::InvalidAction(
@@ -4039,7 +4045,9 @@ fn assign_attach_attachment_declared_targets(
         }
     } else if let Some(target) = targets.get(*next_target) {
         ability.targets.push(target.clone());
-        ability.bind_attach_attachment_target(target.clone());
+        if let Some(binding) = attach_object_binding(state, target)? {
+            ability.bind_attach_attachment_target(binding);
+        }
         *next_target += 1;
     } else if !allow_skip {
         return Err(EngineError::InvalidAction(
@@ -4047,6 +4055,26 @@ fn assign_attach_attachment_declared_targets(
         ));
     }
     Ok(())
+}
+
+/// Captures the exact incarnation of an object selected into an attachment
+/// role, so a later object reusing its storage ID cannot satisfy that role.
+fn attach_object_binding(
+    state: &GameState,
+    target: &TargetRef,
+) -> Result<Option<ObjectIncarnationRef>, EngineError> {
+    let TargetRef::Object(object_id) = target else {
+        return Ok(None);
+    };
+    Ok(Some(
+        state
+            .objects
+            .get(object_id)
+            .map(ObjectIncarnationRef::from_object)
+            .ok_or_else(|| {
+                EngineError::InvalidAction("Selected attachment left play".to_string())
+            })?,
+    ))
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
@@ -6712,7 +6740,9 @@ fn assign_targets_recursive(
             if attach_host_filter_needs_target_slot(&target) {
                 if let Some(target) = targets.get(*next_target) {
                     ability.targets.push(target.clone());
-                    ability.bind_attach_host_target(target.clone());
+                    if let Some(binding) = attach_object_binding(state, target)? {
+                        ability.bind_attach_host_target(binding);
+                    }
                     *next_target += 1;
                 } else if !ability.optional_targeting {
                     return Err(EngineError::InvalidAction(
@@ -7078,7 +7108,9 @@ fn assign_selected_slots_recursive(
                 match selected_slot {
                     Some(target) => {
                         ability.targets.push(target.clone());
-                        ability.bind_attach_host_target(target.clone());
+                        if let Some(binding) = attach_object_binding(state, target)? {
+                            ability.bind_attach_host_target(binding);
+                        }
                     }
                     None if ability.optional_targeting => {}
                     None => {
