@@ -11,7 +11,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const SOKKA_AND_SUKI_ORACLE: &str = "Whenever Sokka and Suki or another Ally you control enters, \
@@ -80,7 +80,15 @@ fn paid_instead_attach_fixture() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         .with_subtypes(vec!["Equipment"])
         .id();
     let host = scenario.add_creature(P0, "Paid Instead Host", 2, 2).id();
-    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
     let spell = scenario
         .add_spell_to_hand(P0, "Paid Instead Attach", false)
         .with_mana_cost(ManaCost::zero())
