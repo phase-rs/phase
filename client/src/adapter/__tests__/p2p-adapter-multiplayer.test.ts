@@ -12,7 +12,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult } from "../types";
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
@@ -62,7 +62,7 @@ const persistenceMocks = vi.hoisted(() => ({
   clearP2PHostSession: vi.fn(async () => undefined),
   saveGame: vi.fn(async () => undefined),
   saveP2PHostSession: vi.fn(async () => undefined),
-  saveResumableGameStrict: vi.fn(async () => undefined),
+  saveResumableGameStrict: vi.fn<() => Promise<void>>(async () => undefined),
 }));
 
 vi.mock("../../services/gamePersistence", async (orig) => {
@@ -133,7 +133,7 @@ const mocks = vi.hoisted(() => {
       result: { events: [], log_entries: [] },
     })),
     exportPersistenceState: vi.fn(async () => JSON.stringify({ players: [], objects: {} })),
-    resumeMultiplayerHostState: vi.fn(async () => ({
+    resumeMultiplayerHostState: vi.fn<() => Promise<RestoredGameStateResult>>(async () => ({
       snapshot: {
         state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } },
         legalResult: { actions: [], autoPassRecommended: false },
