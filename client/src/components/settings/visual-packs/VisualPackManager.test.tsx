@@ -88,8 +88,8 @@ describe("VisualPackManager initialization", () => {
   it("treats plain web as unavailable without making lifecycle calls", async () => {
     platform.load.mockResolvedValue(null);
     render(<VisualPackManager />);
-    expect(await screen.findByText(/not configured in this build/i)).toBeInTheDocument();
-    expect(screen.getByText(/trusted catalog-signing policy/i)).toBeInTheDocument();
+    expect(await screen.findByText(/local storage features required/i)).toBeInTheDocument();
+    expect(screen.getByText(/Cache Storage, IndexedDB, and gzip decompression/i)).toBeInTheDocument();
     expect(platform.load).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: /install/i })).not.toBeInTheDocument();
   });
@@ -103,7 +103,7 @@ describe("VisualPackManager initialization", () => {
     vi.mocked(fixture.value.subscribeRevision).mockImplementation(async () => { calls.push("revision"); return revisionUnlisten; });
     platform.load.mockResolvedValue(fixture.value);
     const view = render(<VisualPackManager />);
-    expect(await screen.findByText(/Installed catalog status/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Offline card images/i)).toBeInTheDocument();
     expect(calls).toEqual(["status", "progress", "revision"]);
     view.unmount();
     expect(progressUnlisten).toHaveBeenCalledTimes(1);
@@ -147,7 +147,7 @@ describe("VisualPackManager initialization", () => {
     await waitFor(() => expect(fixture.value.catalogStatus).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     retriedStatus.resolve({ status: "ready", summary: summary() });
-    expect(await screen.findByText(/Installed catalog status/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Offline card images/i)).toBeInTheDocument();
     expect(platform.load).toHaveBeenCalledTimes(1);
     expect(fixture.value.catalogStatus).toHaveBeenCalledTimes(2);
     expect(fixture.value.subscribeProgress).toHaveBeenCalledTimes(1);
@@ -159,7 +159,7 @@ describe("VisualPackManager initialization", () => {
     vi.mocked(fixture.value.catalogSummary).mockResolvedValue(summary(ROOT_B, "90071992547409931"));
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Installed catalog status/i);
+    await screen.findByText(/Offline card images/i);
     fixture.emitRevision({ cause: "remove", operationId: null, catalogRoot: ROOT_B, revision: installedRevision("90071992547409931") });
     expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
     fixture.emitProgress({
@@ -180,7 +180,7 @@ describe("VisualPackManager initialization", () => {
     vi.mocked(fixture.value.refreshCatalog).mockResolvedValue(summary(ROOT_B));
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Installed catalog status/i);
+    await screen.findByText(/Offline card images/i);
     fireEvent.click(screen.getByRole("button", { name: /verify metadata/i }));
     fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
     expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
@@ -193,7 +193,7 @@ describe("VisualPackManager initialization", () => {
     vi.mocked(fixture.value.refreshCatalog).mockResolvedValue(summary(ROOT_B));
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Installed catalog status/i);
+    await screen.findByText(/Offline card images/i);
     fireEvent.click(screen.getByRole("button", { name: /estimate download/i }));
     expect(await screen.findByText(/Backend estimate and dependency closure/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
@@ -210,7 +210,7 @@ describe("VisualPackManager initialization", () => {
     vi.mocked(fixture.value.verify).mockReturnValue(verification.promise);
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Installed catalog status/i);
+    await screen.findByText(/Offline card images/i);
     fireEvent.click(screen.getByRole("button", { name: /estimate download/i }));
     fireEvent.click(screen.getByRole("button", { name: /verify metadata/i }));
     expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
