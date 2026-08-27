@@ -965,6 +965,7 @@ fn strax_choose_a_player_at_random_records_random_selection() {
         Effect::Choose {
             choice_type:
                 ChoiceType::Player {
+                    population: PlayerChoicePopulation::All,
                     distinctness: PlayerChoiceDistinctness::Independent,
                 },
             selection,
@@ -991,6 +992,7 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
             def.effect.as_ref(),
             Effect::Choose {
                 choice_type: ChoiceType::Player {
+                    population: PlayerChoicePopulation::All,
                     distinctness: PlayerChoiceDistinctness::Independent
                 },
                 ..
@@ -1023,6 +1025,7 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
             node2.effect.as_ref(),
             Effect::Choose {
                 choice_type: ChoiceType::Player {
+                    population: PlayerChoicePopulation::All,
                     distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
                 },
                 ..
@@ -1051,6 +1054,7 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
             node4.effect.as_ref(),
             Effect::Choose {
                 choice_type: ChoiceType::Player {
+                    population: PlayerChoicePopulation::All,
                     distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices
                 },
                 ..

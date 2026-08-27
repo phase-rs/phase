@@ -644,6 +644,19 @@ pub enum PlayerChoiceDistinctness {
     DistinctFromPriorChoices,
 }
 
+/// Which players a resolution-time `ChoiceType::Player` instruction may offer.
+/// Kept as a parameter on the existing player-choice primitive so callers can
+/// narrow the population without introducing one-off choice effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PlayerChoicePopulation {
+    /// CR 102.1: every player still in the game.
+    #[default]
+    All,
+    /// CR 805.9: one of the active players, chosen by the ability's controller
+    /// when the effect is applied.
+    ActivePlayers,
+}
+
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
@@ -740,11 +753,11 @@ pub enum ChoiceType {
         restriction: Option<Box<PlayerFilter>>,
         distinctness: PlayerChoiceDistinctness,
     },
-    /// "Choose a player" — selects any player in the game. `distinctness`
+    /// "Choose a player" — selects a player from `population`. `distinctness`
     /// (CR 608.2c) governs whether this pick must exclude players already
-    /// chosen by an earlier `Opponent`/`Player` choice in the same
-    /// resolution — see [`PlayerChoiceDistinctness`].
+    /// chosen by an earlier `Opponent`/`Player` choice in the same resolution.
     Player {
+        population: PlayerChoicePopulation,
         distinctness: PlayerChoiceDistinctness,
     },
     /// "Choose two colors" — selects two distinct mana colors.
@@ -875,6 +888,15 @@ impl ChoiceType {
     /// resolution.
     pub fn player() -> Self {
         Self::Player {
+            population: PlayerChoicePopulation::All,
+            distinctness: PlayerChoiceDistinctness::Independent,
+        }
+    }
+
+    /// CR 805.9: choose one specific active player as the effect is applied.
+    pub fn active_player() -> Self {
+        Self::Player {
+            population: PlayerChoicePopulation::ActivePlayers,
             distinctness: PlayerChoiceDistinctness::Independent,
         }
     }
@@ -883,6 +905,7 @@ impl ChoiceType {
     /// must exclude players already chosen earlier in this resolution.
     pub fn player_distinct_from_prior() -> Self {
         Self::Player {
+            population: PlayerChoicePopulation::All,
             distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
         }
     }
@@ -1134,17 +1157,34 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
-            // Serialize the default-distinctness form as the legacy unit
-            // variant "Player" so existing card-data JSON stays byte-stable;
-            // only emit the struct form when `distinctness` is non-default
-            // (Gluntch, the Bestower's ordinal-cued picks).
-            Self::Player { distinctness } => {
-                if *distinctness == PlayerChoiceDistinctness::Independent {
+            // Serialize the default-population/default-distinctness form as
+            // the legacy unit variant "Player" so existing card-data JSON
+            // stays byte-stable; emit the struct form only for a narrowed
+            // population or ordinal-cued distinctness.
+            Self::Player {
+                population,
+                distinctness,
+            } => {
+                let non_default_population = *population != PlayerChoicePopulation::All;
+                let non_default_distinctness =
+                    *distinctness != PlayerChoiceDistinctness::Independent;
+                if !non_default_population && !non_default_distinctness {
                     serializer.serialize_unit_variant("ChoiceType", 10, "Player")
                 } else {
-                    let mut variant =
-                        serializer.serialize_struct_variant("ChoiceType", 10, "Player", 1)?;
-                    variant.serialize_field("distinctness", distinctness)?;
+                    let field_count =
+                        non_default_population as usize + non_default_distinctness as usize;
+                    let mut variant = serializer.serialize_struct_variant(
+                        "ChoiceType",
+                        10,
+                        "Player",
+                        field_count,
+                    )?;
+                    if non_default_population {
+                        variant.serialize_field("population", population)?;
+                    }
+                    if non_default_distinctness {
+                        variant.serialize_field("distinctness", distinctness)?;
+                    }
                     variant.end()
                 }
             }
@@ -1234,6 +1274,8 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             Player {
                 #[serde(default)]
+                population: PlayerChoicePopulation,
+                #[serde(default)]
                 distinctness: PlayerChoiceDistinctness,
             },
             Keyword {
@@ -1309,7 +1351,13 @@ impl<'de> Deserialize<'de> for ChoiceType {
                     restriction,
                     distinctness,
                 }),
-                ChoiceTypeData::Player { distinctness } => Ok(Self::Player { distinctness }),
+                ChoiceTypeData::Player {
+                    population,
+                    distinctness,
+                } => Ok(Self::Player {
+                    population,
+                    distinctness,
+                }),
                 ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
                 ChoiceTypeData::CounterKind { options } => Ok(Self::CounterKind { options }),
             },
@@ -6821,6 +6869,10 @@ pub enum QuantityRef {
     /// is the default reading; `Target`, `Opponent { .. }`, and `AllPlayers`
     /// cover targeted-player and cross-player aggregate variants.
     HandSize { player: PlayerScope },
+    /// CR 608.2i: The number of untapped lands `player` controlled at the
+    /// beginning of the current turn. This is a look-back into the committed
+    /// beginning-of-turn snapshot, not a live battlefield count.
+    UntappedLandsAtTurnStart { player: PlayerScope },
     /// CR 119: `player`'s current life total. See `HandSize` for player-axis
     /// semantics.
     LifeTotal { player: PlayerScope },
@@ -7710,6 +7762,7 @@ impl QuantityRef {
     pub(crate) fn player_scope_mut(&mut self) -> Option<&mut PlayerScope> {
         match self {
             QuantityRef::HandSize { player }
+            | QuantityRef::UntappedLandsAtTurnStart { player }
             | QuantityRef::LifeTotal { player }
             | QuantityRef::GraveyardSize { player }
             | QuantityRef::LifeLostThisTurn { player }
@@ -23789,6 +23842,26 @@ pub enum DieResultFilter {
 }
 
 /// Trigger definition with typed fields. Zero params HashMap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PhaseTriggerFanout {
+    /// One trigger for the phase or step, including ordinary "each upkeep"
+    /// wording that does not refer back to an individual player.
+    #[default]
+    Single,
+    /// CR 805.4d: One trigger for each appropriate player on the active team
+    /// when an "each player's" phase trigger refers back to that player.
+    EachPlayer,
+    /// CR 805.4d: One trigger for each appropriate opponent on the active team
+    /// when an "each opponent's" phase trigger refers back to that opponent.
+    EachOpponent,
+}
+
+impl PhaseTriggerFanout {
+    pub fn is_single(&self) -> bool {
+        matches!(self, Self::Single)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
     pub mode: TriggerMode,
@@ -23828,6 +23901,10 @@ pub struct TriggerDefinition {
     pub trigger_zones: Vec<Zone>,
     #[serde(default)]
     pub phase: Option<Phase>,
+    /// CR 805.4d: Shared-team-turn phase triggers that refer to "that player"
+    /// trigger once for each appropriate player, rather than once for the team.
+    #[serde(default, skip_serializing_if = "PhaseTriggerFanout::is_single")]
+    pub phase_fanout: PhaseTriggerFanout,
     #[serde(default)]
     pub optional: bool,
     /// CR 120.3: Filter for combat vs noncombat damage on damage triggers.
@@ -24487,6 +24564,7 @@ impl TriggerDefinition {
             destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![],
             phase: None,
+            phase_fanout: PhaseTriggerFanout::Single,
             optional: false,
             damage_kind: DamageKindFilter::Any,
             secondary: false,
@@ -26678,6 +26756,12 @@ pub struct ResolvedAbility {
     /// controller while the instruction affects another player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scoped_player: Option<PlayerId>,
+    /// CR 805.4d: Shared-team phase fanout binds one individual participant.
+    /// More generally, this identifies the player whose explicit per-player
+    /// iteration this chain represents. Unlike `scoped_player`, it is absent for
+    /// ordinary context and preserves provenance for persistent choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout_player: Option<PlayerId>,
     /// The kind of ability this was (activated, triggered, static, etc.).
     /// Carried through from `AbilityDefinition` to allow resolution guards (e.g. skipping
     /// `BeginGame` abilities during normal stack resolution).
@@ -27002,6 +27086,7 @@ impl ResolvedAbility {
             controller,
             original_controller: None,
             scoped_player: None,
+            fanout_player: None,
             kind: AbilityKind::default(),
             sub_ability: None,
             else_ability: None,
@@ -27872,6 +27957,18 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_scoped_player_recursive(player);
+        }
+    }
+
+    /// CR 805.4d: Stamp the individual participant represented by a shared-team
+    /// phase firing. `player_scope` fanout uses the same runtime provenance seam.
+    pub fn set_fanout_player_recursive(&mut self, player: PlayerId) {
+        self.fanout_player = Some(player);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_fanout_player_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_fanout_player_recursive(player);
         }
     }
 
@@ -29616,6 +29713,19 @@ mod tests {
     }
 
     #[test]
+    fn choice_type_active_player_population_serde_round_trips() {
+        let original = ChoiceType::active_player();
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            json, r#"{"Player":{"population":"ActivePlayers"}}"#,
+            "only the non-default population should be emitted"
+        );
+
+        let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
     fn restricted_color_choice_value_rejects_excluded_color() {
         assert_eq!(
             ChoiceValue::from_choice(
@@ -30041,6 +30151,7 @@ mod tests {
             destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![Zone::Battlefield],
             phase: None,
+            phase_fanout: PhaseTriggerFanout::Single,
             optional: false,
             damage_kind: DamageKindFilter::Any,
             secondary: false,
@@ -30072,6 +30183,29 @@ mod tests {
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(trigger, deserialized);
+    }
+
+    #[test]
+    fn phase_trigger_fanout_roundtrips_and_defaults_to_single() {
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+        trigger.phase_fanout = PhaseTriggerFanout::EachPlayer;
+        let json = serde_json::to_value(&trigger).unwrap();
+        assert_eq!(json["phase_fanout"], "EachPlayer");
+        assert_eq!(
+            serde_json::from_value::<TriggerDefinition>(json)
+                .unwrap()
+                .phase_fanout,
+            PhaseTriggerFanout::EachPlayer
+        );
+
+        let legacy = serde_json::to_value(TriggerDefinition::new(TriggerMode::Phase)).unwrap();
+        assert!(legacy.get("phase_fanout").is_none());
+        assert_eq!(
+            serde_json::from_value::<TriggerDefinition>(legacy)
+                .unwrap()
+                .phase_fanout,
+            PhaseTriggerFanout::Single
+        );
     }
 
     #[test]
@@ -32558,11 +32692,22 @@ mod monarch_subject_axis_tests {
         assert!(player.duration_timing_only());
 
         assert!(PlayerScope::SpecificPlayer { id: PlayerId(3) }.duration_timing_only());
-        // Everything the parser can actually emit must NOT be rejected.
+        // Every value-capable scope must NOT be rejected.
         for ok in [
             PlayerScope::Controller,
             PlayerScope::ScopedPlayer,
+            PlayerScope::Target,
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Sum,
+                exclude: Some(Box::new(PlayerScope::Controller)),
+            },
+            PlayerScope::RecipientController,
             PlayerScope::DefendingPlayer,
+            PlayerScope::ParentObjectTargetController,
+            PlayerScope::SourceChosenPlayer,
         ] {
             assert!(!ok.duration_timing_only(), "{ok:?} must resolve normally");
         }
@@ -32627,6 +32772,17 @@ mod monarch_subject_axis_tests {
             player: PlayerScope::ScopedPlayer,
         };
         assert!(hand.player_scope_mut().is_some());
+
+        let mut historical_lands = QuantityRef::UntappedLandsAtTurnStart {
+            player: PlayerScope::ScopedPlayer,
+        };
+        *historical_lands.player_scope_mut().unwrap() = PlayerScope::DefendingPlayer;
+        assert_eq!(
+            historical_lands,
+            QuantityRef::UntappedLandsAtTurnStart {
+                player: PlayerScope::DefendingPlayer
+            }
+        );
 
         let mut object_axis = QuantityRef::SelfManaValue;
         assert!(object_axis.player_scope_mut().is_none());

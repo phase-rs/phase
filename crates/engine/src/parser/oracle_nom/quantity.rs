@@ -643,6 +643,17 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
     Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
 }
 
+/// CR 608.2i: "untapped land(s) they controlled at the beginning of this
+/// turn" is a player-scoped look-back, bound to the current each-player
+/// recipient by the pronoun "they".
+fn parse_untapped_lands_at_turn_start(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("untapped land").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, player) = value(PlayerScope::ScopedPlayer, tag(" they controlled")).parse(rest)?;
+    let (rest, _) = tag(" at the beginning of this turn").parse(rest)?;
+    Ok((rest, QuantityRef::UntappedLandsAtTurnStart { player }))
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -1843,6 +1854,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_number_of_cards_drawn_this_turn,
             parse_number_of_cards_discarded_this_turn,
+            parse_untapped_lands_at_turn_start,
         )),
         // CR 109.4: "<type> <controller> with <keyword>" — controller-scoped
         // count restricted to a keyword; must precede
@@ -6390,6 +6402,42 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_untapped_lands_at_turn_start_accepts_exact_singular_and_plural() {
+        for phrase in [
+            "untapped land they controlled at the beginning of this turn",
+            "untapped lands they controlled at the beginning of this turn",
+        ] {
+            let (rest, quantity) = parse_untapped_lands_at_turn_start(phrase)
+                .unwrap_or_else(|error| panic!("{phrase:?} should parse: {error:?}"));
+            assert_eq!(rest, "");
+            assert_eq!(
+                quantity,
+                QuantityRef::UntappedLandsAtTurnStart {
+                    player: PlayerScope::ScopedPlayer,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_untapped_lands_at_turn_start_rejects_adjacent_phrases() {
+        for phrase in [
+            "tapped lands they controlled at the beginning of this turn",
+            "untapped creatures they controlled at the beginning of this turn",
+            "untapped lands you controlled at the beginning of this turn",
+            "untapped lands that player controlled at the beginning of this turn",
+            "untapped lands the chosen player controlled at the beginning of this turn",
+            "untapped lands they controlled at the beginning of the last turn",
+            "untapped lands they controlled at the beginning of their turn",
+        ] {
+            assert!(
+                parse_untapped_lands_at_turn_start(phrase).is_err(),
+                "{phrase:?} must remain outside the frozen grammar"
+            );
+        }
+    }
     use crate::types::ability::{
         AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,

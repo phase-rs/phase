@@ -111,8 +111,8 @@ use crate::types::ability::{
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
     MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
     PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    PlayerChoicePopulation, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
     RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
@@ -8415,7 +8415,13 @@ fn try_parse_choose_player_to_verb(
         } else {
             PlayerChoiceDistinctness::Independent
         };
-        Ok::<_, nom::Err<OracleError<'_>>>((i, ChoiceType::Player { distinctness }))
+        Ok::<_, nom::Err<OracleError<'_>>>((
+            i,
+            ChoiceType::Player {
+                population: PlayerChoicePopulation::All,
+                distinctness,
+            },
+        ))
     };
     let opponent_arm = value(
         ChoiceType::opponent(),
@@ -8925,36 +8931,55 @@ fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
     }
 }
 
-/// Rewrite a moved-object filter's controller/owner scope `from` → `to`, recursing
-/// through `And`/`Or`/`Not` composites. The general building block for controller-
-/// scope rebinding; `rebind_owned_scope` above is the pre-existing
-/// `ScopedPlayer → <target>` specialization kept as-is per the #6505 review.
+/// Rewrite a filter's controller/owner scope `from` → `to`, recursing through
+/// composed filters. Returns whether any reference was rebound. The general
+/// building block for controller-scope rebinding; `rebind_owned_scope` above is
+/// the pre-existing `ScopedPlayer → <target>` specialization kept as-is per
+/// the #6505 review.
 ///
 /// CR 109.4 + CR 115.10a (issue #6505): used to lift a battlefield resolution-pick
 /// leg's default `You` scope (the anaphoric "they control" lowered without a
 /// parse-time relative-scope pin) to `ScopedPlayer`, so the resolution-time
 /// `scoped_player` stamp binds the chooser to the target player, not the caster.
-fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: ControllerRef) {
+/// CR 805.9: also binds an `ActivePlayer` reference to the specific active player
+/// chosen by the ability's controller as the effect is applied.
+pub(crate) fn rebind_controller_scope(
+    filter: &mut TargetFilter,
+    from: ControllerRef,
+    to: ControllerRef,
+) -> bool {
     use crate::types::ability::FilterProp;
     match filter {
         TargetFilter::Typed(tf) => {
+            let mut rebound = false;
             if tf.controller.as_ref() == Some(&from) {
                 tf.controller = Some(to.clone());
+                rebound = true;
             }
             for prop in tf.properties.iter_mut() {
                 if let FilterProp::Owned { controller } = prop {
                     if *controller == from {
                         *controller = to.clone();
+                        rebound = true;
                     }
                 }
             }
+            rebound
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            let mut rebound = false;
             for f in filters.iter_mut() {
-                rebind_controller_scope(f, from.clone(), to.clone());
+                rebound |= rebind_controller_scope(f, from.clone(), to.clone());
             }
+            rebound
         }
-        TargetFilter::Not { filter } => rebind_controller_scope(filter, from, to),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_controller_scope(filter, from, to)
+        }
+        TargetFilter::StackAbility { controller, .. } if controller.as_ref() == Some(&from) => {
+            *controller = Some(to);
+            true
+        }
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -8980,7 +9005,6 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -9005,7 +9029,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
-        | TargetFilter::AllPlayers => {}
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -28646,6 +28670,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
+            | QuantityRef::UntappedLandsAtTurnStart { player }
             | QuantityRef::LifeLostThisTurn { player }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
@@ -28773,6 +28798,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     player: PlayerScope::Target,
                 } => {
                     *qty = QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
+                QuantityRef::UntappedLandsAtTurnStart {
+                    player: PlayerScope::Target,
+                } => {
+                    *qty = QuantityRef::UntappedLandsAtTurnStart {
                         player: PlayerScope::ScopedPlayer,
                     }
                 }
@@ -28965,6 +28997,7 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
             QuantityExpr::Ref { qty } => match qty {
                 QuantityRef::LifeTotal { player }
                 | QuantityRef::HandSize { player }
+                | QuantityRef::UntappedLandsAtTurnStart { player }
                 | QuantityRef::LifeLostThisTurn { player }
                 | QuantityRef::LifeGainedThisTurn { player }
                 | QuantityRef::PartySize { player }
@@ -29029,6 +29062,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
             QuantityExpr::Ref { qty } => match qty {
                 QuantityRef::LifeTotal { player }
                 | QuantityRef::HandSize { player }
+                | QuantityRef::UntappedLandsAtTurnStart { player }
                 | QuantityRef::LifeLostThisTurn { player }
                 | QuantityRef::LifeGainedThisTurn { player }
                 | QuantityRef::PartySize { player }
@@ -37063,6 +37097,65 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod untapped_lands_scope_rewrite_tests {
+    use super::*;
+
+    fn lands(player: PlayerScope) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::UntappedLandsAtTurnStart { player },
+        }
+    }
+
+    fn damage_with(player: PlayerScope) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: lands(player),
+                target: TargetFilter::ScopedPlayer,
+                damage_source: None,
+                excess: None,
+            },
+        )
+    }
+
+    fn amount_scope(def: &AbilityDefinition) -> &PlayerScope {
+        let Effect::DealDamage { amount, .. } = def.effect.as_ref() else {
+            panic!("expected DealDamage");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::UntappedLandsAtTurnStart { player },
+        } = amount
+        else {
+            panic!("expected historical land quantity");
+        };
+        player
+    }
+
+    #[test]
+    fn historical_land_quantity_uses_all_existing_player_scope_rewrites() {
+        let mut condition = lands(PlayerScope::Controller);
+        rewrite_condition_quantity_expr(&mut condition);
+        assert_eq!(
+            condition,
+            lands(PlayerScope::ScopedPlayer),
+            "condition controller scope must follow the each-player iteration"
+        );
+
+        let mut each_player = damage_with(PlayerScope::Target);
+        rewrite_player_scope_refs(&mut each_player);
+        assert_eq!(amount_scope(&each_player), &PlayerScope::ScopedPlayer);
+
+        let mut chosen = damage_with(PlayerScope::Controller);
+        rewrite_player_quantity_refs_to_source_chosen(&mut chosen);
+        assert_eq!(amount_scope(&chosen), &PlayerScope::SourceChosenPlayer);
+
+        let mut event = damage_with(PlayerScope::Target);
+        rewrite_event_player_quantity_refs_to_scoped(&mut event);
+        assert_eq!(amount_scope(&event), &PlayerScope::ScopedPlayer);
+    }
+}
 
 #[cfg(test)]
 mod gendered_still_type_tests {

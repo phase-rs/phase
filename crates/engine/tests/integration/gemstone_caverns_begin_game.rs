@@ -289,6 +289,10 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         .collect::<Vec<_>>();
 
     // The begin-game opt-in for Gemstone Caverns must be surfaced to P1.
+    assert_eq!(
+        state.beginning_of_turn_snapshot, None,
+        "CR 103.6 + CR 500.1: the first-turn snapshot must not commit while a begin-game optional choice is pending"
+    );
     let WaitingFor::OptionalEffectChoice { player, .. } = &state.waiting_for else {
         panic!(
             "expected begin-game OptionalEffectChoice prompt, got {:?}",
@@ -305,6 +309,11 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
     )
     .expect("accepting the begin-game opt-in must succeed");
     state.waiting_for = result.waiting_for;
+
+    assert_eq!(
+        state.beginning_of_turn_snapshot, None,
+        "CR 103.6 + CR 500.1: the snapshot must remain unavailable until the accepted ability's exile rider finishes"
+    );
 
     // CR 103.6a: Gemstone Caverns is now on the battlefield.
     assert_eq!(
@@ -392,9 +401,26 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         "Gemstone Caverns retains its luck counter after the exile rider"
     );
     assert!(
-        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == PlayerId(1)),
-        "begin-game resolution must drain to P1 priority, got {:?}",
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == PlayerId(0)),
+        "completed pregame resolution must enter the starting player's first-turn priority, got {:?}",
         state.waiting_for
+    );
+    assert!(
+        !state.objects[&gemstone_id].tapped
+            && state.objects[&gemstone_id]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Land),
+        "the accepted Gemstone Caverns must be an untapped Land at first-turn capture"
+    );
+    let snapshot = state
+        .beginning_of_turn_snapshot
+        .as_ref()
+        .expect("first-turn begin-game continuation must capture the snapshot");
+    assert_eq!(snapshot.turn_number, 1);
+    assert_eq!(
+        snapshot.untapped_lands_controlled[&PlayerId(1)], 1,
+        "the non-starting player's Gemstone Caverns must be included after the begin-game queue drains"
     );
 
     let runtime_mana_ability = &state.objects[&gemstone_id].abilities[gemstone_mana_ability_index];
@@ -403,6 +429,13 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         is_mana_ability(runtime_mana_ability),
         "the exported Gemstone mana ability must be present on its runtime object"
     );
+    // The assertion above deliberately pins the real first-turn priority to the
+    // starting player. Move the test harness to P1's later priority window before
+    // exercising Gemstone Caverns' independent mana-ability contract.
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
     let result = apply(
         &mut state,
         PlayerId(1),

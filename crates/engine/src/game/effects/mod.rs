@@ -3374,6 +3374,7 @@ fn quantity_ref_counts_population_matching(
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
         // resolution/turn counters, and cost bookkeeping.
         QuantityRef::HandSize { .. }
+        | QuantityRef::UntappedLandsAtTurnStart { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
@@ -9673,6 +9674,7 @@ pub(crate) fn drain_pending_discard_batch(
             scoped.set_original_controller_recursive(fan_out.original_controller);
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
+            scoped.set_fanout_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, 1)?;
             if state.waiting_for == initial_waiting_for {
                 continue;
@@ -9708,6 +9710,7 @@ pub(crate) fn drain_pending_discard_batch(
                 remaining_scoped.set_original_controller_recursive(fan_out.original_controller);
                 remaining_scoped.set_controller_recursive(remaining_pid);
                 remaining_scoped.set_scoped_player_recursive(remaining_pid);
+                remaining_scoped.set_fanout_player_recursive(remaining_pid);
                 remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
                 if let Some(prev) = tail {
                     super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
@@ -10601,16 +10604,12 @@ fn resolve_chain_body(
     };
     let ability = ability.as_ref();
 
-    // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
-    // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
-    // ("choose one of them at random") is resolved here, at the chain resolution
-    // point where a mutable ability is available, so the game-selected value
-    // lands on `chosen_players` / `targets` BEFORE the chain descends to a
-    // dependent sub (Strax's reflexive Fight scoped to the chosen player; River
-    // Song's Diary's `CastFromZone { target: ParentTarget }`). No interactive
-    // `WaitingFor::NamedChoice` / `ChooseFromZoneChoice` is raised. This mirrors
-    // the resolution-point handling of `TargetSelectionMode::Random` for targets.
-    let random_choice_owned;
+    // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: Resolve a random
+    // choice, or the sole legal active-player choice (CR 805.9), at this mutable
+    // chain seam. The selected value lands on `chosen_players` / `targets`
+    // BEFORE the chain descends to a dependent sub. Shared turns with multiple
+    // active players still publish `WaitingFor::NamedChoice` below.
+    let inline_choice_owned;
     let random_is_choose = matches!(
         &ability.effect,
         Effect::Choose { selection, .. }
@@ -10620,15 +10619,23 @@ fn resolve_chain_body(
         &ability.effect,
         Effect::ChooseFromZone { selection, .. } if selection.is_random()
     );
-    let (ability, random_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
+    let (ability, inline_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
         let mut owned = ability.clone();
         if random_is_choose {
             choose::resolve_random_in_chain(state, &mut owned, events);
         } else {
             choose_from_zone::resolve_random_in_chain(state, &mut owned, events);
         }
-        random_choice_owned = owned;
-        (&random_choice_owned, true)
+        inline_choice_owned = owned;
+        (&inline_choice_owned, true)
+    } else if choose::is_active_player_choice(ability) {
+        let mut owned = ability.clone();
+        if choose::resolve_single_active_player_in_chain(state, &mut owned, events) {
+            inline_choice_owned = owned;
+            (&inline_choice_owned, true)
+        } else {
+            (ability, false)
+        }
     } else {
         (ability, false)
     };
@@ -10828,6 +10835,7 @@ fn resolve_chain_body(
             // keeping "you" references stable (CR 109.5).
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
+            scoped.set_fanout_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -10897,6 +10905,7 @@ fn resolve_chain_body(
                     // the iterating player.
                     remaining_scoped.set_controller_recursive(remaining_pid);
                     remaining_scoped.set_scoped_player_recursive(remaining_pid);
+                    remaining_scoped.set_fanout_player_recursive(remaining_pid);
                     // CR 608.2c: each remaining player's clause is an INDEPENDENT
                     // following instruction, not a continuation of the prior
                     // player's. When the scoped template carries a conditional
@@ -11672,9 +11681,9 @@ fn resolve_chain_body(
     let events_before = events.len();
     let mut immediate_effect_result = None;
 
-    // Skip no-op unimplemented/runtime-handled effects, and a random
-    // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
-    if !random_choice_resolved
+    // Skip no-op unimplemented/runtime-handled effects, and a named choice
+    // already resolved inline above (random or a sole active player).
+    if !inline_choice_resolved
         && !matches!(
             ability.effect,
             Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }

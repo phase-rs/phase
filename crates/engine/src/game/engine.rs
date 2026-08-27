@@ -6858,6 +6858,18 @@ pub(super) fn resume_pending_continuation_if_priority(
         }
     }
     settle_resolving_stack_entry_after_continuation_resume(state);
+    // CR 103.6 + CR 500.1: an interactive beginning-of-game ability can pause
+    // in any ordinary resolution choice, not only OptionalEffectChoice. Once
+    // that choice and its continuation have drained back to Priority, resume
+    // the pregame queue so the first turn (and its beginning-of-turn snapshot)
+    // cannot start early or remain permanently uncommitted.
+    if state.resolving_begin_game_abilities
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_none()
+        && state.active_spell_resolution().is_none()
+    {
+        state.waiting_for = super::mulligan::resume_begin_game_abilities(state, events);
+    }
     Ok(())
 }
 
@@ -15172,6 +15184,9 @@ pub fn start_game_with_starting_player(
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);
+        // CR 103.6 + CR 103.7 + CR 500.1: the no-library path still commits
+        // the first turn only after the pregame procedure finishes.
+        turns::capture_beginning_of_turn_snapshot(state);
         turns::auto_advance(state, &mut events)
     };
 
@@ -15209,6 +15224,9 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     });
 
     crate::game::planechase::reveal_starting_plane(state);
+    // CR 103.6 + CR 103.7 + CR 500.1: this test/backward-compatible entry
+    // point skips mulligans but preserves the same first-turn snapshot seam.
+    turns::capture_beginning_of_turn_snapshot(state);
     let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
     bump_state_revision(state);

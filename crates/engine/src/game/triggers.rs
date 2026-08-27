@@ -8,11 +8,11 @@ use crate::types::ability::{
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
     DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
-    ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
-    TypeFilter, TypedFilter,
+    ObjectScope, OriginConstraint, PhaseTriggerFanout, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -63,6 +63,39 @@ use super::stack;
 
 // Re-export so existing paths stay valid.
 pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigger_registry};
+
+/// CR 805.4d: Expand a shared-team phase trigger into the individual players
+/// its parsed participant scope names. Outside shared-team turns there is only
+/// one active player, so the same typed scope naturally produces zero or one
+/// firing. This is a collection-time cardinality decision; the ordinary
+/// `(source, trigger index)` event dedup remains definition-level.
+fn phase_trigger_scoped_players(
+    state: &GameState,
+    trigger: &TriggerDefinition,
+    controller: PlayerId,
+) -> Vec<PlayerId> {
+    if !matches!(trigger.mode, TriggerMode::Phase) {
+        return vec![state.active_player];
+    }
+
+    match trigger.phase_fanout {
+        PhaseTriggerFanout::Single => vec![state.active_player],
+        PhaseTriggerFanout::EachPlayer | PhaseTriggerFanout::EachOpponent => {
+            let active_participants = if state.format_config.topology().has_shared_team_turns() {
+                super::topology::team_members(state, state.active_player)
+            } else {
+                vec![state.active_player]
+            };
+            active_participants
+                .into_iter()
+                .filter(|participant| {
+                    matches!(trigger.phase_fanout, PhaseTriggerFanout::EachPlayer)
+                        || super::topology::is_opponent(state, controller, *participant)
+                })
+                .collect()
+        }
+    }
+}
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
@@ -2394,7 +2427,12 @@ fn collect_matching_triggers_inner(
                     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if
                     // clauses read the defending player from each expanded attack
                     // event — the batch-level event is the wrong context.
-                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
+                    // CR 603.4 + CR 805.4d: Phase triggers that fan out across
+                    // a shared turn must check the condition after binding each
+                    // participant below. The PhaseChanged event carries only
+                    // the team representative and cannot answer for teammates.
+                    let skip_early_condition =
+                        matches!(trig_def.mode, TriggerMode::Attacks | TriggerMode::Phase);
                     if !skip_early_condition
                         && !check_trigger_condition_with_source(
                             state,
@@ -2642,6 +2680,7 @@ fn collect_matching_triggers_inner(
             } else {
                 vec![vec![event.clone()]]
             };
+            let scoped_phase_players = phase_trigger_scoped_players(state, trig_def, controller);
             for trigger_events in trigger_event_batches {
                 if batched_zone_change_replay_guard_applies(trig_def, &trigger_events)
                     && batched_zone_change_already_collected(
@@ -2656,24 +2695,6 @@ fn collect_matching_triggers_inner(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
-                // Batched triggers already check their fire-time condition in
-                // `matching_batched_trigger_events` against the full candidate
-                // event before it is reduced to the resolution context. Rechecking
-                // here would make event-count qualifiers read the narrowed context
-                // instead of the declaration that caused the trigger.
-                if !trig_def.batched {
-                    if let Some(ref condition) = trig_def.condition {
-                        if !check_trigger_condition_with_source(
-                            state,
-                            condition,
-                            controller,
-                            Some(&source_context),
-                            Some(&trigger_event),
-                        ) {
-                            continue;
-                        }
-                    }
-                }
                 // CR 603.2c: For batched triggers, stash the filtered subject
                 // count so the resolved ability's `EventContextAmount` reads
                 // "that many" as the number of matching subjects (Dragons that
@@ -2690,69 +2711,111 @@ fn collect_matching_triggers_inner(
                 } else {
                     None
                 };
-                let mut pending_ability = ability.clone();
-                if let GameEvent::CreatureEnlisted {
-                    tapped_snapshot, ..
-                } = &trigger_event
-                {
-                    // CR 608.2h + CR 113.7a: Enlist's linked trigger resolves
-                    // after the tapped creature may have left the battlefield, so
-                    // seed the cost-time LKI snapshot for "that creature's power."
-                    pending_ability
-                        .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
-                }
-                pending.push(MatchedTrigger {
-                    trig_idx,
-                    definition_ref: definition_ref.clone(),
-                    pending: PendingTrigger {
-                        source_id: obj_id,
-                        controller,
-                        condition: trig_def
-                            .condition
-                            .as_ref()
-                            .and_then(|condition| stack_condition_for_trigger(trig_def, condition)),
-                        ability: Box::new(pending_ability),
-                        timestamp,
-                        target_constraints: trig_def
-                            .execute
-                            .as_ref()
-                            .map(|execute| execute.target_constraints.clone())
-                            .unwrap_or_default(),
-                        distribute: trig_def
-                            .execute
-                            .as_ref()
-                            .and_then(|execute| execute.distribute.clone()),
-                        trigger_event: Some(trigger_event),
-                        modal: modal.clone(),
-                        mode_abilities: mode_abilities.clone(),
-                        description: trig_def.description.clone(),
-                        may_trigger_origin: match granted_keyword_kind {
-                            Some(kind) => Some(MayTriggerOrigin::Keyword { keyword: kind }),
-                            None => definition_ref.clone().map(|definition_ref| {
-                                MayTriggerOrigin::Definition { definition_ref }
-                            }),
-                        },
-                        subject_match_count,
-                        die_result: None,
-                        provenance: None,
-                    },
-                    trigger_events,
-                    // CR 603.2c + CR 120.4b: must consult the SAME
-                    // firing-granularity authority as the skip above. Note this
-                    // is deliberately NOT `trig_def.batched`, which additionally
-                    // means "count subjects" — see `fires_once_per_batch`.
+                for scoped_player in scoped_phase_players.iter().copied() {
+                    // Batched triggers already check their fire-time condition
+                    // in `matching_batched_trigger_events` against the full
+                    // candidate event before it is reduced to the resolution
+                    // context. Rechecking here would make event-count qualifiers
+                    // read the narrowed context instead of the declaration that
+                    // caused the trigger.
                     //
-                    // WIDENING THIS FIELD TOUCHES EIGHT CONSUMERS, not just the
-                    // `batched_this_pass` inserts: those five inserts, the
-                    // `RecordBatchedZoneChanges` gate, the batched zone-change
-                    // replay recorder, and the `debug_assert!(!matched.batched)`
-                    // on the settlement path. The two zone-change consumers are
-                    // additionally gated on `batched_zone_change_batch`, which is
-                    // false for a `DamageDealt` batch, so all eight are safe for
-                    // this axis today — but re-check every one before widening.
-                    batched: fires_once_per_batch(trig_def),
-                    constraint: trig_def.constraint.clone(),
-                });
+                    // CR 603.4 + CR 805.4d: A non-batched shared-phase trigger
+                    // checks its intervening-if separately for each participant
+                    // it names. The PhaseChanged event identifies only the team
+                    // representative, so the individual binding must be explicit.
+                    if !trig_def.batched {
+                        if let Some(ref condition) = trig_def.condition {
+                            let phase_participant = matches!(trig_def.mode, TriggerMode::Phase)
+                                .then_some(scoped_player);
+                            if !check_trigger_condition_with_source_for_scoped_player(
+                                state,
+                                condition,
+                                controller,
+                                Some(&source_context),
+                                Some(&trigger_event),
+                                phase_participant,
+                            ) {
+                                continue;
+                            }
+                        }
+                    }
+                    let mut pending_ability = ability.clone();
+                    // CR 805.4d: Every shared-turn firing owns the appropriate
+                    // individual player binding before it becomes a pending
+                    // trigger. The effect and all nested quantities therefore
+                    // read that player's row rather than the team representative.
+                    if matches!(trig_def.mode, TriggerMode::Phase) {
+                        pending_ability.set_scoped_player_recursive(scoped_player);
+                        if !matches!(trig_def.phase_fanout, PhaseTriggerFanout::Single) {
+                            // CR 805.4d: Preserve that this firing belongs to
+                            // one named shared-turn participant. A single phase
+                            // trigger still has phase context, but is not a
+                            // per-participant firing.
+                            pending_ability.set_fanout_player_recursive(scoped_player);
+                        }
+                    }
+                    if let GameEvent::CreatureEnlisted {
+                        tapped_snapshot, ..
+                    } = &trigger_event
+                    {
+                        // CR 608.2h + CR 113.7a: Enlist's linked trigger resolves
+                        // after the tapped creature may have left the battlefield, so
+                        // seed the cost-time LKI snapshot for "that creature's power."
+                        pending_ability
+                            .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
+                    }
+                    pending.push(MatchedTrigger {
+                        trig_idx,
+                        definition_ref: definition_ref.clone(),
+                        pending: PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: trig_def.condition.as_ref().and_then(|condition| {
+                                stack_condition_for_trigger(trig_def, condition)
+                            }),
+                            ability: Box::new(pending_ability),
+                            timestamp,
+                            target_constraints: trig_def
+                                .execute
+                                .as_ref()
+                                .map(|execute| execute.target_constraints.clone())
+                                .unwrap_or_default(),
+                            distribute: trig_def
+                                .execute
+                                .as_ref()
+                                .and_then(|execute| execute.distribute.clone()),
+                            trigger_event: Some(trigger_event.clone()),
+                            modal: modal.clone(),
+                            mode_abilities: mode_abilities.clone(),
+                            description: trig_def.description.clone(),
+                            may_trigger_origin: match granted_keyword_kind {
+                                Some(kind) => Some(MayTriggerOrigin::Keyword { keyword: kind }),
+                                None => definition_ref.clone().map(|definition_ref| {
+                                    MayTriggerOrigin::Definition { definition_ref }
+                                }),
+                            },
+                            subject_match_count,
+                            die_result: None,
+                            provenance: None,
+                        },
+                        trigger_events: trigger_events.clone(),
+                        // CR 603.2c + CR 120.4b: must consult the SAME
+                        // firing-granularity authority as the skip above. Note this
+                        // is deliberately NOT `trig_def.batched`, which additionally
+                        // means "count subjects" — see `fires_once_per_batch`.
+                        //
+                        // WIDENING THIS FIELD TOUCHES EIGHT CONSUMERS, not just the
+                        // `batched_this_pass` inserts: those five inserts, the
+                        // `RecordBatchedZoneChanges` gate, the batched zone-change
+                        // replay recorder, and the `debug_assert!(!matched.batched)`
+                        // on the settlement path. The two zone-change consumers are
+                        // additionally gated on `batched_zone_change_batch`, which is
+                        // false for a `DamageDealt` batch, so all eight are safe for
+                        // this axis today — but re-check every one before widening.
+                        batched: fires_once_per_batch(trig_def),
+                        constraint: trig_def.constraint.clone(),
+                    });
+                }
             }
         }
     }
@@ -7448,6 +7511,12 @@ pub(crate) fn seed_event_context_parent_targets(
                 return;
             }
             let Some(pin) = zone_change_parent_target_pin(event) else {
+                // CR 603.6: A malformed zone-change carrier cannot identify
+                // the object in its destination zone. Remove the source-only
+                // propagation fallback rather than substituting the ability's
+                // source for the event object.
+                ability.targets.clear();
+                ability.target_incarnations.clear();
                 return;
             };
             (Some(*object_id), Some(pin))
@@ -7495,7 +7564,12 @@ fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationR
         {
             return None;
         }
-        if from.is_some_and(|zone| zone != *to) {
+        // CR 400.7: The record-owned context is the pre-route identity
+        // authority. `from: None` can still represent a merge component that
+        // was routed from its absorbed battlefield identity into `to`; compare
+        // the captured expected zone, not the optional public origin, to decide
+        // whether the destination is the next incarnation.
+        if source.identity.expected_zone != *to {
             source.identity.reference.incarnation.checked_add(1)?
         } else {
             source.identity.reference.incarnation
@@ -8693,6 +8767,7 @@ fn resolve_accepted_triggered_mana_body(
         Some(super::stack::TriggeredResolutionScope {
             condition: trigger.condition.as_ref(),
             controller: trigger.controller,
+            scoped_player: trigger.ability.scoped_player,
             trigger_source: trigger.ability.trigger_source.as_ref(),
             trigger_event: trigger.trigger_event.as_ref(),
             subject_match_count: trigger.subject_match_count,
@@ -10697,6 +10772,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
             object_scope_unbound_at_fire_time(*scope)
         }
         QuantityRef::HandSize { player, .. }
+        | QuantityRef::UntappedLandsAtTurnStart { player }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
@@ -12871,6 +12947,28 @@ pub(crate) fn check_trigger_condition_with_source(
     source_context: Option<&TriggerSourceContext>,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
+    check_trigger_condition_with_source_for_scoped_player(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_event,
+        None,
+    )
+}
+
+/// CR 603.4 + CR 805.4d: Evaluate an intervening-if with an explicit player
+/// bound by a shared-team phase firing. The binding is supplied at collection
+/// and retained on the resolving ability, so both CR 603.4 checks inspect the
+/// same individual player rather than the team's active-player representative.
+pub(crate) fn check_trigger_condition_with_source_for_scoped_player(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_event: Option<&GameEvent>,
+    scoped_player: Option<PlayerId>,
+) -> bool {
     if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
         return false;
     }
@@ -12892,6 +12990,7 @@ pub(crate) fn check_trigger_condition_with_source(
         controller,
         source_context,
         trigger_event,
+        scoped_player,
     ) {
         return false;
     }
@@ -12902,6 +13001,7 @@ pub(crate) fn check_trigger_condition_with_source(
         controller,
         source_context,
         trigger_event,
+        scoped_player,
     )
 }
 
@@ -12927,6 +13027,7 @@ fn trigger_condition_designation_anchors_resolvable(
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     trigger_event: Option<&GameEvent>,
+    scoped_player: Option<PlayerId>,
 ) -> bool {
     if let Some(scope) = condition.designation_player_anchor() {
         return crate::game::quantity::resolve_player_scope_for_trigger_check(
@@ -12935,6 +13036,7 @@ fn trigger_condition_designation_anchors_resolvable(
             controller,
             source_context,
             trigger_event,
+            scoped_player,
         )
         .is_some();
     }
@@ -12947,6 +13049,7 @@ fn trigger_condition_designation_anchors_resolvable(
                     controller,
                     source_context,
                     trigger_event,
+                    scoped_player,
                 )
             })
         }
@@ -12956,6 +13059,7 @@ fn trigger_condition_designation_anchors_resolvable(
             controller,
             source_context,
             trigger_event,
+            scoped_player,
         ),
         _ => true,
     }
@@ -12970,6 +13074,7 @@ fn evaluate_trigger_condition_with_source(
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     trigger_event: Option<&GameEvent>,
+    scoped_player: Option<PlayerId>,
 ) -> bool {
     let source_id = source_context.map(|source| source.identity.reference.object_id);
     match condition {
@@ -13723,6 +13828,7 @@ fn evaluate_trigger_condition_with_source(
                 controller,
                 source_context,
                 trigger_event,
+                scoped_player,
             );
             let rhs = crate::game::quantity::resolve_quantity_for_trigger_check(
                 state,
@@ -13730,6 +13836,7 @@ fn evaluate_trigger_condition_with_source(
                 controller,
                 source_context,
                 trigger_event,
+                scoped_player,
             );
             comparator.evaluate(lhs, rhs)
         }
@@ -13799,6 +13906,7 @@ fn evaluate_trigger_condition_with_source(
                 controller,
                 source_context,
                 trigger_event,
+                scoped_player,
             )
             .is_some_and(|pid| eval_is_monarch(state, pid))
         }
@@ -14020,6 +14128,7 @@ fn evaluate_trigger_condition_with_source(
                 controller,
                 source_context,
                 trigger_event,
+                scoped_player,
             )
         }),
         TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
@@ -14029,6 +14138,7 @@ fn evaluate_trigger_condition_with_source(
                 controller,
                 source_context,
                 trigger_event,
+                scoped_player,
             )
         }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
@@ -14040,6 +14150,7 @@ fn evaluate_trigger_condition_with_source(
             controller,
             source_context,
             trigger_event,
+            scoped_player,
         ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
@@ -14879,6 +14990,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         // carries a `PlayerFilter`, not a `TargetFilter`, so it cannot embed a
         // `CostPaidObject` object reference.
         QuantityRef::HandSize { .. }
+        | QuantityRef::UntappedLandsAtTurnStart { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
@@ -16294,6 +16406,37 @@ pub mod tests {
         TriggerDefinition::new(mode)
     }
 
+    /// CR 805.4d: Collection cardinality is typed independently from ordinary
+    /// phase matching. A single trigger remains single, an each-player trigger
+    /// reaches both active teammates, and each-opponent excludes the source's
+    /// own active team while retaining every player on an opposing active team.
+    #[test]
+    fn phase_trigger_scoped_players_respects_shared_team_fanout() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.active_player = PlayerId(0);
+        let mut trigger = make_trigger(TriggerMode::Phase);
+
+        assert_eq!(
+            phase_trigger_scoped_players(&state, &trigger, PlayerId(2)),
+            vec![PlayerId(0)]
+        );
+        trigger.phase_fanout = PhaseTriggerFanout::EachPlayer;
+        assert_eq!(
+            phase_trigger_scoped_players(&state, &trigger, PlayerId(2)),
+            vec![PlayerId(0), PlayerId(1)]
+        );
+        trigger.phase_fanout = PhaseTriggerFanout::EachOpponent;
+        assert_eq!(
+            phase_trigger_scoped_players(&state, &trigger, PlayerId(2)),
+            vec![PlayerId(0), PlayerId(1)]
+        );
+        assert!(phase_trigger_scoped_players(&state, &trigger, PlayerId(0)).is_empty());
+    }
+
     /// CR 102.3 + CR 805.4a: an opponent-turn trigger constraint must read the
     /// active player's team relation, not merely whether that player is the
     /// trigger controller. This drives the production constraint gate used by
@@ -16477,10 +16620,9 @@ pub mod tests {
     }
 
     #[test]
-    fn resolution_fallback_does_not_pin_reentered_zone_change_object() {
+    fn stack_push_rejects_malformed_zone_change_parent_target_provenance() {
         let source = ObjectId(999);
-        let mut state = GameState::new_two_player(1);
-        let entered = make_creature(&mut state, PlayerId(0), "Entered", 2, 2);
+        let entered = ObjectId(2);
         let event = zone_changed_event(
             entered,
             Zone::Hand,
@@ -16488,11 +16630,86 @@ pub mod tests {
             vec![CoreType::Creature],
             vec![],
         );
-        let observed_incarnation = state.objects[&entered].incarnation;
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(&event),
+            EventContextSeedTiming::StackPush,
+        );
+
+        assert!(ability.targets.is_empty());
+        assert!(ability.target_incarnations.is_empty());
+    }
+
+    #[test]
+    fn resolution_fallback_does_not_pin_reentered_zone_change_object() {
+        let source = ObjectId(999);
+        let mut state = GameState::new_two_player(1);
+        let entered = make_creature(&mut state, PlayerId(0), "Entered", 2, 2);
+        crate::game::zones::absorb_component(&mut state, entered, Some(Zone::Battlefield));
+        let pre_delivery_incarnation = state.objects[&entered].incarnation;
+        let mut component_events = Vec::new();
+        crate::game::merge::put_component_into_zone(
+            &mut state,
+            entered,
+            Zone::Graveyard,
+            &mut component_events,
+        );
+        let event = component_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("production component delivery emits a zone-change event");
+        let GameEvent::ZoneChanged { from, .. } = event else {
+            unreachable!("the preceding search accepts only zone-change events");
+        };
+        assert!(from.is_none());
+        let destination_pin = ObjectIncarnationRef::from_object(&state.objects[&entered]);
+        assert_eq!(
+            destination_pin.incarnation,
+            pre_delivery_incarnation + 1,
+            "component delivery creates the destination incarnation"
+        );
+
+        let mut reach_guard = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        seed_event_context_parent_targets(
+            &mut reach_guard,
+            Some(event),
+            EventContextSeedTiming::StackPush,
+        );
+        assert_eq!(reach_guard.targets, vec![TargetRef::Object(entered)]);
+        assert_eq!(reach_guard.target_incarnations, vec![destination_pin]);
+        assert_eq!(
+            crate::game::targeting::resolved_targets(
+                &reach_guard,
+                &TargetFilter::ParentTarget,
+                &state,
+            ),
+            vec![TargetRef::Object(entered)],
+            "the production component event reaches the live target resolver"
+        );
+
         let mut move_events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, entered, Zone::Exile, &mut move_events);
-        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut move_events);
-        assert_ne!(state.objects[&entered].incarnation, observed_incarnation);
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Graveyard, &mut move_events);
+        assert_ne!(
+            ObjectIncarnationRef::from_object(&state.objects[&entered]),
+            destination_pin
+        );
 
         let mut ability = ResolvedAbility::new(
             Effect::TargetOnly {
@@ -16504,7 +16721,7 @@ pub mod tests {
         );
         seed_event_context_parent_targets(
             &mut ability,
-            Some(&event),
+            Some(event),
             EventContextSeedTiming::ResolutionFallback,
         );
 
@@ -29227,6 +29444,7 @@ pub mod tests {
                 PlayerId(0),
                 Some(&source_context),
                 None,
+                None,
             ),
             7,
             "quantity reads the old source's chosen number"
@@ -36416,6 +36634,7 @@ pub mod tests {
             WaitingFor::NamedChoice {
                 player: PlayerId(0),
                 choice_type: crate::types::ability::ChoiceType::Player {
+                    population: Default::default(),
                     distinctness: Default::default(),
                 },
                 options: vec!["P2".to_string()],
@@ -41628,6 +41847,7 @@ pub mod tests {
             PlayerId(0),
         );
         player_ability.scoped_player = Some(PlayerId(1));
+        player_ability.fanout_player = Some(PlayerId(1));
         crate::game::effects::choose::resolve(&mut player_bound, &player_ability, &mut Vec::new())
             .expect("the production per-player constructor raises the prompt");
         assert!(matches!(

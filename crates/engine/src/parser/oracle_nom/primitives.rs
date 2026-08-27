@@ -1069,6 +1069,34 @@ where
     None
 }
 
+/// Count non-overlapping matches of a consuming nom combinator at word
+/// boundaries in `text`.
+///
+/// Successful matches resume at the combinator's remainder; failed probes
+/// advance to the next word boundary. A non-consuming success is ignored and
+/// advances like a failure, preventing an accidental empty parser from
+/// spinning forever.
+pub fn count_at_word_boundaries<'a, O, F>(text: &'a str, mut combinator: F) -> usize
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut count = 0;
+    let mut remaining = text.trim_start();
+    while !remaining.is_empty() {
+        if let Ok((rest, _)) = combinator(remaining) {
+            if rest.len() < remaining.len() {
+                count += 1;
+                remaining = rest.trim_start();
+                continue;
+            }
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |index| remaining[index + 1..].trim_start());
+    }
+    count
+}
+
 /// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
 /// together with the byte offset where that match began.
 pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
@@ -1772,6 +1800,15 @@ mod tests {
         )
         .expect("terminal if gate");
         assert_eq!(tail, "you control a zombie");
+    }
+
+    #[test]
+    fn test_count_at_word_boundaries_counts_consuming_non_overlapping_matches() {
+        let count = count_at_word_boundaries(
+            "this turn, not within a turnover, then this turn",
+            |input| tag::<_, _, OracleError<'_>>("this turn").parse(input),
+        );
+        assert_eq!(count, 2);
     }
 
     #[test]

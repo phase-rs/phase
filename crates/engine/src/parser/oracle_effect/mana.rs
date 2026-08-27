@@ -10,9 +10,9 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, AbilityTag, Comparator, Duration, Effect, FilterProp, LinkedExileScope,
-    ManaContribution, ManaProduction, ManaSpendRestriction, ManaTargetRole, ObjectScope,
-    QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
+    AbilityKind, AbilityTag, Comparator, ControllerRef, Duration, Effect, FilterProp,
+    LinkedExileScope, ManaContribution, ManaProduction, ManaSpendRestriction, ManaTargetRole,
+    ObjectScope, QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -122,16 +122,16 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     })
 }
 
-/// CR 505.1 + CR 106.4: Recognize a leading player-subject before the mana
+/// CR 106.4: Recognize a leading player-subject before the mana
 /// verb so subject-led mana clauses ("the active player adds {C}{C} …", "that
 /// player adds {G}") reach the mana dispatcher. Returns the recipient
 /// `TargetFilter` and the remainder beginning at the mana symbols, with the
 /// subject's "adds" verb normalized away.
 ///
-/// "the active player" is the active player whose phase began (CR 505.1) — for
-/// the Phase triggers that carry these clauses (Belbe, Corrupted Observer) the
-/// active player is the trigger's scoped player, so the recipient resolves via
-/// `TargetFilter::ScopedPlayer`. "that player" is the same anaphor.
+/// This leaf parser records "the active player" as an explicit
+/// `ControllerRef::ActivePlayer`. Trigger lowering applies CR 805.9 by replacing
+/// that reference with a controller-made active-player choice. "That player"
+/// remains the phase participant selected by CR 805.4d fanout.
 ///
 /// CR 115.1 + CR 106.4: "target player" is a genuine chosen target (Jetfire,
 /// Ingenious Scientist: "Target player adds that much {C}"), recorded as
@@ -142,13 +142,17 @@ fn strip_mana_subject_prefix(text: &str) -> Option<(TargetFilter, &str)> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |i| {
         alt((
-            // CR 505.1 + CR 106.4: anaphoric subject — active/that player.
+            // CR 805.9 + CR 106.4: preserve the active-player reference until
+            // trigger lowering binds the controller's resolution-time choice.
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::ActivePlayer)),
+                (tag("the active player "), tag("adds ")),
+            ),
+            // CR 805.4d + CR 106.4: "that player" remains the participant
+            // selected by the phase-fanout binding.
             value(
                 TargetFilter::ScopedPlayer,
-                (
-                    alt((tag("the active player "), tag("that player "))),
-                    tag("adds "),
-                ),
+                (tag("that player "), tag("adds ")),
             ),
             // CR 115.1 + CR 106.4: a chosen target player is the recipient.
             value(TargetFilter::Player, (tag("target player "), tag("adds "))),
@@ -4074,7 +4078,7 @@ mod tests {
         .is_none());
     }
 
-    /// CR 505.1 + CR 106.4: a subject-led mana clause ("the active player adds
+    /// CR 805.9 + CR 106.4: a subject-led mana clause ("the active player adds
     /// …") must reach the mana dispatcher rather than falling to Unimplemented.
     #[test]
     fn parse_add_mana_active_player_subject() {
@@ -4085,7 +4089,9 @@ mod tests {
                 assert_eq!(
                     target,
                     Some(ManaTargetRole::Recipient {
-                        recipient: TargetFilter::ScopedPlayer
+                        recipient: TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::ActivePlayer)
+                        )
                     })
                 );
             }

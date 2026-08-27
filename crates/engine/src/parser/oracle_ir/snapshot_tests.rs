@@ -7,12 +7,15 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
-use crate::parser::oracle_ir::trigger::TriggerNodeIr;
+use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+    AbilityCost, ActivationRestriction, Effect, PlayerScope, QuantityExpr, QuantityRef,
+    TargetChoiceTiming, TargetFilter, TriggerCondition,
 };
 use crate::types::game_state::DistributionUnit;
+use crate::types::phase::Phase;
+use crate::types::triggers::TriggerMode;
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
@@ -49,6 +52,66 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// CR 603.2b + CR 608.2i: preserve Power Surge's raw where-X binding in the
+/// Oracle IR and lower it only at the typed ability boundary.
+#[test]
+fn power_surge_ir_and_lowered_snapshot() {
+    const ORACLE: &str = "At the beginning of each player's upkeep, Power Surge deals X damage to that player, where X is the number of untapped lands they controlled at the beginning of this turn.";
+    const RAW_BINDING: &str =
+        "the number of untapped lands they controlled at the beginning of this turn";
+
+    let (ir, lowered) = parse_two_layer(ORACLE, "Power Surge", &["Enchantment"], &[]);
+    assert_eq!(ir.items.len(), 1);
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &ir.items[0].node else {
+        panic!(
+            "Power Surge must remain native trigger IR: {:?}",
+            ir.items[0].node
+        );
+    };
+    assert_eq!(trigger.condition, TriggerMode::Phase);
+    assert_eq!(trigger.partial_def.phase, Some(Phase::Upkeep));
+    let Some(TriggerBody::EffectChain(chain)) = &trigger.body else {
+        panic!("Power Surge must retain an effect-chain body");
+    };
+    assert_eq!(chain.clauses.len(), 1);
+    assert_eq!(
+        chain.clauses[0].where_x_expression.as_deref(),
+        Some(RAW_BINDING)
+    );
+    assert!(matches!(
+        chain.clauses[0].parsed.effect,
+        Effect::DealDamage {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { ref name },
+                },
+            ..
+        } if name == "X"
+    ));
+
+    assert_eq!(lowered.triggers.len(), 1);
+    let execute = lowered.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Power Surge trigger must lower an executable ability");
+    assert!(!ability_has_unimplemented(execute));
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::DealDamage {
+            target: TargetFilter::ScopedPlayer,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::UntappedLandsAtTurnStart {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            ..
+        }
+    ));
+
+    insta::assert_json_snapshot!("power_surge_ir", &ir);
+    insta::assert_json_snapshot!("power_surge_lowered", &lowered);
 }
 
 /// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native

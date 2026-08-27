@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
@@ -6,18 +6,20 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     ControlWindow, EffectKind, ReplacementDefinition, RestrictionExpiry, TargetFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis, PayableResource,
-    PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
+    AutoPassMode, BeginningOfTurnSnapshot, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis,
+    PayableResource, PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
+use crate::types::zones::Zone;
 
 use super::combat;
 use super::combat_damage;
@@ -1084,6 +1086,46 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
     slots
 }
 
+/// Capture the effective untapped-land population at the committed beginning
+/// of the current turn.
+///
+/// CR 611.2a + CR 613.1: continuous effects whose duration ended at this turn
+/// boundary stop applying before characteristics are read. CR 109.4 + CR 613.1b
+/// + CR 613.1d: both controller and card type are effective characteristics.
+///
+/// CR 702.26b: phased-out permanents are treated as though they don't exist.
+///
+/// CR 608.2i: the resulting value is historical information retained for later
+/// resolution, rather than a live battlefield recount.
+pub(crate) fn capture_beginning_of_turn_snapshot(state: &mut GameState) {
+    let active = state.active_player;
+    super::layers::prune_until_next_turn_effects(state, active);
+    super::layers::flush_layers(state);
+
+    let mut untapped_lands_controlled: HashMap<PlayerId, u32> =
+        state.players.iter().map(|player| (player.id, 0)).collect();
+    for object in state.objects.iter().map(|(_, object)| object) {
+        // CR 110.5 + CR 110.5d: tapped/untapped is a permanent's status;
+        // objects outside the battlefield are neither tapped nor untapped.
+        if object.zone == Zone::Battlefield
+            && !object.is_phased_out()
+            && !object.tapped
+            && object.card_types.core_types.contains(&CoreType::Land)
+        {
+            untapped_lands_controlled
+                .entry(object.controller)
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+
+    state.beginning_of_turn_snapshot = Some(BeginningOfTurnSnapshot {
+        turn_number: state.turn_number,
+        untapped_lands_controlled,
+    });
+    state.layers_dirty.mark_full();
+}
+
 /// Begin the next player's turn (CR 500.1 / CR 101.4 seat order).
 pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
@@ -1446,6 +1488,11 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         },
     });
 
+    // CR 500.1 + CR 501.1: after the non-skipped turn is committed, capture
+    // beginning-of-turn information before the TurnStarted event, phasing, or
+    // the untap turn-based action can mutate the battlefield.
+    capture_beginning_of_turn_snapshot(state);
+
     events.push(GameEvent::TurnStarted {
         player_id: state.active_player,
         turn_number: state.turn_number,
@@ -1513,7 +1560,9 @@ pub fn execute_untap_with_choices(
 
     let active = state.active_player;
 
-    // CR 514.2: Prune "until your next turn" transient effects for the active player.
+    // CR 611.2a: defensively prune "until your next turn" transients here too
+    // for direct untap-entry callers. Normal turn flow already pruned them at
+    // the earlier beginning-of-turn snapshot seam; this call is idempotent.
     super::layers::prune_until_next_turn_effects(state, active);
     // CR 603.7b: A `WheneverEvent` delayed trigger with a stated "until your next
     // turn" duration ends at the START of its controller's next turn (the untap
@@ -3380,6 +3429,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply;
     use crate::game::zones::create_object;
+    use crate::types::ability::{ContinuousModification, Duration, PlayerScope};
     use crate::types::actions::GameAction;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -3392,6 +3442,201 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 1;
         state
+    }
+
+    #[test]
+    fn capture_beginning_of_turn_snapshot_counts_only_existing_untapped_lands() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let tapped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Tapped Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&tapped).unwrap();
+            object.card_types.core_types = vec![CoreType::Land];
+            object.tapped = true;
+        }
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Phased Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&phased).unwrap();
+            object.card_types.core_types = vec![CoreType::Land];
+            object.phase_status = PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            };
+        }
+        let nonland = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Nonland".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nonland)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Artifact];
+
+        capture_beginning_of_turn_snapshot(&mut state);
+        let snapshot = state.beginning_of_turn_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.turn_number, 1);
+        assert_eq!(snapshot.untapped_lands_controlled[&PlayerId(0)], 1);
+        assert_eq!(snapshot.untapped_lands_controlled[&PlayerId(1)], 0);
+        assert!(matches!(
+            state.layers_dirty,
+            crate::types::game_state::LayersDirty::Full
+        ));
+    }
+
+    /// CR 109.4 + CR 611.2a + CR 613.1b + CR 613.1d: the snapshot helper owns
+    /// expiry and layer evaluation. It must not count stale effective values or
+    /// printed/base characteristics after the expiring control effect is gone.
+    #[test]
+    fn capture_snapshot_prunes_then_flushes_effective_controller_and_land_types() {
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let stolen_land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Temporarily Stolen Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&stolen_land).unwrap();
+            object.card_types.core_types = vec![CoreType::Land];
+            object.base_card_types = object.card_types.clone();
+        }
+        state.add_transient_continuous_effect(
+            stolen_land,
+            PlayerId(1),
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SpecificObject { id: stolen_land },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        let animated_land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Layered Land".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            animated_land,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: animated_land },
+            vec![ContinuousModification::AddType {
+                core_type: CoreType::Land,
+            }],
+            None,
+        );
+
+        let unlanded_land = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Layered Nonland".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&unlanded_land).unwrap();
+            object.card_types.core_types = vec![CoreType::Land];
+            object.base_card_types = object.card_types.clone();
+        }
+        state.add_transient_continuous_effect(
+            unlanded_land,
+            PlayerId(1),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: unlanded_land },
+            vec![ContinuousModification::RemoveType {
+                core_type: CoreType::Land,
+            }],
+            None,
+        );
+
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(state.objects[&stolen_land].controller, PlayerId(1));
+        assert!(state.objects[&animated_land]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land));
+        assert!(!state.objects[&unlanded_land]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land));
+
+        capture_beginning_of_turn_snapshot(&mut state);
+
+        assert_eq!(
+            state.objects[&stolen_land].controller,
+            PlayerId(0),
+            "the helper must expire the active player's control effect and flush Layer 2"
+        );
+        let snapshot = state.beginning_of_turn_snapshot.as_ref().unwrap();
+        assert_eq!(
+            snapshot.untapped_lands_controlled[&PlayerId(0)],
+            2,
+            "the reverted natural land and Layer 4 AddType land belong in P0's row"
+        );
+        assert_eq!(
+            snapshot.untapped_lands_controlled[&PlayerId(1)],
+            0,
+            "P1's Layer 4 RemoveType land must not be counted"
+        );
+    }
+
+    #[test]
+    fn start_next_turn_replaces_stale_snapshot_after_skip_selection() {
+        let mut state = setup();
+        state.beginning_of_turn_snapshot = Some(BeginningOfTurnSnapshot {
+            turn_number: 1,
+            untapped_lands_controlled: HashMap::from([(PlayerId(0), 99)]),
+        });
+        state.turns_to_skip[1] = 1;
+        let land = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(state.active_player, PlayerId(0));
+        assert_eq!(state.turn_number, 3);
+        let snapshot = state.beginning_of_turn_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.turn_number, 3);
+        assert_eq!(snapshot.untapped_lands_controlled[&PlayerId(0)], 1);
+        assert_eq!(snapshot.untapped_lands_controlled[&PlayerId(1)], 0);
     }
 
     /// R14 B7: direct phase assignment is an authority boundary. Freeze the

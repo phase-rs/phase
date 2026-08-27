@@ -279,8 +279,8 @@ pub fn resolve(
             })
             .unwrap_or(ability.controller),
         // CR 106.4: A subject-led mana clause routes the mana to the named
-        // player ("the active player adds {C}{C} …" on a Phase trigger, "that
-        // player adds one mana of any color" on Spectral Searchlight).
+        // player (the CR 805.9 chosen active player on a Phase trigger, or
+        // "that player" on Spectral Searchlight).
         _ => match mana_effect_recipient(state, ability, mana_role.as_ref()) {
             Some(player) => player,
             // CR 608.2b: "Illegal targets won't be affected by parts of the

@@ -1310,6 +1310,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::HandSize { player } => {
             format!("cards in hand ({})", fmt_player_scope(player))
         }
+        QuantityRef::UntappedLandsAtTurnStart { player } => format!(
+            "untapped lands at the beginning of this turn ({})",
+            fmt_player_scope(player)
+        ),
         QuantityRef::LifeTotal { player } => {
             format!("life total ({})", fmt_player_scope(player))
         }
@@ -8296,6 +8300,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
     use FeatureSupport::*;
     match qref {
         QuantityRef::HandSize { .. } => ("HandSize", Handled),
+        QuantityRef::UntappedLandsAtTurnStart { .. } => ("UntappedLandsAtTurnStart", Handled),
         QuantityRef::LifeTotal { .. } => ("LifeTotal", Handled),
         QuantityRef::UnspentMana { .. } => ("UnspentMana", Handled),
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),

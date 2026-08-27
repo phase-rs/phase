@@ -475,6 +475,25 @@ impl UnitEvidence {
         }
     }
 
+    /// Visit every prose-free node and count those satisfying `f`.
+    fn count(
+        node: &Value,
+        key: Option<&str>,
+        f: &mut impl FnMut(&Value, Option<&str>) -> bool,
+    ) -> usize {
+        let current = usize::from(f(node, key));
+        let descendants = match node {
+            Value::Object(map) => map
+                .iter()
+                .filter(|(k, _)| k.as_str() != DESCRIPTION_KEY)
+                .map(|(k, v)| Self::count(v, Some(k), f))
+                .sum(),
+            Value::Array(items) => items.iter().map(|v| Self::count(v, key, f)).sum(),
+            _ => 0,
+        };
+        current + descendants
+    }
+
     /// Does any node in the tree deserialize as `T` and satisfy `pred`?
     ///
     /// For **internally tagged** types only (`#[serde(tag = "type")]`): `Effect`,
@@ -502,6 +521,15 @@ impl UnitEvidence {
         pred: impl Fn(&T) -> bool,
     ) -> bool {
         Self::visit(&self.root, None, &mut |node, key| {
+            key.is_some_and(|k| keys.contains(&k))
+                && T::deserialize(node).is_ok_and(|value| pred(&value))
+        })
+    }
+
+    /// Count nodes stored at one of `keys` that deserialize as `T` and satisfy
+    /// `pred`. This is the cardinality-preserving sibling of [`Self::any_at`].
+    fn count_at<T: DeserializeOwned>(&self, keys: &[&str], pred: impl Fn(&T) -> bool) -> usize {
+        Self::count(&self.root, None, &mut |node, key| {
             key.is_some_and(|k| keys.contains(&k))
                 && T::deserialize(node).is_ok_and(|value| pred(&value))
         })
@@ -566,6 +594,16 @@ impl UnitEvidence {
         pred: impl Fn(&crate::types::ability::QuantityRef) -> bool,
     ) -> bool {
         self.any_at(QUANTITY_KEYS, pred)
+    }
+
+    /// Count matching `QuantityRef` carriers, key-anchored per
+    /// [`QUANTITY_KEYS`]. Use when every textual occurrence requires a distinct
+    /// typed carrier rather than a tree-global existence proof.
+    pub(super) fn count_quantity_refs(
+        &self,
+        pred: impl Fn(&crate::types::ability::QuantityRef) -> bool,
+    ) -> usize {
+        self.count_at(QUANTITY_KEYS, pred)
     }
 
     /// Does any `QuantityExpr` carrier satisfy `pred`? Key-anchored per [`QUANTITY_KEYS`].
@@ -748,6 +786,22 @@ mod tests {
         assert!(
             evidence.any_quantity_ref(|q| matches!(q, QuantityRef::BasicLandTypeCount { .. })),
             "a real QuantityRef under the `quantity` key must still be evidence"
+        );
+    }
+
+    #[test]
+    fn quantity_count_is_key_anchored_and_preserves_carrier_cardinality() {
+        let evidence = UnitEvidence::from_json_for_test(
+            r#"{"abilities":[{"effect":{"type":"DealDamage","amount":{"type":"Ref","qty":{"type":"UntappedLandsAtTurnStart","player":{"type":"ScopedPlayer"}}},"target":{"type":"ScopedPlayer"}}},{"condition":{"type":"UntappedLandsAtTurnStart","player":{"type":"Controller"}}},{"effect":{"type":"GainLife","amount":{"type":"Ref","qty":{"type":"UntappedLandsAtTurnStart","player":{"type":"Controller"}}},"player":{"type":"Controller"}}}]}"#,
+        );
+
+        assert_eq!(
+            evidence.count_quantity_refs(|quantity| matches!(
+                quantity,
+                QuantityRef::UntappedLandsAtTurnStart { .. }
+            )),
+            2,
+            "only the two genuine quantity-key carriers must be counted"
         );
     }
 

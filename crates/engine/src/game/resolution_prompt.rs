@@ -567,6 +567,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
+        fanout_player: _, // player id (per-player fanout provenance)
         kind: _,      // AbilityKind tag (no payload)
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string

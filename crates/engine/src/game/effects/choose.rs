@@ -3,7 +3,8 @@ use rand::Rng;
 use crate::game::players;
 use crate::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind,
-    PlayerChoiceDistinctness, ResolvedAbility, SeatDirection, TargetSelectionMode,
+    PlayerChoiceDistinctness, PlayerChoicePopulation, ResolvedAbility, SeatDirection,
+    TargetSelectionMode,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -86,11 +87,12 @@ pub fn resolve(
         source,
         // CR 607.2d / CR 607.2m (by analogy): `persist_player` is an INDEPENDENT
         // routing discriminator, not a repurposing of source authority. During a
-        // `player_scope: All` fan-out (effects/mod.rs `set_scoped_player_recursive`),
-        // `ability.scoped_player` names the fanned per-player value, so a
-        // persisting choice records the anchor onto that exact player. Outside a
-        // fan-out (Khans Siege), `scoped_player` is `None`, so this stays `None`
-        // and the exact-object source binding is preserved unchanged.
+        // real per-player fan-out, `set_fanout_player_recursive` records the
+        // exact iterated player independently of `scoped_player`, so a persisting
+        // choice records the anchor onto that player. Outside a fan-out (Khans
+        // Siege), and for an ordinary phase trigger that has phase scope but no
+        // fan-out provenance, this stays `None` and preserves exact-object source
+        // binding.
         persist_player,
     };
 
@@ -163,22 +165,84 @@ pub(crate) fn resolve_random_in_chain(
     let index = state.rng.random_range(0..options.len());
     let chosen = options[index].clone();
 
-    let (mut source, persist_player) =
-        named_choice_authority(state, ability, persist, &choice_type);
-    register_exact_named_choice_source(state, source.as_ref());
-    if let Some(context) = bind_named_choice(
+    commit_inline_choice(state, ability, events, &choice_type, persist, &chosen);
+    true
+}
+
+/// Returns whether this ability is the CR 805.9 active-player choice handled by
+/// the singleton-binding seam below.
+pub(crate) fn is_active_player_choice(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Player {
+                population: PlayerChoicePopulation::ActivePlayers,
+                ..
+            },
+            selection: TargetSelectionMode::Chosen,
+            ..
+        }
+    )
+}
+
+/// CR 805.9 + CR 608.2d: Outside a shared-team turn there is only one active
+/// player, so an active-player instruction has exactly one legal announcement.
+/// Bind that forced value at the mutable chain seam without publishing a
+/// one-option prompt; shared turns with multiple active players remain
+/// interactive so the ability's controller makes the required choice.
+pub(crate) fn resolve_single_active_player_in_chain(
+    state: &mut GameState,
+    ability: &mut ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let (choice_type, persist) = match &ability.effect {
+        Effect::Choose {
+            choice_type:
+                choice_type @ ChoiceType::Player {
+                    population: PlayerChoicePopulation::ActivePlayers,
+                    ..
+                },
+            persist,
+            selection: TargetSelectionMode::Chosen,
+        } => (choice_type.clone(), *persist),
+        _ => return false,
+    };
+
+    let options = compute_options(
         state,
         &choice_type,
-        &chosen,
-        source.as_mut(),
-        persist_player,
-    ) {
+        ability.controller,
+        ability.source_id,
+        &ability.chosen_players,
+    );
+    let [chosen] = options.as_slice() else {
+        return false;
+    };
+
+    commit_inline_choice(state, ability, events, &choice_type, persist, chosen);
+    true
+}
+
+/// Apply the state and chain bindings shared by non-interactive named choices.
+fn commit_inline_choice(
+    state: &mut GameState,
+    ability: &mut ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    choice_type: &ChoiceType,
+    persist: bool,
+    chosen: &str,
+) {
+    let (mut source, persist_player) = named_choice_authority(state, ability, persist, choice_type);
+    register_exact_named_choice_source(state, source.as_ref());
+    if let Some(context) =
+        bind_named_choice(state, choice_type, chosen, source.as_mut(), persist_player)
+    {
         ability.update_trigger_source_context_in_resolution_segment(context);
     }
     // CR 101.4 + CR 608.2d: mirror the interactive answer handler so a
     // game-selected number is readable per-player too (CR 608.2d override — the
     // game makes the choice, but it is still THIS player's chosen number).
-    record_player_chosen_number(state, ability.controller, &choice_type, &chosen);
+    record_player_chosen_number(state, ability.controller, choice_type, chosen);
 
     // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
     // resolution-scoped chosen player. Append it to the resolving ability's
@@ -201,7 +265,6 @@ pub(crate) fn resolve_random_in_chain(
         source_id: ability.source_id,
         subject: None,
     });
-    true
 }
 
 /// CR 607.2d + CR 613.1 + CR 109.4: Bind a resolved named choice into game
@@ -350,18 +413,13 @@ pub(crate) fn named_choice_authority(
     // during a per-player iteration is the planar anchor (Two Streams Facility),
     // recorded on the choosing player instead of the source object.
     //
-    // NOTE for future axes: `scoped_player` is NOT a reliable "this is a
-    // per-player fan-out" marker — it is also set for a plain triggered ability
-    // resolving for its own controller (measured: The Toymaker's Trap's upkeep
-    // trigger arrives here with `scoped_player == controller == Some(P0)`,
-    // indistinguishable from the first iteration of a real fan-out). Adding a
-    // choice kind to this routing therefore MOVES the answer off the source for
-    // single-chooser cards too, which breaks any object-scoped reader. The
-    // per-player secret number (CR 101.4) is instead recorded ADDITIVELY by
-    // `record_player_chosen_number`, leaving every existing source binding
-    // intact.
+    // CR 805.4d: Shared-turn participant firings are explicit per-player
+    // iterations. `fanout_player` also covers typed `player_scope` fanout;
+    // `scoped_player` is intentionally not consulted because ordinary phase
+    // triggers set it too and must keep their label on the exact source object
+    // that `ChosenLabelIs` reads.
     let persist_player = (persist && matches!(choice_type, ChoiceType::Labeled { .. }))
-        .then_some(ability.scoped_player)
+        .then_some(ability.fanout_player)
         .flatten();
     let needs_context =
         choice_type.needs_choice_source_context() || (persist && persist_player.is_none());
@@ -733,16 +791,29 @@ fn compute_options(
         // CR 608.2c: `DistinctFromPriorChoices` (Gluntch's "choose a
         // second/third player") excludes players already chosen earlier in
         // this resolution; the default `Independent` does not.
-        ChoiceType::Player { distinctness } => state
-            .seat_order
-            .iter()
-            .filter(|&&id| players::player_exists_for_choice(state, id))
-            .filter(|id| {
-                *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
-                    || !already_chosen.contains(id)
-            })
-            .map(|id| id.0.to_string())
-            .collect(),
+        ChoiceType::Player {
+            population,
+            distinctness,
+        } => {
+            // CR 805.9: an effect that refers to "the active player" in a
+            // shared team turn offers exactly the active players; its
+            // controller chooses one when the effect is applied.
+            let candidates = match population {
+                PlayerChoicePopulation::All => state.seat_order.clone(),
+                PlayerChoicePopulation::ActivePlayers => {
+                    crate::game::topology::team_members(state, state.active_player)
+                }
+            };
+            candidates
+                .into_iter()
+                .filter(|&id| players::player_exists_for_choice(state, id))
+                .filter(|id| {
+                    *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
+                        || !already_chosen.contains(id)
+                })
+                .map(|id| id.0.to_string())
+                .collect()
+        }
         ChoiceType::TwoColors => two_color_options(),
         ChoiceType::Word | ChoiceType::Artist => Vec::new(),
         // CR 608.2d: "Choose an ability the target has, then remove it" —
@@ -851,6 +922,7 @@ fn keyword_choice_options(
 
 #[cfg(test)]
 mod tests {
+    use super::super::resolve_ability_chain;
     use super::*;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -877,6 +949,106 @@ mod tests {
             context,
             NamedChoiceSourceBinding::ExactObjectAndResolution,
         )
+    }
+
+    /// CR 805.4d: Only explicit per-player fanout provenance may route a
+    /// persistent anchor label to a player; ordinary phase context is insufficient.
+    #[test]
+    fn named_choice_authority_uses_fanout_provenance() {
+        let state = GameState::new_two_player(42);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Alpha".to_string(), "Beta".to_string()],
+        };
+        let mut ability = make_choose_ability(choice_type.clone());
+        ability.scoped_player = Some(PlayerId(0));
+
+        let (_, ordinary_persist_player) =
+            named_choice_authority(&state, &ability, true, &choice_type);
+        assert_eq!(ordinary_persist_player, None);
+
+        ability.fanout_player = Some(PlayerId(1));
+        let (_, fanout_persist_player) =
+            named_choice_authority(&state, &ability, true, &choice_type);
+        assert_eq!(fanout_persist_player, Some(PlayerId(1)));
+    }
+
+    /// A real `player_scope: All` choice (Two Streams Facility's shape) records
+    /// each anchor on the iterating player and never on the source object.
+    #[test]
+    fn player_scope_choice_persists_each_players_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(700);
+        state.objects.insert(
+            source_id,
+            crate::game::game_object::GameObject::new(
+                source_id,
+                crate::types::identifiers::CardId(700),
+                PlayerId(0),
+                "Per-player anchor source".to_string(),
+                crate::types::zones::Zone::Command,
+            ),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled {
+                    options: vec!["Green anchor".to_string(), "Red waterfall".to_string()],
+                },
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.player_scope = Some(crate::types::ability::PlayerFilter::All);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("the first player-scope iteration must raise its choice");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::NamedChoice {
+                player: PlayerId(0),
+                persist_player: Some(PlayerId(0)),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseOption {
+                choice: "Green anchor".to_string(),
+            },
+        )
+        .expect("the first player choice must resume the fanout");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::NamedChoice {
+                player: PlayerId(1),
+                persist_player: Some(PlayerId(1)),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseOption {
+                choice: "Red waterfall".to_string(),
+            },
+        )
+        .expect("the second player choice must complete the fanout");
+
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Green anchor"
+        ));
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(1),
+            "Red waterfall"
+        ));
+        assert!(state.objects[&source_id].chosen_attributes.is_empty());
     }
 
     /// CR 607.2d / CR 607.2m (by analogy): `bind_named_choice` routes an anchor
@@ -1701,6 +1873,33 @@ mod tests {
             "the game-selected player is bound into chosen_players"
         );
         assert!(state.last_named_choice.is_some());
+    }
+
+    /// CR 805.9 + CR 608.2d: an ordinary turn has one active player, so the
+    /// mandatory singleton value is bound inline and the continuation can run
+    /// without a one-option `NamedChoice` prompt.
+    #[test]
+    fn resolve_single_active_player_in_chain_binds_without_prompting() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::active_player(),
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("the production chain must resolve the forced active-player choice");
+        assert_eq!(
+            state.last_named_choice,
+            Some(ChoiceValue::Player(PlayerId(0)))
+        );
+        assert!(!matches!(state.waiting_for, WaitingFor::NamedChoice { .. }));
     }
 
     #[test]

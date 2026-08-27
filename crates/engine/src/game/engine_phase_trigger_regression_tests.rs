@@ -9,7 +9,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef,
     Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
-    TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -405,6 +406,109 @@ fn upkeep_trigger_fires() {
         "Upkeep trigger should have fired"
     );
     assert!(matches!(wf, WaitingFor::Priority { .. }));
+}
+
+/// CR 805.4d: An ordinary single phase trigger has phase-player context but is
+/// not a per-participant firing; its persisted label remains on the exact source
+/// for an object-scoped `ChosenLabelIs` reader.
+#[test]
+fn single_phase_trigger_persists_label_on_exact_source() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::Untap;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    let source_id = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(0),
+        "Single phase label source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source_id)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .phase(Phase::Upkeep)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Choose {
+                        choice_type: crate::types::ability::ChoiceType::Labeled {
+                            options: vec!["Alpha".to_string(), "Beta".to_string()],
+                        },
+                        persist: true,
+                        selection: crate::types::ability::TargetSelectionMode::Chosen,
+                    },
+                ))
+                .trigger_zones(vec![Zone::Battlefield]),
+        );
+
+    let mut events = Vec::new();
+    crate::game::turns::auto_advance(&mut state, &mut events);
+    let pending = state
+        .pending_trigger
+        .as_ref()
+        .map(|pending| pending.ability.as_ref())
+        .or_else(|| {
+            state
+                .stack
+                .iter()
+                .find(|entry| entry.source_id == source_id)
+                .and_then(StackEntry::ability)
+        })
+        .expect("the upkeep trigger must be pending or on the stack");
+    assert_eq!(pending.scoped_player, Some(PlayerId(0)));
+    assert_eq!(pending.fanout_player, None);
+
+    for _ in 0..4 {
+        if matches!(state.waiting_for, WaitingFor::NamedChoice { .. }) {
+            break;
+        }
+        let WaitingFor::Priority { player } = state.waiting_for else {
+            panic!("expected priority before the named choice");
+        };
+        apply(&mut state, player, GameAction::PassPriority).unwrap();
+    }
+
+    match &state.waiting_for {
+        WaitingFor::NamedChoice {
+            source: Some(source),
+            persist_player,
+            ..
+        } => {
+            assert_eq!(*persist_player, None);
+            assert_eq!(
+                source.binding,
+                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            );
+        }
+        other => panic!("expected exact-source named choice, got {other:?}"),
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseOption {
+            choice: "Beta".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.objects[&source_id].chosen_label(), Some("Beta"));
+
+    let source_context =
+        crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&source_id]);
+    assert!(crate::game::triggers::check_trigger_condition_with_source(
+        &state,
+        &TriggerCondition::ChosenLabelIs {
+            label: "Beta".to_string(),
+        },
+        PlayerId(0),
+        Some(&source_context),
+        None,
+    ));
 }
 
 /// CR 507.1: BeginCombat triggers fire even when there are attackers.

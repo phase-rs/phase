@@ -2162,6 +2162,9 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ObjectNameWordCount { scope, .. }
         | QuantityRef::ObjectTypelineComponentCount { scope, .. }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => legacy_object_scope(scope),
+        // CR 603.3b: This historical quantity is outside the frozen legacy
+        // tags; `rw_quantity_ref` performs its player-scope ordering analysis.
+        QuantityRef::UntappedLandsAtTurnStart { .. } => false,
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
@@ -4042,6 +4045,7 @@ fn walk_ability(
         controller: _,
         original_controller: _,
         scoped_player: _,
+        fanout_player: _, // concrete per-player fanout provenance, no read/write effect
         kind: _,
         context: _,
         optional_targeting: _,
@@ -6173,6 +6177,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             p.reads_player_span = player_span_of_scope(player);
             p
         }
+        // CR 603.3b: Sibling-order analysis preserves the historical
+        // quantity's player-scope dependency.
+        QuantityRef::UntappedLandsAtTurnStart { player } => rw_player_scope(player),
         QuantityRef::LifeTotal { player: _ } | QuantityRef::LifeAboveStarting => {
             reads_player_of(StateKind::PlayerLife)
         }
@@ -7083,10 +7090,30 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, ChoiceType, Comparator, CountScope, PtValue, TargetSelectionMode,
+        AbilityKind, AggregateFunction, ChoiceType, Comparator, CountScope, PtValue,
+        TargetSelectionMode,
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
+
+    #[test]
+    fn untapped_lands_at_turn_start_rw_delegates_player_scope() {
+        let rw = |player| rw_quantity_ref(&QuantityRef::UntappedLandsAtTurnStart { player });
+
+        assert_eq!(rw(PlayerScope::Controller), RwProfile::empty());
+        assert_eq!(
+            rw(PlayerScope::ParentObjectTargetController),
+            reads_event_live()
+        );
+        assert_eq!(rw(PlayerScope::SourceChosenPlayer), member_bound_read());
+        assert_eq!(
+            rw(PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Sum,
+                exclude: Some(Box::new(PlayerScope::SourceChosenPlayer)),
+            }),
+            member_bound_read()
+        );
+    }
 
     /// Row 14. CR 603.3b: the same-event ordering gate reads this profile, and
     /// an OMITTED read is FAIL-OPEN. Every `CardTypeSetSource` must therefore map

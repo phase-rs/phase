@@ -35,6 +35,7 @@ expression: "&ir"
                 "Battlefield"
               ],
               "phase": "End",
+              "phase_fanout": "EachPlayer",
               "optional": false,
               "damage_kind": "Any",
               "secondary": false,

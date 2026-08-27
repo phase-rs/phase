@@ -10,7 +10,8 @@ use nom::Parser;
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_attacked_player_relative_clause, parse_effect_chain_ir,
+    each_target_filter_mut, lower_effect_chain_ir, mass_population_filter_mut,
+    parse_attacked_player_relative_clause, parse_effect_chain_ir, rebind_controller_scope,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -53,15 +54,15 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
-    CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    CastVariantPaid, ChoiceType, CoinFlipResult, Comparator, ControllerRef, CountScope,
+    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PhaseTriggerFanout,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
+    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
+    TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -299,6 +300,83 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
     )
     .parse(effect_lower.trim_start())
     .is_ok()
+}
+
+/// CR 805.9: An ability that refers to "the active player" refers to one
+/// specific active player chosen by the ability's controller as the effect is
+/// applied. Rewrite every active-player controller reference in the resolving
+/// chain to the generic resolution-scoped chosen-player binding, then prepend
+/// the single choice that supplies it. This covers direct player resolvers and
+/// object-population filters rather than special-casing one effect verb.
+fn bind_active_player_choice(ability: &mut AbilityDefinition) {
+    if !rebind_active_player_references(ability) {
+        return;
+    }
+
+    let kind = ability.kind;
+    let dependent = std::mem::replace(
+        ability,
+        AbilityDefinition::new(
+            kind,
+            Effect::Choose {
+                choice_type: ChoiceType::active_player(),
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+        ),
+    );
+    ability.sub_ability = Some(Box::new(dependent));
+}
+
+/// Replace the CR 805.9 intermediate controller reference throughout one
+/// resolving ability chain. Returns whether any reference was rebound.
+fn rebind_active_player_references(ability: &mut AbilityDefinition) -> bool {
+    let chosen = ControllerRef::ChosenPlayer { index: 0 };
+    let mut rebound = false;
+
+    // CR 603.7: A delayed trigger's payload is a separately resolving ability.
+    // Bind its CR 805.9 choice inside that payload rather than choosing early
+    // while the ability that merely creates the delayed trigger resolves.
+    if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
+        bind_active_player_choice(effect);
+    } else {
+        each_target_filter_mut(ability.effect.as_mut(), &mut |filter| {
+            rebound |= rebind_controller_scope(filter, ControllerRef::ActivePlayer, chosen.clone());
+        });
+        if let Some(filter) = mass_population_filter_mut(ability.effect.as_mut()) {
+            rebound |= rebind_controller_scope(filter, ControllerRef::ActivePlayer, chosen.clone());
+        }
+
+        // CR 106.4: Mana carries its recipient inside `ManaTargetRole`, outside
+        // the common TargetFilter slots visited above.
+        if let Effect::Mana {
+            target: Some(role), ..
+        } = ability.effect.as_mut()
+        {
+            if let Some(recipient) = role.recipient() {
+                let mut recipient = recipient.clone();
+                if rebind_controller_scope(
+                    &mut recipient,
+                    ControllerRef::ActivePlayer,
+                    chosen.clone(),
+                ) {
+                    *role = role.clone().with_recipient(recipient);
+                    rebound = true;
+                }
+            }
+        }
+    }
+
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rebound |= rebind_active_player_references(sub);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        rebound |= rebind_active_player_references(else_ability);
+    }
+    for mode in &mut ability.mode_abilities {
+        rebound |= rebind_active_player_references(mode);
+    }
+    rebound
 }
 
 /// CR 608.2d + CR 603.2: A leading "they may" in a normalized trigger body
@@ -1976,6 +2054,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         def.batched = execute.as_deref().is_some_and(|ability| {
             !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
         });
+    }
+
+    // CR 805.4d: "each player's/opponent's" alone does not multiply a
+    // beginning-of-phase trigger during a shared team turn. It fans out only
+    // when the trigger condition, effect, or intervening-if refers back to that
+    // participant. `try_parse_phase_trigger` preserves the grammatical
+    // population; this lowering seam has the complete effect text and can
+    // distinguish the multiplying class from an ordinary once-per-phase body.
+    if !effect_refers_to_phase_participant(&modifiers.effect_lower) {
+        def.phase_fanout = PhaseTriggerFanout::Single;
+    }
+    if let Some(ability) = execute.as_deref_mut() {
+        bind_active_player_choice(ability);
     }
 
     def.execute = execute;
@@ -15299,6 +15390,57 @@ fn parse_enchanted_controller_phrase(input: &str) -> OracleResult<'_, ()> {
     Ok((input, ()))
 }
 
+/// Parse the participant named by an "each player's/opponent's" phase phrase.
+/// This is only the grammatical population; lowering below retains it as
+/// fanout only when the effect refers back to that participant.
+fn parse_phase_trigger_fanout(input: &str) -> OracleResult<'_, PhaseTriggerFanout> {
+    alt((
+        value(
+            PhaseTriggerFanout::EachPlayer,
+            alt((
+                tag("each player's "),
+                tag("each player\u{2019}s "),
+                tag("each players "),
+            )),
+        ),
+        value(
+            PhaseTriggerFanout::EachOpponent,
+            alt((
+                tag("each opponent's "),
+                tag("each opponent\u{2019}s "),
+                tag("each opponents "),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 805.4d: Shared-team phase wording fans out only if the trigger
+/// condition, effect, or intervening-if refers to the individual participant.
+/// The trigger body is already lowercase here. Each referent is recognized at
+/// a word boundary by the shared nom scanner rather than substring dispatch.
+/// Bare `them` is deliberately excluded: in "put one of them into your hand"
+/// it refers to cards, not the phase participant. Player-object uses retain a
+/// grammatical marker (`to them`), while subject and possessive uses are
+/// represented by `they` / `their`. CR 805.9: "the active player" denotes one
+/// active player chosen as the effect is applied, not every phase participant.
+fn effect_refers_to_phase_participant(effect_lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(effect_lower, |input| {
+        value(
+            (),
+            alt((
+                tag("that player"),
+                tag("that opponent"),
+                tag("they"),
+                tag("their"),
+                tag("to them"),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// Parse phase triggers: "At the beginning of your upkeep/end step/combat/draw step"
 fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // CR 511.2: "at end of combat" triggers as the end of combat step begins.
@@ -15334,6 +15476,9 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let phase = scan_for_phase(phase_text);
     let is_generic_main_phase = phase.is_none() && scan_for_generic_main_phase(phase_text);
     def.phase = phase;
+    def.phase_fanout = parse_phase_trigger_fanout(phase_text)
+        .map(|(_, fanout)| fanout)
+        .unwrap_or_default();
 
     // CR 503.1a / CR 507.1: Parse possessive qualifier and trailing suffix for turn constraint.
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid

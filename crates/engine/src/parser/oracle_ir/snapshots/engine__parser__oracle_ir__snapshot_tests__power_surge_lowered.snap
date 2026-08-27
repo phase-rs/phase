@@ -1,0 +1,59 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "DealDamage",
+          "amount": {
+            "type": "Ref",
+            "qty": {
+              "type": "UntappedLandsAtTurnStart",
+              "player": {
+                "type": "ScopedPlayer"
+              }
+            }
+          },
+          "target": {
+            "type": "ScopedPlayer"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "Upkeep",
+      "phase_fanout": "EachPlayer",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of each player's upkeep, ~ deals X damage to that player, where X is the number of untapped lands they controlled at the beginning of this turn.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

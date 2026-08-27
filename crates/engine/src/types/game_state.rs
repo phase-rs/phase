@@ -1205,6 +1205,18 @@ pub struct LandPlayRecord {
     pub from_zone: Zone,
 }
 
+/// CR 608.2i: Rules-authoritative state captured at the committed beginning of
+/// a turn for effects that look back at that previous game state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeginningOfTurnSnapshot {
+    pub turn_number: u32,
+    #[serde(
+        serialize_with = "crate::types::deterministic_serde::hash_map",
+        deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+    )]
+    pub untapped_lands_controlled: HashMap<PlayerId, u32>,
+}
+
 /// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
 /// overwhelmingly common cast origin, so it's the safe default for snapshots
 /// that pre-date the non-Option migration.
@@ -12146,9 +12158,10 @@ pub enum WaitingFor {
         /// PER-PLAYER persistent anchor label — the answer binds
         /// `ChosenAttribute::Label` onto `state.players[persist_player]`
         /// (`chosen_attributes`) instead of onto `source_id`'s object. Set during
-        /// a `player_scope: All` fan-out of a persisting `Effect::Choose` to the
-        /// fanned per-player value (`ability.scoped_player`). `None` preserves the
-        /// object-scoped binding used by Khans Sieges and every other named choice.
+        /// an explicit per-player fan-out of a persisting `Effect::Choose` to
+        /// the fanned value (`ability.fanout_player`). `None` preserves the
+        /// object-scoped binding used by Khans Sieges and every other named
+        /// choice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persist_player: Option<PlayerId>,
         /// CR 107.1a/b: the free-entry contract for `choice_type`, when its
@@ -16388,6 +16401,10 @@ declare_game_state! {
     /// Used by werewolf "if no/two or more spells were cast last turn" conditions.
     #[serde(default)]
     pub spells_cast_last_turn: Option<u8>,
+    /// CR 608.2i: The current turn's committed beginning-of-turn look-back
+    /// state. `None` is honest legacy/turn-zero unavailability, not a real zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beginning_of_turn_snapshot: Option<BeginningOfTurnSnapshot>,
 
     /// Objects whose casting/activation was cancelled this priority window.
     /// Prevents the AI from looping cast→cancel→recast on the same spell or ability.
@@ -22151,6 +22168,7 @@ impl GameState {
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
+            beginning_of_turn_snapshot: None,
             pending_trigger: None,
             pending_trigger_firing: None,
             pending_trigger_event_batch: Vec::new(),
@@ -24109,6 +24127,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         day_night: _,
         spells_cast_this_turn: _,
         spells_cast_last_turn: _,
+        // CR 608.2i: COMPARED rules-authoritative look-back state. Two
+        // positions with different beginning-of-turn facts are not equal.
+        beginning_of_turn_snapshot: _,
         cancelled_casts: _,
         pending_activations: _,
         pending_trigger: _,
@@ -24452,6 +24473,7 @@ impl PartialEq for GameState {
             && self.day_night == other.day_night
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
+            && self.beginning_of_turn_snapshot == other.beginning_of_turn_snapshot
             && self.pending_trigger == other.pending_trigger
             && self.pending_trigger_firing == other.pending_trigger_firing
             && self.pending_trigger_entry == other.pending_trigger_entry
@@ -25766,8 +25788,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, EffectScope, PostReplacementContinuation,
-        QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter, TriggerBaseSetInstanceRef,
-        TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
+        QuantityExpr, QuantityRef, ResolvedAbility, TapStateChange, TargetFilter,
+        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerEntry,
+        TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
@@ -25775,6 +25798,81 @@ mod tests {
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+
+    #[test]
+    fn beginning_of_turn_snapshot_round_trips_and_defaults_when_missing() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 7;
+        state.beginning_of_turn_snapshot = Some(BeginningOfTurnSnapshot {
+            turn_number: 7,
+            untapped_lands_controlled: HashMap::from([(PlayerId(0), 2), (PlayerId(1), 5)]),
+        });
+
+        let serialized = serde_json::to_value(&state).expect("snapshot state serializes");
+        let round_tripped: GameState =
+            serde_json::from_value(serialized.clone()).expect("snapshot state restores");
+        assert_eq!(
+            round_tripped.beginning_of_turn_snapshot,
+            state.beginning_of_turn_snapshot
+        );
+
+        let mut legacy = serialized;
+        legacy
+            .as_object_mut()
+            .expect("GameState serializes as an object")
+            .remove("beginning_of_turn_snapshot");
+        let restored_legacy: GameState =
+            serde_json::from_value(legacy).expect("legacy state without snapshot restores");
+        assert_eq!(restored_legacy.beginning_of_turn_snapshot, None);
+    }
+
+    #[test]
+    fn untapped_lands_at_turn_start_quantity_has_stable_serde_shape() {
+        let reference = QuantityRef::UntappedLandsAtTurnStart {
+            player: crate::types::ability::PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_value(&reference).expect("quantity reference serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "UntappedLandsAtTurnStart",
+                "player": { "type": "ScopedPlayer" }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<QuantityRef>(json).expect("quantity reference restores"),
+            reference
+        );
+    }
+
+    #[test]
+    fn beginning_of_turn_snapshot_affects_partial_and_loop_equality() {
+        let mut a = GameState::new_two_player(7);
+        a.turn_number = 3;
+        a.beginning_of_turn_snapshot = Some(BeginningOfTurnSnapshot {
+            turn_number: 3,
+            untapped_lands_controlled: HashMap::from([(PlayerId(0), 1), (PlayerId(1), 4)]),
+        });
+        let mut b = a.clone();
+        b.beginning_of_turn_snapshot
+            .as_mut()
+            .expect("fixture snapshot exists")
+            .untapped_lands_controlled
+            .insert(PlayerId(1), 5);
+
+        assert_ne!(a.beginning_of_turn_snapshot, b.beginning_of_turn_snapshot);
+        assert_ne!(a, b, "rules-distinct turn history must affect PartialEq");
+
+        let normalized_a = a.normalize_for_loop();
+        let normalized_b = b.normalize_for_loop();
+        assert!(normalized_a.beginning_of_turn_snapshot.is_some());
+        assert!(normalized_b.beginning_of_turn_snapshot.is_some());
+        assert_ne!(
+            normalized_a.beginning_of_turn_snapshot,
+            normalized_b.beginning_of_turn_snapshot
+        );
+        assert!(!loop_states_equal(&normalized_a, &normalized_b));
+    }
 
     #[test]
     fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {

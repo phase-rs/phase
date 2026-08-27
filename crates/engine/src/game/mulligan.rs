@@ -622,6 +622,10 @@ pub fn resume_begin_game_abilities(
 
     state.resolving_begin_game_abilities = false;
     crate::game::planechase::reveal_starting_plane(state);
+    // CR 103.6 + CR 103.7 + CR 500.1: the first turn begins only after the
+    // pregame procedure and beginning-of-game abilities finish. Capture the
+    // committed beginning-of-turn state before phasing and untap actions.
+    turns::capture_beginning_of_turn_snapshot(state);
     turns::auto_advance(state, events)
 }
 

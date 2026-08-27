@@ -12,9 +12,9 @@ use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
-    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord,
-    StackPaidSnapshot, TokenProjection, WaitingFor,
+    AutoPassMode, BeginningOfTurnSnapshot, LandPlayRecord, LiminalEntrant, LiminalEntry,
+    LinkedExileSnapshot, PendingConniveReentry, PersistedGameState, PriorityPassingMode,
+    SpellCastRecord, StackPaidSnapshot, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -71,6 +71,7 @@ struct DiscoveredOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoundTripGroup {
     DirectGameState,
+    BeginningOfTurnSnapshot,
     CombatState,
     DeclareAttackers,
     DeclareBlockers,
@@ -85,6 +86,7 @@ struct NumericRoundTripOwner {
 }
 
 const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
+    NumericRoundTripOwner { id: "src/types/game_state.rs::BeginningOfTurnSnapshot::untapped_lands_controlled", map_key_types: &["PlayerId"], group: RoundTripGroup::BeginningOfTurnSnapshot, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::objects", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_paid_facts", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::liminal_entries", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -174,6 +176,16 @@ fn add_spec(
 fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     let mut specs = BTreeMap::new();
     let game_state = "src/types/game_state.rs";
+
+    add_spec(
+        &mut specs,
+        game_state,
+        "BeginningOfTurnSnapshot",
+        None,
+        "untapped_lands_controlled",
+        "HashMap",
+        Classification::Canonical(HASH_MAP),
+    );
 
     for field in [
         "commander_declined_zone_return",
@@ -1152,11 +1164,12 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        51,
+        52,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
         RoundTripGroup::DirectGameState,
+        RoundTripGroup::BeginningOfTurnSnapshot,
         RoundTripGroup::CombatState,
         RoundTripGroup::DeclareAttackers,
         RoundTripGroup::DeclareBlockers,
@@ -1689,6 +1702,10 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         ),
     ]);
     state.planar_die_actions_this_turn = HashMap::from([(PlayerId(0), 1), (PlayerId(1), 2)]);
+    state.beginning_of_turn_snapshot = Some(BeginningOfTurnSnapshot {
+        turn_number: state.turn_number,
+        untapped_lands_controlled: HashMap::from([(PlayerId(0), 3), (PlayerId(1), 5)]),
+    });
 
     state
 }
@@ -1778,6 +1795,27 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     assert_eq!(
         before["player_actions_this_turn"],
         serde_json::json!([[1, "Scry"], [0, "SearchedLibrary"]])
+    );
+}
+
+#[test]
+fn beginning_of_turn_snapshot_numeric_player_map_round_trips_populated() {
+    let state = build_all_direct_numeric_maps_state();
+    let serialized = serde_json::to_string(&state).expect("populated state should serialize");
+    let before: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    let restored: GameState = serde_json::from_str(&serialized)
+        .expect("beginning-of-turn snapshot numeric player map should restore");
+    let after = serde_json::to_value(restored).expect("restored state should serialize");
+
+    let expected = &before["beginning_of_turn_snapshot"]["untapped_lands_controlled"];
+    assert_eq!(
+        expected.as_object().map(serde_json::Map::len),
+        Some(2),
+        "pre-serialization reach guard must contain both player rows"
+    );
+    assert_eq!(
+        after["beginning_of_turn_snapshot"]["untapped_lands_controlled"], *expected,
+        "exact player/count membership changed"
     );
 }
 

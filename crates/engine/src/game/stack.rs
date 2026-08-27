@@ -962,6 +962,7 @@ pub(crate) fn bind_resolution_scope(
         } => Some(TriggeredResolutionScope {
             condition: condition.as_ref(),
             controller: entry.controller,
+            scoped_player: entry.ability().and_then(|ability| ability.scoped_player),
             trigger_source: entry
                 .ability()
                 .and_then(|ability| ability.trigger_source.as_ref()),
@@ -987,6 +988,9 @@ pub(crate) fn bind_resolution_scope(
 pub(crate) struct TriggeredResolutionScope<'a> {
     pub condition: Option<&'a TriggerCondition>,
     pub controller: PlayerId,
+    /// CR 805.4d: Individual participant bound when a shared-team phase
+    /// creates one firing per named player.
+    pub scoped_player: Option<PlayerId>,
     pub trigger_source: Option<&'a TriggerSourceContext>,
     pub trigger_event: Option<&'a GameEvent>,
     pub subject_match_count: Option<u32>,
@@ -1009,12 +1013,13 @@ pub(crate) fn bind_triggered_resolution_scope(
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let Some(scope) = &triggered {
         if let Some(condition) = scope.condition {
-            if !super::triggers::check_trigger_condition_with_source(
+            if !super::triggers::check_trigger_condition_with_source_for_scoped_player(
                 state,
                 condition,
                 scope.controller,
                 scope.trigger_source,
                 scope.trigger_event,
+                scope.scoped_player,
             ) {
                 return false;
             }
@@ -3149,6 +3154,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         controller: _,
         original_controller,
         scoped_player,
+        fanout_player,
         kind,
         sub_ability,
         else_ability,
@@ -3213,6 +3219,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && trigger_definition_ref.is_none()
         && original_controller.is_none()
         && scoped_player.is_none()
+        && fanout_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
         && sub_ability.is_none()
         && else_ability.is_none()
@@ -3377,6 +3384,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         controller: _,
         original_controller: _,
         scoped_player,
+        fanout_player,
         kind,
         sub_ability,
         else_ability,
@@ -3436,6 +3444,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     fixed_controller_gain_life
         && targets.is_empty()
         && scoped_player.is_none()
+        && fanout_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
         && sub_ability.is_none()
         && else_ability.is_none()
@@ -3585,6 +3594,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         controller: _,
         original_controller: _,
         scoped_player,
+        fanout_player,
         kind,
         sub_ability,
         else_ability,
@@ -3648,6 +3658,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     fixed_opponent_effect
         && targets.is_empty()
         && scoped_player.is_none()
+        && fanout_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
         && sub_ability.is_none()
         && else_ability.is_none()
@@ -4244,6 +4255,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         controller: a_controller,
         original_controller: _,
         scoped_player: a_scoped_player,
+        fanout_player: _,
         kind: a_kind,
         sub_ability: a_sub_ability,
         else_ability: a_else_ability,
@@ -4316,6 +4328,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         controller: b_controller,
         original_controller: _,
         scoped_player: b_scoped_player,
+        fanout_player: _,
         kind: b_kind,
         sub_ability: b_sub_ability,
         else_ability: b_else_ability,
@@ -14043,6 +14056,7 @@ mod tests {
                 Some(TriggeredResolutionScope {
                     condition: None,
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
@@ -14068,6 +14082,7 @@ mod tests {
                 Some(TriggeredResolutionScope {
                     condition: None,
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: None,
@@ -14094,6 +14109,7 @@ mod tests {
                 Some(TriggeredResolutionScope {
                     condition: None,
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: None,
                     subject_match_count: Some(2),
@@ -14143,6 +14159,7 @@ mod tests {
                     // `setup()` is a 20-life board, so this is FALSE.
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 99 }),
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
@@ -14173,6 +14190,7 @@ mod tests {
                 Some(TriggeredResolutionScope {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(4),
@@ -14221,6 +14239,7 @@ mod tests {
                 Some(TriggeredResolutionScope {
                     condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
                     controller: PlayerId(0),
+                    scoped_player: None,
                     trigger_source: None,
                     trigger_event: Some(&event_a),
                     subject_match_count: Some(3),

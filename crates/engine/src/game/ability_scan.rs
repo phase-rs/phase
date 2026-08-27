@@ -238,6 +238,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
+        fanout_player: _,          // player id (per-player fanout provenance)
         kind: _,                   // AbilityKind tag (no payload)
         context: _,                // SpellContext: cast-time fact snapshot, not a live read
         optional_targeting: _,     // bool
@@ -1874,6 +1875,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_scope(player));
             acc
         }
+        QuantityRef::UntappedLandsAtTurnStart { player } => scan_player_scope(player),
         QuantityRef::LifeTotal { player } => {
             let mut acc = Axes {
                 event: false,
@@ -6433,6 +6435,28 @@ mod tests {
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::ManaColor;
     use crate::types::player::{PlayerCounterKind, PlayerId};
+
+    #[test]
+    fn untapped_lands_at_turn_start_scan_delegates_player_scope() {
+        let scan = |player| {
+            scan_quantity_ref(
+                &QuantityRef::UntappedLandsAtTurnStart { player },
+                ScanMode::Conservative,
+            )
+        };
+
+        let controller = scan(PlayerScope::Controller);
+        assert!(!controller.event && !controller.sibling && !controller.projected);
+
+        let parent = scan(PlayerScope::ParentObjectTargetController);
+        assert!(parent.event && !parent.sibling && !parent.projected);
+
+        let nested = scan(PlayerScope::AllPlayers {
+            aggregate: AggregateFunction::Sum,
+            exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+        });
+        assert!(nested.event && !nested.sibling && !nested.projected);
+    }
 
     fn ability_with_amount(qty: QuantityRef) -> ResolvedAbility {
         ResolvedAbility::new(

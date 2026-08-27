@@ -12,9 +12,10 @@ use crate::types::ability::{
     CountScope, DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification,
     DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
     FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectScope,
-    PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    PerpetualModification, PlayerChoicePopulation, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SiblingCondition,
+    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -16536,6 +16537,7 @@ fn phase_trigger_each_players_upkeep_deals_damage_to_them() {
     );
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::EachPlayer);
     match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
         Some(Effect::DealDamage { target, amount, .. }) => {
             assert_eq!(target, &TargetFilter::ScopedPlayer);
@@ -16543,6 +16545,161 @@ fn phase_trigger_each_players_upkeep_deals_damage_to_them() {
         }
         other => panic!("expected DealDamage to ScopedPlayer, got {other:?}"),
     }
+}
+
+/// CR 603.2b + CR 608.2i: Power Surge binds both "that player" and the
+/// beginning-of-turn historical quantity to the player whose upkeep began.
+#[test]
+fn power_surge_phase_trigger_uses_scoped_beginning_of_turn_land_snapshot() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's upkeep, Power Surge deals X damage to that player, where X is the number of untapped lands they controlled at the beginning of this turn.",
+        "Power Surge",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::EachPlayer);
+    match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+        Some(Effect::DealDamage { target, amount, .. }) => {
+            assert_eq!(target, &TargetFilter::ScopedPlayer);
+            assert_eq!(
+                amount,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::UntappedLandsAtTurnStart {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }
+            );
+        }
+        other => panic!("expected Power Surge DealDamage, got {other:?}"),
+    }
+}
+
+/// CR 805.4d: Merely saying "each player's upkeep" does not multiply a
+/// shared-team trigger when the ability never refers to the individual player.
+#[test]
+fn phase_trigger_without_participant_reference_stays_single() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's upkeep, you gain 1 life.",
+        "Test Enchantment",
+    );
+
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::Single);
+}
+
+/// CR 805.9: "the active player" denotes one player chosen as the effect is
+/// applied; it is not a back-reference to every player named by the phase.
+#[test]
+fn phase_trigger_active_player_reference_stays_single() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's upkeep, the active player adds {C}.",
+        "Test Enchantment",
+    );
+
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::Single);
+    let execute = def.execute.as_ref().expect("active-player trigger execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Player {
+                population: PlayerChoicePopulation::ActivePlayers,
+                ..
+            },
+            persist: false,
+            ..
+        }
+    ));
+    let mana = execute
+        .sub_ability
+        .as_ref()
+        .expect("active-player choice must continue into the mana effect");
+    let Effect::Mana {
+        target: Some(role), ..
+    } = mana.effect.as_ref()
+    else {
+        panic!(
+            "expected chosen-player Mana continuation, got {:?}",
+            mana.effect
+        );
+    };
+    assert_eq!(
+        role.recipient().and_then(TargetFilter::chosen_player_index),
+        Some(0),
+        "the mana recipient must be the player selected by the CR 805.9 choice"
+    );
+}
+
+/// CR 805.9: Active-player references in an object population use the same
+/// controller-made resolution choice as direct player effects.
+#[test]
+fn phase_trigger_active_player_population_binds_chosen_player() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's upkeep, destroy all creatures the active player controls.",
+        "Test Enchantment",
+    );
+
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::Single);
+    let execute = def.execute.as_ref().expect("active-player trigger execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Player {
+                population: PlayerChoicePopulation::ActivePlayers,
+                ..
+            },
+            ..
+        }
+    ));
+    let dependent = execute
+        .sub_ability
+        .as_ref()
+        .expect("choice must continue into the population effect");
+    let Effect::DestroyAll { target, .. } = dependent.effect.as_ref() else {
+        panic!(
+            "expected DestroyAll continuation, got {:?}",
+            dependent.effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected typed creature population, got {target:?}");
+    };
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::ChosenPlayer { index: 0 })
+    );
+}
+
+/// CR 805.4d: A plural object pronoun is not a reference to the players whose
+/// shared end step began. Akal Pakal's "one of them" denotes the two looked-at
+/// cards, so the trigger occurs once for the shared phase rather than once per
+/// active-team player.
+#[test]
+fn phase_trigger_object_pronoun_does_not_create_participant_fanout() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's end step, if an artifact entered the battlefield under your control this turn, look at the top two cards of your library. Put one of them into your hand and the other into your graveyard.",
+        "Akal Pakal, First Among Equals",
+    );
+
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::Single);
+}
+
+/// CR 805.4d: The opponent population is retained separately from the general
+/// player population so a shared turn only instantiates appropriate opponents.
+#[test]
+fn phase_trigger_each_opponents_reference_preserves_opponent_fanout() {
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's upkeep, that opponent loses 1 life.",
+        "Test Enchantment",
+    );
+
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(def.phase_fanout, PhaseTriggerFanout::EachOpponent);
 }
 
 /// CR 603.2 + CR 608.2c: Razorkin Needlehead — "Whenever an opponent draws a
