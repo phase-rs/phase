@@ -6,6 +6,7 @@ import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
 import {
   getPlayerDisplayName,
@@ -396,8 +397,10 @@ function PlayerOptionButton({
   const playerId = Number(option) as PlayerId;
   const myId = usePlayerId();
   const seatColor = useSeatColor(playerId);
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatar = usePlayerAvatarImage(avatarIdentity);
   const displayName = getPlayerDisplayName(playerId, myId);
+  const activeAvatarSrc = avatar.src;
 
   return (
     <motion.button
@@ -422,14 +425,21 @@ function PlayerOptionButton({
         className="relative h-10 w-9 shrink-0 overflow-hidden rounded-md border bg-slate-950"
         style={{ borderColor: `${seatColor}cc` }}
       >
-        {avatarUrl ? (
-          <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
+        {activeAvatarSrc ? (
+          <img
+            src={activeAvatarSrc}
+            alt=""
+            className="h-full w-full object-cover"
+            onError={() => avatar.advanceFailedSource(activeAvatarSrc)}
+          />
         ) : (
           <span
             className="flex h-full w-full items-center justify-center text-sm font-bold"
             style={{ color: seatColor }}
           >
-            {displayName.slice(0, 1).toUpperCase()}
+            {avatarIdentity && avatar.isLoading
+              ? null
+              : displayName.slice(0, 1).toUpperCase()}
           </span>
         )}
         <span className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />

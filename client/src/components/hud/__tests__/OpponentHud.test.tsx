@@ -60,7 +60,11 @@ describe("OpponentHud", () => {
     // OR `isSpectator`, and the two live in different module-singleton stores that
     // persist across tests in this file. Both are reset here, not only in
     // `afterEach`, so one spectator row cannot make every later seated row inert.
-    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    useMultiplayerStore.setState({
+      activePlayerId: 0,
+      isSpectator: false,
+      playerAvatars: new Map(),
+    });
     usePreferencesStore.setState({ followActiveOpponent: false, battlefieldPeekOnHover: false });
     useUiStore.setState({ focusedOpponent: 1 });
     useGameStore.setState({ gameState: createGameState(), gameMode: null, waitingFor: null });
@@ -107,7 +111,9 @@ describe("OpponentHud", () => {
 
   it("shows a tooltip and hover preview for opponent avatars with art", async () => {
     useMultiplayerStore.setState({
-      playerAvatars: new Map([[1, "https://example.test/opponent-avatar.jpg"]]),
+      playerAvatars: new Map([
+        [1, { kind: "external", url: "https://example.test/opponent-avatar.jpg" }],
+      ]),
     });
 
     render(<OpponentHud />);
@@ -120,6 +126,11 @@ describe("OpponentHud", () => {
     await waitFor(() => {
       expect(screen.getAllByAltText("Opp 2")).toHaveLength(2);
     });
+
+    const [primary] = screen.getAllByAltText("Opp 2");
+    fireEvent.error(primary);
+    expect(screen.queryByRole("img", { name: "Opp 2" })).not.toBeInTheDocument();
+    expect(screen.getByTitle("Opp 2")).toHaveTextContent("O");
   });
 
   it("auto-selects the active opponent when Follow is enabled", async () => {

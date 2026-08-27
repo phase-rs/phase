@@ -9,6 +9,8 @@ import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
+import type { PlayerAvatarIdentity } from "../../services/playerAvatars.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -232,7 +234,7 @@ export function OpponentHud({
   const isOnline = connectionStatus !== "disconnected";
   const primaryOpponentId =
     liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
-  const primaryOpponentAvatarUrl = useMultiplayerStore(
+  const primaryOpponentAvatarIdentity = useMultiplayerStore(
     (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
   );
   // Always-called hook (rules-of-hooks) — used only on the 1v1 branch below.
@@ -255,7 +257,7 @@ export function OpponentHud({
     const showMatchScore = gameState?.match_config?.match_type === "Bo3";
     const matchScore = showMatchScore ? gameState?.match_score ?? null : null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
-    const opponentAvatarUrl = primaryOpponentAvatarUrl;
+    const opponentAvatarIdentity = primaryOpponentAvatarIdentity;
     const compact = forceCompactHud;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
@@ -278,7 +280,7 @@ export function OpponentHud({
           active={isOpponentTurn}
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
-          avatarUrl={opponentAvatarUrl}
+          avatarIdentity={opponentAvatarIdentity}
           playerId={opponentId}
           density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
@@ -610,7 +612,7 @@ function OpponentTab({
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
   const counts = useMemo(() => {
     if (!gameState || compact) return { creatures: 0, lands: 0, other: 0 };
     const objects = gameState.battlefield
@@ -831,7 +833,7 @@ function OpponentTab({
       )}
       <OpponentAvatar
         label={label}
-        avatarUrl={avatarUrl}
+        avatarIdentity={avatarIdentity}
         seatColor={seatColor}
         compact={compact}
       />
@@ -957,23 +959,30 @@ function OpponentTab({
 
 function OpponentAvatar({
   label,
-  avatarUrl,
+  avatarIdentity,
   seatColor,
   compact = false,
 }: {
   label: string;
-  avatarUrl: string | null;
+  avatarIdentity: PlayerAvatarIdentity | null;
   seatColor: string;
   compact?: boolean;
 }) {
+  const avatar = usePlayerAvatarImage(avatarIdentity);
+  const activeSrc = avatar.src;
   // Inner avatar visuals: real portrait when known, synthesized
   // seat-color tile with the player's initial otherwise.
-  const inner = avatarUrl ? (
+  const inner = activeSrc ? (
     <>
-      <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+      <img
+        src={activeSrc}
+        alt={label}
+        className="h-full w-full object-cover"
+        onError={() => avatar.advanceFailedSource(activeSrc)}
+      />
       <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
     </>
-  ) : (
+  ) : avatarIdentity && avatar.isLoading ? null : (
     <>
       <div
         className="flex h-full w-full items-center justify-center text-[11px] font-bold text-white/90 @min-[11rem]:text-sm"
@@ -998,18 +1007,19 @@ function OpponentAvatar({
     boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
   };
 
-  if (!avatarUrl) {
+  if (!activeSrc) {
     return <div className={tileClassName} style={tileStyle} title={label}>{inner}</div>;
   }
 
   return (
     <AvatarHoverPreview
-      avatarUrl={avatarUrl}
+      avatarUrl={activeSrc}
       label={label}
       seatColor={seatColor}
       title={label}
       className={tileClassName}
       style={tileStyle}
+      onAvatarError={avatar.advanceFailedSource}
     >
       {inner}
     </AvatarHoverPreview>

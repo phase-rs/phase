@@ -79,8 +79,8 @@ import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
 import {
   assignRandomAvatars,
   avatarCardNameForName,
-  fetchAvatarArtUrl,
 } from "../services/playerAvatars";
+import type { PlayerAvatarIdentity } from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -107,36 +107,27 @@ export function isDeckRejectedError(error: unknown): error is AdapterError {
   return error instanceof AdapterError && error.code === AdapterErrorCode.DECK_REJECTED;
 }
 
-let avatarGeneration = 0;
-
 function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNames = false) {
-  const generation = ++avatarGeneration;
   const avatars = assignRandomAvatars(playerCount, seed);
   const names = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   names.set(0, "You");
-  for (let i = 1; i < avatars.length; i++) {
-    names.set(i, avatars[i].name);
+  for (const [playerId, avatar] of avatars.entries()) {
+    if (playerId > 0) names.set(playerId, avatar.name);
+    playerAvatars.set(playerId, { kind: "card", cardName: avatar.cardName });
   }
   useMultiplayerStore.setState(
-    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+    preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
-  for (let i = 0; i < avatars.length; i++) {
-    fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(i, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
-  }
 }
 
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
 ) {
-  const generation = ++avatarGeneration;
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
 
   for (const obj of Object.values(gameState.objects)) {
     if (!obj?.is_commander) continue;
@@ -146,24 +137,15 @@ function setupCommanderAvatars(
 
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
+    playerAvatars.set(playerId, { kind: "card", cardName });
   }
 
   useMultiplayerStore.setState(
-    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+    preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
-
-  for (const [playerId, cardName] of commanderNames) {
-    fetchAvatarArtUrl(cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(playerId, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
-  }
 }
 
 function setupDraftMatchAvatars(seed: string) {
-  const generation = ++avatarGeneration;
   const matchPairing = useMultiplayerDraftStore.getState().matchPairing;
   const randomAvatars = assignRandomAvatars(2, seed);
   const names = new Map<number, string>();
@@ -179,25 +161,20 @@ function setupDraftMatchAvatars(seed: string) {
   names.set(localPlayerId, "You");
   names.set(opponentPlayerId, opponentName);
 
-  useMultiplayerStore.setState({
-    activePlayerId: localPlayerId,
-    playerNames: names,
-    playerAvatars: new Map(),
-  });
-
   const avatarCards = new Map<number, string | undefined>([
     [localPlayerId, randomAvatars[localPlayerId]?.cardName ?? randomAvatars[0]?.cardName],
     [opponentPlayerId, avatarCardNameForName(opponentName) ?? randomAvatars[opponentPlayerId]?.cardName],
   ]);
+  const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   for (const [playerId, cardName] of avatarCards) {
     if (!cardName) continue;
-    fetchAvatarArtUrl(cardName).then((url) => {
-      if (!url || avatarGeneration !== generation) return;
-      const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      next.set(playerId, url);
-      useMultiplayerStore.setState({ playerAvatars: next });
-    });
+    playerAvatars.set(playerId, { kind: "card", cardName });
   }
+  useMultiplayerStore.setState({
+    activePlayerId: localPlayerId,
+    playerNames: names,
+    playerAvatars,
+  });
 }
 
 function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number, string> {

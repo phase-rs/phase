@@ -64,7 +64,7 @@ export function PlayerHud() {
 
   const hudTone = isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
   const seatColor = useSeatColor(playerId);
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
 
   return (
     <div
@@ -81,7 +81,7 @@ export function PlayerHud() {
         active={isMyTurn}
         seatColor={seatColor}
         underAttack={isUnderAttack}
-        avatarUrl={avatarUrl}
+        avatarIdentity={avatarIdentity}
         playerId={playerId}
         density={compact ? "compact" : "default"}
         onClick={isValidTarget ? handleTargetClick : undefined}

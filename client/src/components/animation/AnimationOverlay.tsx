@@ -9,7 +9,6 @@ import {
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
-import { fetchCardImageUrl } from "../../services/scryfall.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -22,8 +21,14 @@ import { DamageVignette } from "./DamageVignette.tsx";
 import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
 import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
+import type { MillCard } from "./MillRevealAnimation.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
+import {
+  ResolvedAnimationImage,
+  type AnimationImageSnapshot,
+  visibleAnimationImageSnapshot,
+} from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
 
 
@@ -36,8 +41,8 @@ interface ActiveFloat {
 
 interface DeathClone {
   id: number;
-  position: DOMRect;
-  cardName: string;
+  position: { x: number; y: number; width: number; height: number };
+  cardName: string | null;
 }
 
 interface ActiveReveal {
@@ -49,23 +54,35 @@ interface ActiveReveal {
 interface ActiveShatter {
   id: number;
   position: { x: number; y: number; width: number; height: number };
-  imageUrl: string;
+  image: HTMLImageElement;
 }
 
 interface ActiveCastArc {
   id: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
-  cardName: string;
+  snapshot: AnimationImageSnapshot | null;
   mode: "cast" | "resolve-permanent" | "resolve-spell";
 }
 
 interface ActiveMillReveal {
   id: number;
-  cards: { objectId: number; cardName: string; colors: string[] }[];
+  cards: MillCard[];
   from: { x: number; y: number };
   to: { x: number; y: number };
 }
+
+interface PendingDeath {
+  id: number;
+  generation: number;
+  snapshot: AnimationImageSnapshot;
+  position: { x: number; y: number; width: number; height: number };
+  readinessDeadlineMs: number;
+}
+
+type DeathReadinessOutcome =
+  | { type: "ready"; image: HTMLImageElement }
+  | { type: "fallback" };
 
 interface AnimationOverlayProps {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -74,8 +91,60 @@ interface AnimationOverlayProps {
 let floatIdCounter = 0;
 let revealIdCounter = 0;
 let shatterIdCounter = 0;
+let deathCloneIdCounter = 0;
 let castArcIdCounter = 0;
 let millRevealIdCounter = 0;
+
+const DEATH_IMAGE_READY_MAX_MS = 250;
+
+function visiblePreEventSnapshot(objectId: number): AnimationImageSnapshot | null {
+  return visibleAnimationImageSnapshot(
+    useGameStore.getState().gameState?.objects[objectId],
+  );
+}
+
+function visiblePostEventSnapshot(objectId: number): AnimationImageSnapshot | null {
+  return visibleAnimationImageSnapshot(
+    useAnimationStore.getState().animationNewState?.objects[objectId],
+  );
+}
+
+function PendingDeathImage({
+  pending,
+  onSettled,
+}: {
+  pending: PendingDeath;
+  onSettled: (id: number, generation: number, outcome: DeathReadinessOutcome) => void;
+}) {
+  const settledRef = useRef(false);
+  const settle = useCallback((outcome: DeathReadinessOutcome) => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    onSettled(pending.id, pending.generation, outcome);
+  }, [onSettled, pending.generation, pending.id]);
+
+  useEffect(() => {
+    const deadline = setTimeout(
+      () => settle({ type: "fallback" }),
+      pending.readinessDeadlineMs,
+    );
+    return () => clearTimeout(deadline);
+  }, [pending.readinessDeadlineMs, settle]);
+
+  return (
+    <div hidden aria-hidden="true">
+      <ResolvedAnimationImage
+        snapshot={pending.snapshot}
+        size="art_crop"
+        alt=""
+        fallback={null}
+        crossOrigin="anonymous"
+        onReady={(image) => settle({ type: "ready", image })}
+        onExhausted={() => settle({ type: "fallback" })}
+      />
+    </div>
+  );
+}
 
 /**
  * Resolve the rendered card element for an object id. Collapsed identical-
@@ -93,6 +162,7 @@ function findCardElement(objectId: number): HTMLElement | null {
 
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeStep = useAnimationStore((s) => s.activeStep);
+  const activeGeneration = useAnimationStore((s) => s.activeGeneration);
   const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
@@ -104,6 +174,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   } | null>(null);
   const [activeReveals, setActiveReveals] = useState<ActiveReveal[]>([]);
   const [activeShatters, setActiveShatters] = useState<ActiveShatter[]>([]);
+  const [pendingDeaths, setPendingDeaths] = useState<PendingDeath[]>([]);
+  const pendingDeathsRef = useRef<PendingDeath[]>([]);
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
   const [activeMillReveals, setActiveMillReveals] = useState<ActiveMillReveal[]>([]);
 
@@ -147,8 +219,62 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     stepTimeoutsRef.current.push(timeout);
   }, []);
 
+  const addPendingDeath = useCallback((pending: PendingDeath) => {
+    if (useAnimationStore.getState().activeGeneration !== pending.generation) return;
+    pendingDeathsRef.current = [...pendingDeathsRef.current, pending];
+    setPendingDeaths(pendingDeathsRef.current);
+  }, []);
+
+  const settlePendingDeath = useCallback((
+    id: number,
+    generation: number,
+    outcome: DeathReadinessOutcome,
+  ) => {
+    if (useAnimationStore.getState().activeGeneration !== generation) return;
+    const pending = pendingDeathsRef.current.find(
+      (record) => record.id === id && record.generation === generation,
+    );
+    if (!pending) return;
+
+    const remaining = pendingDeathsRef.current.filter((record) => record !== pending);
+    if (useAnimationStore.getState().activeGeneration !== generation) return;
+    pendingDeathsRef.current = remaining;
+    setPendingDeaths(remaining);
+
+    if (useAnimationStore.getState().activeGeneration !== generation) return;
+    if (outcome.type === "ready") {
+      setActiveShatters((previous) => [
+        ...previous,
+        {
+          id: pending.id,
+          position: pending.position,
+          image: outcome.image,
+        },
+      ]);
+    } else {
+      setActiveDeathClones((previous) => [
+        ...previous,
+        {
+          id: pending.id,
+          position: pending.position,
+          cardName: pending.snapshot.cardName,
+        },
+      ]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (useAnimationStore.getState().activeGeneration !== activeGeneration) return;
+    const current = pendingDeathsRef.current.filter(
+      (pending) => pending.generation === activeGeneration,
+    );
+    if (current.length === pendingDeathsRef.current.length) return;
+    pendingDeathsRef.current = current;
+    setPendingDeaths(current);
+  }, [activeGeneration]);
+
   const processEffect = useCallback(
-    (effect: StepEffect, stepEffects: StepEffect[]) => {
+    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const { event } = effect;
 
       switch (event.type) {
@@ -328,10 +454,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         case "CreatureDestroyed":
         case "PermanentSacrificed": {
           const { object_id } = event.data;
+          const imageSnapshot = visiblePreEventSnapshot(object_id);
           const pos = getObjectPosition(object_id);
           if (pos && vfxQuality !== "minimal") {
-            const gameState = useGameStore.getState().gameState;
-            const colors = gameState?.objects[object_id]?.color ?? [];
+            const colors = imageSnapshot
+              ? useGameStore.getState().gameState?.objects[object_id]?.color ?? []
+              : [];
             const explosionColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
             particleRef.current?.explosion(pos.x, pos.y, explosionColor);
           }
@@ -340,23 +468,32 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           const registryRect = getPosition(object_id);
           const rect = snapshotRect ?? registryRect;
           if (rect) {
-            const gameState = useGameStore.getState().gameState;
-            const cardName = gameState?.objects[object_id]?.name ?? "Unknown";
-
-            if (vfxQuality !== "minimal" && event.type === "CreatureDestroyed") {
-              const shatterId = ++shatterIdCounter;
-              fetchCardImageUrl(cardName, 0, "art_crop")
-                .then((url) => {
-                  setActiveShatters((prev) => [
-                    ...prev,
-                    { id: shatterId, position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, imageUrl: url },
-                  ]);
-                })
-                .catch(() => {
-                  setActiveDeathClones((prev) => [...prev, { id: object_id, position: rect, cardName }]);
-                });
+            const position = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            if (
+              vfxQuality !== "minimal" &&
+              event.type === "CreatureDestroyed" &&
+              imageSnapshot
+            ) {
+              const generation = useAnimationStore.getState().activeGeneration;
+              addPendingDeath({
+                id: ++shatterIdCounter,
+                generation,
+                snapshot: imageSnapshot,
+                position,
+                readinessDeadlineMs: Math.min(
+                  DEATH_IMAGE_READY_MAX_MS,
+                  owningStepMs * 0.75,
+                ),
+              });
             } else {
-              setActiveDeathClones((prev) => [...prev, { id: object_id, position: rect, cardName }]);
+              setActiveDeathClones((previous) => [
+                ...previous,
+                {
+                  id: ++deathCloneIdCounter,
+                  position,
+                  cardName: imageSnapshot?.cardName ?? null,
+                },
+              ]);
             }
           }
           break;
@@ -366,15 +503,18 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           const { object_id } = event.data;
           const pos = getObjectPosition(object_id);
           if (pos) {
-            const gameState = useGameStore.getState().gameState;
-            const colors = gameState?.objects[object_id]?.color ?? [];
+            const newObject = useAnimationStore.getState().animationNewState?.objects[object_id];
+            const snapshot = visiblePostEventSnapshot(object_id);
+            const colors = snapshot ? newObject?.color ?? [] : [];
             const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
             if (vfxQuality !== "minimal") {
               particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              const cardName = gameState?.objects[object_id]?.name ?? "";
               const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
               const id = ++castArcIdCounter;
-              setActiveCastArcs((prev) => [...prev, { id, from: pos, to: stackPos, cardName, mode: "cast" }]);
+              setActiveCastArcs((previous) => [
+                ...previous,
+                { id, from: pos, to: stackPos, snapshot, mode: "cast" },
+              ]);
             }
           }
           break;
@@ -399,37 +539,58 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 particleRef.current?.summonBurst(pos.x, pos.y, summonColor);
 
                 if (fromZone === "Stack") {
-                  const cardName = gameState?.objects[object_id]?.name ?? "";
+                  const snapshot = visiblePreEventSnapshot(object_id);
                   const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
                   const arcId = ++castArcIdCounter;
-                  setActiveCastArcs((prev) => [...prev, { id: arcId, from: stackPos, to: pos, cardName, mode: "resolve-permanent" }]);
+                  setActiveCastArcs((previous) => [
+                    ...previous,
+                    {
+                      id: arcId,
+                      from: stackPos,
+                      to: pos,
+                      snapshot,
+                      mode: "resolve-permanent",
+                    },
+                  ]);
                 }
               }
             }
           } else if (fromZone === "Stack" && toZone === "Graveyard") {
             if (vfxQuality !== "minimal") {
-              const gameState = useGameStore.getState().gameState;
-              const cardName = gameState?.objects[object_id]?.name ?? "";
+              const snapshot = visiblePreEventSnapshot(object_id);
               const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
               const arcId = ++castArcIdCounter;
-              setActiveCastArcs((prev) => [...prev, { id: arcId, from: stackPos, to: stackPos, cardName, mode: "resolve-spell" }]);
+              setActiveCastArcs((previous) => [
+                ...previous,
+                {
+                  id: arcId,
+                  from: stackPos,
+                  to: stackPos,
+                  snapshot,
+                  mode: "resolve-spell",
+                },
+              ]);
             }
           } else if (fromZone === "Library" && toZone === "Graveyard") {
             if (vfxQuality !== "minimal") {
-              const oldState = useGameStore.getState().gameState;
               const newState = useAnimationStore.getState().animationNewState;
-              const millCards: { objectId: number; cardName: string; colors: string[] }[] = [];
+              const millCards: MillCard[] = [];
               for (const e of stepEffects) {
                 if (e.event.type !== "ZoneChanged") continue;
                 const d = e.event.data;
                 if (d.from !== "Library" || d.to !== "Graveyard") continue;
-                const obj = oldState?.objects[d.object_id] ?? newState?.objects[d.object_id];
-                millCards.push({ objectId: d.object_id, cardName: obj?.name ?? "Unknown", colors: getCardColors(obj?.color ?? []) });
+                const object = newState?.objects[d.object_id];
+                const snapshot = visibleAnimationImageSnapshot(object);
+                millCards.push({
+                  objectId: d.object_id,
+                  snapshot,
+                  colors: snapshot ? getCardColors(object?.color ?? []) : [],
+                });
               }
 
               // Deduplicate: only process once per step (first Library→Graveyard event triggers the batch)
               if (object_id === millCards[0]?.objectId && millCards.length > 0) {
-                const obj = oldState?.objects[object_id] ?? newState?.objects[object_id];
+                const obj = newState?.objects[object_id];
                 const ownerId = obj?.owner ?? 0;
 
                 const libEl = document.querySelector(`[data-library-pile="${ownerId}"]`);
@@ -482,6 +643,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       speedMultiplier,
       containerRef,
       scheduleStepTimeout,
+      addPendingDeath,
     ],
   );
 
@@ -490,7 +652,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     if (!activeStep) return;
 
     for (const effect of activeStep.effects) {
-      processEffect(effect, activeStep.effects);
+      processEffect(
+        effect,
+        activeStep.effects,
+        activeStep.duration * speedMultiplier,
+      );
     }
 
     const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
@@ -574,12 +740,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         </AnimatePresence>
       </div>
 
+      {/* Hidden, bounded image readiness for creature shatter effects. */}
+      {pendingDeaths.map((pending) => (
+        <PendingDeathImage
+          key={`pending-death-${pending.id}`}
+          pending={pending}
+          onSettled={settlePendingDeath}
+        />
+      ))}
+
       {/* Death shatter effects (z-46) */}
       {activeShatters.map((shatter) => (
         <DeathShatter
           key={`shatter-${shatter.id}`}
           position={shatter.position}
-          imageUrl={shatter.imageUrl}
+          image={shatter.image}
           onComplete={() => handleShatterComplete(shatter.id)}
         />
       ))}
@@ -590,7 +765,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`arc-${arc.id}`}
           from={arc.from}
           to={arc.to}
-          cardName={arc.cardName}
+          snapshot={arc.snapshot}
           mode={arc.mode}
           onComplete={() => handleCastArcComplete(arc.id)}
         />
