@@ -1707,6 +1707,19 @@ fn record_replay_action(is_debug_action: bool, actor: PlayerId, action_for_repla
     });
 }
 
+/// Record the AI-only verified-pass seam. This has a distinct typed replay
+/// marker because replaying its visible `PassPriority` payload through the
+/// ordinary reducer would omit the retained stack recheck session.
+fn record_verified_ai_priority_pass(actor: PlayerId, semantic_owner: PlayerId) {
+    REPLAY_LOG.with(|cell| {
+        let mut log = cell.take();
+        if let Some(log) = log.as_mut() {
+            log.push_verified_ai_priority_pass(actor, semantic_owner);
+        }
+        cell.set(log);
+    });
+}
+
 struct DebugCreateCardRequest<'a> {
     actor: PlayerId,
     card_name: &'a str,
@@ -3102,14 +3115,28 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
                 reason: "decision_changed_or_action_outside_issued_bounds",
             };
         }
-        match apply_interaction_with_rejection(
-            state,
-            actor,
-            proposal.contract.semantic_owner,
-            action.clone(),
-        ) {
+        let is_stack_recheck_pass =
+            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        let applied = if is_stack_recheck_pass {
+            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
+                state,
+                &proposal.contract,
+            )
+        } else {
+            apply_interaction_with_rejection(
+                state,
+                actor,
+                proposal.contract.semantic_owner,
+                action.clone(),
+            )
+        };
+        match applied {
             Ok(result) => {
-                record_replay_action(false, actor, action);
+                if is_stack_recheck_pass {
+                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+                } else {
+                    record_replay_action(false, actor, action);
+                }
                 invalidate_ai_proposals();
                 AiProposalSubmission::Applied {
                     result: Box::new(result),

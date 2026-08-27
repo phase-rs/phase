@@ -1114,6 +1114,22 @@ pub fn apply_verified_ai_priority_pass(
     apply_interaction(state, actor, contract.semantic_owner, action)
 }
 
+/// Applies a verified AI priority pass while returning the same stable rejection
+/// metadata as other interaction-materialized actions.
+pub fn apply_verified_ai_priority_pass_with_rejection(
+    state: &mut GameState,
+    contract: &crate::ai_support::AiDecisionContract,
+) -> Result<ActionResult, ActionRejection> {
+    let actor = contract.authorized_actor;
+    apply_verified_ai_priority_pass(state, contract).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, GameAction::PassPriority.related_object_ids()),
+        )
+    })
+}
+
 pub(crate) fn apply_interaction_for_simulation(
     state: &mut GameState,
     authenticated_actor: PlayerId,

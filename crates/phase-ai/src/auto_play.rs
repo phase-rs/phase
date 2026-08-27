@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use engine::ai_support::AiDecisionContract;
-use engine::game::engine::{apply_interaction, EngineError};
+use engine::game::engine::{apply_interaction, apply_verified_ai_priority_pass, EngineError};
 use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -297,7 +297,14 @@ fn run_ai_actions_with_limit(
         // The decision owner and authenticated AI actor are intentionally
         // separate: control effects can make one player submit another
         // player's pending choice.
-        match apply_interaction(state, actor, semantic_owner, action.clone()) {
+        let is_stack_recheck_pass =
+            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        let applied = if is_stack_recheck_pass {
+            apply_verified_ai_priority_pass(state, &contract)
+        } else {
+            apply_interaction(state, actor, semantic_owner, action.clone())
+        };
+        match applied {
             Ok(result) => {
                 results.push(AiActionResult {
                     action,
