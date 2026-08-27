@@ -135,7 +135,7 @@ const mocks = vi.hoisted(() => {
     exportPersistenceState: vi.fn(async () => JSON.stringify({ players: [], objects: {} })),
     resumeMultiplayerHostState: vi.fn<() => Promise<RestoredGameStateResult>>(async () => ({
       snapshot: {
-        state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } },
+        state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } } as unknown as GameState,
         legalResult: { actions: [], autoPassRecommended: false },
         seq: 1,
       },
@@ -369,7 +369,7 @@ beforeEach(() => {
   mocks.resumeMultiplayerHostState.mockReset();
   mocks.resumeMultiplayerHostState.mockResolvedValue({
     snapshot: {
-      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } },
+      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } } as unknown as GameState,
       legalResult: { actions: [], autoPassRecommended: false },
       seq: 1,
     },
@@ -947,7 +947,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   it("consumes a resumed automation result exactly once", async () => {
-    const restored = {
+    const restored: RestoredGameStateResult = {
       snapshot: {
         state: remoteState("resumed"),
         legalResult: { actions: [], autoPassRecommended: false },
