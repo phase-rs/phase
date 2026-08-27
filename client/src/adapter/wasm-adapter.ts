@@ -1088,11 +1088,6 @@ interface MainThreadFallback {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
-  resolveAll(
-    requester: number,
-    aiSeats: { playerId: number; difficulty: string }[],
-    maxResolutions?: number,
-  ): Promise<BatchResolveResult>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
@@ -1204,11 +1199,6 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       enqueue(() => {
         return unwrapActionOutcome<ObjectId[]>(wasm.preview_mana_payment_js(actor, action));
       }),
-
-    resolveAll: (requester, aiSeats, maxResolutions = 0) =>
-      enqueue(() => unwrapActionOutcome<BatchResolveResult>(
-        wasm.resolve_all(requester, JSON.stringify(aiSeats), maxResolutions),
-      )),
 
     // null from any of these three getters means WASM `GAME_STATE` is None
     // (worker restart, PWA update desync, panic recovery). Throw with the
