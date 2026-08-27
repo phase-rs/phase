@@ -8,47 +8,52 @@ vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: () => {} },
   useTranslation: () => ({
     t: (key: string, opts?: Record<string, unknown>) =>
-      key === "resolutionProgress.label"
-        ? `Resolving ${opts?.resolved} / ${opts?.total}`
-        : key === "resolutionProgress.collapse"
-          ? "Collapse resolving progress"
-          : key === "resolutionProgress.expand"
-            ? "Expand resolving progress"
-        : key,
+      key === "restoredAutomation.progressed.title"
+        ? "Stack automation resumed"
+        : key === "restoredAutomation.progressed.summary"
+          ? `Resolved ${opts?.count}; omitted ${opts?.omitted}`
+          : key === "restoredAutomation.dismiss"
+            ? "Dismiss"
+            : key,
   }),
 }));
 
 describe("ResolutionProgressOverlay", () => {
-  beforeEach(() => {
-    useGameStore.setState({ resolutionProgress: null });
-  });
+  beforeEach(() => useGameStore.setState({ restoredStackAutomation: null }));
 
   afterEach(() => {
     cleanup();
-    useGameStore.setState({ resolutionProgress: null });
+    useGameStore.setState({ restoredStackAutomation: null });
   });
 
-  it("renders the engine-provided resolved/total counts when a storm is in flight", async () => {
-    useGameStore.setState({ resolutionProgress: { resolved: 80, total: 200 } });
+  it("renders the exact engine-authored restored automation summary", async () => {
+    useGameStore.setState({
+      restoredStackAutomation: {
+        outcome: "progressed",
+        automatedResolutionCount: 80,
+        omittedEventCount: 200,
+        logEntries: [],
+      },
+    });
     render(<ResolutionProgressOverlay />);
-    expect(await screen.findByText("Resolving 80 / 200")).toBeInTheDocument();
+
+    expect(await screen.findByText("Stack automation resumed")).toBeInTheDocument();
+    expect(screen.getByText("Resolved 80; omitted 200")).toBeInTheDocument();
   });
 
-  it("renders nothing when no resolution is in flight", () => {
-    useGameStore.setState({ resolutionProgress: null });
+  it("dismisses the one-shot presentation without dispatching an engine action", async () => {
+    useGameStore.setState({
+      restoredStackAutomation: {
+        outcome: "progressed",
+        automatedResolutionCount: 1,
+        omittedEventCount: 2,
+        logEntries: [],
+      },
+    });
     render(<ResolutionProgressOverlay />);
-    expect(screen.queryByText(/Resolving/)).not.toBeInTheDocument();
-  });
 
-  it("collapses and expands the progress display without clearing progress", async () => {
-    useGameStore.setState({ resolutionProgress: { resolved: 50, total: 19192 } });
-    render(<ResolutionProgressOverlay />);
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
 
-    fireEvent.click(await screen.findByRole("button", { name: "Collapse resolving progress" }));
-    expect(await screen.findByRole("button", { name: "Expand resolving progress" })).toBeInTheDocument();
-    expect(useGameStore.getState().resolutionProgress).toEqual({ resolved: 50, total: 19192 });
-
-    fireEvent.click(screen.getByRole("button", { name: "Expand resolving progress" }));
-    expect(await screen.findByRole("button", { name: "Collapse resolving progress" })).toBeInTheDocument();
+    expect(useGameStore.getState().restoredStackAutomation).toBeNull();
   });
 });

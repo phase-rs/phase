@@ -25,6 +25,7 @@ import init, {
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
   restore_game_state,
+  resume_restored_game_state,
   resume_multiplayer_host_state,
   load_card_database,
   build_ai_card_subset,
@@ -97,6 +98,7 @@ type EngineRequest =
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
   | { type: "restoreState"; id: number; stateJson: string }
+  | { type: "resumeRestoredGameState"; id: number }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
@@ -512,9 +514,27 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "resumeRestoredGameState": {
+        const presentation = resume_restored_game_state();
+        result(msg.id, {
+          presentation,
+          snapshot: {
+            state: get_game_state(),
+            legalResult: get_legal_actions_js(),
+          },
+        });
+        break;
+      }
+
       case "resumeMultiplayerHostState": {
-        resume_multiplayer_host_state(msg.stateJson);
-        result(msg.id, null);
+        const presentation = resume_multiplayer_host_state(msg.stateJson);
+        result(msg.id, {
+          presentation,
+          snapshot: {
+            state: get_game_state(),
+            legalResult: get_legal_actions_js(),
+          },
+        });
         break;
       }
 

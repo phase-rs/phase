@@ -4056,6 +4056,18 @@ export interface BatchResolveResult {
 }
 
 /**
+ * Engine-authored display summary for the one explicit automation run that
+ * follows loading a persisted game. The state in `RestoredGameStateResult` is
+ * authoritative; this bounded tail only explains that one transition.
+ */
+export interface RestoredStackAutomationPresentation {
+  outcome: "noop" | "progressed" | "zeroResolutionRepair";
+  automatedResolutionCount: number;
+  omittedEventCount: number;
+  logEntries: GameLogEntry[];
+}
+
+/**
  * A `GameState` and the `LegalActionsResult` derived from that exact engine
  * version, captured with no interleaving window between them.
  *
@@ -4074,6 +4086,12 @@ export interface EngineSnapshot {
    * commit authority drops pairs stamped older than the last one it committed.
    */
   seq: number;
+}
+
+/** A post-resume engine pair and its engine-authored automation presentation. */
+export interface RestoredGameStateResult {
+  snapshot: EngineSnapshot;
+  presentation: RestoredStackAutomationPresentation;
 }
 
 /**
@@ -4201,6 +4219,11 @@ export interface EngineAdapter {
    * genuinely need one half in isolation.
    */
   getSnapshot(): Promise<EngineSnapshot>;
+  /**
+   * Explicitly resume automation carried by a persisted state after a normal
+   * restore. Undo and developer restores deliberately do not call this.
+   */
+  resumeRestoredGameState?(): Promise<RestoredGameStateResult | null>;
   /** Returns an opaque, exact member of the current engine-issued decision domain. */
   getAiActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */

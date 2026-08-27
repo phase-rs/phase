@@ -50,10 +50,20 @@
     "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
     "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
-  "resolutionProgress": {
-    "label": "Resolving {{resolved}} / {{total}}",
-    "collapse": "Collapse resolving progress",
-    "expand": "Expand resolving progress"
+  "restoredAutomation": {
+    "dismiss": "Dismiss",
+    "noop": {
+      "title": "Saved game loaded",
+      "summary": "No stack automation needed to resume."
+    },
+    "progressed": {
+      "title": "Stack automation resumed",
+      "summary": "The engine completed {{count}} automated resolutions and omitted {{omitted}} intermediate events."
+    },
+    "zeroResolutionRepair": {
+      "title": "Stack automation repaired",
+      "summary": "The saved automation was safely repaired before play resumed."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Resolve All",

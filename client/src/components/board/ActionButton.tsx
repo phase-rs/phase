@@ -4,10 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { blockerAssignmentPairs, useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets, getValidAttackTargetsByAttacker } from "../../utils/combat.ts";
@@ -273,17 +271,16 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilTurnBoundary";
-  // Armed Arena-style "Resolve All" session (multiplayer): the engine is
-  // auto-passing this seat's priority windows until the stack empties or
-  // grows. Surfaced with the same pulsing cancel affordance as UntilTurnBoundary
-  // so the player can revoke it between opponents' windows.
-  const isResolvingStack = autoPass?.type === "UntilStackEmpty";
+  // A committed human authorization is visible and revocable. AI recheck
+  // sessions use the same engine mechanism, but are an internal decision
+  // policy rather than a human-owned UI state.
+  const isResolvingStack =
+    autoPass?.type === "UntilStackEmpty" && autoPass.policy !== "RecheckNoMeaningfulPriorityAction";
   const canActDuringAutoPass =
     mode === "combat-attackers" || mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
-  const isResolvingAll = useGameStore((s) => s.isResolvingAll);
-  const actionBlocked = actionPending || isResolvingAll;
+  const actionBlocked = actionPending;
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
   const panelClassName =
@@ -414,35 +411,8 @@ export function ActionButton() {
             </button>
             <button
               disabled={actionBlocked}
-              aria-busy={isResolvingAll}
               onClick={() => {
-                const { gameState: gs, gameMode } = useGameStore.getState();
-                // Only claim seats as AI-driven when an AI actually drives them,
-                // mirroring the controller each mode installs. "ai": every
-                // non-local seat. This explicit button is the only UI path that
-                // starts Resolve All; stack pressure never opts the player in.
-                // Draft matches: only a Bot pairing has an AI seat, and it uses
-                // the same binding installMatchRuntime gives the live controller.
-                // Native AI likewise gets an empty list: its authenticated server
-                // advertises the Resolve All capability and owns AI-seat selection.
-                // Everything else — "local" hotseat above all (#4978) — falls
-                // back to per-seat engine auto-yield instead of handing human
-                // seats to the AI.
-                let seats: { playerId: number; difficulty: string }[] = [];
-                if (gameMode === "ai") {
-                  const playerCount = gs?.players?.length ?? 2;
-                  const aiSeats = usePreferencesStore.getState().aiSeats;
-                  seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-                    playerId: i + 1,
-                    difficulty: aiSeats[i]?.difficulty ?? "Medium",
-                  }));
-                } else if (
-                  gameMode === "draft-match" &&
-                  useMultiplayerDraftStore.getState().matchPairing?.type === "Bot"
-                ) {
-                  seats = [DRAFT_BOT_AI_SEAT];
-                }
-                dispatchResolveAll(playerId, seats);
+                void dispatchResolveAll(playerId);
               }}
               aria-describedby={resolveAllTooltipId}
               className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: `${secondaryButtonClass} group relative` })}

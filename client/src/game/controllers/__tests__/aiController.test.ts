@@ -14,11 +14,8 @@ const dispatchMocks = vi.hoisted(() => ({
   dispatchAiActionProposal: vi.fn<
     (proposal: AiActionProposal) => Promise<{ status: "applied" | "stale" }>
   >(),
-  dispatchResolveAll: vi.fn<
-    (requester: number, seats: { playerId: number; difficulty: string }[]) => Promise<void>
-  >(),
 }));
-const { dispatchAiActionProposal, dispatchResolveAll } = dispatchMocks;
+const { dispatchAiActionProposal } = dispatchMocks;
 const notifyEngineLost = vi.fn();
 const attemptStateRehydrate = vi.fn(async () => false);
 const isEnginePanic = vi.fn<(error: unknown) => boolean>(() => false);
@@ -26,7 +23,6 @@ const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(asyn
 
 vi.mock("../../dispatch", () => ({
   dispatchAiActionProposal: dispatchMocks.dispatchAiActionProposal,
-  dispatchResolveAll: dispatchMocks.dispatchResolveAll,
 }));
 vi.mock("../../engineRecovery", () => ({
   attemptStateRehydrate: () => attemptStateRehydrate(),
@@ -41,7 +37,6 @@ let storeState: {
   waitingFor: WaitingFor | null;
   adapter: { getAiActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null> } | null;
   gameSessionGeneration: number;
-  isResolvingAll: boolean;
 };
 let storeSubscriber: (() => void) | null = null;
 let randomSpy: ReturnType<typeof vi.spyOn>;
@@ -94,8 +89,6 @@ beforeEach(() => {
   // of nested retries to fit inside that same window.
   randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
   dispatchAiActionProposal.mockReset();
-  dispatchResolveAll.mockReset();
-  dispatchResolveAll.mockResolvedValue(undefined);
   notifyEngineLost.mockReset();
   attemptStateRehydrate.mockReset();
   attemptStateRehydrate.mockResolvedValue(false);
@@ -108,7 +101,6 @@ beforeEach(() => {
     waitingFor: state.waiting_for,
     adapter: null,
     gameSessionGeneration: 1,
-    isResolvingAll: false,
   };
 });
 
@@ -218,47 +210,7 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
-  it("drops a proposal computed before Resolve All takes ownership of Priority", async () => {
-    const pendingProposal = deferred<AiActionProposal | null>();
-    const getAiActionProposal = vi.fn(() => pendingProposal.promise);
-    storeState.adapter = { getAiActionProposal };
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    controller.start();
-    vi.advanceTimersByTime(1_000);
-    await Promise.resolve();
-
-    storeState.isResolvingAll = true;
-    storeSubscriber?.();
-    pendingProposal.resolve(proposal(PASS));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
-    controller.dispose();
-  });
-
-  it("schedules Priority exactly once when Resolve All releases ownership", async () => {
-    storeState.isResolvingAll = true;
-    const issued = proposal(PASS);
-    const getAiActionProposal = vi.fn(async () => issued);
-    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
-    storeState.adapter = { getAiActionProposal };
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    controller.start();
-    expect(getAiActionProposal).not.toHaveBeenCalled();
-
-    storeState.isResolvingAll = false;
-    storeSubscriber?.();
-    await runOnce();
-
-    expect(getAiActionProposal).toHaveBeenCalledTimes(2);
-    expect(dispatchAiActionProposal).toHaveBeenCalledOnce();
-    controller.dispose();
-  });
-
-  it("starts Resolve All with the engine-issued actor after an AI representative grants consent", async () => {
+  it("leaves final Resolve All consent automation entirely to the engine", async () => {
     const consent = {
       type: "ResolveAllConsent",
       data: { epoch: 7, representative: 1 },
@@ -285,14 +237,12 @@ describe("AI proposal controller", () => {
       return { status: "applied" };
     });
 
-    const seats = [{ playerId: 1, difficulty: "Medium" }];
-    const controller = createAIController({ seats });
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
     await runOnce();
 
     expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
-    expect(dispatchResolveAll).toHaveBeenCalledWith(0, seats);
     controller.dispose();
   });
 
@@ -321,7 +271,6 @@ describe("AI proposal controller", () => {
     await runOnce();
 
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
-    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 
@@ -342,7 +291,6 @@ describe("AI proposal controller", () => {
 
     expect(getAiActionProposal).not.toHaveBeenCalled();
     expect(dispatchAiActionProposal).not.toHaveBeenCalled();
-    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 
@@ -377,7 +325,6 @@ describe("AI proposal controller", () => {
     controller.start();
     await runOnce();
 
-    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 
@@ -412,7 +359,6 @@ describe("AI proposal controller", () => {
     controller.start();
     await runOnce();
 
-    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 
@@ -452,7 +398,6 @@ describe("AI proposal controller", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 

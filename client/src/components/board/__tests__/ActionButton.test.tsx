@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameState, WaitingFor } from "../../../adapter/types";
 import { dispatchAction, dispatchResolveAll } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
-import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
+import { useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
 import {
@@ -90,7 +90,6 @@ describe("ActionButton", () => {
       gameState: createGameState(waitingFor),
       waitingFor,
       legalActions: [],
-      isResolvingAll: false,
     });
     useUiStore.setState({
       combatMode: null,
@@ -171,7 +170,7 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: "Auto-Passing to End Step..." })).toBeInTheDocument();
   });
 
-  it("disables resolve controls while Resolve All is draining", () => {
+  it("does not block Resolve All behind client-side drain state", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
@@ -182,18 +181,16 @@ describe("ActionButton", () => {
       },
       waitingFor: priorityPrompt(),
       legalActions: [],
-      isResolvingAll: true,
     });
     useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: "Resolve" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Resolve All" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Resolve All" })).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toBeEnabled();
   });
 
-  it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
+  it("starts the same engine consent transaction for local hotseat", () => {
     useGameStore.setState({
       gameMode: "local",
       gameState: {
@@ -209,10 +206,10 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
-    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0);
   });
 
-  it("builds the AI seat list for Resolve All when the other seats are AI-driven", () => {
+  it("starts the same engine consent transaction for AI games", () => {
     useGameStore.setState({
       gameMode: "ai",
       gameState: {
@@ -228,9 +225,7 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
-    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
-      { playerId: 1, difficulty: "Medium" },
-    ]);
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0);
   });
 
   it("leaves native AI Resolve All seat ownership to the server", () => {
@@ -249,7 +244,7 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
-    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0);
   });
 
   it("uses the live controller's bot seat binding for a Bot draft match", () => {
@@ -269,7 +264,7 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
-    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [DRAFT_BOT_AI_SEAT]);
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0);
   });
 
   it("claims no AI seats for a vs-human draft match", () => {
@@ -289,7 +284,7 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
-    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0);
   });
 
   it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {
@@ -303,7 +298,6 @@ describe("ActionButton", () => {
       },
       waitingFor: priorityPrompt(1),
       legalActions: [],
-      isResolvingAll: false,
     });
     useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
 
@@ -328,7 +322,6 @@ describe("ActionButton", () => {
       },
       waitingFor: priorityPrompt(),
       legalActions: [],
-      isResolvingAll: false,
     });
     useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
 
@@ -337,6 +330,30 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: "Resolving Stack..." })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resolve All" })).not.toBeInTheDocument();
+  });
+
+  it("does not surface an AI recheck session as a human Resolving Stack control", () => {
+    useGameStore.setState({
+      gameMode: "ai",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {
+          0: {
+            type: "UntilStackEmpty",
+            initial_stack_len: 1,
+            policy: "RecheckNoMeaningfulPriorityAction",
+          },
+        },
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    expect(screen.queryByRole("button", { name: "Resolving Stack..." })).not.toBeInTheDocument();
   });
 
   it("no longer client-gates Confirm/Skip on a must-attack creature (engine is the authority)", () => {

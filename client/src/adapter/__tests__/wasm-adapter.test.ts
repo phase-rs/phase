@@ -11,6 +11,7 @@ import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
@@ -19,6 +20,7 @@ vi.mock("../../services/cardData", () => ({
 }));
 
 vi.mock("@wasm/engine", () => ({
+  resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
 }));
 
@@ -58,7 +60,8 @@ const mockWorkerClient = {
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
-  resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
+  resumeRestoredGameState: vi.fn(),
+  resumeMultiplayerHostState: vi.fn(),
   setMultiplayerMode: vi.fn().mockResolvedValue(undefined),
   resetGame: vi.fn().mockResolvedValue(undefined),
   applySeatMutation: vi.fn().mockResolvedValue({ state: {}, delta: {} }),
@@ -99,6 +102,20 @@ describe("WasmAdapter", () => {
       status: "stale",
       reason: "test",
     });
+    const restored = {
+      presentation: {
+        outcome: "noop" as const,
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
+      snapshot: {
+        state: buildGameState({ turn_number: 3, phase: "PreCombatMain" }),
+        legalResult: { actions: [], autoPassRecommended: false },
+      },
+    };
+    mockWorkerClient.resumeRestoredGameState.mockResolvedValue(restored);
+    mockWorkerClient.resumeMultiplayerHostState.mockResolvedValue(restored);
   });
 
   describe("AI decision diagnostics", () => {
@@ -678,6 +695,22 @@ describe("WasmAdapter", () => {
         "resume failed",
       );
       expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("resumeRestoredGameState", () => {
+    it("returns the engine-authored presentation with its matching snapshot", async () => {
+      await adapter.initialize();
+
+      const resumed = await adapter.resumeRestoredGameState();
+
+      expect(mockWorkerClient.resumeRestoredGameState).toHaveBeenCalledOnce();
+      expect(resumed.presentation).toMatchObject({
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+      });
+      expect(resumed.snapshot.state.turn_number).toBe(3);
     });
   });
 

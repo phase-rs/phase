@@ -1,4 +1,4 @@
-import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
+import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
 import type { InteractionSubmission } from "../adapter/generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
 import { reportStructuredActionRejection } from "./actionRejectionReporter";
@@ -23,7 +23,7 @@ import {
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { pressureMultiplier, stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
+import { pressureMultiplier } from "../utils/stackPressure";
 import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
@@ -568,6 +568,7 @@ async function processAction(
     events,
     logEntries: result.log_entries ?? [],
     stateHistory,
+    extraState: { restoredStackAutomation: null },
   });
 
   // Play victory/defeat stinger on GameOver
@@ -799,6 +800,7 @@ export async function dispatchInteraction(
     useGameStore.getState().commitEngineSnapshot(snapshot, {
       events: result.events,
       logEntries: result.log_entries ?? [],
+      extraState: { restoredStackAutomation: null },
     });
   } catch (err) {
     reportActionError(err);
@@ -881,7 +883,11 @@ async function processRemoteUpdateInner(
   //    update that was superseded while its animation played is dropped rather
   //    than clobbering the newer state.
   if (!isCurrentDispatchGeneration(generation)) return;
-  useGameStore.getState().commitEngineSnapshot(snapshot, { events, logEntries });
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    events,
+    logEntries,
+    extraState: { restoredStackAutomation: null },
+  });
   // Written INSIDE the generation gate, alongside the snapshot it describes:
   // outside it, a superseded update would clobber the list with a stale one.
   // `undefined` means "this transport does not publish rollback targets" (p2p,
@@ -961,6 +967,7 @@ export async function restoreGameState(
       nextLogSeq: 0,
       stateHistory: [],
       turnCheckpoints: preservedCheckpoints,
+      restoredStackAutomation: null,
     },
   });
   if (gameId) {
@@ -971,116 +978,14 @@ export async function restoreGameState(
   return null;
 }
 
-const BATCH_CHUNK_SIZE = 5;
-// Under "Instant" stack pressure (a multi-hundred/thousand identical-trigger
-// storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted. Keep
-// large storms in engine-owned fast-forward batches so partial stacks collapse
-// before the frontend pays the per-chunk `getSnapshot` cost.
-// The value is intentionally large: the worker boundary already keeps the main
-// thread responsive, while this still lets the overlay update during truly
-// pathological stacks.
-const BATCH_CHUNK_INSTANT = 5_000;
-let batchResolveInProgress = false;
-
-export async function dispatchResolveAll(
-  requester: number,
-  aiSeats: { playerId: number; difficulty: string }[],
-): Promise<void> {
-  if (batchResolveInProgress) return;
-  const { adapter: batchAdapter } = useGameStore.getState();
-  if (!batchAdapter) {
-    debugLog("dispatchResolveAll: no adapter");
-    return;
-  }
-  const waitingFor = useGameStore.getState().gameState?.waiting_for;
-  if (waitingFor?.type === "ResolveAllReady") {
-    if (!batchAdapter.resolveAll) {
-      debugLog("dispatchResolveAll: consent is Ready but the adapter cannot consume it");
-      return;
-    }
-  } else if (
-    !batchAdapter.resolveAll
-    || (aiSeats.length === 0 && batchAdapter.resolveAllUsesServerAi !== true)
-  ) {
-    // No batch drain (transports without the capability), or no AI deciders for
-    // the other seats (local hotseat — every seat is a human, #4978). A native
-    // adapter explicitly vouches that its authenticated server owns AI-seat
-    // selection; all other transports must preserve human priority windows.
-    // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
-    // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
-    // this player receives priority and clears itself when the stack empties
-    // or grows (an opponent responded).
-    await dispatchAction(
-      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
-      requester,
-    );
-    return;
-  }
-
-  // Resolve All starts as an ordinary engine action so every representative
-  // receives the explicit Phase-1 Grant/Decline prompt. A later invocation
-  // after Ready consumes that already-issued authorization; it never starts a
-  // second run or asks a future AI decision speculatively.
-  if (waitingFor?.type !== "ResolveAllReady") {
-    const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
-    const maxResolutions =
-      stackPressureFromLength(stackLen) === "Instant"
-        ? BATCH_CHUNK_INSTANT
-        : BATCH_CHUNK_SIZE;
-    await dispatchAction(
-      { type: "BeginResolveAll", data: { max_resolutions: maxResolutions } },
-      requester,
-    );
-    return;
-  }
-
-  batchResolveInProgress = true;
-  const { setIsResolvingAll, setResolutionProgress } = useGameStore.getState();
-  setIsResolvingAll(true);
-  // Storm-origin denominator: latched from the FIRST chunk's `total` because
-  // the engine reports the *remaining* stack per chunk (shrinks as it drains),
-  // so only the first chunk carries the true origin count.
-  let latchedTotal = 0;
-  // Engine-authoritative gross resolved count, accumulated across chunks.
-  let resolvedSoFar = 0;
-
-  try {
-    const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
-    const maxResolutions =
-      stackPressureFromLength(stackLen) === "Instant"
-        ? BATCH_CHUNK_INSTANT
-        : BATCH_CHUNK_SIZE;
-    const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
-      requester, aiSeats, maxResolutions,
-    );
-
-    if (latchedTotal === 0) latchedTotal = batchResult.total;
-    resolvedSoFar += batchResult.itemsResolved;
-    if (batchResult.itemsResolved > 0) recordStackResolutions(batchResult.itemsResolved);
-    if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
-      setResolutionProgress({
-        resolved: Math.min(resolvedSoFar, latchedTotal),
-        total: latchedTotal,
-      });
-    }
-
-    // The Ready authorization is one run only. Commit one atomic snapshot
-    // after its proved prefix, then return control to ordinary priority.
-    const snapshot = await batchAdapter.getSnapshot();
-    useGameStore.getState().commitEngineSnapshot(snapshot);
-
-    const { gameId, adapter } = useGameStore.getState();
-    const newState = useGameStore.getState().gameState;
-    if (gameId && adapter && newState) {
-      await saveAuthoritativeGame(gameId, adapter, newState);
-    }
-  } catch (err) {
-    if (isStaleAction(err)) return;
-    debugLog(`Resolve All error: ${err instanceof Error ? err.message : String(err)}`);
-    reportActionError(err, { type: "PassPriority" });
-  } finally {
-    batchResolveInProgress = false;
-    setIsResolvingAll(false);
-    setResolutionProgress(null);
-  }
+/**
+ * Begin the engine-owned Resolve All consent transaction. The final grant
+ * installs and runs the shared stack-resolution session in the engine; the
+ * browser never drains a Ready prefix or selects which future entries pass.
+ */
+export async function dispatchResolveAll(requester: number): Promise<void> {
+  await dispatchAction(
+    { type: "BeginResolveAll", data: { max_resolutions: 0 } },
+    requester,
+  );
 }

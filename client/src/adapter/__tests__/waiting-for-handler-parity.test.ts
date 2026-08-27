@@ -12,9 +12,9 @@ import { repoRoot, rustEnumVariants } from "./rustEnumVariants";
  * legitimately have no frontend UI handler.
  *
  * `ResolveAllReady` is deliberately inert: `WaitingFor::acting_player()` in
- * `crates/engine/src/types/game_state.rs` returns `None` for it, and the
- * consent submitter consumes the already-authorized run through
- * `dispatchResolveAll`. `GameOver` likewise returns `None` but remains in
+ * `crates/engine/src/types/game_state.rs` returns `None` for it, and restore
+ * automation repairs legacy saved frames before the client receives a
+ * snapshot. `GameOver` likewise returns `None` but remains in
  * `HANDLED_WAITING_FOR_TYPES` because it has a rendered terminal screen.
  *
  * If a future variant is genuinely never player-facing, add it here WITH a

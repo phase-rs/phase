@@ -17,6 +17,7 @@ import type {
   ObjectId,
   PlayerId,
   PersistedGameState,
+  RestoredGameStateResult,
   SubmitResult,
   WaitingFor,
 } from "./types";
@@ -834,6 +835,8 @@ export class P2PHostAdapter implements EngineAdapter {
    * stays uniform across fresh/resume flows.
    */
   private resumeGameState: PersistedGameState | null = null;
+  /** The exactly-once result produced while installing a persisted host. */
+  private resumedAutomation: RestoredGameStateResult | null = null;
 
   constructor(
     private readonly hostDeckData: unknown,
@@ -1134,16 +1137,16 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /** Persist the host authority as the engine's opaque trusted envelope. */
-  private persistAuthoritativeState(): void {
+  private async persistAuthoritativeState(): Promise<void> {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     if (!this.gameId) return;
-    void this.wasm
-      .exportPersistenceState()
-      .then((json) => saveGame(this.gameId!, JSON.parse(json) as PersistedGameState))
-      .catch((err) => {
-        console.warn("[P2PHost] trusted state export failed:", err);
-      });
+    try {
+      const json = await this.wasm.exportPersistenceState();
+      await saveGame(this.gameId, JSON.parse(json) as PersistedGameState);
+    } catch (err) {
+      console.warn("[P2PHost] trusted state export failed:", err);
+    }
   }
 
   /**
@@ -1433,7 +1436,7 @@ export class P2PHostAdapter implements EngineAdapter {
       staleRetries = 0;
       const result = outcome.result;
       await this.broadcastStateUpdate(result.events, result.log_entries);
-      this.persistAuthoritativeState();
+      void this.persistAuthoritativeState();
       this.emit({
         type: "stateChanged",
         snapshot: await this.wasm.getSnapshot(),
@@ -1540,13 +1543,17 @@ export class P2PHostAdapter implements EngineAdapter {
       // in the same call that installs the state. No client code sets the flag,
       // so an open lobby leaves zero engine footprint.
       if (this.isResume && this.resumeGameState) {
-        await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
+        this.resumedAutomation = await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
         this.resumeGameState = null;
         // The engine now holds both this game's state and the multiplayer
         // flag. Its await window is the widest in the adapter (the full card
         // DB load happens inside), so re-check before recording the claim.
         if (this.disposed) await this.bailDisposed(true, "resume");
         sharedEngineHost = this.engineClaim;
+        // Persist the post-automation authority before any reconnect can be
+        // accepted or snapshot published. The saved input may have contained
+        // a now-completed session, so writing it back would replay the burst.
+        await this.persistAuthoritativeState();
         traceAdapter("Host", "initialize-resume", {
           tokens: this.playerTokens.size,
           gameStarted: this.gameStarted,
@@ -2014,7 +2021,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (isZeroCountDebugCreate(action)) return result;
     await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
-    this.persistAuthoritativeState();
+    void this.persistAuthoritativeState();
     return result;
   }
 
@@ -2038,7 +2045,7 @@ export class P2PHostAdapter implements EngineAdapter {
       : await this.wasm.submitInteraction(submission, actor);
     await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
-    this.persistAuthoritativeState();
+    void this.persistAuthoritativeState();
     return result;
   }
 
@@ -2298,6 +2305,18 @@ export class P2PHostAdapter implements EngineAdapter {
     return this.wasm.getSnapshot();
   }
 
+  /**
+   * Returns the already-completed host-resume transition once. The transition
+   * itself happens inside `initialize()` before this adapter exposes a state
+   * to reconnecting guests; this method only hands its atomic result to the
+   * local store.
+   */
+  async resumeRestoredGameState(): Promise<RestoredGameStateResult | null> {
+    const resumed = this.resumedAutomation;
+    this.resumedAutomation = null;
+    return resumed;
+  }
+
   getAiActionProposal(
     difficulty: string,
     playerId: number,
@@ -2332,7 +2351,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (outcome.status === "applied") {
       await this.broadcastStateUpdate(outcome.result.events, outcome.result.log_entries);
       await this.runAiLoop();
-      this.persistAuthoritativeState();
+      void this.persistAuthoritativeState();
     }
     return outcome;
   }
@@ -2561,7 +2580,7 @@ export class P2PHostAdapter implements EngineAdapter {
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
           await this.runAiLoop();
-          this.persistAuthoritativeState();
+          void this.persistAuthoritativeState();
           // Emit local stateChanged so host UI updates for opponent actions.
           if (!this.nativeBridge) {
             this.emit({
@@ -2598,7 +2617,7 @@ export class P2PHostAdapter implements EngineAdapter {
             : await this.wasm.submitInteraction(msg.submission, pid);
           await this.broadcastStateUpdate(result.events, result.log_entries);
           await this.runAiLoop();
-          this.persistAuthoritativeState();
+          void this.persistAuthoritativeState();
           if (!this.nativeBridge) {
             this.emit({
               type: "stateChanged",
@@ -2974,7 +2993,7 @@ export class P2PHostAdapter implements EngineAdapter {
         : await this.wasm.submitAction(concedeAction, pid);
       await this.broadcastStateUpdate(result.events, result.log_entries, reason);
       await this.runAiLoop();
-      this.persistAuthoritativeState();
+      void this.persistAuthoritativeState();
       if (!this.nativeBridge) {
         this.emit({
           type: "stateChanged",

@@ -23,8 +23,7 @@ export function clearPromptOverlayState(): void {
     manaPaymentShortcutActions: [],
     spellCosts: {},
     legalActionsByObject: {},
-    resolutionProgress: null,
-    isResolvingAll: false,
+    restoredStackAutomation: null,
   });
   useUiStore.getState().setPendingAbilityChoice(null);
   useUiStore.getState().setEnchantmentsDialogPlayer(null);
