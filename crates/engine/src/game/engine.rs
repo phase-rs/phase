@@ -1082,8 +1082,9 @@ pub fn apply_verified_ai_priority_pass(
     }
 
     let representative = super::topology::priority_pass_representative(state, *player);
-    let mut inserted_verified_representative = false;
-    if let Some(session) = state.stack_resolution_session.as_ref() {
+    let inserted_verified_representative = if let Some(session) =
+        state.stack_resolution_session.as_ref()
+    {
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
             session.representatives.iter().copied(),
@@ -1103,12 +1104,12 @@ pub fn apply_verified_ai_priority_pass(
                 "AI priority pass cannot replace the active stack-resolution session".to_string(),
             ));
         }
-        inserted_verified_representative = state
+        state
             .stack_resolution_session
             .as_mut()
             .expect("the validated active session remains installed")
             .verified_pass_representatives
-            .insert(representative);
+            .insert(representative)
     } else {
         // The shared session is installed before the ordinary action boundary
         // so its explicit-pass seam can enforce the one-entry limit. A rejected
@@ -1145,7 +1146,7 @@ pub fn apply_verified_ai_priority_pass(
                 Err(error)
             }
         };
-    }
+    };
 
     match apply_interaction(state, authenticated_actor, contract.semantic_owner, action) {
         Ok(result) => Ok(result),
