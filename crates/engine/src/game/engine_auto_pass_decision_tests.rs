@@ -156,7 +156,7 @@ fn declare_attackers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
         vec![stop(Phase::DeclareAttackers, PhaseStopScope::AllTurns)],
     );
 
-    apply(
+    let result = apply(
         &mut state,
         PlayerId(0),
         GameAction::SetAutoPass {
@@ -166,7 +166,26 @@ fn declare_attackers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
         },
     )
     .expect("turn-boundary auto-pass is valid at Declare Attackers");
-    assert!(state.auto_pass.contains_key(&PlayerId(0)));
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        })
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            ..
+        }
+    ));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AttackersDeclared { .. })),
+        "the phase stop must leave the attacker prompt unsubmitted"
+    );
 
     let error = apply(
         &mut state,
@@ -197,7 +216,7 @@ fn declare_blockers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
         vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
     );
 
-    apply(
+    let result = apply(
         &mut state,
         PlayerId(0),
         GameAction::SetAutoPass {
@@ -207,7 +226,26 @@ fn declare_blockers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
         },
     )
     .expect("turn-boundary auto-pass is valid at Declare Blockers");
-    assert!(state.auto_pass.contains_key(&PlayerId(0)));
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        })
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            ..
+        }
+    ));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BlockersDeclared { .. })),
+        "the phase stop must leave the blocker prompt unsubmitted"
+    );
 
     let error = apply(
         &mut state,
@@ -286,6 +324,13 @@ fn turn_boundary_auto_pass_does_not_bypass_must_attack() {
         result.waiting_for,
         WaitingFor::DeclareAttackers { .. }
     ));
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "an unsatisfied must-attack requirement leaves the requested session armed"
+    );
 }
 
 fn blockers_declaration_state(must_block: bool) -> GameState {
@@ -359,6 +404,13 @@ fn turn_boundary_auto_pass_does_not_bypass_must_block() {
         result.waiting_for,
         WaitingFor::DeclareBlockers { .. }
     ));
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "an unsatisfied must-block requirement leaves the requested session armed"
+    );
 }
 
 fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
@@ -800,6 +852,12 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
         PlayerId(0),
         vec![stop(Phase::DeclareBlockers, PhaseStopScope::OpponentsTurns)],
     );
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
 
     let mut result = ActionResult {
         events: Vec::new(),
@@ -818,6 +876,13 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
         ),
         "OpponentsTurns stop fires on the attacker's turn → the empty-blocker \
          auto-submit is paused"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BlockersDeclared { .. })),
+        "the phase stop must not submit an empty blocker declaration"
     );
 }
 
@@ -934,6 +999,13 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
         ),
         "OwnTurn stop fires on the owner's own turn → the empty-attacker \
          auto-submit is paused"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AttackersDeclared { .. })),
+        "the phase stop must not submit an empty attacker declaration"
     );
 }
 

@@ -139,23 +139,13 @@ pub fn resolve_all_ready_prefix_with(
     while items_resolved < resolution_cap && !state.stack.is_empty() {
         let mut proof = state.clone();
         let stack_before = proof.stack.len();
-        // A turn-boundary preference remains live while Resolve All is asking
-        // for consent, but this proof is allowed to materialize exactly one
-        // consented resolution. Suppress only those entries on the clone, then
-        // restore the exact map entries before a successful clone is committed.
-        let suspended_turn_boundary_auto_passes: Vec<_> = proof
-            .auto_pass
-            .iter()
-            .filter_map(|(player, mode)| {
-                matches!(mode, AutoPassMode::UntilTurnBoundary { .. })
-                    .then_some((*player, mode.clone()))
-            })
-            .collect();
-        proof
-            .auto_pass
-            .retain(|_, mode| !matches!(mode, AutoPassMode::UntilTurnBoundary { .. }));
+        // Durable auto-pass intent remains live while Resolve All is asking
+        // for consent, but the clone may materialize exactly one consented
+        // resolution. Suspend the whole clone-local map: an UntilStackEmpty
+        // entry could otherwise run beyond this proof's one-entry limit.
+        let suspended_auto_passes = std::mem::take(&mut proof.auto_pass);
         let materialized = materialize_one_consented_resolution(&mut proof, &run);
-        proof.auto_pass.extend(suspended_turn_boundary_auto_passes);
+        proof.auto_pass = suspended_auto_passes;
         let Some((boundary, mut actions)) = materialized else {
             proof_stopped = true;
             break;
@@ -1306,6 +1296,45 @@ mod tests {
             state.auto_pass.get(&PlayerId(0)),
             Some(&AutoPassMode::UntilTurnBoundary {
                 until: TurnBoundary::EndOfCurrentTurn,
+            })
+        );
+    }
+
+    #[test]
+    fn ready_consent_proof_isolates_until_stack_empty_from_the_second_entry() {
+        let mut state = ready_state(vec![
+            no_op_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+        ]);
+        state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("Ready retains its frozen run")
+            .max_resolutions = 1;
+        let initial_stack_len = state.stack.len();
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilStackEmpty { initial_stack_len },
+        );
+
+        let result = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        );
+
+        assert_eq!(result.items_resolved, 1);
+        assert_eq!(
+            stack_resolved_count(&result.events),
+            1,
+            "one consented materialization may resolve only one stack entry"
+        );
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 2,
             })
         );
     }
