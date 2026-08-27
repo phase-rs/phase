@@ -320,6 +320,26 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the remaining rest-pile delivery completes");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let redirected_rest = [rest_a, rest_b]
+        .into_iter()
+        .find(|id| {
+            matches!(
+                runner.state().objects[id].zone,
+                Zone::Graveyard | Zone::Exile
+            )
+        })
+        .expect("one rest-pile card must take the configured redirect");
+    let returned_rest = [rest_a, rest_b]
+        .into_iter()
+        .find(|id| runner.state().objects[id].zone == Zone::Library)
+        .expect("the other rest-pile card must complete its library placement");
+    assert_ne!(redirected_rest, returned_rest);
+    assert!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .contains(&returned_rest),
+        "the unredirected rest-pile card must be present in P0's library"
+    );
 
     let tracked = runner
         .state()
@@ -772,6 +792,13 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the final rest placement drains the deferred completion");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        matches!(
+            runner.state().objects[&kept].zone,
+            Zone::Graveyard | Zone::Exile
+        ),
+        "the kept battlefield entry must take one configured redirect"
+    );
     let tracked = runner
         .state()
         .tracked_object_sets
