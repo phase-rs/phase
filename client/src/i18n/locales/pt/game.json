@@ -49,6 +49,12 @@
     "collapse": "Recolher progresso de resolução",
     "expand": "Expandir progresso de resolução"
   },
+  "restoredAutomation": {
+    "dismiss": "Fechar",
+    "noop": {"title": "Jogo salvo carregado", "summary_one": "Não foi necessário retomar a automação da pilha.", "summary_other": "Não foi necessário retomar a automação da pilha."},
+    "progressed": {"title": "Automação da pilha retomada", "summary_one": "O motor concluiu {{count}} resolução automatizada.", "summary_other": "O motor concluiu {{count}} resoluções automatizadas.", "omitted_one": "{{count}} evento intermediário foi omitido.", "omitted_other": "{{count}} eventos intermediários foram omitidos."},
+    "zeroResolutionRepair": {"title": "Automação da pilha reparada", "summary_one": "A automação salva foi reparada com segurança antes de retomar o jogo.", "summary_other": "A automação salva foi reparada com segurança antes de retomar o jogo."}
+  },
   "resolveAllConsent": {
     "eyebrow": "Resolver tudo",
     "title": "Aprovar a resolução rápida?",
