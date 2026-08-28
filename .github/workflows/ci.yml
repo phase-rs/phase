@@ -239,6 +239,10 @@ jobs:
           name: test-runtime-binaries
           path: target/debug
 
+      - name: Restore test runtime binary permissions
+        # Actions artifacts preserve file contents but not executable bits.
+        run: chmod +x target/debug/probe-pin target/debug/ai-commander
+
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and
         # executes its partition; it does not invoke Cargo or compile Rust.
