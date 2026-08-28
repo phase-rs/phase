@@ -2057,6 +2057,59 @@ fn verified_ai_pass_installs_rechecking_session_and_pauses_for_unverified_priori
 }
 
 #[test]
+fn resolve_all_supersedes_a_rechecking_ai_session_and_retains_auto_pass_baseline() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 30_109, PlayerId(1));
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    state.priority_player = PlayerId(1);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+
+    let contract = AiDecisionContract::issue(&state, PlayerId(1));
+    apply_verified_ai_priority_pass(&mut state, PlayerId(1), &contract, GameAction::PassPriority)
+        .expect("the AI pass installs its provisional recheck session");
+    assert!(matches!(
+        state
+            .stack_resolution_session
+            .as_ref()
+            .map(|session| session.policy),
+        Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction)
+    ));
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::BeginResolveAll { max_resolutions: 0 },
+    )
+    .expect("the priority holder may replace an AI recheck with Resolve All");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ResolveAllConsent {
+            representative: PlayerId(1),
+            ..
+        }
+    ));
+    assert!(state.stack_resolution_session.is_none());
+    assert!(matches!(
+        state
+            .resolve_all_consent_run
+            .as_ref()
+            .and_then(|run| run.auto_pass_baseline.as_ref())
+            .and_then(|baseline| baseline.get(&PlayerId(0))),
+        Some(AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn
+        })
+    ));
+}
+
+#[test]
 fn verified_ai_pass_cache_never_passes_an_unverified_representative() {
     let mut state = priority_state();
     push_simple_stack_entry(&mut state, 30_110, PlayerId(1));

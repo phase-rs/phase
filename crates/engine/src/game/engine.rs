@@ -8189,10 +8189,24 @@ fn begin_resolve_all_consent(
     priority_player: PlayerId,
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
-    if state.stack_resolution_session.is_some() {
-        return Err(EngineError::ActionNotAllowed(
-            "Resolve All cannot replace an active stack-resolution session".to_string(),
-        ));
+    match state
+        .stack_resolution_session
+        .as_ref()
+        .map(|session| session.policy)
+    {
+        // An AI-issued recheck is an internal, provisional shortcut. An
+        // explicit Resolve All proposal is the priority holder's replacement
+        // shortcut, so restore the saved preferences before asking every
+        // representative for the new proposal's consent.
+        Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction) => {
+            take_and_restore_stack_resolution_session(state);
+        }
+        Some(StackResolutionPolicy::Committed) => {
+            return Err(EngineError::ActionNotAllowed(
+                "Resolve All cannot replace an active stack-resolution session".to_string(),
+            ));
+        }
+        None => {}
     }
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
