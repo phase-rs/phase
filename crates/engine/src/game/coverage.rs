@@ -3822,7 +3822,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
-            d.push(("after".into(), format!("{after:?}")));
+            // CR 608.2c: `after: PreCombatMain` is the "after this phase"
+            // resolution-time sentinel, never a literal precombat-main anchor
+            // (see `types::ability::Effect::AdditionalPhase`'s `after` doc).
+            // Render what it means — otherwise the audit output claims
+            // "after: PreCombatMain" for the 47 cards whose insertion point is
+            // simply the phase the effect resolves in.
+            d.push((
+                "after".into(),
+                if matches!(after, crate::types::phase::Phase::PreCombatMain) {
+                    "the phase this resolves in".into()
+                } else {
+                    format!("{after:?}")
+                },
+            ));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
             }

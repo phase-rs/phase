@@ -85,13 +85,27 @@ pub fn resolve(
         }
     };
 
-    // CR 500.8 (Full Throttle): "After this main phase, there are N additional
-    // combat phases" anchors to whichever main phase the spell resolves in.
-    // The parser emits `after: PreCombatMain` as a sentinel for this wording.
-    let after = if after == Phase::PreCombatMain
-        && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-    {
-        state.phase
+    // CR 608.2c + CR 500.8: `Phase::PreCombatMain` in `after` is the parser's
+    // sentinel for "after this [main|combat] phase" — the anchor is the LAST STEP
+    // of the phase this effect is resolving in, resolved here because only the
+    // resolver can see `state.phase`. CR 608.2c ("read the whole text and apply
+    // the rules of English") is the authority for "this phase" denoting the
+    // resolving phase; CR 500.8 then adds the insertion directly after it.
+    // Mirrors the beginning-phase branch above. Combat-resolved sources (Aurelia,
+    // Godo, Combat Celebrant, Najeela, Scourge of the Throne, Great Train Heist,
+    // …) yield `EndCombat`, identical to the pre-sentinel default. A literal
+    // `after` (Upkeep, End, EndCombat) passes through untouched.
+    //
+    // This remap is deliberately class-agnostic. The "after this MAIN phase"
+    // wording additionally creates nothing at all outside a main phase (Gatherer,
+    // Fury of the Horde: "No new phases are created."), but that precondition is
+    // information only the PARSER holds — it is attached to the clause as an
+    // `AbilityCondition::CurrentPhaseIs` gate by
+    // `oracle_effect::imperative::this_phase_anchor_gate`, so this effect never
+    // resolves at all in that case. Re-deriving it here is impossible: `after`
+    // carries no qualifier.
+    let after = if after == Phase::PreCombatMain {
+        crate::game::turns::last_step_of_phase(state.phase)
     } else {
         after
     };
@@ -168,22 +182,22 @@ pub fn resolve(
     // the bundle `count` times so each scheduled occurrence still fires
     // its own anchor → primary → follow_up sequence.
     //
-    // When `count > 1` inserts multiple combat phases after a main-phase
-    // anchor, only the first bundle may anchor to that main phase — the
-    // turn never returns there. Chain subsequent combat bundles to
-    // `EndCombat` so each extra combat is reachable (Full Throttle).
-    // Repeating the same phase/step (Obeka upkeep) keeps the original anchor.
-    for i in 0..count {
-        let bundle_anchor = if i == 0 || phase == after {
-            after
-        } else if phase == Phase::BeginCombat {
-            Phase::EndCombat
-        } else {
-            after
-        };
+    // CR 500.8: every bundle anchors at the SAME insertion point.
+    // `advance_phase_once` chains them through the resume frame ("another phase
+    // queued after the same anchor runs next"), so Full Throttle's two combats
+    // run back to back BEFORE the turn resumes at the anchor's natural
+    // successor, per "the most recently created phase will occur first". The
+    // former `EndCombat` re-anchor for `i > 0` is removed: it made the second
+    // combat reachable only by consuming the natural combat's slot, which lost a
+    // whole combat phase. CR 500.8 is the authority — an extra phase is ADDED
+    // directly after the specified phase, so it never displaces a phase the turn
+    // already has (CR 505.1a corroborates by contemplating "a turn in which an
+    // effect has caused an additional combat phase and an additional main phase
+    // to be created", but it only classifies which main is precombat).
+    for _ in 0..count {
         for &follow_up in followed_by.iter().rev() {
             state.extra_phases.push(ExtraPhase {
-                anchor: bundle_anchor,
+                anchor: after,
                 phase: follow_up,
                 attacker_restriction: None,
                 attacker_restriction_source: None,
@@ -200,7 +214,7 @@ pub fn resolve(
             None
         };
         state.extra_phases.push(ExtraPhase {
-            anchor: bundle_anchor,
+            anchor: after,
             phase,
             attacker_restriction_source: if restriction.is_some() {
                 Some(ability.source_id)
@@ -332,6 +346,10 @@ mod tests {
         }
     }
 
+    /// CR 500.8 + CR 608.2c: the `after: PreCombatMain` sentinel resolves to the
+    /// LAST STEP of the phase the effect resolves in — here the postcombat main
+    /// phase. CR 500.8: every bundle of a `count > 1` effect anchors at that same
+    /// insertion point, so both extra combats run before the turn resumes.
     #[test]
     fn additional_phase_after_this_main_phase_uses_active_main_as_anchor() {
         let mut state = GameState {
@@ -356,22 +374,27 @@ mod tests {
             state.extra_phases,
             vec![
                 ep(Phase::PostCombatMain, Phase::BeginCombat),
-                ep(Phase::EndCombat, Phase::BeginCombat),
+                ep(Phase::PostCombatMain, Phase::BeginCombat),
             ]
         );
     }
 
+    /// CR 500.8 + CR 506.1: the Group B wording ("after this phase", resolving
+    /// during combat — Aurelia, Port Razer, Najeela, …) reaches the resolver as
+    /// the `PreCombatMain` sentinel and must resolve to an `EndCombat` anchor,
+    /// exactly as the pre-sentinel literal default did.
     #[test]
     fn additional_phase_pushes_begin_combat() {
         let mut state = GameState {
             active_player: PlayerId(0),
+            phase: Phase::DeclareAttackers,
             ..Default::default()
         };
         let mut events = Vec::new();
         let ability = make_ability(
             TargetFilter::Controller,
             Phase::BeginCombat,
-            Phase::EndCombat,
+            Phase::PreCombatMain,
             vec![],
             PlayerId(0),
         );
@@ -390,13 +413,14 @@ mod tests {
     fn additional_phase_with_main_pushes_both() {
         let mut state = GameState {
             active_player: PlayerId(0),
+            phase: Phase::DeclareAttackers,
             ..Default::default()
         };
         let mut events = Vec::new();
         let ability = make_ability(
             TargetFilter::Controller,
             Phase::BeginCombat,
-            Phase::EndCombat,
+            Phase::PreCombatMain,
             vec![Phase::PostCombatMain],
             PlayerId(0),
         );
@@ -419,6 +443,7 @@ mod tests {
     fn cr_500_8_lifo_ordering() {
         let mut state = GameState {
             active_player: PlayerId(0),
+            phase: Phase::DeclareAttackers,
             ..Default::default()
         };
         let mut events = Vec::new();
@@ -427,7 +452,7 @@ mod tests {
         let ability1 = make_ability(
             TargetFilter::Controller,
             Phase::BeginCombat,
-            Phase::EndCombat,
+            Phase::PreCombatMain,
             vec![],
             PlayerId(0),
         );
@@ -437,7 +462,7 @@ mod tests {
         let ability2 = make_ability(
             TargetFilter::Controller,
             Phase::BeginCombat,
-            Phase::EndCombat,
+            Phase::PreCombatMain,
             vec![],
             PlayerId(0),
         );
@@ -465,13 +490,14 @@ mod tests {
         // Active player is 1, but controller is 0
         let mut state = GameState {
             active_player: PlayerId(1),
+            phase: Phase::DeclareAttackers,
             ..Default::default()
         };
         let mut events = Vec::new();
         let ability = make_ability(
             TargetFilter::Controller,
             Phase::BeginCombat,
-            Phase::EndCombat,
+            Phase::PreCombatMain,
             vec![],
             PlayerId(0),
         );
@@ -552,11 +578,16 @@ mod tests {
         );
     }
 
-    /// CR 500.8 (Full Throttle): count>1 combat bundles after a main-phase
-    /// anchor must chain through EndCombat — the turn never returns to the
-    /// main phase between inserted combats.
+    /// CR 500.8 (Full Throttle): every bundle of a `count > 1` effect anchors at
+    /// the SAME insertion point — the phase the effect resolved in. The former
+    /// `EndCombat` re-anchor for `i > 0` was wrong: the second combat was then
+    /// inserted after the FIRST inserted combat's end-of-combat step, which is
+    /// where the turn's own natural combat phase would otherwise resume, so the
+    /// extra combat consumed the natural one (CR 500.8 — an extra phase is ADDED
+    /// directly after the specified phase, so it never displaces one the turn
+    /// already has).
     #[test]
-    fn additional_combat_count_chains_after_end_combat() {
+    fn additional_combat_count_anchors_every_bundle_at_the_insertion_point() {
         let mut state = GameState {
             active_player: PlayerId(0),
             phase: Phase::PreCombatMain,
@@ -578,7 +609,7 @@ mod tests {
             state.extra_phases,
             vec![
                 ep(Phase::PreCombatMain, Phase::BeginCombat),
-                ep(Phase::EndCombat, Phase::BeginCombat),
+                ep(Phase::PreCombatMain, Phase::BeginCombat),
             ]
         );
     }
@@ -612,8 +643,11 @@ mod tests {
         assert_eq!(state.phase, Phase::Untap, "inserted beginning phase starts");
         assert_eq!(
             state.extra_phase_resume,
-            vec![Phase::PostCombatMain],
-            "resume anchor recorded"
+            vec![crate::types::game_state::ExtraPhaseResume {
+                anchor: Phase::PostCombatMain,
+                inserted: Phase::Untap,
+            }],
+            "resume frame records the anchor and the inserted beginning phase"
         );
 
         advance_phase(&mut state, &mut events);
@@ -681,6 +715,14 @@ mod tests {
         assert!(state.extra_phases.is_empty());
     }
 
+    /// CR 500.8 (Full Throttle, cast in a precombat main phase): an extra phase is
+    /// ADDED directly after the specified phase, so "there are two additional
+    /// combat phases" grants two combats ADDITIONAL to
+    /// the turn's own combat phase, so the turn runs three. The old assertion
+    /// (two combats, then straight to the postcombat main) encoded the swallowed
+    /// natural combat: the second bundle was anchored at the first inserted
+    /// combat's `EndCombat`, which is exactly where the turn would otherwise have
+    /// resumed at its natural `BeginCombat`.
     #[test]
     fn additional_combat_count_advances_through_both_extra_phases() {
         use crate::game::turns::advance_phase;
@@ -701,21 +743,33 @@ mod tests {
         );
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        advance_phase(&mut state, &mut events);
-        assert_eq!(state.phase, Phase::BeginCombat, "first extra combat");
-
-        while state.phase != Phase::EndCombat {
+        let mut sequence = Vec::new();
+        for _ in 0..24 {
             advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
         }
-        advance_phase(&mut state, &mut events);
-        assert_eq!(state.phase, Phase::BeginCombat, "second extra combat");
 
-        while state.phase != Phase::EndCombat {
-            advance_phase(&mut state, &mut events);
-        }
-        advance_phase(&mut state, &mut events);
-        assert_eq!(state.phase, Phase::PostCombatMain);
+        let combat = || {
+            [
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ]
+        };
+        let mut expected: Vec<Phase> = Vec::new();
+        expected.extend(combat()); // first inserted combat
+        expected.extend(combat()); // second inserted combat
+        expected.extend(combat()); // the turn's own natural combat
+        expected.push(Phase::PostCombatMain);
+        expected.push(Phase::End);
+        assert_eq!(sequence, expected);
         assert!(state.extra_phases.is_empty());
+        assert!(state.extra_phase_resume.is_empty());
     }
 
     /// CR 501.1 + CR 500.8: "additional beginning phase after this phase"
@@ -849,5 +903,181 @@ mod tests {
             .get(&set_id)
             .expect("tracked set published at resolution");
         assert_eq!(members, &vec![ObjectId(11), ObjectId(22)]);
+    }
+
+    /// CR 500.8 + CR 506.1 + CR 608.2c: the "after this phase" sentinel resolving
+    /// anywhere inside the combat phase anchors at that phase's LAST step, so
+    /// the inserted combat begins only once the current combat is over. This is
+    /// the building-block proof for the whole "after this phase" class that
+    /// resolves during combat (Aurelia, Godo, Combat Celebrant, Najeela, Port
+    /// Razer, Scourge of the Throne, Hellkite Charger, … — 30+ cards): reverting
+    /// the sentinel remap makes every row anchor at `PreCombatMain` and the
+    /// extra combat becomes unreachable.
+    #[test]
+    fn current_phase_sentinel_resolves_to_end_combat_from_every_combat_step() {
+        for resolving_in in [
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+        ] {
+            let mut state = GameState {
+                active_player: PlayerId(0),
+                phase: resolving_in,
+                ..Default::default()
+            };
+            let mut events = Vec::new();
+            let ability = make_ability(
+                TargetFilter::Controller,
+                Phase::BeginCombat,
+                Phase::PreCombatMain,
+                vec![],
+                PlayerId(0),
+            );
+
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            assert_eq!(
+                state.extra_phases,
+                vec![ep(Phase::EndCombat, Phase::BeginCombat)],
+                "resolving in {resolving_in:?} must anchor the extra combat at end of combat",
+            );
+        }
+    }
+
+    /// CR 500.8 + CR 608.2c: the same building block across EVERY phase and step
+    /// of a turn — the sentinel always resolves to the LAST STEP of the phase the
+    /// effect is resolving in (CR 501.1 beginning phase → draw step; CR 505.1
+    /// main phases have no steps; CR 506.1 combat → end of combat; CR 512.1
+    /// ending phase → cleanup step).
+    ///
+    /// The `End` / `Cleanup` rows are the ones that matter for the turn
+    /// boundary: they produce a `Cleanup` anchor, i.e. a phase inserted directly
+    /// after the cleanup step. `turns::advance_phase_once` must still start the
+    /// next turn once that insertion is exhausted — see
+    /// `turns::tests::cleanup_anchored_insertion_still_ends_the_turn`.
+    #[test]
+    fn current_phase_sentinel_resolves_to_the_last_step_of_every_phase() {
+        for (resolving_in, expected_anchor) in [
+            (Phase::Untap, Phase::Draw),
+            (Phase::Upkeep, Phase::Draw),
+            (Phase::Draw, Phase::Draw),
+            (Phase::PreCombatMain, Phase::PreCombatMain),
+            (Phase::BeginCombat, Phase::EndCombat),
+            (Phase::DeclareAttackers, Phase::EndCombat),
+            (Phase::DeclareBlockers, Phase::EndCombat),
+            (Phase::CombatDamage, Phase::EndCombat),
+            (Phase::EndCombat, Phase::EndCombat),
+            (Phase::PostCombatMain, Phase::PostCombatMain),
+            (Phase::End, Phase::Cleanup),
+            (Phase::Cleanup, Phase::Cleanup),
+        ] {
+            let mut state = GameState {
+                active_player: PlayerId(0),
+                phase: resolving_in,
+                ..Default::default()
+            };
+            let mut events = Vec::new();
+            let ability = make_ability(
+                TargetFilter::Controller,
+                Phase::BeginCombat,
+                Phase::PreCombatMain,
+                vec![],
+                PlayerId(0),
+            );
+
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            assert_eq!(
+                state.extra_phases,
+                vec![ep(expected_anchor, Phase::BeginCombat)],
+                "resolving in {resolving_in:?} must anchor at {expected_anchor:?}",
+            );
+        }
+    }
+
+    /// CR 500.8 ("if multiple extra phases are created after the same phase, the
+    /// most recently created phase will occur first"): two effects
+    /// resolving in the SAME postcombat main phase — one with a follow-up main
+    /// phase (Relentless Assault) and one without (Port Razer's wording) — both
+    /// anchor at that main phase, and the more recent bundle runs first. The
+    /// discriminating property is that neither bundle's follow-up main is
+    /// consumed by the other bundle's combat: the follow-up main is anchored at
+    /// the shared insertion point, not at the inserted combat's end.
+    #[test]
+    fn two_main_anchored_bundles_interleave_most_recent_first() {
+        use crate::game::turns::advance_phase;
+
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+
+        // First resolution: extra combat followed by an extra main phase.
+        resolve(
+            &mut state,
+            &make_ability(
+                TargetFilter::Controller,
+                Phase::BeginCombat,
+                Phase::PreCombatMain,
+                vec![Phase::PostCombatMain],
+                PlayerId(0),
+            ),
+            &mut events,
+        )
+        .unwrap();
+        // Second resolution: a bare extra combat (most recent → runs first).
+        resolve(
+            &mut state,
+            &make_ability(
+                TargetFilter::Controller,
+                Phase::BeginCombat,
+                Phase::PreCombatMain,
+                vec![],
+                PlayerId(0),
+            ),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.extra_phases,
+            vec![
+                ep(Phase::PostCombatMain, Phase::PostCombatMain),
+                ep(Phase::PostCombatMain, Phase::BeginCombat),
+                ep(Phase::PostCombatMain, Phase::BeginCombat),
+            ],
+            "every entry anchors at the shared insertion point",
+        );
+
+        let mut sequence = Vec::new();
+        for _ in 0..24 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        let combat = || {
+            [
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ]
+        };
+        let mut expected: Vec<Phase> = Vec::new();
+        expected.extend(combat()); // bare bundle (most recent) first
+        expected.extend(combat()); // first bundle's combat
+        expected.push(Phase::PostCombatMain); // first bundle's follow-up main
+        expected.push(Phase::End); // resume after the anchor
+        assert_eq!(sequence, expected);
+        assert!(state.extra_phases.is_empty());
+        assert!(state.extra_phase_resume.is_empty());
     }
 }

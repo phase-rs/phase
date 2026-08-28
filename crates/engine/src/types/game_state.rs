@@ -17125,15 +17125,27 @@ declare_game_state! {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
-    /// CR 500.8 + CR 501.1: LIFO stack of anchor phases for inserted beginning
-    /// phases (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus)
-    /// currently in progress. When such a phase's draw step ends, the turn
-    /// resumes at the anchor's natural successor (or runs the next queued
-    /// beginning phase for the same anchor) rather than at the draw step's
-    /// default successor. Empty outside inserted beginning phases.
-    /// `#[serde(default)]` so saved games load unchanged.
+    /// CR 500.8: LIFO stack of return points for the inserted phases currently
+    /// in progress — beginning phases (Temple of Atropos, Sphinx/Shadow of the
+    /// Second Sun, Cyclonus), combat phases (Aurelia, Moraug, Relentless
+    /// Assault), main phases (the "followed by an additional main phase" rider)
+    /// and inserted steps (Paradox Haze's extra upkeep) alike. When an inserted
+    /// phase's terminal step ends (`turns::inserted_phase_terminal_step`), the
+    /// turn either runs the next phase queued after the same anchor or resumes
+    /// at the anchor's natural successor — never at the inserted phase's own
+    /// default successor, which is what silently swallowed the natural combat
+    /// phase / duplicated the postcombat main phase before. Empty outside
+    /// inserted phases; cleared at every turn boundary.
+    ///
+    /// `#[serde(default)]` so saved games without the field load unchanged. The
+    /// element type changed from a bare `Phase` to [`ExtraPhaseResume`]; a
+    /// payload carrying the old element shape (e.g. `["PostCombatMain"]`) is
+    /// migrated at the load boundary by [`ExtraPhaseResumeCompat`]. Every
+    /// committed serialized `GameState` (`crates/engine/tests/**/*.json.gz`)
+    /// records `"extra_phase_resume":[]`, and no client / server / ts-rs consumer
+    /// reads the field.
     #[serde(default)]
-    pub extra_phase_resume: Vec<Phase>,
+    pub extra_phase_resume: Vec<ExtraPhaseResume>,
 
     /// CR 103.1: The current turn-order direction. Durable — persists across
     /// turns until an effect reverses it again. Default `Normal` is the game's
@@ -20001,6 +20013,65 @@ pub struct ExtraPhase {
     /// extra phases.
     #[serde(default)]
     pub attacker_restriction_source: Option<ObjectId>,
+}
+
+/// CR 500.8: one in-progress inserted phase. `anchor` is the phase the insert
+/// was added directly after — the turn resumes at `next_phase(anchor)` once the
+/// bundle anchored there is exhausted. `inserted` is the phase currently
+/// running, from which `turns::inserted_phase_terminal_step` derives the step
+/// that ends it.
+///
+/// Storing `inserted` rather than a denormalized terminal step keeps the
+/// primitive fact in state and the CR 500.10 step-vs-phase derivation in one
+/// function.
+///
+/// `Deserialize` goes through [`ExtraPhaseResumeCompat`] so a session persisted
+/// before this type existed still loads — see that type for the migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExtraPhaseResumeCompat")]
+pub struct ExtraPhaseResume {
+    /// The phase this insert was added directly after (CR 500.8).
+    pub anchor: Phase,
+    /// The inserted phase currently in progress.
+    pub inserted: Phase,
+}
+
+/// Load-boundary compatibility shape for [`ExtraPhaseResume`].
+///
+/// `extra_phase_resume` used to be a `Vec<Phase>` holding only the ANCHOR of an
+/// inserted BEGINNING phase (`Temple of Atropos`, `Sphinx of the Second Sun`,
+/// `Cyclonus`), because that was the only insertion kind that needed a return
+/// point. `#[serde(default)]` on the field covers a payload that omits it
+/// entirely, but NOT one that carries the old element shape — and such payloads
+/// are real: `advance_phase_once` can return `PhaseEntryOutcome::Paused` inside
+/// an inserted beginning phase (an untap-choice prompt under Winter Orb during
+/// a Temple of Atropos insert), and a `Paused` phase transition is a durable
+/// save point. Such a session serializes `"extra_phase_resume":["PostCombatMain"]`
+/// and would otherwise fail to deserialize across a deploy.
+///
+/// The legacy element is mapped to what it meant: an inserted beginning phase
+/// (CR 501.1 — `Phase::Untap` is the beginning-phase marker) anchored at the
+/// recorded phase.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+pub enum ExtraPhaseResumeCompat {
+    /// The current shape.
+    Current { anchor: Phase, inserted: Phase },
+    /// Pre-`ExtraPhaseResume` saves: a bare anchor phase.
+    LegacyBeginningPhaseAnchor(Phase),
+}
+
+impl From<ExtraPhaseResumeCompat> for ExtraPhaseResume {
+    fn from(compat: ExtraPhaseResumeCompat) -> Self {
+        match compat {
+            ExtraPhaseResumeCompat::Current { anchor, inserted } => Self { anchor, inserted },
+            // CR 501.1: the old stack only ever recorded inserted beginning phases.
+            ExtraPhaseResumeCompat::LegacyBeginningPhaseAnchor(anchor) => Self {
+                anchor,
+                inserted: Phase::Untap,
+            },
+        }
+    }
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
@@ -29234,6 +29305,52 @@ mod tests {
     /// via `#[serde(alias)]` + `#[serde(default)]`. The `UntilStackEmpty` arm is
     /// asserted unchanged as a positive reach-guard proving the alias captured
     /// the right tag and did not disturb the sibling variant.
+    /// CR 500.8 + CR 501.1: `extra_phase_resume` used to be a `Vec<Phase>` of
+    /// inserted-BEGINNING-phase anchors. A session persisted while
+    /// `advance_phase_once` was `Paused` inside such an insertion (an untap
+    /// choice under Winter Orb during a Temple of Atropos insert) is a durable
+    /// save point carrying `["PostCombatMain"]`, and `#[serde(default)]` does not
+    /// help — the field is present, only its element shape changed. The compat
+    /// shim maps the legacy element to what it meant.
+    #[test]
+    fn extra_phase_resume_legacy_bare_phase_element_deserializes() {
+        // Legacy element shape.
+        assert_eq!(
+            serde_json::from_str::<Vec<ExtraPhaseResume>>(r#"["PostCombatMain"]"#).unwrap(),
+            vec![ExtraPhaseResume {
+                anchor: Phase::PostCombatMain,
+                inserted: Phase::Untap,
+            }],
+        );
+        // Positive reach-guard: the current shape still round-trips, so the
+        // untagged shim did not swallow it.
+        let current = ExtraPhaseResume {
+            anchor: Phase::PreCombatMain,
+            inserted: Phase::BeginCombat,
+        };
+        let encoded = serde_json::to_string(&current).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"anchor":"PreCombatMain","inserted":"BeginCombat"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ExtraPhaseResume>(&encoded).unwrap(),
+            current,
+        );
+        // Whole-`GameState` load boundary: a legacy payload restores.
+        let mut raw = serde_json::to_value(GameState::default()).unwrap();
+        raw["extra_phase_resume"] = serde_json::json!(["PostCombatMain"]);
+        let restored = serde_json::from_value::<GameState>(raw)
+            .expect("a legacy extra_phase_resume payload must still load");
+        assert_eq!(
+            restored.extra_phase_resume,
+            vec![ExtraPhaseResume {
+                anchor: Phase::PostCombatMain,
+                inserted: Phase::Untap,
+            }],
+        );
+    }
+
     #[test]
     fn auto_pass_mode_legacy_eot_deserializes() {
         assert_eq!(

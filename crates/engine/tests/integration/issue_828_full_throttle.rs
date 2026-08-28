@@ -41,12 +41,14 @@ fn full_throttle_schedules_two_extra_combats_after_main_phase() {
     assert_eq!(
         runner.state().extra_phases[1],
         engine::types::game_state::ExtraPhase {
-            anchor: Phase::EndCombat,
+            anchor: Phase::PreCombatMain,
             phase: Phase::BeginCombat,
             attacker_restriction: None,
             attacker_restriction_source: None,
         },
-        "the second extra combat must chain after the first combat ends"
+        "CR 500.8: both extra combats are inserted directly after THIS main phase; \
+         the turn chains them through the resume frame, so the second must not be \
+         re-anchored to the first combat's end (that consumed the natural combat)"
     );
 }
 
@@ -71,8 +73,9 @@ fn full_throttle_postcombat_main_anchors_to_postcombat_main() {
     );
     assert_eq!(
         runner.state().extra_phases[1].anchor,
-        Phase::EndCombat,
-        "the second extra combat must chain after end of combat"
+        Phase::PostCombatMain,
+        "CR 500.8: every bundle anchors at the same insertion point — the main \
+         phase the spell resolved in"
     );
 }
 
@@ -133,7 +136,10 @@ fn full_throttle_turn_advances_through_two_extra_combats() {
         runner.state().extra_phases
     );
     assert_eq!(
-        declare_attackers_rounds, 2,
-        "Full Throttle must produce two reachable extra combat phases"
+        declare_attackers_rounds, 3,
+        "CR 500.8: Full Throttle grants two combat phases ADDITIONAL \
+         to the turn's own combat phase, so a precombat-main cast yields three \
+         reachable combats (the old expectation of two encoded the natural combat \
+         being consumed by the second extra one)"
     );
 }

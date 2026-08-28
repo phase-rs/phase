@@ -92,6 +92,12 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
     // CR 500.10a: the additional-combat-phase guard only adds the phase to the
     // controller's own turn — make Hulk's controller the active player.
     runner.state_mut().active_player = P0;
+    // CR 500.8 + CR 608.2c: "there is an additional combat phase after this phase"
+    // anchors to the phase the trigger RESOLVES in, so the fixture must sit in the
+    // phase this trigger actually resolves in — the combat damage step, where an
+    // attacking creature is dealt damage. Held constant across both cases, so
+    // attacking-status remains the sole variable.
+    runner.state_mut().phase = Phase::CombatDamage;
 
     // Pre-tap Hulk so the chained "untap him" rider has an observable to flip.
     // CR 508.1f: a declared attacker is normally tapped; for the not-attacking
