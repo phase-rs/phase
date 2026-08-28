@@ -1138,6 +1138,11 @@ fn parse_control_named_condition_action_lead(
         value((), tag("return ")),
         value((), tag("discard ")),
         value((), tag("choose ")),
+        // Die-roll result tables commonly follow an intervening-if named-count
+        // condition (for example Name Sticker Goblin). Treat the verb as an
+        // effect lead so the preceding card name is not extended through the
+        // comma into the trigger's execute clause.
+        value((), tag("roll ")),
     ))
     .parse(input)
 }
@@ -4583,7 +4588,12 @@ fn parse_control_count_le(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, n) = parse_number(rest)?;
     let rest = rest.trim_start();
     let (rest, _) = tag("or fewer ").parse(rest)?;
-    let type_text = rest.trim_end_matches('.');
+    // A named-count condition may be followed by an execute clause. Preserve
+    // the comma-prefixed clause as the condition remainder before handing the
+    // typed, named phrase to `parse_type_phrase`; otherwise that parser treats
+    // the effect text as part of the literal card name.
+    let (condition_remainder, type_text) = parse_control_named_final_name(rest)?;
+    let type_text = type_text.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -4592,9 +4602,14 @@ fn parse_control_count_le(input: &str) -> OracleResult<'_, StaticCondition> {
         )));
     }
     let filter = inject_controller_you(filter);
-    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    let remainder = if remainder.trim().is_empty() {
+        condition_remainder
+    } else {
+        let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+        &input[consumed..]
+    };
     Ok((
-        &input[consumed..],
+        remainder,
         make_quantity_comparison(QuantityRef::ObjectCount { filter }, Comparator::LE, n),
     ))
 }
@@ -11965,6 +11980,35 @@ mod tests {
             assert_eq!(name, "throne of empires");
             assert_eq!(rest, tail);
         }
+    }
+
+    /// CR 201.2 + CR 603.4: the quoted-card named-count condition on Name
+    /// Sticker Goblin must leave its die-roll clause for trigger effect parsing.
+    #[test]
+    fn control_named_count_stops_before_roll_die_effect() {
+        let (rest, condition) = parse_control_count_le(
+            "you control 9 or fewer creatures named \"name sticker\" goblin, roll a 20-sided die",
+        )
+        .expect("named count must parse");
+        assert_eq!(rest, ", roll a 20-sided die");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 9 },
+        } = condition
+        else {
+            panic!("expected a <= 9 object count, got {condition:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected a typed creature filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Named { name } if name == "\"name sticker\" goblin"
+        )));
     }
 
     #[test]

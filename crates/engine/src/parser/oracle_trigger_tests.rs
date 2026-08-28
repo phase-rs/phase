@@ -1183,14 +1183,29 @@ fn name_sticker_goblin_parses_complete_trigger_and_die_table() {
         .first()
         .expect("Name Sticker Goblin trigger");
     assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    // The list-form negated origin is represented by the rich clause path;
+    // scalar discriminators must stay clear so they cannot erase the exclusion.
+    assert_eq!(trigger.origin, None);
+    assert_eq!(trigger.destination, None);
+    assert_eq!(trigger.valid_card, None);
+    assert_eq!(trigger.zone_change_clauses.len(), 1);
+    let clause = &trigger.zone_change_clauses[0];
     assert_eq!(
-        trigger.origin,
-        Some(crate::types::ability::OriginConstraint::NotFrom(vec![
-            Zone::Graveyard,
-            Zone::Exile,
-        ]))
+        clause.origin,
+        crate::types::ability::OriginConstraint::OneOf(vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Command,
+        ])
     );
+    assert_eq!(clause.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        clause.destination_constraint,
+        crate::types::ability::OriginConstraint::Any
+    );
+    assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
 
     let TriggerCondition::And { conditions } = trigger
         .condition
@@ -1275,6 +1290,25 @@ fn source_zone_contraction_is_context_gated() {
         source_zone_contraction_tail("it's on the battlefield", false),
         None,
         "event-object trigger contexts must not be retargeted to the source"
+    );
+}
+
+/// CR 603.6a + CR 113.6b: the source-zone shorthand must not attach to the
+/// permanent carrying a non-self ETB trigger. The full parser path is used
+/// here (rather than the helper alone) so the simple-pattern dispatch cannot
+/// regress into retargeting an entering event object to the trigger source.
+#[test]
+fn nonself_etb_source_zone_shorthand_is_not_misbound_to_source() {
+    let def = parse_trigger_line(
+        "Whenever another creature enters, if it's on the battlefield, draw a card.",
+        "Witnessing Enchantment",
+    );
+    assert_ne!(
+        def.condition,
+        Some(TriggerCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        }),
+        "the entering event object is not the trigger source"
     );
 }
 
