@@ -347,7 +347,8 @@ export default defineConfig(({ mode }) => ({
             // as card-locale-sidecars: regenerated each deploy, so
             // StaleWhileRevalidate.
             //
-            // Two anchored branches, mirroring the engine-WASM rule above.
+            // The anchored R2 branch covers both production and staging,
+            // mirroring the engine-WASM rule above.
             // Workbox's RegExpRoute refuses a cross-origin match that does not
             // begin at index 0 of the href, and in production these are served
             // from R2 at DATA_BASE_URL — so a bare `…\.json$` suffix pattern
@@ -355,7 +356,7 @@ export default defineConfig(({ mode }) => ({
             // second branch keeps the same-origin path working in dev/Tauri,
             // where the files are served from the site root.
             urlPattern:
-              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.v2\.[a-z]{2}\.json$|\/scryfall-images\.v2\.[a-z]{2}\.json$)/,
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?scryfall-images\.v2\.[a-z]{2}\.json$|\/scryfall-images\.v2\.[a-z]{2}\.json$)/,
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "card-art-locale-maps",
