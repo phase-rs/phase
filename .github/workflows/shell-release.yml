@@ -559,6 +559,9 @@ jobs:
     env:
       SHELL_TAG: ${{ needs.resolve-shell-ref.outputs.release_tag }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - name: Download Linux shell artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -660,6 +663,32 @@ jobs:
             artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
             artifacts/update.json
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Publish and verify updater manifest
+        run: |
+          set -euo pipefail
+
+          npm install --global "wrangler@$WRANGLER_VERSION"
+          wrangler r2 object put "phase-rs-data/desktop/update.json" \
+            --file artifacts/update.json \
+            --remote \
+            --content-type application/json \
+            --cache-control "max-age=60, must-revalidate"
+
+          for _ in {1..6}; do
+            if curl --fail --silent --show-error https://data.phase-rs.dev/desktop/update.json \
+              | jq -e --arg version "$SHELL_VERSION" '.version == $version' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::Published updater manifest did not report shell v${SHELL_VERSION}"
+          exit 1
+
       - name: Download signed Android APKs
         if: needs.build-android.outputs.apk_available == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -676,4 +705,5 @@ jobs:
           gh release upload "$SHELL_TAG" \
             artifacts/shell-tauri-android/Phase-Android-ARM64.apk \
             artifacts/shell-tauri-android/Phase-Android-ARMv7.apk \
+            --repo "$GITHUB_REPOSITORY" \
             --clobber
