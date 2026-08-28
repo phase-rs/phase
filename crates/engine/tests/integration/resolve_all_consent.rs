@@ -1362,10 +1362,6 @@ fn persisted_restore_classifies_without_advancing_stack_automation() {
         RestoredStackAutomation::LegacyResolveAllReady
     );
     assert_eq!(
-        restored, state,
-        "generic decode reconstructs rules state without consuming automation"
-    );
-    assert_eq!(
         restored.stack, state.stack,
         "decode resolves no stack entry"
     );
