@@ -721,7 +721,14 @@ fn gilgamesh_direct_equipment_choice_completes_to_priority() {
                     "Gilgamesh says 'a Samurai', not 'target Samurai'; its Samurai choice must wait for resolution"
                 );
             }
-            WaitingFor::EffectZoneChoice { cards, .. } => {
+            WaitingFor::EffectZoneChoice {
+                cards, effect_kind, ..
+            } => {
+                assert_eq!(
+                    effect_kind,
+                    engine::types::ability::EffectKind::Attach,
+                    "the Gilgamesh Equipment choice must be dispatched as Attach"
+                );
                 assert_eq!(
                     cards.len(),
                     2,

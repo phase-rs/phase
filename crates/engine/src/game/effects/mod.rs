@@ -28,7 +28,7 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
     PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
@@ -1087,10 +1087,11 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // authorize a synthetic entry completion.
         }
         ResolutionFrame::PostReplacement(drains) => {
-            if matches!(
+            let retired_paused_dispatch = matches!(
                 drains.resident().map(|drain| &drain.status),
                 Some(crate::types::game_state::DrainStatus::Paused)
-            ) {
+            );
+            if retired_paused_dispatch {
                 // CR 614.6 + CR 615.5: the direct child has answered the
                 // continuation's prompt, so retire precisely the resident
                 // paused dispatch before considering later ready work.
@@ -1113,6 +1114,19 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                         .take_active_post_replacement()
                         .expect("post-replacement dispatcher may remove only its active frame");
                 }
+            }
+            // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
+            // dispatch can expose the next ordinary continuation. Drain that
+            // exact continuation before priority; if it is the remaining
+            // Attach operation, its own completion boundary owns the printed
+            // tail. A typed Attach-choice owner remains action-owned.
+            if retired_paused_dispatch
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .active_ability_continuation()
+                    .is_some_and(|continuation| continuation.attachment_choice.is_none())
+            {
+                drain_pending_continuation(state, events);
             }
         }
     }
@@ -12966,29 +12980,33 @@ fn resolve_chain_body(
         }
         // CR 608.2c + CR 616.1: An Attach choice or a bound remaining subset
         // already split this node's trailing instructions into an outer
-        // continuation. An Attached replacement can leave either owner below
-        // its active PostReplacement frame. The generic pause path must not
-        // prepend that same tail onto the child operation.
+        // continuation. An Attached replacement can leave either owner beneath
+        // its active child frame. The generic pause path must not prepend that
+        // same tail onto the child operation.
         let attach_child_already_owns_tail = matches!(ability.effect, Effect::Attach { .. })
             && (state
-                .active_ability_continuation()
-                .is_some_and(|pending| pending.attachment_choice.is_some())
-                || state
-                    .active_ability_continuation()
-                    .is_some_and(|pending| is_bound_attach_remainder_for(pending, ability))
+                .resolution_stack
+                .ability_continuations()
+                .any(|pending| {
+                    pending.attachment_choice.is_some()
+                        || is_bound_attach_remainder_for(pending, ability)
+                })
                 || state
                     .resolution_stack
                     .has_active_post_replacement_attach_choice_pair()
-                || matches!(
-                    (
-                        state.resolution_stack.last(),
-                        state.resolution_stack.active_predecessor(),
-                    ),
-                    (
-                        Some(ResolutionFrame::PostReplacement(_)),
-                        Some(ResolutionFrame::AbilityContinuation(frame)),
-                    ) if is_bound_attach_remainder_for(&frame.pending, ability)
-                ));
+                || state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+                    .and_then(|drain| drain.source)
+                    .is_some_and(|source_id| {
+                        ability
+                            .attach_attachment_targets()
+                            .iter()
+                            .position(|attachment| attachment.object_id == source_id)
+                            .is_some_and(|index| {
+                                index + 1 < ability.attach_attachment_targets().len()
+                            })
+                    }));
         if attach_child_already_owns_tail {
             return Ok(());
         }
@@ -13158,7 +13176,7 @@ fn resolve_chain_body(
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             let attachment_candidates =
-                forwarded_attachment_candidates(state, sub, &forwarded_objects);
+                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects);
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
@@ -13533,46 +13551,6 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
 /// continuation edges; when a dependent node is removed, resume at its next
 /// `SequentialSibling` rather than treating a dependent `ContinuationStep` as
 /// independently executable.
-/// CR 400.7 + CR 608.2c: Capture only the live, battlefield objects delivered
-/// by this resolution event. Their exact incarnations exclude both stale objects
-/// that reused an id and preexisting matching Equipment.
-/// Capture the exact, live objects a forward-result move delivered for the
-/// special `Attach { ParentTarget, .. }` "one of them" continuation shape. The
-/// attach operand has no standalone filter: its
-/// `ZoneChangedThisWay` gate supplies the event-relative filter. Keeping the
-/// incarnation pair here prevents a later battlefield object with the same id
-/// from becoming eligible and keeps pre-existing matching Equipment out.
-fn forwarded_attachment_candidates(
-    state: &GameState,
-    sub: &ResolvedAbility,
-    delivered: &[ObjectId],
-) -> Vec<ObjectIncarnationRef> {
-    let Effect::Attach {
-        attachment: TargetFilter::ParentTarget,
-        ..
-    } = &sub.effect
-    else {
-        return Vec::new();
-    };
-    let Some(AbilityCondition::ZoneChangedThisWay {
-        filter,
-        destination: Some(Zone::Battlefield),
-    }) = sub.condition.as_ref()
-    else {
-        return Vec::new();
-    };
-    let filter_ctx = filter::FilterContext::from_ability(sub);
-    delivered
-        .iter()
-        .filter_map(|&object_id| {
-            let object = state.objects.get(&object_id)?;
-            (object.zone == Zone::Battlefield
-                && filter::matches_target_filter(state, object_id, filter, &filter_ctx))
-            .then(|| ObjectIncarnationRef::from_object(object))
-        })
-        .collect()
-}
-
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {

@@ -4,8 +4,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -73,21 +73,66 @@ pub(in crate::game) fn priority_equip_announcements(
         .collect()
 }
 
+/// The terminal state of one resolved Attach operation after any required
+/// resolution-time selection has been made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachResolutionOutcome {
+    Completed,
+    Paused,
+}
+
+/// The prompt phase either hands a fully bound operation to the executor,
+/// completes as a no-op, or parks another resolution-time choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachPromptOutcome {
+    Execute,
+    Completed,
+    Paused,
+}
+
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_with_prompt(state, ability, events).map(|_| ())
+}
+
+/// Prompt or park an Attach operation until both attachment roles are bound,
+/// then execute it. Callers that already hold a bound attachment role must use
+/// [`resolve_bound_attachment_operation`] directly so they cannot reopen the
+/// same resolution-time prompt.
+fn resolve_with_prompt(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<AttachResolutionOutcome, EffectError> {
+    let attachment_filter = match &ability.effect {
+        Effect::Attach { attachment, .. } => attachment,
+        _ => &TargetFilter::SelfRef,
+    };
+
+    match prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
+        AttachPromptOutcome::Execute => resolve_bound_attachment_operation(state, ability, events),
+        AttachPromptOutcome::Completed => Ok(AttachResolutionOutcome::Completed),
+        AttachPromptOutcome::Paused => Ok(AttachResolutionOutcome::Paused),
+    }
+}
+
+/// Execute an Attach operation whose resolution-time attachment roles are
+/// already bound. This deliberately excludes prompt logic: re-entering it for
+/// an Equipment answer can recreate the same `EffectZoneChoice` indefinitely.
+fn resolve_bound_attachment_operation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<AttachResolutionOutcome, EffectError> {
     let source_id = ability.source_id;
     let (attachment_filter, target_filter) = match &ability.effect {
         Effect::Attach { attachment, target } => (attachment, target),
         _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
     };
-
-    if prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
-        return Ok(());
-    }
 
     // CR 400.7 + CR 603.7c: a delayed attach whose pinned referent became a new
     // object attaches nothing. The trigger fired and resolved (CR 603.7b); it
@@ -108,7 +153,7 @@ pub fn resolve(
             source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(AttachResolutionOutcome::Completed);
     }
 
     // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
@@ -194,7 +239,7 @@ pub fn resolve(
                         );
                     }
                     state.waiting_for = waiting_for;
-                    return Ok(());
+                    return Ok(AttachResolutionOutcome::Paused);
                 }
             }
             crate::game::replacement::ReplacementResult::Prevented => {
@@ -218,12 +263,12 @@ pub fn resolve(
                     );
                 }
                 crate::game::replacement::park_waiting_for(state, player);
-                return Ok(());
+                return Ok(AttachResolutionOutcome::Paused);
             }
         }
     }
 
-    Ok(())
+    Ok(AttachResolutionOutcome::Completed)
 }
 
 /// CR 608.2c + CR 616.1: A selected attachment can open an attached-event
@@ -307,28 +352,12 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    #[cfg(test)]
-    eprintln!(
-        "attach trace: deliver attachment={attachment_id:?} target={target_id:?} before={:?}",
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|object| object.attached_to)
-    );
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
             old_target,
         });
     }
-    #[cfg(test)]
-    eprintln!(
-        "attach trace: deliver attachment={attachment_id:?} target={target_id:?} after={:?}",
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|object| object.attached_to)
-    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -462,15 +491,25 @@ fn prompt_resolution_attachment_choice(
     ability: &ResolvedAbility,
     attachment_filter: &TargetFilter,
     events: &mut Vec<GameEvent>,
-) -> Result<bool, EffectError> {
+) -> Result<AttachPromptOutcome, EffectError> {
     if !ability.attach_attachment_candidates().is_empty() {
         return prompt_forwarded_attachment_choice(state, ability, events);
     }
+    let candidates = attachment_candidates_from_zone_change(
+        state,
+        ability,
+        state.last_zone_changed_ids.as_slice(),
+    );
+    if !candidates.is_empty() {
+        let mut bound = ability.clone();
+        bound.bind_attach_attachment_candidates(candidates);
+        return prompt_forwarded_attachment_choice(state, &bound, events);
+    }
     if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
-        return Ok(false);
+        return Ok(AttachPromptOutcome::Execute);
     }
     if explicit_attachment_target_chosen(state, ability, attachment_filter) {
-        return Ok(false);
+        return Ok(AttachPromptOutcome::Execute);
     }
 
     let ctx = FilterContext::from_ability(ability);
@@ -495,13 +534,49 @@ fn prompt_resolution_attachment_choice(
         // accepted, clearing the optional flag, so `attachment_choice_bounds`
         // defaults to {min:1, max:1} against zero candidates. Subsumes the prior
         // `(0, 0, _)` no-op arm.
-        (0, _, _) | (_, 0, 0) => Ok(true),
-        (1, 1, 1) => Ok(false),
+        (0, _, _) | (_, 0, 0) => Ok(AttachPromptOutcome::Completed),
+        (1, 1, 1) => Ok(AttachPromptOutcome::Execute),
         _ => {
             park_resolution_attachment_choice(state, ability, eligible, bounds);
-            Ok(true)
+            Ok(AttachPromptOutcome::Paused)
         }
     }
+}
+
+/// CR 400.7 + CR 608.2c + CR 701.3b: A `ZoneChangedThisWay` Attach whose attachment
+/// operand is `ParentTarget` means "one of them", not merely the most recent
+/// trigger event. Preserve the exact event-scoped battlefield objects as typed
+/// attachment candidates so the prompt never includes preexisting Equipment.
+pub(crate) fn attachment_candidates_from_zone_change(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_ids: &[ObjectId],
+) -> Vec<ObjectIncarnationRef> {
+    let Effect::Attach {
+        attachment: TargetFilter::ParentTarget,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: Some(Zone::Battlefield),
+    }) = ability.condition.as_ref()
+    else {
+        return Vec::new();
+    };
+
+    let context = FilterContext::from_ability(ability);
+    object_ids
+        .iter()
+        .filter_map(|&object_id| {
+            let object = state.objects.get(&object_id)?;
+            (object.zone == Zone::Battlefield
+                && matches_target_filter(state, object_id, filter, &context))
+            .then(|| ObjectIncarnationRef::from_object(object))
+        })
+        .collect()
 }
 
 /// CR 115.10a: An Attach whose attachment operand is the moved set from a
@@ -512,7 +587,7 @@ fn prompt_forwarded_attachment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<bool, EffectError> {
+) -> Result<AttachPromptOutcome, EffectError> {
     let candidates: Vec<ObjectId> = ability
         .attach_attachment_candidates()
         .iter()
@@ -520,7 +595,7 @@ fn prompt_forwarded_attachment_choice(
         .map(|candidate| candidate.object_id)
         .collect();
     if candidates.is_empty() {
-        return Ok(true);
+        return Ok(AttachPromptOutcome::Completed);
     }
 
     let Effect::Attach { target, .. } = &ability.effect else {
@@ -530,7 +605,7 @@ fn prompt_forwarded_attachment_choice(
     if ability.attach_host_target().is_none() {
         let hosts = resolved_object_ids_for_filter(state, ability, target);
         match hosts.len() {
-            0 => return Ok(true),
+            0 => return Ok(AttachPromptOutcome::Completed),
             1 => {
                 let mut bound = ability.clone();
                 let host = state
@@ -548,18 +623,18 @@ fn prompt_forwarded_attachment_choice(
                     hosts,
                     MultiTargetBounds { min: 1, max: 1 },
                 );
-                return Ok(true);
+                return Ok(AttachPromptOutcome::Paused);
             }
         }
     }
 
     if !ability.attach_attachment_targets().is_empty() {
-        return Ok(false);
+        return Ok(AttachPromptOutcome::Execute);
     }
 
     let bounds = attachment_choice_bounds(state, ability, candidates.len())?;
     match (candidates.len(), bounds.min, bounds.max) {
-        (0, _, _) | (_, 0, 0) => Ok(true),
+        (0, _, _) | (_, 0, 0) => Ok(AttachPromptOutcome::Completed),
         (1, 1, 1) => {
             let mut bound = ability.clone();
             let attachment = state
@@ -568,12 +643,14 @@ fn prompt_forwarded_attachment_choice(
                 .map(ObjectIncarnationRef::from_object)
                 .expect("resolved attachment candidate must exist");
             bound.bind_attach_attachment_target(attachment);
-            resolve(state, &bound, events)?;
-            Ok(true)
+            match resolve_bound_attachment_operation(state, &bound, events)? {
+                AttachResolutionOutcome::Completed => Ok(AttachPromptOutcome::Completed),
+                AttachResolutionOutcome::Paused => Ok(AttachPromptOutcome::Paused),
+            }
         }
         _ => {
             park_resolution_attachment_choice(state, ability, candidates, bounds);
-            Ok(true)
+            Ok(AttachPromptOutcome::Paused)
         }
     }
 }
@@ -702,7 +779,7 @@ pub(crate) fn complete_resolution_attachment_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let choice_ability = bind_resolution_attachment_choice(state, ability, attachment_ids)?;
-    resolve(state, &choice_ability, events)
+    resolve_bound_attachment_operation(state, &choice_ability, events).map(|_| ())
 }
 
 /// Bind the answer to a resolution-time attachment choice before the child
@@ -759,6 +836,8 @@ pub(crate) fn resolve_selected_attachment_choice(
                 "Attach EffectZoneChoice missing typed attachment operation".to_string(),
             )
         })?;
+    let selecting_host = !operation.attach_attachment_candidates().is_empty()
+        && operation.attach_host_target().is_none();
     let bound_operation = bind_resolution_attachment_choice(state, operation, attachment_ids)?;
     let operation = {
         let frame = state
@@ -775,20 +854,25 @@ pub(crate) fn resolve_selected_attachment_choice(
         operation
     };
 
-    // `resolve` needs mutable access to the state, so it cannot borrow the
-    // operation from the active frame directly. This clone is deliberately
-    // taken only after the frame has become the authoritative bound owner.
-    resolve(state, &operation, events)?;
+    // A host answer must re-enter the prompt phase to choose from the
+    // forwarded Equipment set. An already-bound Equipment answer instead
+    // executes directly, avoiding a recursive replay of its own prompt.
+    let outcome = if selecting_host {
+        resolve_with_prompt(state, &operation, events)?
+    } else {
+        resolve_bound_attachment_operation(state, &operation, events)?
+    };
 
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        return Ok(false);
+    match outcome {
+        AttachResolutionOutcome::Paused => Ok(false),
+        AttachResolutionOutcome::Completed => {
+            let _ = state
+                .take_active_attachment_choice_continuation()
+                .expect("completed attach choice must retain its active child")
+                .expect("completed attach choice must own its active child");
+            Ok(true)
+        }
     }
-
-    let _ = state
-        .take_active_attachment_choice_continuation()
-        .expect("completed attach choice must retain its active child")
-        .expect("completed attach choice must own its active child");
-    Ok(true)
 }
 
 /// Resolve an explicitly chosen attachment through its role binding before the
@@ -1235,10 +1319,6 @@ pub(crate) fn attach_to_with_authority(
     authority: AttachmentAuthority<'_>,
 ) -> Option<TargetRef> {
     let legal = can_attach_to_object_with_authority(state, attachment_id, target_id, authority);
-    #[cfg(test)]
-    eprintln!(
-        "attach trace: authority attachment={attachment_id:?} target={target_id:?} legal={legal}"
-    );
     if !legal {
         return None;
     }
@@ -1311,14 +1391,6 @@ pub(crate) fn attach_to_with_authority(
             resulting_timestamp,
         );
     }
-    #[cfg(test)]
-    eprintln!(
-        "attach trace: authority attachment={attachment_id:?} target={target_id:?} after={:?}",
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|object| object.attached_to)
-    );
     old_target
 }
 
