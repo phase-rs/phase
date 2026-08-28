@@ -474,7 +474,7 @@ describe("GamePage — P2P pause resume control", () => {
     renderGamePage("/game/test-game-123?mode=p2p-host");
     act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Resume" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Resume game" }));
     expect(requestResume).toHaveBeenCalledOnce();
   });
 
@@ -482,7 +482,7 @@ describe("GamePage — P2P pause resume control", () => {
     renderGamePage("/game/test-game-123?mode=p2p-join");
     act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
 
-    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume game" })).toBeNull();
   });
 });
 
