@@ -1303,6 +1303,20 @@ fn nonself_etb_source_zone_shorthand_is_not_misbound_to_source() {
         "Whenever another creature enters, if it's on the battlefield, draw a card.",
         "Witnessing Enchantment",
     );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert!(matches!(
+        def.valid_card.as_ref(),
+        Some(TargetFilter::Typed(filter))
+            if filter.type_filters.contains(&TypeFilter::Creature)
+                && filter.properties.iter().any(|property| matches!(property, FilterProp::Another))
+    ));
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
     assert_ne!(
         def.condition,
         Some(TriggerCondition::SourceInZone {
