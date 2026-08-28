@@ -11199,14 +11199,16 @@ fn resolve_chain_body(
                 // shapes. The unconditional and ordinal `SequentialSibling` escapes
                 // below are local to this call site: neither is an independent
                 // intervening-if path that the delayed-body hoist may preserve.
+                let is_ordinal_sequential_sibling = sub.sub_link
+                    == SubAbilityLink::SequentialSibling
+                    && sub.sibling_condition == SiblingCondition::Dependent
+                    && matches!(
+                        sub.condition.as_ref(),
+                        Some(AbilityCondition::NthResolutionThisTurn { .. })
+                    );
                 if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && (sub.condition.is_none()
-                            || (sub.sibling_condition == SiblingCondition::Dependent
-                                && matches!(
-                                    sub.condition.as_ref(),
-                                    Some(AbilityCondition::NthResolutionThisTurn { .. })
-                                ))))
+                        && (sub.condition.is_none() || is_ordinal_sequential_sibling))
                 {
                     let mut sub_resolved = sub.as_ref().clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
@@ -11222,6 +11224,14 @@ fn resolve_chain_body(
                         sub_resolved.targets = ability.targets.clone();
                     }
                     sub_resolved.context = ability.context.clone();
+                    // CR 608.2c: The false-parent ordinal escape bypasses the
+                    // ordinary post-effect chain handoff, so it must explicitly
+                    // carry this printed ability's index to the next ordinal
+                    // instruction. Otherwise `NthResolutionThisTurn` reads no
+                    // `(source, ability_index)` ledger entry and can never match.
+                    if is_ordinal_sequential_sibling {
+                        apply_parent_chain_context(&mut sub_resolved, ability, None, state);
+                    }
                     resolve_ability_chain(state, &sub_resolved, events, depth + 1)?;
                 }
             }
