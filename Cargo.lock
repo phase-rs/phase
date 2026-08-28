@@ -1607,12 +1607,13 @@ dependencies = [
 
 [[package]]
 name = "manabrew-protocol"
-version = "3.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899b03250b480a4449ea5ec7b7690ed55d537b943216e4600621b6caef2d8980"
+checksum = "85036b3a0b5195eb3fa099da3019ebe2278e19c836dd0ef4fb691216c8a3f104"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "strum_macros 0.28.0",
  "ts-rs 10.1.0",
 ]
