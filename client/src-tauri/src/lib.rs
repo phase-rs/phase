@@ -1,8 +1,6 @@
 #[cfg(desktop)]
 use tauri::{Manager, WebviewWindowBuilder};
 
-#[cfg(desktop)]
-mod artifact_trust;
 mod audio_probe;
 mod host_platform;
 mod migration;
