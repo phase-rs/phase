@@ -15034,7 +15034,7 @@ mod tests {
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
-        TrackedSetId, TriggerFiring,
+        ObjectIncarnationRef, TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::Keyword;
     use crate::types::keywords::KeywordKind;
