@@ -17672,7 +17672,8 @@ declare_game_state! {
     /// Empty except mid-declaration; drained by `finish_declare_attackers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_attack_trigger_events: Vec<crate::types::events::GameEvent>,
-    /// CR 603.4: Per-ability per-turn resolution counter.
+    /// CR 608.2c: Per-ability per-turn resolution counter for ordinary
+    /// resolution-time conditions, not intervening-if conditions under CR 603.4.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
     /// `resolve_ability_chain` (depth 0) when the resolving ability has a

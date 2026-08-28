@@ -21525,11 +21525,14 @@ impl SubAbilityLink {
 /// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
 /// `SequentialSibling` continuation with its OWN gating condition must still be
 /// checked when a PRECEDING sibling's condition was
-/// false. `Dependent` (default) is today's behavior — the continuation's own
+/// false. `Dependent` (default) suppresses the continuation because its own
 /// condition/effect may presuppose the preceding sibling's effect actually ran
 /// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
 /// `GainControl` produced a target), so it is skipped alongside a failed
-/// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// predecessor. The sole narrow exception is a direct dependent
+/// `SequentialSibling` whose condition is `NthResolutionThisTurn`: ordinal
+/// clauses are evaluated in their written order under CR 608.2c even after an
+/// earlier ordinal is false. `ReplicatedOrBranch` marks a sibling produced by per-item
 /// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
 /// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.
@@ -22430,7 +22433,8 @@ pub enum AbilityCondition {
     DayNightIs {
         state: crate::types::game_state::DayNight,
     },
-    /// CR 603.4: Intervening-if gate for "if this is the [Nth] time this ability has
+    /// CR 608.2c: Ordinary resolution-time condition (not an intervening-if
+    /// condition under CR 603.4) for "if this is the [Nth] time this ability has
     /// resolved this turn". Counter is keyed by `(source_id, ability_index)` and
     /// incremented at the top of `resolve_ability_chain` (depth 0). The condition is
     /// satisfied when, after the increment, the per-turn resolution count equals `n`.
@@ -27325,9 +27329,10 @@ pub struct ResolvedAbility {
     /// accidentally bind to an amass-specific referent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amassed_army_object: Option<CostPaidObjectSnapshot>,
-    /// CR 603.4: Index of the printed ability this resolution came from on the
+    /// CR 608.2c: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
-    /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
+    /// ordinary-resolution-condition tracking (`AbilityCondition::NthResolutionThisTurn`),
+    /// not an intervening-if condition under CR 603.4. `None` for
     /// synthesized/runtime-only abilities (prowess, firebending) and activated
     /// abilities for which nth-resolution gating is not yet wired through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27385,7 +27390,9 @@ pub struct ResolvedAbility {
     /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
     /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
     /// preceding sibling's failed gate. `Dependent` (default) preserves the
-    /// prior skip-with-failed-predecessor behavior. See [`SiblingCondition`].
+    /// prior skip-with-failed-predecessor behavior, except the narrow direct
+    /// `NthResolutionThisTurn` ordinal-sibling case described by
+    /// [`SiblingCondition`]. See [`SiblingCondition`].
     #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
     pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
