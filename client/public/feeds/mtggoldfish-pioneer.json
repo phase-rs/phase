@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-27T00:00:00Z",
+  "updated": "2026-08-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -573,7 +573,7 @@
       "main": [
         {
           "count": 2,
-          "name": "Essence Scatter"
+          "name": "Out of Air"
         },
         {
           "count": 4,
@@ -636,7 +636,7 @@
           "name": "Temporary Lockdown"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Supreme Verdict"
         },
         {
@@ -662,6 +662,10 @@
         {
           "count": 4,
           "name": "Plunder the Trollshaws"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
         }
       ],
       "sideboard": [
@@ -678,12 +682,12 @@
           "name": "Quantum Riddler"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 2,
-          "name": "Get Lost"
+          "count": 4,
+          "name": "Kutzil's Flanker"
         }
       ]
     },
@@ -699,96 +703,28 @@
       ],
       "main": [
         {
-          "count": 1,
+          "count": 3,
           "name": "Accumulate Wisdom"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 3,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 2,
-          "name": "Thor, God of Thunder"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Spirebluff Canal"
         },
         {
           "count": 4,
           "name": "It'll Quench Ya!"
         },
         {
-          "count": 2,
-          "name": "Accumulate Wisdom"
-        },
-        {
           "count": 3,
-          "name": "Willowrush Verge"
+          "name": "Firebending Lesson"
         },
         {
-          "count": 1,
-          "name": "Willowrush Verge"
-        },
-        {
-          "count": 3,
-          "name": "Questing Druid"
-        },
-        {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 2,
+          "count": 4,
           "name": "Steam Vents"
         },
         {
-          "count": 2,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 1,
-          "name": "Gran-Gran"
+          "count": 4,
+          "name": "Divide by Zero"
         },
         {
           "count": 4,
@@ -796,25 +732,19 @@
         },
         {
           "count": 2,
-          "name": "Pop Quiz"
+          "name": "Island"
         },
         {
-          "count": 2,
-          "name": "Combustion Technique"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Price of Freedom"
+          "count": 4,
+          "name": "Riverpyre Verge"
         },
         {
-          "count": 1,
-          "name": "Sokka's Haiku"
+          "count": 4,
+          "name": "Riverglide Pathway"
         },
         {
           "count": 3,
-          "name": "Avengers Disassembled"
+          "name": "Combustion Technique"
         },
         {
           "count": 1,
@@ -822,11 +752,69 @@
         },
         {
           "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Pop Quiz"
+        },
+        {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 1,
+          "name": "Thor, God of Thunder"
+        },
+        {
+          "count": 4,
+          "name": "Willowrush Verge"
+        },
+        {
+          "count": 3,
+          "name": "Questing Druid"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 1,
+          "name": "Thor, God of Thunder"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 1,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 2,
+          "name": "Aether Gust"
+        },
+        {
+          "count": 1,
           "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
-          "name": "Mascot Exhibition"
+          "name": "Firebending Lesson"
         },
         {
           "count": 1,
@@ -834,23 +822,23 @@
         },
         {
           "count": 1,
-          "name": "Origin of Metalbending"
+          "name": "Ghost Vacuum"
         },
         {
           "count": 1,
-          "name": "Ral, Crackling Wit"
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 2,
+          "name": "Ashiok, Dream Render"
         },
         {
           "count": 1,
           "name": "Combustion Technique"
         },
         {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        },
-        {
           "count": 1,
-          "name": "Price of Freedom"
+          "name": "Redirect Lightning"
         }
       ]
     },
