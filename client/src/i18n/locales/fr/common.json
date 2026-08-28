@@ -20,7 +20,7 @@
   },
   "pausedBanner": {
     "message": "Partie en pause — {{reason}}",
-    "resume": "Reprendre"
+    "resume": "Reprendre la partie"
   },
   "fullscreen": {
     "enter": "Passer en plein écran",

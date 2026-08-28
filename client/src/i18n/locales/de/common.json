@@ -20,7 +20,7 @@
   },
   "pausedBanner": {
     "message": "Spiel pausiert — {{reason}}",
-    "resume": "Fortsetzen"
+    "resume": "Spiel fortsetzen"
   },
   "fullscreen": {
     "enter": "Vollbild starten",

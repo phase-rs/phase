@@ -20,7 +20,7 @@
   },
   "pausedBanner": {
     "message": "Partida en pausa — {{reason}}",
-    "resume": "Reanudar"
+    "resume": "Reanudar partida"
   },
   "fullscreen": {
     "enter": "Activar pantalla completa",

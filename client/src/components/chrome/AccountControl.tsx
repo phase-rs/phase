@@ -330,6 +330,12 @@ export function AccountControl() {
                     >
                       {t("sync.keepLocal")}
                     </button>
+                    <button
+                      className={POPOVER_BTN}
+                      onClick={() => void resolveConflict("merge")}
+                    >
+                      {t("sync.keepBothDecks")}
+                    </button>
                   </div>
                 </div>
               ) : (
