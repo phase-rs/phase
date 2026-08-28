@@ -145,14 +145,17 @@ pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) ->
     matches!(&state.waiting_for, WaitingFor::TargetSelection { .. })
 }
 
-/// Whether a decision can alter the target requirements of an in-progress cast.
+/// Whether a decision needs the reducer to validate an in-progress cast.
 ///
 /// CR 601.2b-c: a kicker declaration precedes target selection and may replace
 /// the spell's target requirements. The capability contract must therefore
 /// simulate each such payment decision before issuing it; otherwise an AI can
 /// decline the only target-enabling kicker and receive a targetless cast.
+/// CR 601.2h: an unfinished mana payment cannot be finalized, so its pass
+/// candidate must likewise be simulated before it enters the contract.
 fn decision_contract_requires_reducer_validation(state: &GameState) -> bool {
     target_selection_requires_reducer_validation(state)
+        || matches!(&state.waiting_for, WaitingFor::ManaPayment { .. })
         || matches!(
             &state.waiting_for,
             WaitingFor::OptionalCostChoice {
