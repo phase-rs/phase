@@ -21,14 +21,38 @@ describe("getCardImageSrcSetProps", () => {
     }
   });
 
-  it("keeps srcSet, sizes and loading together", () => {
+  it("keeps srcSet, sizes, loading and the intrinsic size together", () => {
     // `sizes="auto"` is valid only alongside `loading="lazy"`; a site that lost
     // `loading` would silently revert to always selecting the 488px asset.
     expect(getCardImageSrcSetProps(sized("normal"))).toEqual({
       srcSet: `${sized("small")} 146w, ${sized("normal")} 488w`,
       sizes: "auto, 200px",
       loading: "lazy",
+      width: 488,
+      height: 680,
     });
+  });
+
+  it("never offers sizes=auto without the intrinsic size that resolves it", () => {
+    // Dropping `width`/`height` leaves the element with no intrinsic aspect
+    // ratio: the spec's 300x150 default object size stands in, so every call
+    // site that lets the image supply its own height (the hover and mobile
+    // previews, the textbox slice, the coverage dashboard) lays out a 2:1
+    // letterbox and `object-cover` crops the card to a middle slice.
+    for (const props of [
+      getCardImageSrcSetProps(sized("normal")),
+      getCardImageSrcSetProps("http://visual-pack.localhost/current", {
+        small: "http://visual-pack.localhost/small-object",
+        normal: "http://visual-pack.localhost/normal-object",
+      }),
+    ]) {
+      expect(props?.sizes).toContain("auto");
+      expect(props?.width).toBe(488);
+      expect(props?.height).toBe(680);
+      // The pair must describe the card scan itself, not an arbitrary box:
+      // both rungs are the same image at two widths.
+      expect(props!.width / props!.height).toBeCloseTo(488 / 680, 5);
+    }
   });
 
   it("returns undefined for sources with no size variants", () => {
@@ -51,6 +75,8 @@ describe("getCardImageSrcSetProps", () => {
       srcSet: "http://visual-pack.localhost/small-object 146w, http://visual-pack.localhost/normal-object 488w",
       sizes: "auto, 200px",
       loading: "lazy",
+      width: 488,
+      height: 680,
     });
     expect(getCardImageSrcSetProps("http://visual-pack.localhost/current")).toBeUndefined();
   });

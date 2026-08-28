@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 199,
+      "date": "2026-08-27",
+      "title": "Commander Draft and Android arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Commander Draft is ready for pods, and phase.rs is now available as an Android APK\n• Glacian, Powerstone Engineer can tap any chosen number of artifacts for X, unlocking the wider \"Tap X untapped [type]\" ability class\n• Choosing a Ring-bearer now fires the triggers that care about that choice (Call of the Ring), and Mount Doom, Cloak and Dagger, Entwined, and Karolina Dean, Runaway join the card pool\n• You can download direct Scryfall visual packs for card art, animations, and avatars\n\n🛠️ Cards That Now Work Right\n• Adventures preserve the correct face and qualifier through casting and resolution (including Garenbrig Squire and land-front Adventures)\n• Dauthi Voidwalker can choose a void-countered card in exile and cast it for free, even in multiplayer games\n• Face-down casts no longer combine with a separate alternative-cost permission, while normal-cost permissions still work correctly\n• Effects that make a player pay \"unless\" by sacrificing or tapping the specified creatures now keep the right payer and payment bounds\n• Palantír and Gearhulk-style effects can use the full chain of cards selected by earlier instructions\n\n⚔️ Combat & Gameplay\n• Draft pods recover cleanly after a reload and Swiss pairing now avoids rematches whenever a fresh pairing exists\n• Resolve All resumes the intended auto-passes afterward, and rejected game actions now explain what went wrong instead of failing silently\n• Copies of spells no longer carry over Commander-specific role choices from their originals\n\n🖥️ Interface\n• Card hover previews are stable again in decks and on the game board\n• Android and desktop controls now respect each platform’s supported features\n\n🌐 Multiplayer\n• Commander Draft and ordinary draft pods retain their state and reconnect reliably across the table",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1542554811785019483"
+    },
+    {
       "id": 198,
       "date": "2026-08-25",
       "title": "Conditional spells keep their targets",
