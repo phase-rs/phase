@@ -715,7 +715,7 @@ function BetweenGamesView({
 
     return (
       <div className={tabletLayout
-        ? "mx-auto flex h-[calc(100dvh_-_8rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
+        ? "mx-auto flex h-[calc(100dvh_-_4rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
         : "mx-auto flex w-full max-w-4xl flex-col gap-4 py-8"}
       >
         <div className="flex items-center justify-between">
@@ -1352,7 +1352,10 @@ export function DraftPodPage() {
       <MenuShell
         layout="stacked"
         contentWidthClass="max-w-none"
-        compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+        compactTopPadding={
+          (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+          || tabletDeckbuilding
+        }
       >
         <div className="flex w-full flex-col">
           {screen === "betweenGames" && overlayDismissed && (

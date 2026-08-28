@@ -50,9 +50,12 @@ export interface CardPoolBoardProps {
   forceShowHeaders?: boolean;
   phoneToolbar?: boolean;
   phoneLayoutDialog?: boolean;
+  phonePortraitDeckToolbar?: boolean;
   tabletMode?: boolean;
-  phoneDeckVisualColumnCap?: number;
-  onPhoneDeckVisualColumnCapChange?(next: number): void;
+  compactDeckTypeCounts?: boolean;
+  visualColumnCapValue?: number;
+  visualColumnCapMax?: number;
+  onVisualColumnCapChange?(next: number): void;
   touchDragEnabled?: boolean;
   touchScrollEnabled?: boolean;
   onWorkspaceChange(next: DraftWorkspaceState): void;
@@ -133,9 +136,12 @@ export function CardPoolBoard({
   forceShowHeaders = false,
   phoneToolbar = false,
   phoneLayoutDialog = false,
+  phonePortraitDeckToolbar = false,
   tabletMode = false,
-  phoneDeckVisualColumnCap,
-  onPhoneDeckVisualColumnCapChange,
+  compactDeckTypeCounts = false,
+  visualColumnCapValue,
+  visualColumnCapMax,
+  onVisualColumnCapChange,
   touchDragEnabled = false,
   touchScrollEnabled = false,
   onWorkspaceChange,
@@ -461,9 +467,12 @@ export function CardPoolBoard({
         interactionLocked={interactionLocked}
         phoneMode={phoneToolbar}
         phoneLayoutDialog={phoneLayoutDialog}
+        phonePortraitDeckToolbar={phonePortraitDeckToolbar}
         tabletMode={tabletMode}
-        phoneDeckVisualColumnCap={phoneDeckVisualColumnCap}
-        onPhoneDeckVisualColumnCapChange={onPhoneDeckVisualColumnCapChange}
+        compactDeckTypeCounts={compactDeckTypeCounts}
+        visualColumnCapValue={visualColumnCapValue}
+        visualColumnCapMax={visualColumnCapMax}
+        onVisualColumnCapChange={onVisualColumnCapChange}
       />
       <div
         ref={registerBoard}

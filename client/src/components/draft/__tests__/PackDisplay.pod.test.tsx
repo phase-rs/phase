@@ -176,7 +176,7 @@ describe("DraftPodPage pack presentation preferences", () => {
     expect(screen.getByRole("slider", { name: "Pack scale" })).toHaveValue("0.83");
 
     fireEvent.change(screen.getByRole("slider", { name: "Pack scale" }), { target: { value: "1.2" } });
-    expect(JSON.parse(localStorage.getItem(DRAFT_WORKSPACE_PREFERENCES_KEY) ?? "null")).toMatchObject({ schemaVersion: 2, packScale: 1.2 });
+    expect(JSON.parse(localStorage.getItem(DRAFT_WORKSPACE_PREFERENCES_KEY) ?? "null")).toMatchObject({ schemaVersion: 3, packScale: 1.2 });
     first.unmount();
 
     renderDraftingPage();

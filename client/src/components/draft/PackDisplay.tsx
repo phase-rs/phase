@@ -617,7 +617,7 @@ export function PackDisplay({
             </button>
           )}
         </div>
-        {mobileLayout ? (
+        {mobileLayout || responsiveLayout === "tablet-landscape" ? (
           <div data-pack-scale-controls className="ml-auto flex shrink-0 items-center gap-1.5">
             <button type="button" disabled={locked} aria-label={t("pack.scaleDecrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale - 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>−</button>
             <label className="flex items-center">

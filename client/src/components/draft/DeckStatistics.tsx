@@ -29,6 +29,31 @@ function countColorSymbols(manaCost: string, color: string): number {
   return count;
 }
 
+/**
+ * The builder's mana value is deliberately based on spells only. Lands do
+ * not contribute to a deck's average mana cost, including virtual basics.
+ */
+export function AverageManaCost({ cards }: { cards: readonly DraftCardInstance[] }) {
+  const { t } = useTranslation("draft");
+  const averageManaValue = useMemo(() => {
+    const nonlandCards = cards.filter((card) => !isLand(card.type_line));
+    return nonlandCards.length === 0
+      ? 0
+      : nonlandCards.reduce((sum, card) => sum + card.cmc, 0) / nonlandCards.length;
+  }, [cards]);
+
+  return (
+    <div className="text-center">
+      <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+        {t("limitedDeck.averageManaCost")}
+      </div>
+      <output className="mt-1 block text-2xl font-semibold tabular-nums text-white">
+        {averageManaValue.toFixed(2)}
+      </output>
+    </div>
+  );
+}
+
 export function DeckStatistics({
   cards,
   virtualCardNames,
@@ -61,9 +86,6 @@ export function DeckStatistics({
     };
   }, [cardNames]);
 
-  const averageManaValue = nonlandCards.length === 0
-    ? 0
-    : nonlandCards.reduce((sum, card) => sum + card.cmc, 0) / nonlandCards.length;
   const total = cards.length + virtualCardNames.length;
   const virtualBasicCount = virtualCardNames.filter((name) => BASIC_LAND_NAMES.has(name)).length;
   const typeCounts = TYPE_ROWS.map((type) => {
@@ -88,14 +110,7 @@ export function DeckStatistics({
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="text-center">
-        <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          {t("limitedDeck.averageManaCost")}
-        </div>
-        <output className="mt-1 block text-2xl font-semibold tabular-nums text-white">
-          {averageManaValue.toFixed(2)}
-        </output>
-      </div>
+      <AverageManaCost cards={cards} />
 
       <table className="w-full text-sm">
         <thead>

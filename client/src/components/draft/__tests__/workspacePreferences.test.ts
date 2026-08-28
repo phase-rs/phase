@@ -23,7 +23,7 @@ beforeEach(() => {
 describe("workspace preferences", () => {
   it("repairs_malformed_preferences_field_by_field_and_clamps_dimensions", () => {
     const repaired = repairDraftWorkspacePreferences({
-      schemaVersion: 2,
+      schemaVersion: 3,
       explicitView: "board",
       cardPreviewMode: "invalid",
       packScale: 3,
@@ -32,6 +32,7 @@ describe("workspace preferences", () => {
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
       phoneDeckVisualColumnCaps: { portrait: 0, landscape: 7 },
+      tabletDeckVisualColumnCaps: { portrait: 0, landscape: 16 },
       deck: {
         sort: "type",
         columnCount: 1,
@@ -47,20 +48,23 @@ describe("workspace preferences", () => {
     });
 
     expect(repaired).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       explicitView: "board",
       cardPreviewMode: "none",
       packScale: 2.9,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
       phoneDeckVisualColumnCaps: { portrait: 1, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 1, landscape: 15 },
       deck: { sort: "type", columnCount: 2, rows: "two", showHeaders: false },
       sideboard: { sort: "cmc", columnCount: 20, rows: "one", showHeaders: true },
     });
   });
 
   it("resolves_live_width_breakpoints", () => {
-    expect(resolveDraftWorkspaceView(null, 1024, "tablet-landscape")).toBe("compact");
+    for (const layout of ["phone-portrait", "phone-landscape", "tablet-portrait", "tablet-landscape"] as const) {
+      expect(resolveDraftWorkspaceView(null, 1024, layout)).toBe("compact");
+    }
     expect(resolveDraftWorkspaceView(null, 1440, "desktop")).toBe("board");
     expect(resolveDraftWorkspaceView("compact", 1440)).toBe("compact");
     expect(resolveDraftWorkspaceView("board", 390)).toBe("board");
@@ -75,15 +79,18 @@ describe("workspace preferences", () => {
     expect(getResponsiveDraftLayout(1440, 900)).toBe("desktop");
   });
 
-  it("caps_phone_and_tablet_visual_column_groups_by_orientation", () => {
-    const caps = { portrait: 3, landscape: 5 };
-    expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "draft", caps)).toBe(3);
-    expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "draft", caps)).toBe(5);
-    expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "builder", caps)).toBe(3);
-    expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "builder", caps)).toBe(5);
-    expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "draft", caps)).toBe(3);
-    expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "draft", caps)).toBe(5);
-    expect(resolveDraftWorkspaceVisualColumnCap("desktop", "draft", caps)).toBeUndefined();
+  it("caps_visual_column_groups_by_context_and_orientation", () => {
+    const phoneCaps = { portrait: 3, landscape: 5 };
+    const tabletCaps = { portrait: 12, landscape: 15 };
+    expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "draft", phoneCaps, tabletCaps)).toBe(3);
+    expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "draft", phoneCaps, tabletCaps)).toBe(5);
+    expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "builder", phoneCaps, tabletCaps)).toBe(3);
+    expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "builder", phoneCaps, tabletCaps)).toBe(5);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "draft", phoneCaps, tabletCaps)).toBe(3);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "draft", phoneCaps, tabletCaps)).toBe(5);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "builder", phoneCaps, tabletCaps)).toBe(12);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "builder", phoneCaps, tabletCaps)).toBe(15);
+    expect(resolveDraftWorkspaceVisualColumnCap("desktop", "draft", phoneCaps, tabletCaps)).toBeUndefined();
   });
 
   it("honors_draft_phone_tablet_and_desktop_sideboard_overrides", () => {
@@ -107,13 +114,14 @@ describe("workspace preferences", () => {
     const first = createDefaultDraftWorkspacePreferences();
     const second = createDefaultDraftWorkspacePreferences();
     expect(first).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       explicitView: null,
       cardPreviewMode: "none",
       packScale: DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
       sideboardCollapsed: null,
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
       deck: { sort: "cmc", columnCount: 7, rows: "one", showHeaders: true },
       sideboard: { sort: "cmc", columnCount: 6, rows: "one", showHeaders: true },
     });
@@ -132,7 +140,7 @@ describe("workspace preferences", () => {
 
   it("defaults invalid roots, versions, fractions, and non-finite values", () => {
     const defaults = createDefaultDraftWorkspacePreferences();
-    for (const value of [null, [], "invalid", {}, { schemaVersion: 3 }]) {
+    for (const value of [null, [], "invalid", {}, { schemaVersion: 4 }]) {
       expect(repairDraftWorkspacePreferences(value)).toEqual(defaults);
     }
     expect(repairDraftWorkspacePreferences({
@@ -147,7 +155,7 @@ describe("workspace preferences", () => {
     });
   });
 
-  it("migrates_v1_preferences_and_repairs_v2_phone_fields_independently", () => {
+  it("migrates_v1_and_v2_preferences_and_repairs_v3_visual_caps_independently", () => {
     expect(repairDraftWorkspacePreferences({
       schemaVersion: 1,
       explicitView: "board",
@@ -157,15 +165,32 @@ describe("workspace preferences", () => {
       deck: { sort: "type", columnCount: 4, rows: "two", showHeaders: false },
       sideboard: { sort: "color", columnCount: 8, rows: "one", showHeaders: true },
     })).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       explicitView: "board",
       cardPreviewMode: "follow",
       packScale: 1.8,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
       deck: { sort: "type", columnCount: 4, rows: "two", showHeaders: false },
       sideboard: { sort: "color", columnCount: 8, rows: "one", showHeaders: true },
+    });
+
+    expect(repairDraftWorkspacePreferences({
+      schemaVersion: 2,
+      explicitView: "board",
+      cardPreviewMode: "none",
+      packScale: 1.65,
+      sideboardCollapsed: null,
+      builderPhoneSideboardCollapsed: true,
+      phoneDeckVisualColumnCaps: { portrait: 2, landscape: 5 },
+      deck: { sort: "cmc", columnCount: 7, rows: "one", showHeaders: true },
+      sideboard: { sort: "cmc", columnCount: 6, rows: "one", showHeaders: true },
+    })).toMatchObject({
+      schemaVersion: 3,
+      phoneDeckVisualColumnCaps: { portrait: 2, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 2, landscape: 5 },
     });
 
     const defaults = createDefaultDraftWorkspacePreferences();
@@ -173,9 +198,11 @@ describe("workspace preferences", () => {
       ...defaults,
       builderPhoneSideboardCollapsed: "false",
       phoneDeckVisualColumnCaps: { portrait: 2.5, landscape: 2 },
+      tabletDeckVisualColumnCaps: { portrait: 2.5, landscape: 16 },
     })).toMatchObject({
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 2 },
+      tabletDeckVisualColumnCaps: { portrait: 3, landscape: 15 },
     });
   });
 

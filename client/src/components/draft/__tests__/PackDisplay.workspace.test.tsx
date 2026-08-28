@@ -209,6 +209,34 @@ describe("PackDisplay local workspace controller", () => {
     },
   );
 
+  it("uses compact minus-slider-plus controls only for tablet landscape drafting", () => {
+    const { rerender } = render(
+      <PackDisplay
+        controller={controller()}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout="tablet-landscape"
+      />,
+    );
+
+    const landscapeControls = document.querySelector<HTMLElement>("[data-pack-scale-controls]")!;
+    expect(within(landscapeControls).getByText("Pack scale")).toHaveClass("sr-only");
+    expect(within(landscapeControls).queryByRole("button", { name: "Reset pack scale" })).not.toBeInTheDocument();
+    expect(Array.from(landscapeControls.children).map((child) => child.tagName)).toEqual(["BUTTON", "LABEL", "BUTTON"]);
+
+    rerender(
+      <PackDisplay
+        controller={controller()}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout="tablet-portrait"
+      />,
+    );
+    const portraitControls = document.querySelector<HTMLElement>("[data-pack-scale-controls]")!;
+    expect(within(portraitControls).getByText("Pack scale")).toBeInTheDocument();
+    expect(within(portraitControls).getByRole("button", { name: "Reset pack scale" })).toBeInTheDocument();
+  });
+
   it.each(["phone-portrait", "phone-landscape"] as const)(
     "disables_mobile_pick_destinations_while_the_%s_workspace_is_open",
     (responsiveLayout) => {
