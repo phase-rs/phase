@@ -3,7 +3,6 @@ import { assetKey, catalogRoot, packId, type AssetKey, type CandidateKey, type C
 import { CARD_BACK_URL } from "../../scryfall.ts";
 
 const BULK_INDEX_URL = "https://api.scryfall.com/bulk-data";
-const METADATA_CACHE = "phase-visual-pack-scryfall-metadata-v1";
 
 export class ScryfallBulkError extends Error {
   constructor(readonly kind: "network" | "storage" | "unsupported") {
@@ -209,10 +208,6 @@ export async function loadScryfallBulkSource(fetcher: typeof fetch = globalThis.
 }
 
 async function bulkResponse(source: ScryfallBulkSource, signal: AbortSignal, fetcher: typeof fetch): Promise<Response> {
-  const cache = await caches.open(METADATA_CACHE);
-  const path = `/__visual-packs/scryfall/${source.root}.jsonl.gz`;
-  const cached = await cache.match(path);
-  if (cached) return cached;
   const response = await fetcher(source.downloadUrl, {
     headers: { Accept: "application/gzip,application/octet-stream;q=0.9,*/*;q=0.8" },
     credentials: "omit",
@@ -221,7 +216,6 @@ async function bulkResponse(source: ScryfallBulkSource, signal: AbortSignal, fet
     signal,
   });
   if (response.status !== 200 || response.type === "opaque" || !response.body) throw new ScryfallBulkError("network");
-  void cache.put(path, response.clone()).catch(() => undefined);
   return response;
 }
 
