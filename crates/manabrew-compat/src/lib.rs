@@ -1,9 +1,8 @@
 //! Serialization adapter between this repo's MTG engine (`GameState` /
 //! `GameAction`) and the external ManaBrew wire protocol.
 //!
-//! Pinned upstream: `manabrew-protocol` **3.0.0** (crates.io, 2026-07-28).
-//! [`PROTOCOL_VERSION`] is the crate major, which is how upstream defines the
-//! wire version.
+//! Pinned upstream: `manabrew-protocol` **5.2.0** (crates.io, 2026-08-24).
+//! [`PROTOCOL_VERSION`] is a separate number — see its own docs.
 //!
 //! This crate is a pure serialization boundary: it never computes, derives, or
 //! re-interprets game state. Anything the engine does not supply is recorded in
@@ -83,7 +82,7 @@ use serde::{Deserialize, Serialize};
 
 /// Deliberate local extension of upstream's mulligan answer.
 ///
-/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 3.0.0, but
+/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 5.2.0, but
 /// Phase models `MulliganChoice::UseSerumPowder` and needs the committed object
 /// id. It is safe because this client-to-engine answer is exchanged only
 /// between this adapter and its paired client; third-party clients are not
@@ -471,9 +470,18 @@ pub enum ClientToServerMessage {
     },
 }
 
-/// Wire version of the pinned upstream protocol. Upstream defines the wire
-/// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Handshake wire version a client reports to a ManaBrew relay.
+///
+/// This is **not** the `manabrew-protocol` major, despite the two being equal
+/// today. Upstream defines it as the major of `manabrew-relay-protocol`, the
+/// separate crate that owns the relay envelopes and the handshake
+/// (`PROTOCOL_VERSION: u32 = major_of(env!("CARGO_PKG_VERSION_MAJOR"))` there),
+/// so it moves only on a breaking *wire* change. `manabrew-protocol` 5.2.0 and
+/// `manabrew-relay-protocol` 5.4.1 both sit at major 5, which is why the
+/// distinction is easy to miss; the two crates version independently and can
+/// diverge. Bump this from the relay crate's major, never from the dependency
+/// pinned in `Cargo.toml`.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
 
@@ -668,7 +676,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps and deliberate local wire divergences from protocol 3.0.0,
+/// Gaps and deliberate local wire divergences from protocol 5.2.0,
 /// machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
@@ -1225,7 +1233,7 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 91] = [
     UnsupportedCapability {
         code: "local.serum-powder-mulligan-vendor-extension",
         area: "mulligan",
-        reason: "Deliberate adapter-local divergence from manabrew-protocol 3.0.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
+        reason: "Deliberate adapter-local divergence from manabrew-protocol 5.2.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
         suggested_protocol_extension: "None required for this paired deployment. Keep both member names under review whenever the upstream protocol version changes.",
     },
     UnsupportedCapability {
@@ -3459,9 +3467,12 @@ fn build_stack(state: &GameState, derived: &DerivedViews) -> Vec<StackObjectDto>
                 owner_id: source
                     .map(|object| encode_player_id(object.owner))
                     .unwrap_or_default(),
-                // Matches upstream's own projection: a back face exists, and
-                // the stack shows face 1 once the object is transformed.
-                is_double_faced: source.is_some_and(|object| object.back_face.is_some()),
+                // CR 712.1 + CR 710.1b: the engine owns "is this double-faced",
+                // and `back_face.is_some()` is not that predicate — a flip,
+                // Adventure or Omen card parks its other half in the same slot.
+                // Same classifier `build_card_dto` uses, for the same reason.
+                is_double_faced: source
+                    .is_some_and(engine::game::transform::is_double_faced_permanent),
                 face_index: source.map_or(0, |object| u8::from(object.transformed)),
                 identity: CardIdentity {
                     name: details
@@ -4694,11 +4705,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use engine::game::game_object::BackFaceData;
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
     };
+    use engine::types::card::LayoutKind;
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
@@ -4812,8 +4825,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_the_pinned_crate_major() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn protocol_version_is_the_relay_crate_major() {
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     // -------------------------------------------------------------- state ---
@@ -4912,6 +4925,53 @@ mod tests {
         );
         assert_eq!(stack_object["isDoubleFaced"], false);
         assert_eq!(stack_object["faceIndex"], 0);
+    }
+
+    /// The `is_double_faced` half of the above, on a card that discriminates.
+    ///
+    /// `back_face.is_some()` is NOT the DFC predicate: CR 710 flip cards and
+    /// Adventure / Omen cards park their other half in the same slot. Only a
+    /// `Transform`/`Modal`/`Meld` back face (or a melded or already-transformed
+    /// object) is a DFC, which is what
+    /// `engine::game::transform::is_double_faced_permanent` decides. A plain
+    /// card passes either predicate, so it proves nothing here — an Adventure
+    /// creature on the stack is the case that separates them.
+    #[test]
+    fn an_adventure_spell_on_the_stack_is_not_double_faced() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Adventurer".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source).unwrap().back_face = Some(BackFaceData {
+            name: "The Adventure".to_string(),
+            layout_kind: Some(LayoutKind::Adventure),
+            ..Default::default()
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        let prepared = prepare_snapshot(&state, PlayerId(0), "game-a").unwrap();
+        let json = serde_json::to_value(build_state_update(&prepared, &lookup).unwrap()).unwrap();
+
+        let object = state.objects.get(&source).unwrap();
+        assert!(
+            object.back_face.is_some(),
+            "the reach guard: the raw check this replaced would report true here"
+        );
+        assert_eq!(json["gameView"]["stack"][0]["isDoubleFaced"], false);
     }
 
     /// Player counters moved from five flat `*Counters` fields into one
@@ -7415,6 +7475,7 @@ mod tests {
                 &ResponseViolation::UnknownActionId("action-9".to_string()),
                 Some(1),
             ),
+            protocol_error_for_violation(&ResponseViolation::CancelNotAllowed, Some(1)),
             protocol_error_for(
                 &AdapterError::MalformedId {
                     expected_prefix: "card-",
@@ -7429,8 +7490,8 @@ mod tests {
 
         assert_eq!(
             produced.len(),
-            5,
-            "each of the five conformance failures must map to a distinct code"
+            6,
+            "each of the six conformance failures must map to a distinct code"
         );
         assert!(
             produced
@@ -7439,11 +7500,28 @@ mod tests {
                 .all(|(index, code)| !produced[..index].contains(code)),
             "each conformance failure must map to a distinct code"
         );
+        // Exhaustive, wildcard-free: when upstream adds a code this stops
+        // compiling, which is the only thing that makes the list below a real
+        // completeness check. A hand-written list cannot fail on its own —
+        // `CancelNotAllowed` arrived in 5.0.0 and this test kept passing.
+        fn every_code_is_listed_below(code: ProtocolErrorCode) {
+            match code {
+                ProtocolErrorCode::StalePrompt
+                | ProtocolErrorCode::WrongPlayer
+                | ProtocolErrorCode::WrongPromptType
+                | ProtocolErrorCode::UnknownActionId
+                | ProtocolErrorCode::CancelNotAllowed
+                | ProtocolErrorCode::InvalidShape => {}
+            }
+        }
+        every_code_is_listed_below(ProtocolErrorCode::StalePrompt);
+
         for code in [
             ProtocolErrorCode::StalePrompt,
             ProtocolErrorCode::WrongPlayer,
             ProtocolErrorCode::WrongPromptType,
             ProtocolErrorCode::UnknownActionId,
+            ProtocolErrorCode::CancelNotAllowed,
             ProtocolErrorCode::InvalidShape,
         ] {
             assert!(produced.contains(&code), "no producer for {code:?}");
