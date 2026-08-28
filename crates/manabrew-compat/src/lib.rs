@@ -4974,6 +4974,42 @@ mod tests {
         assert_eq!(json["gameView"]["stack"][0]["isDoubleFaced"], false);
     }
 
+    #[test]
+    fn a_transformed_double_faced_spell_on_the_stack_reports_its_back_face() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Werewolf Back".to_string(),
+            Zone::Stack,
+        );
+        let object = state.objects.get_mut(&source).unwrap();
+        object.back_face = Some(BackFaceData {
+            name: "Werewolf Front".to_string(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        });
+        object.transformed = true;
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        let prepared = prepare_snapshot(&state, PlayerId(0), "game-a").unwrap();
+        let json = serde_json::to_value(build_state_update(&prepared, &lookup).unwrap()).unwrap();
+
+        assert_eq!(json["gameView"]["stack"][0]["isDoubleFaced"], true);
+        assert_eq!(json["gameView"]["stack"][0]["faceIndex"], 1);
+    }
+
     /// Player counters moved from five flat `*Counters` fields into one
     /// `counters` map keyed by `PlayerCounterKind`, and only non-zero entries
     /// are carried.
