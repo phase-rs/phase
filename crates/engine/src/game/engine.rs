@@ -1411,12 +1411,15 @@ fn apply_action_boundary_core(
     // defers to the next boundary at which the flag is clear. No "outermost"
     // depth test is added: gating on it would leave AI-probe clones unrepaired
     // while the real state is repaired.
+    let pre_recovery_pass_was_authorized = matches!(&action, GameAction::PassPriority)
+        && check_actor_authorization(state, authenticated_actor, &action).is_ok();
     effects::sweep_ownerless_post_replacement_strand(state);
-    state.remove_empty_active_post_replacement_frame();
     let recovered_devour_rest_boundary =
-        recover_orphaned_devour_completion_at_priority_boundary(state);
+        recover_orphaned_devour_completion_at_priority_boundary(state)
+            || recover_orphaned_spell_resolution_at_priority_boundary(state);
+    state.remove_empty_active_post_replacement_frame();
     let recovered_stale_priority_pass =
-        recovered_devour_rest_boundary && matches!(action, GameAction::PassPriority);
+        recovered_devour_rest_boundary && matches!(&action, GameAction::PassPriority);
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -1437,6 +1440,25 @@ fn apply_action_boundary_core(
         Some(semantic_owner)
     };
     let preserve_interaction = interaction::action_preserves_interaction(&action);
+    // Clear transient inter-effect state at the start of each player action.
+    // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
+    // consumed by sub_ability continuations via EventContextAmount fallback.
+    state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
+    state.exiled_from_hand_this_resolution = 0;
+    state.die_result_this_resolution = None;
+    state.consumed_before_priority_trigger_events.clear();
+    if recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
+        lifecycle.discard();
+        return Err(EngineError::WrongPlayer);
+    }
+    if !recovered_stale_priority_pass {
+        if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+            lifecycle.discard();
+            *state = boundary_snapshot;
+            return Err(err);
+        }
+    }
     if recovered_stale_priority_pass {
         return Ok(RawActionApplication {
             result: ActionResult {
@@ -1454,19 +1476,6 @@ fn apply_action_boundary_core(
             preserve_interaction,
             lifecycle,
         });
-    }
-    // Clear transient inter-effect state at the start of each player action.
-    // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
-    // consumed by sub_ability continuations via EventContextAmount fallback.
-    state.last_effect_count = None;
-    state.last_effect_counts_by_player.clear();
-    state.exiled_from_hand_this_resolution = 0;
-    state.die_result_this_resolution = None;
-    state.consumed_before_priority_trigger_events.clear();
-    if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
-        lifecycle.discard();
-        *state = boundary_snapshot;
-        return Err(err);
     }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
@@ -1556,18 +1565,67 @@ fn recover_orphaned_devour_completion_at_priority_boundary(state: &mut GameState
         return false;
     }
 
-    let cleared = state.clear_completed_active_devour_snapshot();
+    let mut recovered = state.clone();
+    let cleared = recovered.clear_completed_active_devour_snapshot();
     debug_assert!(cleared, "the guarded Devour frame must be consumable");
-    state.remove_empty_active_post_replacement_frame();
-    settle_resolving_stack_entry_after_continuation_resume(state);
-    if state.resolving_stack_entry.is_some() {
+    recovered.remove_empty_active_post_replacement_frame();
+    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    if recovered.resolving_stack_entry.is_some() {
         return false;
     }
 
-    priority::reset_priority(state);
-    state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
+    priority::reset_priority(&mut recovered);
+    recovered.waiting_for = WaitingFor::Priority {
+        player: recovered.active_player,
     };
+    *state = recovered;
+    true
+}
+
+/// CR 117.3b + CR 608.2c: A persisted permanent-spell epilogue may retain its
+/// sole `SpellResolution` frame after every other instruction has completed.
+/// Consume only that exact bare carrier rest, then route settlement through the
+/// ordinary completed-carrier authority.
+fn recover_orphaned_spell_resolution_at_priority_boundary(state: &mut GameState) -> bool {
+    let Some(pending) = state.active_spell_resolution() else {
+        return false;
+    };
+    let exact_bare_spell_resolution_rest = matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && state.resolution_stack.len() == 1
+        && state.active_ability_continuation().is_none()
+        && state.pending_cast.is_none()
+        && state.pending_resolution_completion.is_none()
+        && matches!(
+            state.resolving_stack_entry.as_ref(),
+            Some(crate::types::game_state::StackEntry {
+                id,
+                kind: StackEntryKind::Spell { .. },
+                ..
+            }) if *id == pending.object_id
+        );
+    if !exact_bare_spell_resolution_rest {
+        return false;
+    }
+
+    let mut recovered = state.clone();
+    let pending = recovered
+        .take_active_spell_resolution()
+        .expect("the guarded bare spell-resolution frame must be active");
+    debug_assert!(matches!(
+        recovered.resolving_stack_entry.as_ref(),
+        Some(crate::types::game_state::StackEntry { id, .. }) if *id == pending.object_id
+    ));
+    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    if recovered.resolving_stack_entry.is_some() {
+        return false;
+    }
+
+    priority::reset_priority(&mut recovered);
+    recovered.waiting_for = WaitingFor::Priority {
+        player: recovered.active_player,
+    };
+    *state = recovered;
     true
 }
 
