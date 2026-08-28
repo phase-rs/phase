@@ -94,6 +94,108 @@ fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRe
     (state, targets)
 }
 
+/// CR 601.2h: manual payment preserves the announced spell on the stack until
+/// the caster either pays its locked total cost or cancels the cast.
+fn manual_mana_payment_state(payable: bool) -> GameState {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Manual Payment Contract Spell", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    if payable {
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+    }
+
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(spell.0),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast must enter its mana-payment step");
+
+    let state = runner.state().clone();
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: None,
+            }
+        ),
+        "reach guard: a manual cast with a nonzero cost must pause for mana payment"
+    );
+    assert!(
+        state
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.object_id == spell),
+        "reach guard: the real cast must retain its pending payment authority"
+    );
+    assert!(
+        state
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell && entry.source_id == spell),
+        "reach guard: the announced spell must have a live stack entry during payment"
+    );
+    state
+}
+
+/// CR 601.2h: a cast cannot be finalized with a partial payment, while a
+/// payable manual cast may finalize from the same `WaitingFor::ManaPayment` prompt.
+#[test]
+fn decision_contract_validates_manual_mana_payment_finalization() {
+    let unpayable = manual_mana_payment_state(false);
+    let mut rejected_finalization = unpayable.clone();
+    assert!(matches!(
+        apply_as_current(&mut rejected_finalization, GameAction::PassPriority),
+        Err(EngineError::ActionNotAllowed(message)) if message == "Cannot pay mana cost"
+    ));
+
+    let contract = AiDecisionContract::issue(&unpayable, P0);
+    assert!(
+        !contract.contains_action(&unpayable, &GameAction::PassPriority),
+        "a ManaPayment pass must be issued only when the reducer can finalize payment"
+    );
+    assert!(
+        contract.contains_action(&unpayable, &GameAction::CancelCast),
+        "an unpaid cast must retain the reducer-approved cancellation escape"
+    );
+    assert!(
+        contract.permits(&unpayable, P0, &GameAction::CancelCast),
+        "the issued cancellation escape must be accepted at the contract boundary"
+    );
+    let mut canceled = unpayable.clone();
+    apply_as_current(&mut canceled, GameAction::CancelCast)
+        .expect("the reducer must accept cancellation of the live unpaid cast");
+
+    let payable = manual_mana_payment_state(true);
+    let payable_contract = AiDecisionContract::issue(&payable, P0);
+    assert!(
+        payable_contract.contains_action(&payable, &GameAction::PassPriority),
+        "a payable manual cast must retain its reducer-completable payment pass"
+    );
+    assert!(
+        payable_contract.permits(&payable, P0, &GameAction::PassPriority),
+        "the payable finalization pass must be accepted at the contract boundary"
+    );
+    let mut finalized = payable.clone();
+    apply_as_current(&mut finalized, GameAction::PassPriority)
+        .expect("the reducer must accept finalization of the payable live cast");
+}
+
 #[test]
 fn decision_contract_filters_final_targets_that_cannot_complete_payment() {
     let p3 = PlayerId(3);
