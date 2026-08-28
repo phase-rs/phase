@@ -169,10 +169,16 @@ pub struct ScoringPolicy {
                      // an earlier round, not a narrower exemption.
 }
 
-/// Plain deserialization target for the `#[serde(try_from = ...)]`
-/// boundary — same pattern `MatchArity` uses via `try_from = "u8"`,
-/// generalized to a 3-field struct instead of a single scalar.
-#[derive(Deserialize)]
+/// Plain (de)serialization target for the `#[serde(try_from = ...,
+/// into = ...)]` boundary — same pattern `MatchArity` uses via
+/// `try_from = "u8"`, generalized to a 3-field struct instead of a single
+/// scalar. REVISED, maintainer review: must derive `Serialize` too, not
+/// only `Deserialize` — `#[serde(into = "RawScoringPolicy")]` on
+/// `ScoringPolicy` generates a `Serialize` impl that converts to this type
+/// and serializes THAT, so this type not implementing `Serialize` itself
+/// means `ScoringPolicy` silently fails to compile, not merely fails to
+/// round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawScoringPolicy {
     pub win_points: u8,
     pub draw_points: u8,
@@ -214,11 +220,19 @@ impl ScoringPolicy {
     /// `MatchArity`. At `arity = HEAD_TO_HEAD` this is exactly MTR §2.1's
     /// 3/1/0 — the same formula, not a special case of it. `arity` is
     /// already validated to `2..=128` by `MatchArity::new` (§1 above), so
-    /// `2 * arity.0 - 1` is always in `3..=255` here — never zero, so this
-    /// internal construction path doesn't need to route through the
-    /// fallible `new()` the way external/deserialized input does.
+    /// the FINAL value `2n - 1` is always in `3..=255` — but REVISED,
+    /// maintainer review: the INTERMEDIATE `2 * n` is not (`2 * 128 =
+    /// 256`, which overflows `u8` before the subtraction ever runs, even
+    /// though the post-subtraction result of `255` would have fit). Fixed
+    /// by computing in `u16` and converting down with a checked
+    /// conversion, not a bare `as` cast that would silently truncate on a
+    /// future arity bound change instead of panicking loudly in a debug
+    /// build:
     pub fn default_for_arity(arity: MatchArity) -> Self {
-        Self { win_points: 2 * arity.0 - 1, draw_points: 1, loss_points: 0 }
+        let n = u16::from(arity.0);
+        let win_points = u8::try_from(2 * n - 1)
+            .expect("MatchArity::new caps arity at 128, so 2n-1 always fits u8");
+        Self { win_points, draw_points: 1, loss_points: 0 }
     }
 }
 
