@@ -1430,6 +1430,19 @@ describe("localized card art", () => {
     expect(resolved).not.toBe(cardUrl(EN_ID));
   });
 
+  it("falls back to English art when a v2 locale entry is invalid", async () => {
+    const mod = await loadScryfallModule();
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await mod.loadLocaleArt("de");
+
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
   it("keeps English art when the printing has no localized sibling", async () => {
     const mod = await loadScryfallModule();
     stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });

@@ -20,7 +20,7 @@ export AUDIO_BASE_URL="${AUDIO_BASE_URL:-$R2_PUBLIC/audio}"
 # the {lng} template resolves to where the upload loop below PUTs them.
 export CARD_DATA_LOCALE_URL_TEMPLATE="${CARD_DATA_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/card-data.{lng}.json}"
 # Per-locale card-art maps, same lifecycle as the content sidecars above.
-export SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE="${SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/scryfall-images.{lng}.json}"
+export SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE="${SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/scryfall-images.v2.{lng}.json}"
 
 DEPLOY_CACHE=".deploy-cache"
 touch "$DEPLOY_CACHE"
@@ -46,11 +46,11 @@ upload_to_r2() {
     "card-data.fr.json:public/card-data.fr.json" \
     "card-data.it.json:public/card-data.it.json" \
     "card-data.pt.json:public/card-data.pt.json" \
-    "scryfall-images.de.json:public/scryfall-images.de.json" \
-    "scryfall-images.es.json:public/scryfall-images.es.json" \
-    "scryfall-images.fr.json:public/scryfall-images.fr.json" \
-    "scryfall-images.it.json:public/scryfall-images.it.json" \
-    "scryfall-images.pt.json:public/scryfall-images.pt.json" \
+    "scryfall-images.v2.de.json:public/scryfall-images.v2.de.json" \
+    "scryfall-images.v2.es.json:public/scryfall-images.v2.es.json" \
+    "scryfall-images.v2.fr.json:public/scryfall-images.v2.fr.json" \
+    "scryfall-images.v2.it.json:public/scryfall-images.v2.it.json" \
+    "scryfall-images.v2.pt.json:public/scryfall-images.v2.pt.json" \
     "coverage-data.json:public/coverage-data.json" \
     "coverage-summary.json:public/coverage-summary.json"; do
     key="${entry%%:*}"
@@ -147,8 +147,8 @@ echo "  AUDIO_BASE_URL=$AUDIO_BASE_URL"
 rm -f client/dist/card-data.json client/dist/card-data.json.br
 # Locale sidecars (card-data.<lng>.json) — served from R2, strip from bundle.
 rm -f client/dist/card-data.??.json client/dist/card-data.??.json.br
-# Locale card-art maps (scryfall-images.<lng>.json) — same, served from R2.
-rm -f client/dist/scryfall-images.??.json client/dist/scryfall-images.??.json.br
+# Locale card-art maps (scryfall-images.v2.<lng>.json) — same, served from R2.
+rm -f client/dist/scryfall-images.v2.??.json client/dist/scryfall-images.v2.??.json.br
 rm -f client/dist/coverage-data.json client/dist/coverage-data.json.br
 rm -f client/dist/coverage-summary.json client/dist/coverage-summary.json.br
 rm -f client/dist/audio/music/planeswalker-*.m4a
