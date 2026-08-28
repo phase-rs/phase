@@ -1163,6 +1163,121 @@ fn trigger_conjunctive_battlefield_condition_does_not_corrupt_roll_die_effect() 
     );
 }
 
+/// CR 603.4 + CR 113.6b + CR 706.3a: Name Sticker Goblin's exact Oracle
+/// wording has a source-bound contraction, a named/controller-scoped cap, an
+/// origin exclusion, and ASCII-hyphen result ranges. Keep this as one complete
+/// structural assertion so a partial parse cannot look like card support.
+#[test]
+fn name_sticker_goblin_parses_complete_trigger_and_die_table() {
+    const ORACLE: &str = "When this creature enters from anywhere other than a graveyard or exile, if it's on the battlefield and you control 9 or fewer creatures named \"Name Sticker\" Goblin, roll a 20-sided die.\n1-6 | Add {R}{R}{R}{R}.\n7-14 | Add {R}{R}{R}{R}{R}.\n15-20 | Add {R}{R}{R}{R}{R}{R}.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "\"Name Sticker\" Goblin",
+        &[],
+        &["Creature".to_string()],
+        &["Goblin".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Name Sticker Goblin trigger");
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        trigger.origin,
+        Some(crate::types::ability::OriginConstraint::NotFrom(vec![
+            Zone::Graveyard,
+            Zone::Exile,
+        ]))
+    );
+
+    let TriggerCondition::And { conditions } = trigger
+        .condition
+        .as_ref()
+        .expect("intervening-if must remain attached to the trigger")
+    else {
+        panic!(
+            "expected source-zone and count conjunction: {:?}",
+            trigger.condition
+        );
+    };
+    assert!(conditions.contains(&TriggerCondition::SourceInZone {
+        zone: Zone::Battlefield,
+    }));
+    assert!(conditions.iter().any(|condition| matches!(
+        condition,
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 9 },
+        } if filter.controller == Some(ControllerRef::You)
+            && filter.type_filters == vec![TypeFilter::Creature]
+            && filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Named { name } if name == "\"name sticker\" goblin"
+            ))
+    )));
+
+    let Effect::RollDie { sides, results, .. } = trigger
+        .execute
+        .as_deref()
+        .expect("die roll execute ability")
+        .effect
+        .as_ref()
+    else {
+        panic!("expected RollDie, got {:?}", trigger.execute);
+    };
+    assert_eq!(*sides, 20);
+    assert_eq!(
+        results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 6), (7, 14), (15, 20)]
+    );
+    for (branch, expected_red) in results.iter().zip([4usize, 5, 6]) {
+        assert!(
+            matches!(
+                branch.effect.effect.as_ref(),
+                Effect::Mana {
+                    produced: ManaProduction::Fixed { colors, .. },
+                    ..
+                } if colors.len() == expected_red
+                    && colors.iter().all(|color| *color == crate::types::mana::ManaColor::Red)
+            ),
+            "expected {expected_red} red mana, got {:?}",
+            branch.effect
+        );
+    }
+}
+
+#[test]
+fn source_zone_contraction_is_context_gated() {
+    assert_eq!(
+        source_zone_contraction_tail("it's on the battlefield and you control a creature", true),
+        Some(" on the battlefield and you control a creature")
+    );
+    assert_eq!(
+        source_zone_contraction_tail("it’s in your graveyard, return it", true),
+        Some(" in your graveyard, return it")
+    );
+    assert_eq!(
+        source_zone_contraction_tail("it on the battlefield", true),
+        None
+    );
+    assert_eq!(source_zone_contraction_tail("it's a Goblin", true), None);
+    assert_eq!(
+        source_zone_contraction_tail("it's on the battlefield", false),
+        None,
+        "event-object trigger contexts must not be retargeted to the source"
+    );
+}
+
 // CR 603.4 + CR 702.105a (phase-rs/phase#5449 review, second finding):
 // Scourge of the Throne's "if it's attacking the player with the most life or
 // tied for most life" must map to the SAME typed QuantityComparison condition

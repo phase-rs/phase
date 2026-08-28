@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::character::complete::{one_of, space0, space1};
+use nom::character::complete::{one_of, space0, space1, u8 as parse_u8};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{pair, preceded, terminated};
@@ -12255,29 +12255,31 @@ fn try_parse_roll_die_with_modifier(
 /// resolves to this branch — see CR 706.2 on modifier-shifted results
 /// (Diviner's Portent, Gale's Redirection, etc.).
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
-    let trimmed = text.trim();
-
-    // Find the pipe separator: "N—M | effect", "N+ | effect", or "N | effect"
-    let (_, (range_part, effect_text)) = nom_primitives::split_once_on(trimmed, " | ").ok()?;
-    let range_part = range_part.trim();
-    let effect_text = effect_text.trim();
-
-    // Parse range: "1—9" (em dash U+2014), "10—19", "15+" (open-ended upper),
-    // or "20" (single value).
-    let (min, max) = if let Some(dash_idx) = range_part.find('\u{2014}') {
-        let min_str = &range_part[..dash_idx];
-        let max_str = &range_part[dash_idx + '\u{2014}'.len_utf8()..];
-        (min_str.parse::<u8>().ok()?, max_str.parse::<u8>().ok()?)
-    // allow-noncombinator: CR 706.2 "N+" open-ended upper bound — single-char structural suffix on a pre-tokenized numeric range slice; the surrounding nom split already isolated `range_part` off the pipe delimiter (Pattern 3 in PATTERNS.md).
-    } else if let Some(min_str) = range_part.strip_suffix('+') {
-        (min_str.trim().parse::<u8>().ok()?, u8::MAX)
-    } else {
-        // Single value like "20"
-        let val = range_part.parse::<u8>().ok()?;
-        (val, val)
-    };
-
-    Some((min, max, effect_text))
+    // CR 706.3a: a result-table header is one complete numeric range followed
+    // by a pipe and a nonempty instruction. Keep the grammar here rather than
+    // manually slicing a pre-tokenized header: current Oracle data contains
+    // ASCII hyphens as well as en/em dashes, and accepting a prefix (for
+    // example `1-6-9`) would silently misroute a result branch.
+    let mut parser = all_consuming((
+        space0::<_, OracleError<'_>>,
+        alt((
+            map((parse_u8, one_of("-–—"), parse_u8), |(min, _, max)| {
+                (min, max)
+            }),
+            map(terminated(parse_u8, tag("+")), |min| (min, u8::MAX)),
+            map(parse_u8, |value| (value, value)),
+        )),
+        space0,
+        tag("|"),
+        space0,
+        take_till(|character| character == '|'),
+        space0,
+    ));
+    let (_, (_, (min, max), _, _, _, effect_text, _)) = parser.parse(text.trim()).ok()?;
+    if min == 0 || min > max || effect_text.trim().is_empty() {
+        return None;
+    }
+    Some((min, max, effect_text.trim()))
 }
 
 /// CR 705: Try to parse "if you win the flip, [effect]" / "if you lose the flip,
@@ -21878,9 +21880,33 @@ mod tests {
             Some((1, 9, "Draw a card."))
         );
         assert_eq!(
+            super::try_parse_die_result_line("1-9 | Draw a card."),
+            Some((1, 9, "Draw a card."))
+        );
+        assert_eq!(
+            super::try_parse_die_result_line("1–9 | Draw a card."),
+            Some((1, 9, "Draw a card."))
+        );
+        assert_eq!(
             super::try_parse_die_result_line("20 | Win the game."),
             Some((20, 20, "Win the game."))
         );
+        for malformed in [
+            "0 | Draw a card.",
+            "9-1 | Draw a card.",
+            "1-256 | Draw a card.",
+            "1-9-12 | Draw a card.",
+            "1--9 | Draw a card.",
+            "1-9 | ",
+            "1-9 | Draw a card. | trailing",
+            "1-9 trailing | Draw a card.",
+        ] {
+            assert_eq!(
+                super::try_parse_die_result_line(malformed),
+                None,
+                "malformed range must decline: {malformed}"
+            );
+        }
     }
 
     /// CR 701.13 + CR 701.24: A suffix-less "exile the top card[s]" (no "of
