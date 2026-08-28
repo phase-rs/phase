@@ -1413,16 +1413,21 @@ fn apply_action_boundary_core(
     // while the real state is repaired.
     effects::sweep_ownerless_post_replacement_strand(state);
     state.remove_empty_active_post_replacement_frame();
+    let recovered_devour_rest_boundary =
+        recover_orphaned_devour_completion_at_priority_boundary(state);
+    let recovered_stale_priority_pass =
+        recovered_devour_rest_boundary && matches!(action, GameAction::PassPriority);
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
-    let suppress_auto_pass_once = matches!(
-        &action,
-        GameAction::RespondResolveAllConsent {
-            decision: ResolveAllConsentDecision::Decline,
-            ..
-        } | GameAction::RevokeResolveAllConsent { .. }
-    );
+    let suppress_auto_pass_once = recovered_stale_priority_pass
+        || matches!(
+            &action,
+            GameAction::RespondResolveAllConsent {
+                decision: ResolveAllConsentDecision::Decline,
+                ..
+            } | GameAction::RevokeResolveAllConsent { .. }
+        );
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -1432,6 +1437,24 @@ fn apply_action_boundary_core(
         Some(semantic_owner)
     };
     let preserve_interaction = interaction::action_preserves_interaction(&action);
+    if recovered_stale_priority_pass {
+        return Ok(RawActionApplication {
+            result: ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            },
+            journal_start,
+            is_actor_scoped_preference,
+            suppress_auto_pass_once,
+            boundary_snapshot,
+            previous_interaction_waiting,
+            previous_interaction_slots,
+            submitted_interaction_owner,
+            preserve_interaction,
+            lifecycle,
+        });
+    }
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -1507,6 +1530,45 @@ fn apply_action_boundary_core(
         preserve_interaction,
         lifecycle,
     })
+}
+
+/// CR 117.3b + CR 608.2c + CR 614.12a + CR 614.13a: A completed Devour entry
+/// cannot leave priority assigned to a later player while its spell carrier,
+/// empty replacement drain, and snapshot frame remain live. Recover the exact
+/// persisted rest shape before an old priority pass can advance the turn.
+///
+/// The recovery is intentionally narrower than ordinary continuation draining:
+/// it requires the captured two-frame shape (an empty `PostReplacement` parent
+/// and a Devour-only `ChangeZone` child), an active resolving carrier, and a
+/// live priority window. A prompt-bearing Devour entry or a pending multi-entry
+/// ChangeZone iteration therefore remains untouched.
+fn recover_orphaned_devour_completion_at_priority_boundary(state: &mut GameState) -> bool {
+    let is_orphaned_devour_completion = matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.resolving_stack_entry.is_some()
+        && state.resolution_stack.len() == 2
+        && state.active_change_zone_frame().is_some_and(|frame| {
+            frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+        })
+        && state
+            .active_post_replacement_drains()
+            .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty);
+    if !is_orphaned_devour_completion {
+        return false;
+    }
+
+    let cleared = state.clear_completed_active_devour_snapshot();
+    debug_assert!(cleared, "the guarded Devour frame must be consumable");
+    state.remove_empty_active_post_replacement_frame();
+    settle_resolving_stack_entry_after_continuation_resume(state);
+    if state.resolving_stack_entry.is_some() {
+        return false;
+    }
+
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    true
 }
 
 fn finish_action_boundary(

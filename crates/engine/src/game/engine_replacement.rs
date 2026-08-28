@@ -2756,6 +2756,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
         // stack top, which is a wider set than "the frame this dispatch
         // addressed". Narrowing it would be a second, unrelated behavioural delta.
         state.remove_empty_active_post_replacement_frame();
+        // CR 614.12a + CR 614.13a: A Devour snapshot created by this completed
+        // entry can sit above this just-retired drain. It has no remaining
+        // iteration or prompt owner, so retire it before priority is restored.
+        state.clear_completed_active_devour_snapshot();
     }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
     // here. This drain runs for EVERY replacement continuation — including a

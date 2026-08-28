@@ -20238,6 +20238,23 @@ impl GameState {
         });
     }
 
+    /// CR 614.12a + CR 614.13a: A Devour-only ChangeZone frame owns the
+    /// pre-entry eligibility snapshot for exactly one completed entry event.
+    /// Once that event's replacement work has returned without parking an
+    /// iteration, retire the now-ownerless frame.
+    pub fn clear_completed_active_devour_snapshot(&mut self) -> bool {
+        if !self.active_change_zone_frame().is_some_and(|frame| {
+            frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+        }) {
+            return false;
+        }
+
+        let _ = self
+            .take_active_change_zone_frame()
+            .expect("a completed Devour-only ChangeZone frame must be active");
+        true
+    }
+
     /// Parks a newly paused ChangeZone iteration. A Devour-only frame belongs
     /// to the same operation and is replaced; every other active frame remains
     /// the structural parent below this new child.
@@ -21298,13 +21315,7 @@ impl GameState {
             // child is retired, the snapshot is again the active owner and its
             // single-entry lifetime ends. A pending iteration keeps its snapshot
             // for the remaining co-arrivers.
-            if self.active_change_zone_frame().is_some_and(|frame| {
-                frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
-            }) {
-                let _ = self
-                    .take_active_change_zone_frame()
-                    .expect("a completed Devour-only ChangeZone frame must be active");
-            }
+            self.clear_completed_active_devour_snapshot();
         }
     }
 
