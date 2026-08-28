@@ -1075,6 +1075,11 @@ scryfall_oracle_id = "14c8a590-88ec-4982-ad7b-36a219ff6de7"
 scryfall_id = "9a46a0f5-390c-4d5f-9d1f-38031b68aa25"
 
 [[token.source_card_refs]]
+card_name = "Exquisite Huntmaster"
+scryfall_oracle_id = "393ef069-ea6b-4969-b878-d942281cc918"
+scryfall_id = "bd1c8d48-a527-4bbe-898a-fc70f6f63cce"
+
+[[token.source_card_refs]]
 card_name = "Sylvan Offering"
 scryfall_oracle_id = "732aaa4b-22ea-49e2-b09f-e6169f726537"
 scryfall_id = "8f171772-eb52-4cc2-b3cd-8ceb0f15732f"
@@ -7172,6 +7177,11 @@ colors = ["Red"]
 keywords = []
 
 [[token.source_card_refs]]
+card_name = "Dalkovan Packbeasts"
+scryfall_oracle_id = "cdd1a043-bd47-4197-be26-e2f7d3f1d209"
+scryfall_id = "b021490e-cddb-4db3-bdae-56cbf76b8ec9"
+
+[[token.source_card_refs]]
 card_name = "Dragonback Lancer"
 scryfall_oracle_id = "7875c063-19c3-4e6e-81d8-1a378a4e16e5"
 scryfall_id = "0200a8c5-3293-48d0-a523-ba148680f588"
@@ -11182,6 +11192,11 @@ scryfall_oracle_id = "15260fa6-6062-423a-a248-81292ea46178"
 scryfall_id = "5f348c7e-7d72-40f1-a65f-ee7ff4b09412"
 
 [[token.source_card_refs]]
+card_name = "Ertha Jo, Frontier Mentor"
+scryfall_oracle_id = "0a66ce8b-af99-411f-8ecb-52a5d2f6af3d"
+scryfall_id = "2c12c0db-cb9f-4692-8bbc-8287f57dc0cc"
+
+[[token.source_card_refs]]
 card_name = "We Ride at Dawn"
 scryfall_oracle_id = "5675ac63-b69b-41b9-a7ed-4085a4e431b2"
 scryfall_id = "62cd82da-badb-420b-8ea8-681db86afbbc"
@@ -11220,6 +11235,11 @@ scryfall_id = "e523de28-b2d5-4be9-be78-883cef2499e9"
 card_name = "Mourner's Surprise"
 scryfall_oracle_id = "567fa6e0-fc7b-4502-9c51-f2538c411003"
 scryfall_id = "980b0b68-7218-49c6-b6bf-022218f3abf4"
+
+[[token.source_card_refs]]
+card_name = "Lassoed by the Law"
+scryfall_oracle_id = "9457f3c1-a087-46cd-a8be-cf665466b77c"
+scryfall_id = "faef007f-74cc-4e46-beb9-1c70bcf19445"
 
 [[token.source_card_refs]]
 card_name = "Ertha Jo, Frontier Mentor"
@@ -14934,6 +14954,11 @@ scryfall_oracle_id = "2f3f5a1c-8b88-4080-bd80-14db4d6c8c50"
 scryfall_id = "011bd7d8-6d60-482a-91b7-d3f0aad13b71"
 
 [[token.source_card_refs]]
+card_name = "Biomechan Engineer"
+scryfall_oracle_id = "b395925b-2456-454e-9262-3b55c9f2799a"
+scryfall_id = "66317697-32e0-4c74-9f62-b8d1a50c03ef"
+
+[[token.source_card_refs]]
 card_name = "Elegy Acolyte"
 scryfall_oracle_id = "f7d52eac-edc9-464b-a163-07c136aa6e4c"
 scryfall_id = "c69ed7c7-1f49-4299-b3e6-75150258ac59"
@@ -15002,6 +15027,11 @@ keywords = []
 card_name = "Idol of Oblivion"
 scryfall_oracle_id = "c232d974-9c65-4bce-b045-e5a7cc0c62e0"
 scryfall_id = "0fca2f74-d220-47f1-964a-a4cd6e096fbf"
+
+[[token.source_card_refs]]
+card_name = "Idol of Oblivion"
+scryfall_oracle_id = "c232d974-9c65-4bce-b045-e5a7cc0c62e0"
+scryfall_id = "f8692db5-6f2d-4330-9e23-1c3246898a35"
 
 [[token.source_card_refs]]
 card_name = "Desolation Twin"
@@ -17626,6 +17656,11 @@ scryfall_id = "16b8a76e-5ad9-42b6-ba03-819b2491c0c2"
 [[token.source_card_refs]]
 card_name = "Empty the Warrens"
 scryfall_oracle_id = "3a59c882-8bb8-49ba-862f-125020dd5bec"
+scryfall_id = "e9116aa0-1993-4f4a-9a1d-0561d0fbcba9"
+
+[[token.source_card_refs]]
+card_name = "Empty the Warrens"
+scryfall_oracle_id = "3a59c882-8bb8-49ba-862f-125020dd5bec"
 scryfall_id = "41d728ed-9fdf-4d92-bd97-66e27c139423"
 
 [[token.source_card_refs]]
@@ -17639,6 +17674,11 @@ scryfall_oracle_id = "79824266-bffa-476c-bdd3-976e9d789a42"
 scryfall_id = "2470167c-acee-4de3-b762-a7ade6fc284e"
 
 [[token.source_card_refs]]
+card_name = "You See a Pair of Goblins"
+scryfall_oracle_id = "77d016e3-f652-4827-b49a-8044f6d2d45b"
+scryfall_id = "3ad91aa1-921b-4fb8-96cc-58b0f283a6f0"
+
+[[token.source_card_refs]]
 card_name = "Goblin Rally"
 scryfall_oracle_id = "9ccb6ce8-ccb6-4809-a1cc-cebd38744815"
 scryfall_id = "38b8c2a5-d84f-44c7-85dd-50c78f8b47da"
@@ -17647,6 +17687,11 @@ scryfall_id = "38b8c2a5-d84f-44c7-85dd-50c78f8b47da"
 card_name = "Den of the Bugbear"
 scryfall_oracle_id = "f451b8f0-1ff5-4e8d-9f30-9352d83ed687"
 scryfall_id = "8fd0fdb6-3a6d-4831-8d1b-0b1b69304c36"
+
+[[token.source_card_refs]]
+card_name = "Goblin War Party"
+scryfall_oracle_id = "fa4417e5-229a-4465-9bc5-0b3d6209b4a4"
+scryfall_id = "e0e68bf2-2ebc-4664-9434-9dca2df09c78"
 
 [[token.source_card_refs]]
 card_name = "Empty the Warrens"
@@ -17767,6 +17812,11 @@ scryfall_id = "76049160-69f7-4114-81f3-dfab8242ac15"
 card_name = "Krenko's Command"
 scryfall_oracle_id = "9cfe86ae-eebe-44aa-a956-4b3e9e621105"
 scryfall_id = "80979d0c-d833-46d8-9f7c-b188801fe336"
+
+[[token.source_card_refs]]
+card_name = "A Killer Among Us"
+scryfall_oracle_id = "79d577a8-53c0-4220-bc0e-70764d72d5fd"
+scryfall_id = "35987b9f-3cdc-4ccb-beb7-e87a8f1b4e3d"
 
 [[token.source_card_refs]]
 card_name = "Siege-Gang Commander"
@@ -31962,6 +32012,11 @@ colors = ["White"]
 keywords = ["Flying"]
 
 [[token.source_card_refs]]
+card_name = "Court of Grace"
+scryfall_oracle_id = "f63c2438-27d4-449a-828f-f0a2ea86ff16"
+scryfall_id = "4939bedb-c6e2-4eca-b6a3-e8d3c917c2fd"
+
+[[token.source_card_refs]]
 card_name = "Entreat the Angels"
 scryfall_oracle_id = "b349f018-c20b-48b0-9e65-d5fd56b24b88"
 scryfall_id = "ff4411bc-ed4e-4d54-9e1b-21fc77b0e415"
@@ -32005,6 +32060,11 @@ scryfall_id = "0c8e0b8f-fd4a-46fb-8eac-7be0dad65c26"
 card_name = "Court of Grace"
 scryfall_oracle_id = "f63c2438-27d4-449a-828f-f0a2ea86ff16"
 scryfall_id = "f89995b9-5409-4d3a-9518-7a4354b9d02f"
+
+[[token.source_card_refs]]
+card_name = "Decree of Justice"
+scryfall_oracle_id = "67a98359-6f02-4556-ad47-c01b643686d6"
+scryfall_id = "45903917-5a7f-4e91-9722-7d5795d47ebe"
 
 [[token.source_card_refs]]
 card_name = "Sigil of the Empty Throne"
@@ -38319,6 +38379,11 @@ scryfall_oracle_id = "b4429e71-434e-480c-a8d1-2ad11de8b2d9"
 scryfall_id = "a4dfb147-10f6-49f1-b777-12125e87189b"
 
 [[token.source_card_refs]]
+card_name = "Gelatinous Genesis"
+scryfall_oracle_id = "291e4b91-17c7-4b7b-8057-f0d361424016"
+scryfall_id = "296ac494-8538-443d-9e31-fd40b6cacb5b"
+
+[[token.source_card_refs]]
 card_name = "Gutter Grime"
 scryfall_oracle_id = "0b8adb9e-97a5-43d9-87d6-993f22edaf3b"
 scryfall_id = "cf3f3913-86d8-4b1c-9d2e-942102e7fac3"
@@ -39580,6 +39645,16 @@ scryfall_oracle_id = "b6821131-9ae1-4a3c-8235-90deae33c05f"
 scryfall_id = "63a21f8c-d5b5-4270-b534-f04234ede9aa"
 
 [[token.source_card_refs]]
+card_name = "Writhing Chrysalis"
+scryfall_oracle_id = "d27bebc9-348d-4b8e-816a-a4da66fb5618"
+scryfall_id = "5095db22-3eb2-4c1c-bf22-72096b648cf3"
+
+[[token.source_card_refs]]
+card_name = "Path of Annihilation"
+scryfall_oracle_id = "eca6ffeb-463c-40b0-90b4-7e09e5579c10"
+scryfall_id = "edff0f40-4157-49e0-9370-aad2acf9e1fa"
+
+[[token.source_card_refs]]
 card_name = "Pawn of Ulamog"
 scryfall_oracle_id = "9bcaf141-1f1f-491f-aced-13dc093b9e2c"
 scryfall_id = "a1a77c8c-5dd7-4027-bc11-3b41cda5d57d"
@@ -39605,6 +39680,11 @@ scryfall_oracle_id = "7b70696e-b09e-4bc9-8438-d31075d78c0c"
 scryfall_id = "378afb65-9251-4678-a915-538b7ea8ea1b"
 
 [[token.source_card_refs]]
+card_name = "Basking Broodscale"
+scryfall_oracle_id = "a7c69802-99c4-4778-934e-cc09ba58c267"
+scryfall_id = "b199a31d-5e2d-411d-961a-ff7633030767"
+
+[[token.source_card_refs]]
 card_name = "Corpsehatch"
 scryfall_oracle_id = "5a6c9376-313b-4420-890e-5aa78fa6382f"
 scryfall_id = "f0715429-0b15-47fc-adf4-fdb5c8dfb029"
@@ -39613,6 +39693,11 @@ scryfall_id = "f0715429-0b15-47fc-adf4-fdb5c8dfb029"
 card_name = "Emrakul's Hatcher"
 scryfall_oracle_id = "1ee811fb-c25d-4cf5-b396-539c36e8f90f"
 scryfall_id = "e442d1cf-3e17-4719-8d5b-512749c9eee8"
+
+[[token.source_card_refs]]
+card_name = "Emrakul's Messenger"
+scryfall_oracle_id = "f1409c9e-f0d9-49e1-b02e-d0f04a658331"
+scryfall_id = "cd6642fc-72a2-43b8-96fb-7fcec56e9167"
 
 [token.token_image_ref]
 scryfall_id = "c74a7492-ed7b-4037-aa5c-bcfabe4c8951"
@@ -44727,6 +44812,11 @@ keywords = ["Hexproof"]
 [[token.source_card_refs]]
 card_name = "Volo, Itinerant Scholar"
 scryfall_oracle_id = "9b61f5b1-7688-4336-8fe9-66da37a34df9"
+scryfall_id = "b26d8358-2d92-49ce-8c4b-fe9f8c7838b2"
+
+[[token.source_card_refs]]
+card_name = "Volo, Itinerant Scholar"
+scryfall_oracle_id = "9b61f5b1-7688-4336-8fe9-66da37a34df9"
 scryfall_id = "0f77bd3a-b9a5-4330-9397-3992a28d157e"
 
 [[token.source_card_refs]]
@@ -46634,6 +46724,11 @@ scryfall_id = "96ff0ce1-9737-452a-9ecb-b32a3e926283"
 card_name = "Young Pyromancer"
 scryfall_oracle_id = "5fac139a-07d3-4e6c-98e3-d98b199f7a6f"
 scryfall_id = "e63195ed-5c3e-40e8-9cc2-5cbc1faf7f7f"
+
+[[token.source_card_refs]]
+card_name = "Young Pyromancer"
+scryfall_oracle_id = "5fac139a-07d3-4e6c-98e3-d98b199f7a6f"
+scryfall_id = "ea746050-6299-4295-bb61-1b148d3dee30"
 
 [[token.source_card_refs]]
 card_name = "Young Pyromancer"
@@ -48672,6 +48767,11 @@ scryfall_id = "d467f448-7cad-4bb9-92b9-3529f1e5805f"
 card_name = "Blood Fountain"
 scryfall_oracle_id = "abfa5753-8c02-4e2f-8f98-b0636907293a"
 scryfall_id = "edd57db1-9a72-4ae4-bb40-26bc57fb2972"
+
+[[token.source_card_refs]]
+card_name = "Vampires' Vengeance"
+scryfall_oracle_id = "3a82e724-28f6-430f-a474-ab4276197963"
+scryfall_id = "6d6552c0-0466-43cf-afd9-903029ead0b6"
 
 [[token.source_card_refs]]
 card_name = "Sanguine Brushstroke"
@@ -53885,6 +53985,11 @@ card_name = "Knight of Sorrows"
 scryfall_oracle_id = "50f644d6-2597-4ad6-8ea8-6b09056f90c0"
 scryfall_id = "4f35e4c3-3461-4f53-a081-393057d509aa"
 
+[[token.source_card_refs]]
+card_name = "Afterlife Insurance"
+scryfall_oracle_id = "05501e88-d4c3-4474-92a9-c02ab15b107b"
+scryfall_id = "671cfe88-a213-4889-aaae-5be1e00ccff0"
+
 [token.token_image_ref]
 scryfall_id = "ef77c8eb-aa24-46d5-8036-6651c7602383"
 scryfall_oracle_id = "18ef473d-f958-4bff-8045-154f6adc6b04"
@@ -53965,6 +54070,11 @@ scryfall_id = "215b4632-adce-4357-bfcf-b6014ed2a24b"
 card_name = "Riku of Many Paths"
 scryfall_oracle_id = "1cfe6e3a-f8c9-4105-ad03-0faf1fcc4626"
 scryfall_id = "21b63544-4c31-4f38-9907-0407719a60b1"
+
+[[token.source_card_refs]]
+card_name = "Ravenform"
+scryfall_oracle_id = "d3d61a6a-7870-44df-92e5-513dac2c2c3e"
+scryfall_id = "2a2082e3-94b7-448a-ba87-ede5222b6f37"
 
 [token.token_image_ref]
 scryfall_id = "000d9280-a79a-4f9f-822c-7aaecbff3337"
@@ -56754,6 +56864,11 @@ scryfall_oracle_id = "e70a93e4-2fe7-46d3-8958-153ab2fcfd99"
 scryfall_id = "02e58076-86a3-4bf1-a3e4-8b53a4e93543"
 
 [[token.source_card_refs]]
+card_name = "Skyline Despot"
+scryfall_oracle_id = "c0ce54a1-14a1-45f3-91d0-c57b581afc63"
+scryfall_id = "0ffd1fc6-7a55-4ec1-b540-48d6597fe943"
+
+[[token.source_card_refs]]
 card_name = "Lathliss, Dragon Queen"
 scryfall_oracle_id = "15fef45d-f1a9-49b2-abaa-fe77bb9d1afd"
 scryfall_id = "29da3c7f-f886-4be0-bce5-d2707c5fc926"
@@ -57220,6 +57335,11 @@ card_name = "Subterranean Tremors"
 scryfall_oracle_id = "f0881756-de74-43b1-a9fe-c2fde93faf5a"
 scryfall_id = "1b9510b8-6601-4116-8713-ff7649c000eb"
 
+[[token.source_card_refs]]
+card_name = "Subterranean Tremors"
+scryfall_oracle_id = "f0881756-de74-43b1-a9fe-c2fde93faf5a"
+scryfall_id = "9ab81e97-1e24-4357-8a0c-8f97cc52be3a"
+
 [token.token_image_ref]
 scryfall_id = "70345006-5cde-44f8-ab66-9d8163d4c4f6"
 scryfall_oracle_id = "49db8af8-de3b-4503-acc6-04cac2f87a2e"
@@ -57318,6 +57438,11 @@ scryfall_id = "e2dbfb1b-092c-44a3-932d-a8b27be0a72b"
 card_name = "Sensor Splicer"
 scryfall_oracle_id = "9676da93-1e17-4f6c-b610-a242b78c71ab"
 scryfall_id = "3369340f-d170-4566-b8e8-e4dc918f7f85"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Triniform"
+scryfall_oracle_id = "f8526a36-eb8f-457d-b532-e12b47622cfa"
+scryfall_id = "2f3ff307-2ddc-4f1d-bbe3-13a5e86aef2d"
 
 [[token.source_card_refs]]
 card_name = "Maul Splicer"
@@ -60249,6 +60374,11 @@ scryfall_id = "ba00ab71-f686-46eb-af3a-7d70f22e13b6"
 card_name = "Zellix, Sanity Flayer"
 scryfall_oracle_id = "4dde484a-8d5b-4eb6-ab4a-e30cc370431c"
 scryfall_id = "a5d57db6-0aa5-4e28-b156-e97b74af2cee"
+
+[[token.source_card_refs]]
+card_name = "Zellix, Sanity Flayer"
+scryfall_oracle_id = "4dde484a-8d5b-4eb6-ab4a-e30cc370431c"
+scryfall_id = "db10d001-2db7-44ef-ac84-1d1400ae4972"
 
 [token.token_image_ref]
 scryfall_id = "1ddf9fb5-473f-44a2-98bd-93b4f7478d4f"
@@ -64315,6 +64445,11 @@ subtypes = ["Spirit"]
 supertypes = []
 colors = ["White"]
 keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Court of Grace"
+scryfall_oracle_id = "f63c2438-27d4-449a-828f-f0a2ea86ff16"
+scryfall_id = "4939bedb-c6e2-4eca-b6a3-e8d3c917c2fd"
 
 [[token.source_card_refs]]
 card_name = "Staff of the Storyteller"
@@ -72691,6 +72826,11 @@ card_name = "Toby, Beastie Befriender"
 scryfall_oracle_id = "b4c27c89-fa50-4cf0-bf37-039732d16fef"
 scryfall_id = "cafe5755-88b0-4fee-8596-4232844f60fc"
 
+[[token.source_card_refs]]
+card_name = "Toby, Beastie Befriender"
+scryfall_oracle_id = "b4c27c89-fa50-4cf0-bf37-039732d16fef"
+scryfall_id = "1af32fc3-99a4-42f3-8689-84d17458c8ea"
+
 [token.token_image_ref]
 scryfall_id = "f43e18d8-529d-4d63-b627-b9d9fa4f3f38"
 scryfall_oracle_id = "d2f35b1a-1eba-4007-8f27-737d26b7a6a2"
@@ -74178,6 +74318,11 @@ keywords = []
 card_name = "Threefold Thunderhulk"
 scryfall_oracle_id = "b8020a8b-557b-465d-865d-b59fecd7abc1"
 scryfall_id = "699d1222-f150-46aa-9004-87b45f07eb42"
+
+[[token.source_card_refs]]
+card_name = "Anim Pakal, Thousandth Moon"
+scryfall_oracle_id = "05551d91-50c6-46d1-86a4-cd3d177d0923"
+scryfall_id = "731db824-96ca-4eda-9765-d1ae3e51b319"
 
 [token.token_image_ref]
 scryfall_id = "e32673cc-bec9-49b3-bc34-e2b3982ca245"
@@ -75760,6 +75905,11 @@ scryfall_id = "baddb39b-c31f-48e4-8d43-1cc46a713416"
 card_name = "Bestial Menace"
 scryfall_oracle_id = "ef08d371-9d6c-4a2d-a444-d475fbf1b633"
 scryfall_id = "f9540288-9aef-49a2-a5da-3e42ba9dbbcd"
+
+[[token.source_card_refs]]
+card_name = "Xyris, the Writhing Storm"
+scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
+scryfall_id = "466a7198-d022-47af-a7c5-351a54eb71de"
 
 [[token.source_card_refs]]
 card_name = "Orochi Eggwatcher // Shidako, Broodmistress"
@@ -100267,6 +100417,16 @@ scryfall_oracle_id = "4fbe1c02-f5bf-47c7-80de-09a32d01e5db"
 scryfall_id = "3818ffcf-5da3-4d93-bbbb-41b3e4a1c360"
 
 [[token.source_card_refs]]
+card_name = "Tura Kennerüd, Skyknight"
+scryfall_oracle_id = "4cb3a303-9ded-46d5-90e7-1cc1c65a75da"
+scryfall_id = "0e7acfb7-cf8b-41f2-9cb0-49d14899312f"
+
+[[token.source_card_refs]]
+card_name = "Decree of Justice"
+scryfall_oracle_id = "67a98359-6f02-4556-ad47-c01b643686d6"
+scryfall_id = "45903917-5a7f-4e91-9722-7d5795d47ebe"
+
+[[token.source_card_refs]]
 card_name = "You're Confronted by Robbers"
 scryfall_oracle_id = "7d10ad59-e90d-4726-bd55-5680d7c21638"
 scryfall_id = "28bebe57-9702-45a9-ab84-013e9726d55f"
@@ -100516,6 +100676,11 @@ scryfall_id = "f42bd4af-3c3a-4750-8e21-03d0aba3116f"
 card_name = "Root Out"
 scryfall_oracle_id = "bec03edc-261a-4b02-be37-2006f657e905"
 scryfall_id = "03a97659-10e2-4ada-bb2b-365019c97ba5"
+
+[[token.source_card_refs]]
+card_name = "Tivit, Seller of Secrets"
+scryfall_oracle_id = "f4e0b557-4f80-4b7c-bfcc-6d4c468faf2e"
+scryfall_id = "bd2d7f1e-5409-4d1a-ad13-587b0607a9aa"
 
 [[token.source_card_refs]]
 card_name = "Gone Missing"
@@ -103588,6 +103753,11 @@ colors = [
     "Green",
 ]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Send in the Pest"
+scryfall_oracle_id = "955bfcb8-6477-4ed0-b6e7-8940874ae5e4"
+scryfall_id = "2c19ed9e-556a-4a98-939c-05854ad61b79"
 
 [[token.source_card_refs]]
 card_name = "Send in the Pest"
@@ -107177,6 +107347,16 @@ scryfall_id = "90741ec9-6893-42d4-b510-8664666094e3"
 card_name = "Seedship Agrarian"
 scryfall_oracle_id = "003d9c17-5d5c-469f-ad87-d78faf55e025"
 scryfall_id = "2fc7946d-37b0-4dc8-9daa-8d2204d8e4d2"
+
+[[token.source_card_refs]]
+card_name = "Glacier Godmaw"
+scryfall_oracle_id = "300e48df-7f7f-47ff-b450-8ba7bd1b1c67"
+scryfall_id = "13dc01bc-a100-44f5-80f7-b81e9e4d6dfe"
+
+[[token.source_card_refs]]
+card_name = "Biomechan Engineer"
+scryfall_oracle_id = "b395925b-2456-454e-9262-3b55c9f2799a"
+scryfall_id = "66317697-32e0-4c74-9f62-b8d1a50c03ef"
 
 [[token.source_card_refs]]
 card_name = "Sunstar Expansionist"
@@ -117400,6 +117580,11 @@ card_name = "Third Path Iconoclast"
 scryfall_oracle_id = "f7156897-2b02-4ecd-868d-d4d59244e9ed"
 scryfall_id = "ca29f373-7051-4cbe-bda8-e711fda4f9bb"
 
+[[token.source_card_refs]]
+card_name = "Third Path Iconoclast"
+scryfall_oracle_id = "f7156897-2b02-4ecd-868d-d4d59244e9ed"
+scryfall_id = "ecf68113-d9ca-4c0a-826f-986459ce0018"
+
 [token.token_image_ref]
 scryfall_id = "a35d32fd-8dd5-41eb-a75f-3c9bc45b23bb"
 scryfall_oracle_id = "0410f6f6-88f6-48e2-b301-7660c86317a1"
@@ -122611,6 +122796,11 @@ scryfall_id = "846a0e79-a530-429e-8f7f-4b87f1b0156e"
 [[token.source_card_refs]]
 card_name = "Artistic Process"
 scryfall_oracle_id = "0c061a1b-206a-4fcc-92e5-30c8ed9d65c1"
+scryfall_id = "580774b5-bc1e-46a3-9375-a2fe497df032"
+
+[[token.source_card_refs]]
+card_name = "Artistic Process"
+scryfall_oracle_id = "0c061a1b-206a-4fcc-92e5-30c8ed9d65c1"
 scryfall_id = "bce9d933-be58-4301-beb4-07b04d0b69f0"
 
 [[token.source_card_refs]]
@@ -125267,6 +125457,12 @@ scryfall_oracle_id = "c8f6cc1f-b7e4-470d-8d48-ef848d7c1116"
 scryfall_id = "68fe8de1-8c3b-4e05-9d4a-67d979184980"
 
 [[token.source_card_refs]]
+card_name = "Imodane's Recruiter // Train Troops"
+face_name = "Train Troops"
+scryfall_oracle_id = "50bee80e-89df-48c2-b608-ba66ff3e794a"
+scryfall_id = "567d177e-9e38-4b88-9d72-aaf152ccd7e1"
+
+[[token.source_card_refs]]
 card_name = "Hopeful Vigil"
 scryfall_oracle_id = "33fff722-5cc5-4d0e-b788-166b3edb1223"
 scryfall_id = "d382fd32-b1f5-4ec7-9d42-fc2915ed3bc9"
@@ -125276,6 +125472,12 @@ card_name = "Virtue of Loyalty // Ardenvale Fealty"
 face_name = "Ardenvale Fealty"
 scryfall_oracle_id = "f61f4307-4eec-476a-97e5-d4d3da2b54c3"
 scryfall_id = "ea7e7daf-7c06-4c74-8bcf-e42c1f611861"
+
+[[token.source_card_refs]]
+card_name = "Imodane's Recruiter // Train Troops"
+face_name = "Imodane's Recruiter"
+scryfall_oracle_id = "50bee80e-89df-48c2-b608-ba66ff3e794a"
+scryfall_id = "567d177e-9e38-4b88-9d72-aaf152ccd7e1"
 
 [[token.source_card_refs]]
 card_name = "Knightly Valor"
@@ -132267,6 +132469,11 @@ scryfall_oracle_id = "9a107e48-3d50-4941-95b1-10f2b29a4245"
 scryfall_id = "b000f605-177f-459d-a197-fcf54efec2fb"
 
 [[token.source_card_refs]]
+card_name = "Adeline, Resplendent Cathar"
+scryfall_oracle_id = "38515f89-348b-4cf3-b7bd-1f6fe4ce2fba"
+scryfall_id = "0b883558-b550-4654-ad1e-dc363b88dc6e"
+
+[[token.source_card_refs]]
 card_name = "Voice of the Provinces"
 scryfall_oracle_id = "81b15ed1-7069-4f8b-96b9-f6d67298afef"
 scryfall_id = "c2599730-fc82-468b-bb5c-7e722dbabbe7"
@@ -132285,6 +132492,11 @@ scryfall_id = "e6dde9fc-def0-422f-94d0-e6d09101d543"
 card_name = "Adeline, Resplendent Cathar"
 scryfall_oracle_id = "38515f89-348b-4cf3-b7bd-1f6fe4ce2fba"
 scryfall_id = "1de30c12-2011-495a-be25-f7a46b23e142"
+
+[[token.source_card_refs]]
+card_name = "A Killer Among Us"
+scryfall_oracle_id = "79d577a8-53c0-4220-bc0e-70764d72d5fd"
+scryfall_id = "35987b9f-3cdc-4ccb-beb7-e87a8f1b4e3d"
 
 [token.token_image_ref]
 scryfall_id = "5054bb15-ddd5-4e5e-a9fd-6bdf255f7fd3"
@@ -135606,6 +135818,11 @@ scryfall_id = "5e1c14a0-cd68-45fc-a127-422ca6113048"
 card_name = "Fain, the Broker"
 scryfall_oracle_id = "31b990e3-9bad-4b0a-a9d5-f5b9ed2ad0b0"
 scryfall_id = "f5829ea0-1f41-46ba-a5e6-b7bd7051a591"
+
+[[token.source_card_refs]]
+card_name = "Fain, the Broker"
+scryfall_oracle_id = "31b990e3-9bad-4b0a-a9d5-f5b9ed2ad0b0"
+scryfall_id = "9dbfddcb-6f88-4d6a-9f03-248d7b86e567"
 
 [[token.source_card_refs]]
 card_name = "Felisa, Fang of Silverquill"
@@ -140075,6 +140292,16 @@ card_name = "Hare Apparent"
 scryfall_oracle_id = "3c1619bd-db5e-4df6-a196-0a9d62374f6d"
 scryfall_id = "9fc6f0e9-eb5f-4bc0-b3d7-756644b66d12"
 
+[[token.source_card_refs]]
+card_name = "Tempt with Bunnies"
+scryfall_oracle_id = "6874be51-623d-4eaf-a67a-2fcbb9a8ceca"
+scryfall_id = "34fb2206-241a-46c6-9f48-af72119ee8bd"
+
+[[token.source_card_refs]]
+card_name = "Cadira, Caller of the Small"
+scryfall_oracle_id = "fcf22321-2f55-41ca-b8e1-4792540ba3ee"
+scryfall_id = "71c7ad30-cf3b-4438-9ee9-4f5af3a5d594"
+
 [token.token_image_ref]
 scryfall_id = "63ae4f9c-ad6e-4d6a-89f1-653916bf5373"
 scryfall_oracle_id = "fee35fc4-a5b5-4c2c-8c6a-62dad166ea72"
@@ -140100,6 +140327,11 @@ subtypes = ["Reflection"]
 supertypes = []
 colors = ["Blue"]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Alirios, Enraptured"
+scryfall_oracle_id = "7dbf9e96-e61f-43db-8767-63a351cf4ef8"
+scryfall_id = "87428a11-91a6-4ea5-bd64-4ce42be65c96"
 
 [[token.source_card_refs]]
 card_name = "Alirios, Enraptured"
@@ -151912,6 +152144,11 @@ scryfall_oracle_id = "87c1bd51-6a85-4a14-af7b-a5b02ab69d73"
 scryfall_id = "ae50172c-8896-4ad2-8c83-d349ccca2308"
 
 [[token.source_card_refs]]
+card_name = "Deekah, Fractal Theorist"
+scryfall_oracle_id = "6b071146-2f83-4fda-a55a-46fcb74e6f28"
+scryfall_id = "3192dba9-111a-4005-9e33-cb8a2337501b"
+
+[[token.source_card_refs]]
 card_name = "Paradox Zone"
 scryfall_oracle_id = "2fff8441-1f5a-423b-ab98-93016266f5c5"
 scryfall_id = "b1116eb3-4d16-4404-b29d-7d96d7eaa703"
@@ -155086,6 +155323,11 @@ scryfall_oracle_id = "936ae5dc-9838-47f3-ba1f-66523a7f5b76"
 scryfall_id = "31c99a7d-a70b-4599-9bd2-be7a5cac28ff"
 
 [[token.source_card_refs]]
+card_name = "Mischievous Mystic"
+scryfall_oracle_id = "542831c6-6279-4977-9b29-0fb9c0ebf04d"
+scryfall_id = "d8ee0690-d44f-4aa6-b815-3ccc99d18c3b"
+
+[[token.source_card_refs]]
 card_name = "Alela, Artful Provocateur"
 scryfall_oracle_id = "936ae5dc-9838-47f3-ba1f-66523a7f5b76"
 scryfall_id = "80a94f62-2060-494b-924a-792b728dcf99"
@@ -156113,10 +156355,25 @@ scryfall_oracle_id = "470f0bbf-a0c9-4216-96f0-d400dac17aef"
 scryfall_id = "2acceef2-ee34-4cce-a69a-d31aa11f9ca4"
 
 [[token.source_card_refs]]
+card_name = "Diamond Pick-Axe"
+scryfall_oracle_id = "542e7d60-3fc8-46e2-8786-f7c8b3d4c979"
+scryfall_id = "10882e5b-4f49-45fd-ba15-fee54adaa47d"
+
+[[token.source_card_refs]]
 card_name = "Young Red Dragon // Bathe in Gold"
 face_name = "Young Red Dragon"
 scryfall_oracle_id = "2f865ae9-9328-4f6f-924f-d5e0a65aaa96"
 scryfall_id = "2e391516-e04f-4432-aaa2-ee90ee564330"
+
+[[token.source_card_refs]]
+card_name = "Descent into Avernus"
+scryfall_oracle_id = "1313da2f-92bb-4862-9153-373972cc1520"
+scryfall_id = "7a5e84d8-ac85-4aef-9373-4d26f9f11c85"
+
+[[token.source_card_refs]]
+card_name = "Jolene, the Plunder Queen"
+scryfall_oracle_id = "8215f4a2-7131-426b-ad9c-6427caabd715"
+scryfall_id = "082193bc-51fc-4140-ace5-04b89049b66a"
 
 [[token.source_card_refs]]
 card_name = "Skullport Merchant"
@@ -156132,6 +156389,11 @@ scryfall_id = "bc49a9d1-9c5f-4a80-bab8-767f6d3b75e2"
 card_name = "Heap Gate"
 scryfall_oracle_id = "35922a30-6b84-44dd-a2f0-306554a1ae90"
 scryfall_id = "756a8e0a-f76e-4947-ac67-bc76d6fe98a6"
+
+[[token.source_card_refs]]
+card_name = "Goldlust Triad"
+scryfall_oracle_id = "86d76078-9af3-45a7-90d6-72946afdc78b"
+scryfall_id = "a770d7c1-565a-4cec-a4e3-dbb17b9a2b95"
 
 [[token.source_card_refs]]
 card_name = "Magda, Brazen Outlaw"
@@ -156159,6 +156421,11 @@ scryfall_oracle_id = "94e8b0a9-44a1-4dce-8d44-78681ae638a1"
 scryfall_id = "c2ff06c7-6731-45db-acf5-704634de825f"
 
 [[token.source_card_refs]]
+card_name = "Ganax, Astral Hunter"
+scryfall_oracle_id = "a3112971-3af4-46e8-b2d6-a8759b39d0d1"
+scryfall_id = "598580ba-31ff-49ad-8c7c-1e75f6cd62e7"
+
+[[token.source_card_refs]]
 card_name = "Monologue Tax"
 scryfall_oracle_id = "ace8e88e-ca6a-4bdf-8c6d-1b914fc00259"
 scryfall_id = "af55c245-d758-4deb-b69a-4f50cc19475b"
@@ -156179,9 +156446,19 @@ scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
 scryfall_id = "90f8a36e-2129-4bd4-870a-a998afaec199"
 
 [[token.source_card_refs]]
+card_name = "Shiny Impetus"
+scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
+scryfall_id = "bf3054a3-6473-4c2c-b277-26e23d10443a"
+
+[[token.source_card_refs]]
 card_name = "Tireless Provisioner"
 scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
 scryfall_id = "1163fe84-c5d5-42c8-b7cd-d206a9b0bd3f"
+
+[[token.source_card_refs]]
+card_name = "Tivit, Seller of Secrets"
+scryfall_oracle_id = "f4e0b557-4f80-4b7c-bfcc-6d4c468faf2e"
+scryfall_id = "bd2d7f1e-5409-4d1a-ad13-587b0607a9aa"
 
 [[token.source_card_refs]]
 card_name = "Bucknard's Everfull Purse"
@@ -156192,6 +156469,11 @@ scryfall_id = "38b51dbb-7d8e-41fc-9768-627fd4692555"
 card_name = "Pitiless Plunderer"
 scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
 scryfall_id = "64e2d58c-75a4-4448-8924-d92064786ce9"
+
+[[token.source_card_refs]]
+card_name = "Fain, the Broker"
+scryfall_oracle_id = "31b990e3-9bad-4b0a-a9d5-f5b9ed2ad0b0"
+scryfall_id = "9dbfddcb-6f88-4d6a-9f03-248d7b86e567"
 
 [[token.source_card_refs]]
 card_name = "Academy Manufactor"
@@ -156244,6 +156526,11 @@ scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
 scryfall_id = "10e6f41c-cb5a-48ea-9ae6-86249bcce629"
 
 [[token.source_card_refs]]
+card_name = "Rev, Tithe Extractor"
+scryfall_oracle_id = "8345eb05-c04e-4c1d-9776-5ab7d91a7842"
+scryfall_id = "34d75399-02e1-4ab8-9493-70c1d9d28b42"
+
+[[token.source_card_refs]]
 card_name = "Young Red Dragon // Bathe in Gold"
 face_name = "Bathe in Gold"
 scryfall_oracle_id = "2f865ae9-9328-4f6f-924f-d5e0a65aaa96"
@@ -156253,6 +156540,11 @@ scryfall_id = "2e391516-e04f-4432-aaa2-ee90ee564330"
 card_name = "Xorn"
 scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
 scryfall_id = "3dfd3791-b9d3-4d28-a772-88786ba086e8"
+
+[[token.source_card_refs]]
+card_name = "Battle Angels of Tyr"
+scryfall_oracle_id = "c2bd0c24-3973-48bc-a591-3779e3640c5d"
+scryfall_id = "d1ad6649-8371-42da-809e-df27c45a2d52"
 
 [[token.source_card_refs]]
 card_name = "Deadly Dispute"
@@ -156268,6 +156560,16 @@ scryfall_id = "6ac5ef8f-302d-415c-8e9e-b228cc2fbf9e"
 card_name = "Grim Hireling"
 scryfall_oracle_id = "89738595-dafb-400a-bfba-91a53a37e717"
 scryfall_id = "b4fe104c-34ff-4b17-a703-98e7dedcb518"
+
+[[token.source_card_refs]]
+card_name = "Treasure Dredger"
+scryfall_oracle_id = "9a691e96-fb47-4c23-a063-3b287c51147b"
+scryfall_id = "d27d79c3-7740-4a46-94c6-06e41956f464"
+
+[[token.source_card_refs]]
+card_name = "Gluntch, the Bestower"
+scryfall_oracle_id = "0222dc7c-459b-4909-a037-72b2eb248599"
+scryfall_id = "5c45a5b1-d5d4-41cb-8d86-e3a54cf2808c"
 
 [[token.source_card_refs]]
 card_name = "Unexpected Windfall"
@@ -156301,6 +156603,11 @@ scryfall_oracle_id = "234a734b-ba28-4f1b-9d01-3c3e7d516590"
 scryfall_id = "71c65e99-6caa-45e9-b619-6d7669ea4178"
 
 [[token.source_card_refs]]
+card_name = "Strike It Rich"
+scryfall_oracle_id = "c34c17c7-3827-49a2-be25-67f44fdfe150"
+scryfall_id = "6717de83-2dcc-411b-b638-9250882a1db3"
+
+[[token.source_card_refs]]
 card_name = "Impulsive Pilferer"
 scryfall_oracle_id = "7d9fc9e7-d80b-49c3-871c-ed25b3059ae8"
 scryfall_id = "d9e8f74a-fb7d-4291-b3c0-72c1796f3c70"
@@ -156331,6 +156638,11 @@ scryfall_oracle_id = "9dc6281b-08e0-4c66-9aef-abc7184ca36a"
 scryfall_id = "24d3dde3-e5f8-4ab7-bd2b-6f45988099ad"
 
 [[token.source_card_refs]]
+card_name = "Baeloth Barrityl, Entertainer"
+scryfall_oracle_id = "33b401b1-cf94-4c7a-8a8a-426ac3d87bd0"
+scryfall_id = "76e64d7f-2259-411a-ac01-365f60debf08"
+
+[[token.source_card_refs]]
 card_name = "Shambling Ghast"
 scryfall_oracle_id = "e5e6229a-3422-4afd-9a87-86daa2d31d3a"
 scryfall_id = "918c77ce-cf06-4790-b493-bfa6a52ac7c9"
@@ -156344,6 +156656,11 @@ scryfall_id = "a6c1c529-1bac-4c6d-9c6d-5013b5cc002c"
 card_name = "Black Market Connections"
 scryfall_oracle_id = "d2664f28-49e1-46f8-a863-b217e961a57c"
 scryfall_id = "d456810a-452c-4cc6-9d73-35fe64787259"
+
+[[token.source_card_refs]]
+card_name = "Seize the Spoils"
+scryfall_oracle_id = "58f83528-9110-4895-b5ea-51b90af30a8d"
+scryfall_id = "1a5bb429-104a-44e1-ab8a-7f251b6c93d1"
 
 [[token.source_card_refs]]
 card_name = "Treasure Map // Treasure Cove"
@@ -163104,6 +163421,11 @@ colors = ["White"]
 keywords = ["Flying"]
 
 [[token.source_card_refs]]
+card_name = "Linvala, the Preserver"
+scryfall_oracle_id = "64f5689d-504d-40e9-bdb5-36dcefd257e2"
+scryfall_id = "b2777bed-a41e-4704-adf6-48cdf126bc9f"
+
+[[token.source_card_refs]]
 card_name = "The Book of Exalted Deeds"
 scryfall_oracle_id = "046add85-952f-46ac-974a-463d2a7d3fd4"
 scryfall_id = "cb0829bd-3108-4ef3-b754-1642c28992ae"
@@ -164149,6 +164471,11 @@ scryfall_id = "6b921a42-8da9-454e-9791-cc3f4da34023"
 card_name = "Maverick Thopterist"
 scryfall_oracle_id = "71ba6f1b-2fa6-4d4c-8778-f0765b1a5d8e"
 scryfall_id = "f1e6817f-2592-4074-aba0-c8efebd7883a"
+
+[[token.source_card_refs]]
+card_name = "Loyal Apprentice"
+scryfall_oracle_id = "7f268b15-ac92-4e98-821b-78d15d9285d9"
+scryfall_id = "ea5604aa-50b7-4b3e-b4bb-43eb17cf7e90"
 
 [[token.source_card_refs]]
 card_name = "Hangarback Walker"
@@ -169465,6 +169792,11 @@ subtypes = ["Servo"]
 supertypes = []
 colors = []
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Marionette Apprentice"
+scryfall_oracle_id = "726d9d2c-736a-4852-9938-a0f50d8fd89f"
+scryfall_id = "99267114-ed51-47ea-9a64-46bd7498fde3"
 
 [[token.source_card_refs]]
 card_name = "Weaponcraft Enthusiast"
@@ -178476,6 +178808,11 @@ scryfall_oracle_id = "9573c85a-e574-4b4e-aae0-2165c45fd27e"
 scryfall_id = "b74ad496-05bc-4c5a-9027-b14df9c387ab"
 
 [[token.source_card_refs]]
+card_name = "Spyglass Siren"
+scryfall_oracle_id = "4ec9d9eb-14e2-47ea-88a2-d2394e363784"
+scryfall_id = "d051f427-77a9-4217-bf4b-c77f05fb2498"
+
+[[token.source_card_refs]]
 card_name = "Worldwalker Helm"
 scryfall_oracle_id = "9573c85a-e574-4b4e-aae0-2165c45fd27e"
 scryfall_id = "29db3d9f-d95e-4854-8ea6-7970877221d6"
@@ -179173,6 +179510,16 @@ scryfall_oracle_id = "f3abd4d1-a975-4e85-8684-aa0fce029670"
 scryfall_id = "ec6f4542-b5ca-4464-afc6-8bada09b7f6c"
 
 [[token.source_card_refs]]
+card_name = "Syphon Flesh"
+scryfall_oracle_id = "bc7c3151-ad07-429a-8af8-e4f24b7d9f6b"
+scryfall_id = "adf09241-c401-48d2-b3f9-233ea1097c0a"
+
+[[token.source_card_refs]]
+card_name = "Ghoulcaller Gisa"
+scryfall_oracle_id = "0dd894cb-1968-471c-af08-ea7ec5ce8428"
+scryfall_id = "be470fff-5feb-407d-a917-150f8d741e2d"
+
+[[token.source_card_refs]]
 card_name = "Curse of Shallow Graves"
 scryfall_oracle_id = "dc66dbed-f979-4ad1-b5f9-08538886167f"
 scryfall_id = "02f6c39a-8f65-45b9-b632-8d101fb9646a"
@@ -179213,6 +179560,11 @@ scryfall_id = "bab61dd9-aae8-42f5-98ce-fb53ba1a3123"
 card_name = "Liliana, Death's Majesty"
 scryfall_oracle_id = "7fca595e-1902-40fd-a359-622caa612b6a"
 scryfall_id = "bdcaf0f0-3681-463c-b132-58056156bc6a"
+
+[[token.source_card_refs]]
+card_name = "Curse of Disturbance"
+scryfall_oracle_id = "6cbd36d9-de47-41b0-9ef4-a72ca01adccd"
+scryfall_id = "9f911185-ced6-4835-a47a-fef2abe6658c"
 
 [[token.source_card_refs]]
 card_name = "Bone Miser"
@@ -180045,6 +180397,11 @@ scryfall_id = "2e37fd36-84f0-4869-bfae-da4b97c9725d"
 card_name = "Barret, Avalanche Leader"
 scryfall_oracle_id = "83f776d9-f3b6-40c2-8008-1ace4d110825"
 scryfall_id = "6ee716c6-a4be-4237-bdef-f812baffa6d5"
+
+[[token.source_card_refs]]
+card_name = "Otharri, Suns' Glory"
+scryfall_oracle_id = "b081352b-d17b-4031-bbcc-c5c02cbfa6b6"
+scryfall_id = "89b4491d-154d-46e2-84c2-afa4596e2b13"
 
 [token.token_image_ref]
 scryfall_id = "6afbbdad-aeed-428a-b840-c33f59a18d0b"
@@ -182251,6 +182608,11 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Coruscation Mage"
 scryfall_oracle_id = "88bb91b5-2ccd-4ce9-8cd4-e54d63c12abf"
+scryfall_id = "ed807515-a162-4935-ba20-6a72d9509150"
+
+[[token.source_card_refs]]
+card_name = "Coruscation Mage"
+scryfall_oracle_id = "88bb91b5-2ccd-4ce9-8cd4-e54d63c12abf"
 scryfall_id = "dc2c1de0-6233-469a-be72-a050b97d2c8f"
 
 [token.token_image_ref]
@@ -183589,6 +183951,11 @@ card_name = "Budoka Gardener // Dokai, Weaver of Life"
 face_name = "Dokai, Weaver of Life"
 scryfall_oracle_id = "cb952c81-c7bb-4670-938d-296d35551986"
 scryfall_id = "e7fcfcba-6547-4617-a301-47e1d7523dae"
+
+[[token.source_card_refs]]
+card_name = "Dance of the Tumbleweeds"
+scryfall_oracle_id = "7c57d4aa-d221-4b36-a544-9fa89d63ffbe"
+scryfall_id = "955bec24-7117-4201-bd67-6b4cfa67174d"
 
 [[token.source_card_refs]]
 card_name = "Tumbleweed Rising"
@@ -189120,6 +189487,11 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Endrek Sahr, Master Breeder"
 scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
+scryfall_id = "ab1ae05a-20ca-4d4c-907c-be7cf8d9f062"
+
+[[token.source_card_refs]]
+card_name = "Endrek Sahr, Master Breeder"
+scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
 scryfall_id = "22a14b34-c575-471b-b636-b25cb269196c"
 
 [[token.source_card_refs]]
@@ -190773,6 +191145,11 @@ scryfall_id = "b2d1219f-fadb-4427-8627-e5aef3589600"
 card_name = "Swan Song"
 scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
 scryfall_id = "40fc6412-df1c-4bfa-842b-8c3a6f14e19d"
+
+[[token.source_card_refs]]
+card_name = "Perch Protection"
+scryfall_oracle_id = "295fe873-ecb5-4d5e-a73c-3af6c478afc5"
+scryfall_id = "f3afb862-c156-495b-a0df-4c4ed0bbc869"
 
 [token.token_image_ref]
 scryfall_id = "2a3d4bf9-2107-4686-8df5-cd7c934d0691"
@@ -194978,6 +195355,11 @@ scryfall_id = "6493bf5e-4cfe-4798-a270-ff6e49c70f50"
 card_name = "Tukatongue Thallid"
 scryfall_oracle_id = "c7dbd008-e941-497e-8305-80c53b1dffe2"
 scryfall_id = "dfb24ef0-54c3-445d-95a8-c82eec387cc7"
+
+[[token.source_card_refs]]
+card_name = "Shroofus Sproutsire"
+scryfall_oracle_id = "e0cebb09-d10d-4b70-96be-82df0e5d52d3"
+scryfall_id = "9ed9f270-4da6-439e-b13a-70da6e7f424a"
 
 [[token.source_card_refs]]
 card_name = "Fungal Infection"
@@ -200031,6 +200413,11 @@ card_name = "Rite of the Raging Storm"
 scryfall_oracle_id = "984f92dd-cb9b-4421-a8e6-75bfe566be10"
 scryfall_id = "8f06e3db-ce55-4535-8557-cc52c5fce637"
 
+[[token.source_card_refs]]
+card_name = "Rite of the Raging Storm"
+scryfall_oracle_id = "984f92dd-cb9b-4421-a8e6-75bfe566be10"
+scryfall_id = "0d249b67-072c-40b3-a8ce-63eca0ea8047"
+
 [token.token_image_ref]
 scryfall_id = "8292126c-a7b4-40d3-8a08-f15dd871207d"
 scryfall_oracle_id = "5bb0c2ce-429c-4188-8d5a-7183dc104590"
@@ -201544,6 +201931,11 @@ scryfall_id = "9780fd8f-489e-4978-ba98-92732b88e826"
 card_name = "Crib Swap"
 scryfall_oracle_id = "2987c385-011a-4032-a516-a46d1e9dc9e8"
 scryfall_id = "eed102ee-959c-4c44-9476-989c1f426624"
+
+[[token.source_card_refs]]
+card_name = "Personify"
+scryfall_oracle_id = "e1708ad9-35d4-4243-92ca-ddf9d129aa32"
+scryfall_id = "7ff2f480-ee10-4b97-a861-13e5ef5381c2"
 
 [token.token_image_ref]
 scryfall_id = "b2bb05a1-38b7-469b-af71-f747defffb13"
@@ -207440,6 +207832,11 @@ subtypes = [
 supertypes = []
 colors = ["Black"]
 keywords = ["Vigilance"]
+
+[[token.source_card_refs]]
+card_name = "God-Eternal Oketra"
+scryfall_oracle_id = "3b03358d-f87e-4939-afc9-5ee3f044146a"
+scryfall_id = "b490dbbc-8f73-409d-b293-bce8429d8f20"
 
 [[token.source_card_refs]]
 card_name = "God-Eternal Oketra"
@@ -220020,6 +220417,11 @@ scryfall_oracle_id = "ae61b2ef-2e60-499a-8708-e37b9bd5620e"
 scryfall_id = "836c9684-06bf-45c8-8706-449def571e66"
 
 [[token.source_card_refs]]
+card_name = "Rally the Monastery"
+scryfall_oracle_id = "3f6101a5-3038-45b0-8302-b2e4127b9510"
+scryfall_id = "db2f80a1-a9e6-4efa-9a8a-cb473e502dce"
+
+[[token.source_card_refs]]
 card_name = "A-Cori-Steel Cutter"
 scryfall_oracle_id = "94ab54a2-a89d-4d70-90bd-95b9f4c61cf4"
 scryfall_id = "058da414-1f05-45a0-8938-2fbc1050e17e"
@@ -220398,6 +220800,11 @@ scryfall_id = "804e43a0-faf6-4cd7-b5e8-34c767f8fa1c"
 card_name = "Namor the Sub-Mariner"
 scryfall_oracle_id = "dff11626-ad4d-443a-b7db-f508790b5fd2"
 scryfall_id = "7aaefcf9-fbe1-4767-92a5-09825761d116"
+
+[[token.source_card_refs]]
+card_name = "A Killer Among Us"
+scryfall_oracle_id = "79d577a8-53c0-4220-bc0e-70764d72d5fd"
+scryfall_id = "35987b9f-3cdc-4ccb-beb7-e87a8f1b4e3d"
 
 [token.token_image_ref]
 scryfall_id = "7f7a4f95-f12b-4c28-a6f7-f3c64364abba"
@@ -221584,6 +221991,11 @@ scryfall_id = "c5da5dd8-1e56-4c0a-a18f-f094a1cfe2c9"
 card_name = "Clown Extruder"
 scryfall_oracle_id = "71da6074-227a-4561-be1f-13477266f2be"
 scryfall_id = "f8e23dec-67c1-446a-b599-2a8ea8f7c716"
+
+[[token.source_card_refs]]
+card_name = "Clown Car"
+scryfall_oracle_id = "e0a6947f-3d52-45e0-8fd7-0bc07cc8c784"
+scryfall_id = "1b58d87a-e610-4022-8266-f6160a430463"
 
 [[token.source_card_refs]]
 card_name = "Clowning Around"
@@ -225384,6 +225796,11 @@ subtypes = [
 supertypes = []
 colors = ["Red"]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Agate Instigator"
+scryfall_oracle_id = "e1a2bd31-b800-47cd-8866-1b849a601b09"
+scryfall_id = "72de7010-3449-4fe1-bf2a-f4bd8feb74e9"
 
 [[token.source_card_refs]]
 card_name = "Agate Instigator"
