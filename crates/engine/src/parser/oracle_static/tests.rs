@@ -20381,6 +20381,27 @@ fn cant_be_blocked_attacking_alone() {
     assert_eq!(def.condition, Some(StaticCondition::SourceAttackingAlone));
 }
 
+/// CR 303.4b: an Aura's host is "enchanted", so "as long as it's enchanted" on a
+/// SelfRef static is a self-state gate, not an unparsed remainder. Metathran
+/// Elite is the corpus witness for the `as long as` branch of the pronoun
+/// rewrite; every other #8183 regression test rides the `unless` branch, which
+/// already trimmed its clause before this fix. Without the shared trim in
+/// `parse_affected_scoped_static_condition`, the trailing period survives into
+/// `rewrite_self_pronoun_subject`, whose match is exact, so "enchanted." misses
+/// and the condition fails open as `Unrecognized`.
+#[test]
+fn cant_be_blocked_as_long_as_its_enchanted() {
+    let def =
+        parse_static_line("This creature can't be blocked as long as it's enchanted.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::SourceIsEnchanted),
+        "Metathran Elite's gate must resolve to a typed self-state condition; \
+         an Unrecognized remainder fails open in the layer system (#8183)"
+    );
+}
+
 #[test]
 fn enchanted_creature_cant_be_blocked_as_long_as_you_control_gate() {
     let def =
