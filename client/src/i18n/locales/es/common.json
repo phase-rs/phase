@@ -295,7 +295,15 @@
     "back": "Atrás",
     "settings": "Ajustes",
     "languageSettings": "Idioma ({{lang}}) — abrir ajustes",
-    "languageTitle": "Idioma: {{lang}}"
+    "languageTitle": "Idioma: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Descartar este mensaje",
+      "severity": {
+        "info": "Aviso",
+        "warning": "Atención",
+        "critical": "Importante"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Algo salió mal",

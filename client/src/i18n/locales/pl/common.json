@@ -295,7 +295,15 @@
     "back": "Wstecz",
     "settings": "Ustawienia",
     "languageSettings": "Język ({{lang}}) — otwórz ustawienia",
-    "languageTitle": "Język: {{lang}}"
+    "languageTitle": "Język: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Zamknij tę wiadomość",
+      "severity": {
+        "info": "Informacja",
+        "warning": "Uwaga",
+        "critical": "Ważne"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Coś poszło nie tak",

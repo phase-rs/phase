@@ -13,6 +13,7 @@ declare const __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: string;
 declare const __CARD_NAMES_URL__: string;
 declare const __CHANGELOG_URL__: string;
 declare const __CHANGELOG_META_URL__: string;
+declare const __STATUS_URL__: string;
 declare const __COVERAGE_DATA_URL__: string;
 declare const __COVERAGE_SUMMARY_URL__: string;
 declare const __CARD_DATA_META_URL__: string;

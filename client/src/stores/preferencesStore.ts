@@ -294,6 +294,7 @@ function buildDefaultPreferences(): PreferencesState {
     battlefieldCardDisplay: "art_crop",
     collapsedFolderIds: [],
     lastSeenChangelogId: undefined,
+    dismissedStatusId: undefined,
     commandZoneDisplay: "auto",
     collapseLands: "auto",
     collapseSupport: "auto",
@@ -369,6 +370,10 @@ interface PreferencesState {
    * silently seeds it to the current latest so they get no unread dot for
    * entries that predate their first visit. */
   lastSeenChangelogId?: number;
+  /** Id of the operator status message this player dismissed. Compared for
+   * EQUALITY, so a newly published message (which always carries a new id)
+   * re-shows even after the previous one was dismissed. */
+  dismissedStatusId?: number;
   /** Command-zone layout mode (inline dock / compact pile / auto-by-viewport). */
   commandZoneDisplay: CommandZoneDisplay;
   /** Whether the lands sub-row collapses into its summary tile (auto/on/off). */
@@ -473,6 +478,7 @@ interface PreferencesActions {
   toggleFolderCollapsed: (id: string) => void;
   setCollapsedFolderIds: (ids: string[]) => void;
   setLastSeenChangelogId: (id: number) => void;
+  setDismissedStatusId: (id: number) => void;
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
   setCollapseLands: (mode: ZoneCollapseMode) => void;
   setCollapseSupport: (mode: ZoneCollapseMode) => void;
@@ -635,6 +641,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         })),
       setCollapsedFolderIds: (ids) => set({ collapsedFolderIds: ids }),
       setLastSeenChangelogId: (id) => set({ lastSeenChangelogId: id }),
+      setDismissedStatusId: (id) => set({ dismissedStatusId: id }),
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
       setCollapseLands: (mode) => set({ collapseLands: mode }),
       setCollapseSupport: (mode) => set({ collapseSupport: mode }),
@@ -804,7 +811,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 31,
+      version: 32,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -874,6 +881,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          via the shallow merge.
       // v30 → v31: Add draftDoubleClickConfirmPick; legacy stores default to
       //          true via the shallow merge.
+      // v31 → v32: Add dismissedStatusId; legacy stores default to undefined
+      //          via the shallow merge, so no operator status message counts as
+      //          already dismissed for an existing user.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

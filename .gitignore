@@ -53,6 +53,10 @@ client/public/decks.json
 client/public/decks-skipped.json
 client/public/draft-pools.json
 client/public/parser-warning-patterns.json
+# Local operator status message, written by scripts/publish-status.sh
+# --channel local so the maintainer can preview the banner in `pnpm dev`. It is
+# a throwaway test payload — the real object is published to R2 out of band.
+client/public/status.json
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
