@@ -2128,7 +2128,13 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
         map(parse_ge_threshold, |n| (Comparator::GE, n)),
     ))
     .parse(rest)?;
-    let (rest, _) = alt((tag("Auras"), tag("Aura"))).parse(rest.trim_start())?;
+    // `parse_inner_condition` is a LOWERCASE-input combinator — its production
+    // entry point (`oracle_static::shared::parse_static_condition`) calls it
+    // with `&text.to_lowercase()`. Capitalized `tag("Aura")` here made this arm
+    // unreachable in a real parse, so Timber Paladin's three tiered gates all
+    // fell to `StaticCondition::Unrecognized`, which `game/layers.rs` evaluates
+    // as always-true — every tier applied and the 10/10 tier won on timestamp.
+    let (rest, _) = alt((tag("auras"), tag("aura"))).parse(rest.trim_start())?;
     let aura_filter = TargetFilter::Typed(TypedFilter {
         type_filters: vec![
             TypeFilter::Enchantment,
@@ -13345,7 +13351,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_plural_aura_count() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by 3 or more Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by 3 or more auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13359,7 +13365,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_exactly_one_aura() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly one Aura").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly one aura").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13373,7 +13379,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_exactly_two_auras() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13541,7 +13547,7 @@ mod tests {
     // (it is tried earlier in the `alt()` and requires `tag("is enchanted by ")`).
     #[test]
     fn test_source_is_enchanted_does_not_steal_aura_count() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
