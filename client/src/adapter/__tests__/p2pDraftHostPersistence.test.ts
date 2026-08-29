@@ -436,6 +436,93 @@ describe("P2PDraftHost persistence disposal", () => {
     expect(privateHost.seatNames.has(1)).toBe(false);
   });
 
+  it("restores a leave's live recovery state when its durability fence fails", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: { setSeatConnected: ReturnType<typeof vi.fn>; exportSession: ReturnType<typeof vi.fn> };
+      draftStarted: boolean;
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      perSeatWorkspaceSnapshots: Map<number, unknown>;
+      expiredDisconnectedSeats: Set<number>;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    const workspace = { schemaVersion: 1, placements: {}, virtualBasics: [] };
+    privateHost.draftStarted = true;
+    privateHost.adapter.setSeatConnected = vi.fn(async () => {});
+    privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+    privateHost.perSeatWorkspaceSnapshots.set(1, workspace);
+    saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
+
+    await expect(privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session)).rejects.toThrow("IDB unavailable");
+
+    expect(privateHost.guestSessions.get(1)).toBe(session);
+    expect(privateHost.seatTokens.get(1)).toBe("leave-token");
+    expect(privateHost.seatNames.get(1)).toBe("Guest");
+    expect(privateHost.perSeatWorkspaceSnapshots.get(1)).toBe(workspace);
+    expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(false);
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(1, 1, false);
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(2, 1, true);
+    expect(session.send).not.toHaveBeenCalled();
+    expect(session.close).not.toHaveBeenCalled();
+  });
+
+  it("does not extend a reconnect deadline across repeated reconnect drops", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = recoveredHost("Host");
+      const privateHost = host as unknown as {
+        adapter: {
+          setSeatConnected: ReturnType<typeof vi.fn>;
+          exportSession: ReturnType<typeof vi.fn>;
+          getViewForSeat: ReturnType<typeof vi.fn>;
+        };
+        draftStarted: boolean;
+        guestSessions: Map<number, unknown>;
+        seatTokens: Map<number, string>;
+        disconnectedSeats: Map<number, { deadlineAt: number }>;
+        mutationQueue: Promise<void>;
+        handleGuestDisconnect: (seat: number) => void;
+        handleReconnect: (session: unknown, token: string) => Promise<void>;
+      };
+      const view = { status: "Drafting", pool: [], seats: [] };
+      privateHost.draftStarted = true;
+      privateHost.adapter.setSeatConnected = vi.fn(async () => {});
+      privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
+      privateHost.adapter.getViewForSeat = vi.fn(async () => view);
+      privateHost.seatTokens.set(1, "guest-token");
+      privateHost.guestSessions.set(1, { send: vi.fn(async () => {}), close: vi.fn() });
+
+      privateHost.handleGuestDisconnect(1);
+      await privateHost.mutationQueue;
+      const deadlineAt = privateHost.disconnectedSeats.get(1)?.deadlineAt;
+      expect(deadlineAt).toBeDefined();
+
+      const firstReconnect = { onMessage: vi.fn(), send: vi.fn(async () => {}), close: vi.fn() };
+      await privateHost.handleReconnect(firstReconnect, "guest-token");
+      await vi.advanceTimersByTimeAsync(5_000);
+      privateHost.handleGuestDisconnect(1);
+      expect(privateHost.disconnectedSeats.get(1)?.deadlineAt).toBe(deadlineAt);
+      await privateHost.mutationQueue;
+
+      const secondReconnect = { onMessage: vi.fn(), send: vi.fn(async () => {}), close: vi.fn() };
+      await privateHost.handleReconnect(secondReconnect, "guest-token");
+      await vi.advanceTimersByTimeAsync(5_000);
+      privateHost.handleGuestDisconnect(1);
+      expect(privateHost.disconnectedSeats.get(1)?.deadlineAt).toBe(deadlineAt);
+      await host.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("makes a stale prior session inert after the seat reconnects", async () => {
     const host = recoveredHost("Host");
     const privateHost = host as unknown as {

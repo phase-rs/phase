@@ -311,6 +311,11 @@ export class P2PDraftHost {
   private seatTokens = new Map<number, string>();
   private seatNames = new Map<number, string>();
   private kickedTokens = new Set<string>();
+  /**
+   * The absolute end of a guest's current reconnect episode. It survives a
+   * successful tentative reconnect so a later drop cannot grant a new window.
+   */
+  private reconnectDeadlines = new Map<number, number>();
   private disconnectedSeats = new Map<
     number,
     { deadlineAt: number; timer: ReturnType<typeof setTimeout> | null }
@@ -713,8 +718,9 @@ export class P2PDraftHost {
       });
 
       // The prior fence makes the engine's connected bitmap recoverable while
-      // this reconnect is tentative. This fence records the completed handoff:
-      // a later host recovery must not resurrect the old grace deadline.
+      // this reconnect is tentative. This fence records the completed handoff
+      // while retaining its absolute deadline, so a later recovery or drop
+      // can use only the remaining grace window.
       await this.persistSessionStrict();
 
       const view = this.draftStarted
@@ -749,6 +755,7 @@ export class P2PDraftHost {
         if (reconnectDeadlineAt > Date.now()) {
           this.scheduleReconnectGrace(reconnectSeat, reconnectDeadlineAt);
         } else {
+          this.reconnectDeadlines.delete(reconnectSeat);
           this.expiredDisconnectedSeats.add(reconnectSeat);
         }
       }
@@ -1353,8 +1360,17 @@ export class P2PDraftHost {
     const session = this.guestSessions.get(seat);
     if (!session || session !== originatingSession || this.seatTokens.get(seat) !== draftToken) return;
 
+    const priorGraceDeadline = this.disconnectedSeats.get(seat)?.deadlineAt;
+    const priorReconnectDeadline = this.reconnectDeadlines.get(seat);
+    const priorWorkspace = this.perSeatWorkspaceSnapshots.get(seat);
+    const priorToken = this.seatTokens.get(seat);
+    const priorName = this.seatNames.get(seat);
+    const wasKicked = this.kickedTokens.has(draftToken);
+    const wasExpired = this.expiredDisconnectedSeats.has(seat);
+
     this.guestSessions.delete(seat);
     this.clearReconnectGrace(seat);
+    this.reconnectDeadlines.delete(seat);
     this.perSeatWorkspaceSnapshots.delete(seat);
 
     if (!this.draftStarted) {
@@ -1367,7 +1383,25 @@ export class P2PDraftHost {
       await this.adapter.setSeatConnected(seat, false);
     }
 
-    await this.persistSessionStrict();
+    try {
+      await this.persistSessionStrict();
+    } catch (error) {
+      // A failed strict write leaves the prior durable session authoritative.
+      // Restore its complete in-memory counterpart before returning without an
+      // acknowledgement, so the existing recovery capability stays usable.
+      this.guestSessions.set(seat, session);
+      if (priorGraceDeadline !== undefined) this.scheduleReconnectGrace(seat, priorGraceDeadline);
+      else if (priorReconnectDeadline !== undefined) this.reconnectDeadlines.set(seat, priorReconnectDeadline);
+      if (priorWorkspace !== undefined) this.perSeatWorkspaceSnapshots.set(seat, priorWorkspace);
+      if (priorToken !== undefined) this.seatTokens.set(seat, priorToken);
+      if (priorName !== undefined) this.seatNames.set(seat, priorName);
+      if (wasKicked) this.kickedTokens.add(draftToken);
+      else this.kickedTokens.delete(draftToken);
+      if (wasExpired) this.expiredDisconnectedSeats.add(seat);
+      else this.expiredDisconnectedSeats.delete(seat);
+      if (this.draftStarted) await this.adapter.setSeatConnected(seat, true);
+      throw error;
+    }
     await session.send({
       type: "draft_leave_ack",
       draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
@@ -1390,7 +1424,10 @@ export class P2PDraftHost {
 
     this.guestSessions.delete(seat);
 
-    this.scheduleReconnectGrace(seat, Date.now() + this.gracePeriodMs);
+    this.scheduleReconnectGrace(
+      seat,
+      this.reconnectDeadlines.get(seat) ?? Date.now() + this.gracePeriodMs,
+    );
     // The socket callback is synchronous, but all externally visible state
     // follows the one durable queue: connected bitmap → snapshot → views/pause.
     this.runDetachedMutation("guest disconnect", async () => {
@@ -1407,6 +1444,7 @@ export class P2PDraftHost {
   }
 
   private scheduleReconnectGrace(seat: number, deadlineAt: number): void {
+    this.reconnectDeadlines.set(seat, deadlineAt);
     const remainingMs = Math.max(0, deadlineAt - Date.now());
     const timer = setTimeout(() => {
       this.runDetachedMutation("reconnect grace expiry", () => this.expireReconnectGrace(seat));
@@ -1456,6 +1494,7 @@ export class P2PDraftHost {
     // silently resume the pod just because their reconnect window ended.
     if (!this.disconnectedSeats.has(seat)) return;
     this.clearReconnectGrace(seat);
+    this.reconnectDeadlines.delete(seat);
     if (!this.draftStarted) {
       this.seatTokens.delete(seat);
       this.seatNames.delete(seat);
@@ -2072,6 +2111,7 @@ export class P2PDraftHost {
       await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
       const grace = this.disconnectedSeats.get(seat);
       if (grace) this.clearReconnectGrace(seat);
+      this.reconnectDeadlines.delete(seat);
       this.expiredDisconnectedSeats.delete(seat);
       this.seatTokens.delete(seat);
       this.seatNames.delete(seat);
@@ -2485,6 +2525,7 @@ export class P2PDraftHost {
     // Cancel grace timer if active
     const grace = this.disconnectedSeats.get(seat);
     if (grace) this.clearReconnectGrace(seat);
+    this.reconnectDeadlines.delete(seat);
     this.expiredDisconnectedSeats.delete(seat);
 
     await this.persistSessionStrict();
@@ -2589,9 +2630,7 @@ export class P2PDraftHost {
       seatTokens: Object.fromEntries(this.seatTokens),
       seatNames: Object.fromEntries(this.seatNames),
       kickedTokens: [...this.kickedTokens],
-      reconnectDeadlines: Object.fromEntries(
-        [...this.disconnectedSeats.entries()].map(([seat, grace]) => [seat, grace.deadlineAt]),
-      ),
+      reconnectDeadlines: Object.fromEntries(this.reconnectDeadlines),
       expiredDisconnectedSeats: [...this.expiredDisconnectedSeats],
       draftStarted: this.draftStarted,
       manualPause: this.manualPause,
@@ -2799,6 +2838,7 @@ export class P2PDraftHost {
 
       const deadlineAt = reconnectDeadlines[seat] ?? now + this.gracePeriodMs;
       if (deadlineAt <= now) {
+        this.reconnectDeadlines.delete(seat);
         if (this.draftStarted) {
           this.expiredDisconnectedSeats.add(seat);
         } else {
@@ -2849,6 +2889,7 @@ export class P2PDraftHost {
       if (timer !== null) clearTimeout(timer);
     }
     this.disconnectedSeats.clear();
+    this.reconnectDeadlines.clear();
     this.bo3State.clear();
     this.matchDecks.clear();
     this.matchLaunches.clear();
