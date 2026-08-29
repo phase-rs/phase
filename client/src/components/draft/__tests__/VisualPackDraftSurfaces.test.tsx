@@ -94,6 +94,7 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
     pass_direction: "Left",
     current_pack: [PRINTING_B],
     required_pick_count: 1,
+    pick_selection_mode: "Direct",
     pool: [PRINTING_A],
     draft_effects: [],
     pool_groups: {

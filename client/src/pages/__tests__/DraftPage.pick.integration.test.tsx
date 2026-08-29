@@ -86,7 +86,7 @@ function view({ pool = [], pack = [card("picked")], effects = [] }: { pool?: Dra
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
     seats: [], current_pack_number: 1, pick_number: 1, pass_direction: "Left",
-    cards_per_pack: 14, required_pick_count: 1, pick_steps_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [],
+    cards_per_pack: 14, required_pick_count: 1, pick_selection_mode: "Direct", pick_steps_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [],
     timer_remaining_ms: null, standings: [], current_round: 0, next_pairing_round: 1, tournament_format: "Swiss",
     pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
   } as DraftPlayerView;

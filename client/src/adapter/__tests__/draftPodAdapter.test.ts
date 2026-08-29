@@ -128,6 +128,7 @@ function mockView(status: string): DraftPlayerView {
     current_pack: null,
     // Premier (CR 905.1a) with no pending pack.
     required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pool: [],
     draft_effects: [],
     pool_groups: {

@@ -94,6 +94,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
     pass_direction: "Left",
     cards_per_pack: 14,
     required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,

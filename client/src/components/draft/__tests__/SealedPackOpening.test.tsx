@@ -16,6 +16,7 @@ const VIEW: DraftPlayerView = {
   pass_direction: "Left",
   current_pack: null,
   required_pick_count: 0,
+  pick_selection_mode: "Direct",
   pool: [
     {
       instance_id: "creature",

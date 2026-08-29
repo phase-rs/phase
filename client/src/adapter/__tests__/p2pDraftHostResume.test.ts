@@ -49,6 +49,7 @@ function viewFor(
     pass_direction: "Left",
     current_pack: null,
     required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pool: [],
     draft_effects: [],
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
