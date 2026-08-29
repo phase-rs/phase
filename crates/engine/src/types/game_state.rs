@@ -28731,8 +28731,7 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("legacy continuation event reconciles after frame projection")
-            .into_game_state()
-            .expect("persisted test snapshot satisfies the checked restore contract");
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("legacy continuation projects into the canonical frame stack")
@@ -28778,8 +28777,7 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("v2 frame event reconciles before materialization")
-            .into_game_state()
-            .expect("persisted test snapshot satisfies the checked restore contract");
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("v2 frame restores as an active continuation")

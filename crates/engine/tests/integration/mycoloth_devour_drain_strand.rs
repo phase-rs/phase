@@ -394,6 +394,8 @@ fn a2_wedged_turn15_capture_drains_its_parked_triggers() {
     assert_turn15_wedge_present(&state);
 
     apply(&mut state, PlayerId(1), GameAction::PassPriority).expect("PassPriority is legal");
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("the refreshed priority window accepts the next pass");
 
     assert!(
         state.deferred_triggers.is_empty(),
