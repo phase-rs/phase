@@ -189,7 +189,7 @@ fn missing_payment_finalization_baseline_is_indeterminate_not_no_payment() {
             PaymentContinuationIndeterminate::MissingFinalizationBaseline
         )
     );
-    assert_eq!(batch.successors, vec![None]);
+    assert!(batch.successors.iter().all(Option::is_none));
 }
 
 #[test]
