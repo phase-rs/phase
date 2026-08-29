@@ -261,7 +261,13 @@ fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
 /// round trip, so this test covers the persisted seam on its own terms.
 fn state_with_resolving_stack_entry() -> GameState {
     let mut state = GameState::new_two_player(42);
-    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.waiting_for = WaitingFor::OptionalEffectChoice {
+        player: P0,
+        source_id: SOURCE,
+        description: None,
+        may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
+    };
     state.resolving_stack_entry = Some(StackEntry {
         id: ObjectId(704),
         source_id: SOURCE,
@@ -308,7 +314,8 @@ fn persisted_round_trip_preserves_the_boxed_resolving_stack_entry() {
     // just the derived `GameState` one.
     let restored = serde_json::from_str::<PersistedGameState>(&json)
         .expect("and deserializes back through the persisted codec")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     let restored_entry = restored
         .resolving_stack_entry
@@ -387,7 +394,8 @@ fn persisted_restore_migrates_legacy_jeskas_will_mana_target_role() {
 
     let restored = serde_json::from_value::<PersistedGameState>(persisted)
         .expect("legacy Jeska's Will snapshot restores through the persisted codec")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     let reserialized = serde_json::to_value(PersistedGameState::capture(restored))
         .expect("the migrated state reserializes");
     assert_eq!(

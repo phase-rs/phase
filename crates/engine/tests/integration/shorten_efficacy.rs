@@ -550,6 +550,7 @@ fn restore_dump(json: &str) -> GameState {
     )
     .expect("gameState deserializes through the production decoder")
     .into_game_state()
+    .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// The LIVE-PATH board: the real 4-player Dina / Bloodthirsty Conqueror drain

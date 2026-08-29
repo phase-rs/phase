@@ -69,10 +69,11 @@ pub fn load_realistic_dump() -> GameState {
     // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
     // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
     // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
-    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+    // The test unwraps the fallible persistence boundary after asserting this fixture decodes.
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// Count the battlefield Saprolings `who` controls (tapped or not) — the fodder reach-guard oracle.

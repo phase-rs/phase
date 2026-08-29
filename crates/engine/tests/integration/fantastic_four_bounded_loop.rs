@@ -104,7 +104,8 @@ fn load_dump(gz: &[u8]) -> GameState {
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
     let mut state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     state.loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     state
 }
@@ -2606,7 +2607,8 @@ fn c1_row7c_the_may_journal_does_not_cross_save_load() {
     );
     let restored = serde_json::from_value::<PersistedGameState>(encoded)
         .expect("the encoded board decodes through the production decoder")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert_eq!(
         restored.loop_answers_recorded(),
         0,

@@ -2,8 +2,8 @@ import type { ReactNode, Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DraftWorkspaceCapabilities } from "../../../adapter/draft-adapter";
-import { ManaFontIcon } from "../../icons/ManaFontIcon";
 import { PopoverMenu, popoverMenuItemClass } from "../../menu/PopoverMenu";
+import { DeckTypeCounts } from "./DeckTypeCounts";
 import {
   DRAFT_WORKSPACE_COLUMN_MAX,
   DRAFT_WORKSPACE_COLUMN_MIN,
@@ -23,9 +23,12 @@ interface DraftWorkspaceToolbarProps {
   interactionLocked?: boolean;
   phoneMode?: boolean;
   phoneLayoutDialog?: boolean;
+  phonePortraitDeckToolbar?: boolean;
   tabletMode?: boolean;
-  phoneDeckVisualColumnCap?: number;
-  onPhoneDeckVisualColumnCapChange?(next: number): void;
+  compactDeckTypeCounts?: boolean;
+  visualColumnCapValue?: number;
+  visualColumnCapMax?: number;
+  onVisualColumnCapChange?(next: number): void;
   onChange(next: DraftBoardPreferences): void;
 }
 
@@ -40,9 +43,12 @@ export function DraftWorkspaceToolbar({
   interactionLocked = false,
   phoneMode = false,
   phoneLayoutDialog = false,
+  phonePortraitDeckToolbar = false,
   tabletMode = false,
-  phoneDeckVisualColumnCap,
-  onPhoneDeckVisualColumnCapChange,
+  compactDeckTypeCounts = false,
+  visualColumnCapValue,
+  visualColumnCapMax,
+  onVisualColumnCapChange,
   onChange,
 }: DraftWorkspaceToolbarProps) {
   const { t } = useTranslation("draft");
@@ -136,28 +142,30 @@ export function DraftWorkspaceToolbar({
       </button>
     </div>
   );
-  const layoutCapControls = phoneDeckVisualColumnCap === undefined || onPhoneDeckVisualColumnCapChange === undefined
+  const layoutCapControls = visualColumnCapValue === undefined
+    || visualColumnCapMax === undefined
+    || onVisualColumnCapChange === undefined
     ? null
     : (
       <div role="group" aria-label={t("workspace.layout.maxPerRow")} className="flex items-center justify-center gap-2">
         <button
           type="button"
-          disabled={interactionLocked || phoneDeckVisualColumnCap <= 1}
-          onClick={() => onPhoneDeckVisualColumnCapChange(phoneDeckVisualColumnCap - 1)}
+          disabled={interactionLocked || visualColumnCapValue <= 1}
+          onClick={() => onVisualColumnCapChange(visualColumnCapValue - 1)}
           aria-label={t("workspace.layout.decreaseMaxPerRow")}
-          className="h-8 w-8 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
+          className="h-11 w-11 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
         >
           −
         </button>
         <output className="min-w-8 text-center font-mono text-sm text-fg" aria-live="polite">
-          {phoneDeckVisualColumnCap}
+          {visualColumnCapValue}
         </output>
         <button
           type="button"
-          disabled={interactionLocked || phoneDeckVisualColumnCap >= 5}
-          onClick={() => onPhoneDeckVisualColumnCapChange(phoneDeckVisualColumnCap + 1)}
+          disabled={interactionLocked || visualColumnCapValue >= visualColumnCapMax}
+          onClick={() => onVisualColumnCapChange(visualColumnCapValue + 1)}
           aria-label={t("workspace.layout.increaseMaxPerRow")}
-          className="h-8 w-8 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
+          className="h-11 w-11 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
         >
           +
         </button>
@@ -168,7 +176,7 @@ export function DraftWorkspaceToolbar({
     <div
       role="toolbar"
       aria-label={t("workspace.toolbar.label")}
-      className={`flex flex-wrap items-center gap-3 border-b border-hairline px-4 py-1.5 shadow-[inset_0_-1px_0_rgba(0,0,0,0.2)] ${phoneMode ? "sticky top-0 z-20 bg-slate-950" : "bg-white/[0.035]"}`}
+      className={`flex flex-wrap items-center gap-3 border-b border-hairline ${phonePortraitDeckToolbar ? "px-2" : "px-4"} py-1.5 shadow-[inset_0_-1px_0_rgba(0,0,0,0.2)] ${phoneMode ? "sticky top-0 z-20 bg-slate-950" : "bg-white/[0.035]"}`}
     >
       {heading !== undefined && (
         <h2 className="shrink-0 font-display text-base font-semibold text-fg">{heading}</h2>
@@ -285,25 +293,7 @@ export function DraftWorkspaceToolbar({
       {phoneLayoutDialog && tabletMode && showHeadersControl}
       {phoneMode && !phoneLayoutDialog && columnControls}
       {deckTypeCounts !== undefined && (
-        <output
-          data-deck-type-counts
-          className="inline-flex min-h-9 items-center gap-3 text-sm font-semibold tabular-nums text-fg"
-        >
-          <span
-            aria-label={`${deckTypeCounts.creatures} ${t("pool.groups.creature")}`}
-            className="inline-flex items-center gap-1"
-          >
-            <span>{deckTypeCounts.creatures}</span>
-            <ManaFontIcon iconClass="ms-creature" fallbackText="C" size="md" className="shrink-0" />
-          </span>
-          <span
-            aria-label={`${deckTypeCounts.lands} ${t("pool.groups.land")}`}
-            className="inline-flex items-center gap-1"
-          >
-            <span>{deckTypeCounts.lands}</span>
-            <ManaFontIcon iconClass="ms-land" fallbackText="L" size="md" className="shrink-0" />
-          </span>
-        </output>
+        <DeckTypeCounts counts={deckTypeCounts} compact={compactDeckTypeCounts} />
       )}
       {deckControls}
       {trailingControls}

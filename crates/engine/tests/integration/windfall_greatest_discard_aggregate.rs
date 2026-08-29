@@ -594,7 +594,9 @@ fn windfall_paused_mid_fan_out_still_draws_the_greatest() {
         .expect("parked Windfall state serializes through the authoritative persistence envelope");
     let restored: PersistedGameState = serde_json::from_str(&saved)
         .expect("parked Windfall state restores through the authoritative persistence envelope");
-    let restored = restored.into_game_state();
+    let restored = restored
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert!(
         restored.pending_discard_batch.is_some(),
         "the live discard cursor must survive save and restore before its replacement choice"

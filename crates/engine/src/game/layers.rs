@@ -952,22 +952,12 @@ pub(crate) fn evaluate_condition_with_recipient(
 ///
 /// Purely structural (no `GameState` needed), mirroring the shape of
 /// `condition_uses_recipient_context` and `static_condition_uses_object_population`
-/// in this module. The `_ => false` leaf arm is safe because the leaf question
-/// is delegated to the compiler-forced
-/// [`StaticCondition::designation_player_anchor`] accessor.
+/// in this module. Delegates the leaf question and the Boolean-combinator walk
+/// to [`StaticCondition::has_unbindable_designation_anchor`] — the single
+/// authority shared with any parser-time gate that must decline to mark such a
+/// condition "supported" when it can never bind at runtime.
 fn static_condition_has_unresolvable_designation_anchor(condition: &StaticCondition) -> bool {
-    if let Some(scope) = condition.designation_player_anchor() {
-        return !matches!(scope, PlayerScope::Controller);
-    }
-    match condition {
-        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
-            .iter()
-            .any(static_condition_has_unresolvable_designation_anchor),
-        StaticCondition::Not { condition } => {
-            static_condition_has_unresolvable_designation_anchor(condition)
-        }
-        _ => false,
-    }
+    condition.has_unbindable_designation_anchor()
 }
 
 /// Selects the controller that supplies "you" for an active effect's

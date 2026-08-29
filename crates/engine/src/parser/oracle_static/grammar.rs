@@ -783,11 +783,26 @@ pub(crate) fn parse_enchanted_equipped_predicate(
             if matches!(predicate, RuleStaticPredicate::CantUntap) {
                 if let Some((_, after_cond)) = pred_tp.split_around(" as long as ") {
                     let condition_text = after_cond.original.trim().trim_end_matches('.');
+                    // CR 502.3: this "as long as" split bypasses
+                    // `extract_cant_untap_condition`, so it must apply the shared
+                    // untap-step enforceability gate itself — otherwise a
+                    // scoped-designation or payment-continuation leaf reaching
+                    // THIS path would still be a false green.
                     def.condition = Some(
                         parse_static_condition(condition_text)
                             .or_else(|| parse_attached_static_condition(condition_text))
-                            .unwrap_or(StaticCondition::Unrecognized {
-                                text: condition_text.to_string(),
+                            .map(|condition| {
+                                gate_cant_untap_condition(
+                                    condition,
+                                    condition_text,
+                                    UntapGatePolarity::Positive,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                unenforceable_cant_untap_condition(
+                                    condition_text,
+                                    UntapGatePolarity::Positive,
+                                )
                             }),
                     );
                 } else if let Some(condition) = extract_cant_untap_condition(&pred_lower) {

@@ -609,7 +609,10 @@ export function DraftPage() {
         <MenuShell
           layout="stacked"
           contentWidthClass="max-w-none"
-          compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+          compactTopPadding={
+            (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+            || tabletDeckbuilding
+          }
         >
         <div className="flex w-full flex-col">
         {resumeLoading ? (

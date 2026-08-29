@@ -6,7 +6,7 @@ use engine::game::zones::move_to_zone;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode,
     DiscardSelfScope, Effect, PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, SacrificeCost, SubAbilityLink, TargetFilter,
+    ResolvedAbility, SacrificeCost, SubAbilityLink, TargetFilter, TargetRef,
 };
 use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::game_state::{
@@ -123,6 +123,74 @@ fn runner_with_hand(card_count: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) 
         .map(|index| scenario.add_card_to_hand(P0, &format!("Payment Card {index}")))
         .collect();
     (scenario.build(), source, cards)
+}
+
+fn cast_to_resolution_optional_payment(runner: &mut GameRunner, card: ObjectId) {
+    let mut cast = runner.cast(card).commit();
+    for _ in 0..32 {
+        if matches!(
+            cast.state().waiting_for,
+            WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        ) {
+            return;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("cast/ETB production path advances to optional payment");
+    }
+    panic!(
+        "production path never reached optional payment: {:?}",
+        cast.state().waiting_for
+    );
+}
+
+fn pass_until_trigger_target_selection(runner: &mut GameRunner) {
+    for _ in 0..32 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("reflexive trigger advances to its target selection");
+    }
+    panic!(
+        "reflexive trigger never requested its target: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn drain_without_reflexive_target(runner: &mut GameRunner) {
+    for _ in 0..64 {
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ),
+            "declined/impossible payment must never create Bullseye's reflexive target prompt"
+        );
+        if runner.state().stack.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().pending_trigger_order.is_none()
+        {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("production stack drains without a reflexive trigger");
+            }
+            ref other => panic!("unexpected negative-path prompt while draining: {other:?}"),
+        }
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_trigger.is_none());
+    assert!(runner.state().pending_trigger_order.is_none());
+    assert!(runner.state().pending_trigger_entry.is_none());
+    assert!(runner.state().active_optional_effect_frame().is_none());
+    assert!(runner.state().pending_cost_move_resume.is_none());
 }
 
 fn optional_graveyard_exile_replacement() -> ReplacementDefinition {
@@ -314,6 +382,233 @@ fn parsed_trigger_reaches_optional_payment_through_cast_and_apply() {
     )
     .expect("parsed trigger payment action applies");
     assert_eq!(runner.state().players[P0.0 as usize].life, 23);
+}
+
+#[test]
+fn kun_lun_warrior_decline_discard_and_sacrifice_paths() {
+    const ORACLE: &str = "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card.";
+
+    // Decline: no payment and no If-you-do draw.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warrior = scenario
+        .add_creature_to_hand_from_oracle(P0, "K'un-Lun Warrior", 3, 3, ORACLE)
+        .id();
+    let top = scenario.add_card_to_library_top(P0, "Decline Top");
+    scenario.add_card_to_hand(P0, "Decline Fodder");
+    let mut runner = scenario.build();
+    cast_to_resolution_optional_payment(&mut runner, warrior);
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseResolutionOptionalPaymentBranch {
+            choice: ResolutionOptionalPaymentChoice::Decline,
+        },
+    )
+    .unwrap();
+    assert_eq!(runner.state().objects[&top].zone, Zone::Library);
+
+    // Discard: branch index 1 discards exactly the chosen card, then draws once.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warrior = scenario
+        .add_creature_to_hand_from_oracle(P0, "K'un-Lun Warrior", 3, 3, ORACLE)
+        .id();
+    let fodder = scenario.add_card_to_hand(P0, "Discard Fodder");
+    let top = scenario.add_card_to_library_top(P0, "Discard Top");
+    let mut runner = scenario.build();
+    cast_to_resolution_optional_payment(&mut runner, warrior);
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseResolutionOptionalPaymentBranch {
+            choice: ResolutionOptionalPaymentChoice::Pay { index: 1 },
+        },
+    )
+    .unwrap();
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&top].zone, Zone::Hand);
+
+    // Sacrifice: branch index 0 offers only the artifact and draws once after
+    // the canonical sacrifice cursor completes.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warrior = scenario
+        .add_creature_to_hand_from_oracle(P0, "K'un-Lun Warrior", 3, 3, ORACLE)
+        .id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Payment Artifact", "")
+        .id();
+    let nonartifact = scenario.add_creature(P0, "Ineligible Creature", 1, 1).id();
+    let top = scenario.add_card_to_library_top(P0, "Sacrifice Top");
+    let mut runner = scenario.build();
+    cast_to_resolution_optional_payment(&mut runner, warrior);
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseResolutionOptionalPaymentBranch {
+            choice: ResolutionOptionalPaymentChoice::Pay { index: 0 },
+        },
+    )
+    .unwrap();
+    let WaitingFor::PayCost { choices, count, .. } = &runner.state().waiting_for else {
+        panic!("artifact sacrifice must use the canonical selector");
+    };
+    assert_eq!((*count, choices.as_slice()), (1, &[artifact][..]));
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards {
+            cards: vec![artifact],
+        },
+    )
+    .unwrap();
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&nonartifact].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&top].zone, Zone::Hand);
+
+    // No artifact and no hand card: the impossible optional payment declines
+    // without exposing a prompt or drawing.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warrior = scenario
+        .add_creature_to_hand_from_oracle(P0, "K'un-Lun Warrior", 3, 3, ORACLE)
+        .id();
+    let top = scenario.add_card_to_library_top(P0, "Unavailable Top");
+    let mut runner = scenario.build();
+    let mut cast = runner.cast(warrior).commit();
+    for _ in 0..16 {
+        if cast.state().stack.is_empty() {
+            break;
+        }
+        assert!(!matches!(
+            cast.state().waiting_for,
+            WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        ));
+        cast.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(cast.state().objects[&warrior].zone, Zone::Battlefield);
+    assert_eq!(cast.state().objects[&top].zone, Zone::Library);
+}
+
+#[test]
+fn bullseye_when_you_do_creates_reflexive_trigger_then_targets() {
+    const ORACLE: &str = "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.\n{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bullseye = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bullseye, Death Dealer", 3, 3, ORACLE)
+        .id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Bullseye Fodder", "")
+        .id();
+    let mut runner = scenario.build();
+    cast_to_resolution_optional_payment(&mut runner, bullseye);
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseResolutionOptionalPaymentBranch {
+            choice: ResolutionOptionalPaymentChoice::Pay { index: 0 },
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost { .. }
+    ));
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards {
+            cards: vec![artifact],
+        },
+    )
+    .unwrap();
+    pass_until_trigger_target_selection(&mut runner);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .unwrap();
+    for _ in 0..8 {
+        if runner.state().players[P1.0 as usize].life == 18 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().players[P1.0 as usize].life, 18);
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+
+    // The nonland-discard sibling reaches the same delayed target seam.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bullseye = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bullseye, Death Dealer", 3, 3, ORACLE)
+        .id();
+    let discard = scenario.add_card_to_hand(P0, "Bullseye Discard");
+    let mut runner = scenario.build();
+    cast_to_resolution_optional_payment(&mut runner, bullseye);
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::ChooseResolutionOptionalPaymentBranch {
+            choice: ResolutionOptionalPaymentChoice::Pay { index: 1 },
+        },
+    )
+    .unwrap();
+    assert_eq!(runner.state().objects[&discard].zone, Zone::Graveyard);
+    pass_until_trigger_target_selection(&mut runner);
+
+    // Declining the parent payment creates no reflexive trigger and asks for no
+    // target. A land-only hand likewise leaves no payable branch.
+    for with_land in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bullseye = scenario
+            .add_creature_to_hand_from_oracle(P0, "Bullseye, Death Dealer", 3, 3, ORACLE)
+            .id();
+        if with_land {
+            scenario.add_land_to_hand(P0, "Only Land");
+        } else {
+            scenario.add_card_to_hand(P0, "Decline Nonland");
+        }
+        let mut runner = scenario.build();
+        if with_land {
+            let mut cast = runner.cast(bullseye).commit();
+            for _ in 0..16 {
+                if cast.state().stack.is_empty() {
+                    break;
+                }
+                assert!(!matches!(
+                    cast.state().waiting_for,
+                    WaitingFor::ResolutionOptionalPaymentChoice { .. }
+                        | WaitingFor::TriggerTargetSelection { .. }
+                ));
+                cast.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(cast.state().objects[&bullseye].zone, Zone::Battlefield);
+            drop(cast);
+            drain_without_reflexive_target(&mut runner);
+            assert_eq!(runner.state().players[P1.0 as usize].life, 20);
+        } else {
+            cast_to_resolution_optional_payment(&mut runner, bullseye);
+            apply(
+                runner.state_mut(),
+                P0,
+                GameAction::ChooseResolutionOptionalPaymentBranch {
+                    choice: ResolutionOptionalPaymentChoice::Decline,
+                },
+            )
+            .unwrap();
+            drain_without_reflexive_target(&mut runner);
+            assert_eq!(runner.state().players[P1.0 as usize].life, 20);
+        }
+    }
 }
 
 #[test]

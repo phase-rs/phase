@@ -11460,6 +11460,95 @@ pub enum PersistedGameState {
     Trusted(Box<TrustedGameStateEnvelope>),
 }
 
+/// Controls when a decoded persisted state may be finalized.
+///
+/// A persisted payload contains only serializable engine state. Callers that
+/// restore runtime-only card data must defer finalization until that data has
+/// been installed; finalizing it first can publish a priority window derived
+/// from incomplete characteristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistedRestoreFinalization {
+    /// The caller supplies runtime-only state before consuming the prepared
+    /// token with [`PreparedPersistedGameState::finalize_after_rehydration`].
+    DeferUntilRehydrated,
+    /// Compatibility policy for consumers that have no runtime rehydration
+    /// step. This still uses the same checked restore pipeline.
+    Immediate,
+}
+
+/// A decoded persisted game that has passed restore-boundary repair but has
+/// not yet been made externally observable.
+///
+/// The contained game state is deliberately opaque. The only way to mutate it
+/// is the one-shot rehydration closure, followed by the engine-owned finalizer.
+/// This prevents a persistence consumer from accidentally publishing an
+/// intermediate priority state between decode and runtime rehydration.
+#[derive(Debug)]
+pub struct PreparedPersistedGameState {
+    state: GameState,
+    finalization: PersistedRestoreFinalization,
+    recovered_terminal_rest: bool,
+}
+
+/// A persisted state reached a priority window with unresolved resolution
+/// ownership and no exact engine-owned terminal repair.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PersistedRestoreError {
+    #[error("persisted state uses an unsupported format configuration: {0}")]
+    UnsupportedFormat(String),
+    #[error("persisted restore finalization policy mismatch: {0}")]
+    FinalizationPolicyMismatch(&'static str),
+    #[error("persisted state runtime rehydration failed: {0}")]
+    RehydrationFailed(String),
+    #[error("persisted state has unsettled resolution ownership at priority")]
+    UnsettledPriorityResolution,
+    #[error("persisted terminal-rest recovery did not make strict progress")]
+    TerminalRestRecoveryExhausted,
+    #[error("persisted priority state has deferred triggers that could not settle")]
+    DeferredTriggerSettlement,
+    #[error("persisted priority settlement failed: {0}")]
+    PrioritySettlementFailed(String),
+}
+
+impl PreparedPersistedGameState {
+    /// Rehydrate runtime-only state, then run the single restore finalization
+    /// boundary. The closure is intentionally the only mutable access to the
+    /// decoded state and is consumed exactly once with this token.
+    pub fn finalize_after_rehydration(
+        self,
+        rehydrate: impl FnOnce(&mut GameState) -> Result<(), String>,
+    ) -> Result<GameState, PersistedRestoreError> {
+        if self.finalization != PersistedRestoreFinalization::DeferUntilRehydrated {
+            return Err(PersistedRestoreError::FinalizationPolicyMismatch(
+                "prepared for immediate finalization",
+            ));
+        }
+        self.finish_after_rehydration(rehydrate)
+    }
+
+    fn finish_after_rehydration(
+        self,
+        rehydrate: impl FnOnce(&mut GameState) -> Result<(), String>,
+    ) -> Result<GameState, PersistedRestoreError> {
+        let mut state = self.state;
+        rehydrate(&mut state).map_err(PersistedRestoreError::RehydrationFailed)?;
+        crate::game::engine::finalize_persisted_restore(&mut state, self.recovered_terminal_rest)?;
+        Ok(state)
+    }
+
+    /// Finish a checked restore whose consumer has no runtime-only state to
+    /// hydrate. Kept separate from `into_game_state` so every new persistence
+    /// boundary chooses its finalization policy explicitly.
+    pub fn finalize_immediately(self) -> Result<GameState, PersistedRestoreError> {
+        if self.finalization != PersistedRestoreFinalization::Immediate {
+            return Err(PersistedRestoreError::FinalizationPolicyMismatch(
+                "requires runtime rehydration before finalization",
+            ));
+        }
+        self.finish_after_rehydration(|_| Ok(()))
+    }
+}
+
 impl Serialize for PersistedGameState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -11529,8 +11618,10 @@ impl PersistedGameState {
         Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
     }
 
-    /// Restores the persisted form through the appropriate trust boundary.
-    pub fn into_game_state(self) -> GameState {
+    /// Decodes the persisted form through the appropriate trust boundary,
+    /// without publishing it. This is private on purpose: every external
+    /// restore must first pass the checked terminal-rest preparation below.
+    fn into_game_state_unchecked(self) -> GameState {
         let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
@@ -11583,6 +11674,38 @@ impl PersistedGameState {
         state.rehydrate_rng();
         state.resume_stale_token_commander_zone_choice();
         state
+    }
+
+    /// Decode and repair a persisted state before runtime-only data is
+    /// rehydrated. No priority pass, Resolve All resume, or other player action
+    /// is manufactured here.
+    pub fn prepare_for_restore(
+        self,
+        finalization: PersistedRestoreFinalization,
+    ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
+        let mut state = self.into_game_state_unchecked();
+        state
+            .format_config
+            .reject_unimplemented_range_of_influence()
+            .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        let recovered_terminal_rest =
+            crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
+        Ok(PreparedPersistedGameState {
+            state,
+            finalization,
+            recovered_terminal_rest,
+        })
+    }
+
+    /// Checked decode for callers without runtime-only rehydration.
+    ///
+    /// Production persistence boundaries that need runtime-only card data use
+    /// [`Self::prepare_for_restore`] with deferred finalization. This immediate
+    /// variant remains fallible so persisted corruption cannot turn into a
+    /// process panic at a library boundary.
+    pub fn into_game_state(self) -> Result<GameState, PersistedRestoreError> {
+        self.prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .and_then(PreparedPersistedGameState::finalize_immediately)
     }
 }
 
@@ -26589,7 +26712,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("legacy effect save restores through the persisted boundary")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(matches!(
             restored.objects[&source].abilities[0].effect.as_ref(),
             Effect::SetTapState {
@@ -26796,7 +26920,8 @@ mod tests {
 
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("legacy pair marker migrates at the persistence boundary")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert!(restored.batched_zone_change_trigger_fired.contains(&(
                 definition_ref.clone(),
                 19,
@@ -27103,10 +27228,12 @@ mod tests {
 
         let raw = serde_json::from_value::<PersistedGameState>(raw)
             .expect("raw delayed install migrates")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let trusted = serde_json::from_value::<PersistedGameState>(trusted)
             .expect("trusted delayed install migrates")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
 
         assert_eq!(raw.delayed_triggers, trusted.delayed_triggers);
         assert_eq!(
@@ -27212,10 +27339,12 @@ mod tests {
         [
             serde_json::from_value::<PersistedGameState>(raw)
                 .expect("raw legacy dungeon prompt migrates")
-                .into_game_state(),
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
             serde_json::from_value::<PersistedGameState>(trusted)
                 .expect("trusted legacy dungeon prompt migrates")
-                .into_game_state(),
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
         ]
     }
 
@@ -27518,7 +27647,8 @@ mod tests {
             erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("unique legacy event records reconcile")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert_eq!(
                 restored_deferred_zone_change_keys(&restored),
                 vec![(19, 0), (19, 1)]
@@ -27580,7 +27710,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("the parked batch's records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let batch = restored
             .pending_discard_batch
             .as_ref()
@@ -27685,7 +27816,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(wire)
             .expect("an absent parked batch defaults to None")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(restored.pending_discard_batch.is_none());
         assert!(
             matches!(
@@ -27766,7 +27898,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("the parked batch's records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let parked = restored
             .pending_combat_lifelink
             .as_ref()
@@ -27845,7 +27978,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(wire)
             .expect("an absent parked batch defaults to None")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(restored.pending_combat_lifelink.is_none());
         assert!(
             matches!(
@@ -27878,7 +28012,8 @@ mod tests {
             .expect("fixture serializes");
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("unique records repair a stale collision")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             restored_deferred_zone_change_keys(&restored),
             vec![(19, 0), (19, 1)]
@@ -27906,7 +28041,8 @@ mod tests {
             .expect("fixture serializes");
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("stamped prior-turn event remains valid")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(18, 0)]);
     }
 
@@ -27930,7 +28066,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("stale ledger history is pruned before live event reconciliation")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
 
         assert_eq!(restored.zone_changes_this_turn.len(), 1);
         assert_eq!(
@@ -28117,7 +28254,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("all serialized carrier records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let GameEvent::ZoneChanged { record, .. } = &restored
             .pending_player_scope_sacrifice_choice
             .as_ref()
@@ -28366,7 +28504,8 @@ mod tests {
             erase_deferred_and_order_trigger_firing_classifiers(&mut persisted);
             let state = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("historical omitted Normal classifiers migrate")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
 
             assert_eq!(state.deferred_triggers[0].firing(), TriggerFiring::Ordinary);
             assert_eq!(
@@ -28486,7 +28625,8 @@ mod tests {
         for persisted in [raw, trusted] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("restriction fixture restores")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
 
             assert!(
                 !restored.restrictions.iter().any(|restriction| matches!(
@@ -28536,7 +28676,7 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("v1 fixture conservatively restores unlabelled trigger carriers")
-            .into_game_state();
+            .into_game_state_unchecked();
 
         assert_eq!(
             restored.pending_trigger_firing,
@@ -28591,7 +28731,7 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("legacy continuation event reconciles after frame projection")
-            .into_game_state();
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("legacy continuation projects into the canonical frame stack")
@@ -28637,7 +28777,7 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("v2 frame event reconciles before materialization")
-            .into_game_state();
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("v2 frame restores as an active continuation")
@@ -33664,7 +33804,8 @@ mod tests {
         ] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("legacy null source ID is the source-less choice mode")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert!(matches!(
                 restored.waiting_for,
                 WaitingFor::NamedChoice {
@@ -33691,7 +33832,10 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("persistence boundary supplies the v1 discriminator");
-        let resumed = restored.clone().into_game_state();
+        let resumed = restored
+            .clone()
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             resumed.active_draw_sequence().map(|frame| frame.remaining),
             Some(2)
@@ -33728,7 +33872,8 @@ mod tests {
 
         let mut restored = serde_json::from_value::<PersistedGameState>(raw)
             .expect("legacy bare PlayerId extra turn must deserialize")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             restored.extra_turns,
             vec![ExtraTurn {

@@ -6419,7 +6419,14 @@ pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
 }
 
 fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
-    matches!(def.condition, Some(StaticCondition::Unrecognized { .. }))
+    // Coverage-tooling detail (not a game rule): recurse through And/Or/Not —
+    // a parser fallback that wraps an unparsed `unless` clause as
+    // `Not(Unrecognized)` is a top-level `Not`, not a top-level `Unrecognized`,
+    // and must still be flagged (`contains_unrecognized` is the single
+    // authority; see its doc comment in `types/ability.rs`).
+    def.condition
+        .as_ref()
+        .is_some_and(StaticCondition::contains_unrecognized)
         || def
             .modifications
             .iter()
@@ -6514,10 +6521,16 @@ fn check_statics(
         }
         // Flag unrecognized conditions — these represent parser gaps where
         // the condition text wasn't decomposed into typed building blocks.
-        if let Some(StaticCondition::Unrecognized { ref text }) = def.condition {
-            let label = format!("Static:Unrecognized({})", truncate_label(text, 60));
-            if !missing.contains(&label) {
-                missing.push(label);
+        // Recurse through And/Or/Not (`contains_unrecognized`/`unrecognized_texts`)
+        // so a nested `Not(Unrecognized)` fallback (e.g. an unbindable
+        // recipient-scoped `unless` gate) is labeled instead of silently
+        // passing as supported.
+        if let Some(condition) = &def.condition {
+            for text in condition.unrecognized_texts() {
+                let label = format!("Static:Unrecognized({})", truncate_label(text, 60));
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
             }
         }
         for modification in &def.modifications {
@@ -7793,7 +7806,10 @@ fn is_static_supported(
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
 ) -> bool {
     (static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode))
-        && !matches!(stat.condition, Some(StaticCondition::Unrecognized { .. }))
+        && !stat
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized)
         && stat
             .modifications
             .iter()
@@ -11754,6 +11770,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
+    /// rounds 2 and 3: `extract_cant_untap_condition` falls back to
+    /// `Not(Unrecognized{..})` for a recipient-scoped `unless` tail with no
+    /// runtime binding authority (see
+    /// `oracle_static::tests::static_cant_untap_unless_recipient_scoped_designation_is_unrecognized`
+    /// for the AST-shape proof). That prior test only proves the SHAPE is
+    /// produced — it says nothing about whether coverage honors it. This test
+    /// closes that gap: it feeds the exact nested shape into the actual
+    /// coverage entry points and asserts the card is reported unsupported.
+    ///
+    /// Before the fix, all three of `static_has_unimplemented_parts`,
+    /// `check_statics`, and `is_static_supported` matched ONLY a top-level
+    /// `StaticCondition::Unrecognized`, so this `Not(Unrecognized)` shape
+    /// silently passed as fully supported (a false green) even though the
+    /// restriction is permanently inert at runtime — `Unrecognized` evaluates
+    /// `true`, and the wrapping `Not` negates it to `false` forever, so the
+    /// CantUntap gate can never actually apply. `StaticCondition::
+    /// contains_unrecognized` / `unrecognized_texts` (`types/ability.rs`) are
+    /// now the single recursive authority both `card_face_has_unimplemented_parts`
+    /// and `card_face_gaps` delegate to, so a nested `Unrecognized` at ANY
+    /// depth under `Not`/`And`/`Or` is caught, not just this one call site.
+    #[test]
+    fn cant_untap_with_nested_unrecognized_condition_is_not_fully_supported() {
+        let def = StaticDefinition::new(StaticMode::CantUntap).condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "that player is the monarch".to_string(),
+            }),
+        });
+        let face = CardFace {
+            name: "Test Recipient-Scoped Untap Gate".to_string(),
+            static_abilities: vec![def],
+            ..Default::default()
+        };
+
+        assert!(
+            super::card_face_has_unimplemented_parts(&face),
+            "a CantUntap static whose condition is Not(Unrecognized) must be \
+             flagged as having unimplemented parts, not reported as fully \
+             parsed/supported"
+        );
+
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter().any(|gap| gap.contains("Unrecognized")),
+            "card_face_gaps must surface the nested unrecognized clause as a \
+             parse-gap label so coverage tooling sees the honest gap instead \
+             of silence, got {gaps:?}"
+        );
+    }
+
+    /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
+    /// round 5, the card-face coverage half of the payment-continuation
+    /// blocker.
+    ///
+    /// CR 118.12a "unless [a player] pays [cost]" is an optional cost; the
+    /// engine offers that choice only at attack/block declaration
+    /// (`WaitingFor::CombatTaxPayment`). CR 502.3 untapping is a turn-based
+    /// action with no payment prompt, so a `CantUntap` gated on `UnlessPay`
+    /// could never be satisfied — `game::layers::evaluate_condition` hard-codes
+    /// it to `false`. The parser now refuses to attach it and emits the honest
+    /// `Not(Unrecognized)` gap shape instead (see
+    /// `oracle_static::tests::static_cant_untap_unless_payment_condition_is_unrecognized`
+    /// for the AST proof).
+    ///
+    /// This test is the OUTCOME half: it drives that shape through the real
+    /// card-face coverage entry points and asserts the card is reported
+    /// unsupported with a labelled gap, so the condition is visibly deferred
+    /// rather than silently accepted. Paired with the nested-`Unrecognized`
+    /// test above, it covers both unsupported-condition classes the untap-step
+    /// gate rejects (unbindable designation anchor, absent continuation).
+    #[test]
+    fn cant_untap_with_payment_gated_condition_is_not_fully_supported() {
+        let def = StaticDefinition::new(StaticMode::CantUntap).condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "you pay {2}".to_string(),
+            }),
+        });
+        let face = CardFace {
+            name: "Test Payment-Gated Untap Restriction".to_string(),
+            static_abilities: vec![def],
+            ..Default::default()
+        };
+
+        assert!(
+            super::card_face_has_unimplemented_parts(&face),
+            "a CantUntap gated on a payment the untap step can never prompt for              must be flagged as having unimplemented parts, not reported as              fully parsed/supported"
+        );
+
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter().any(|gap| gap.contains("you pay {2}")),
+            "card_face_gaps must name the deferred payment clause so the gap is              actionable in coverage tooling, got {gaps:?}"
+        );
     }
 
     /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
@@ -16320,6 +16431,46 @@ mod tests {
         assert!(
             is_static_supported(&supported, &trigger_registry, &static_registry),
             "a plain keyword-grant continuous static must be supported"
+        );
+    }
+
+    /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
+    /// round 3, which cited this exact `is_static_supported` gate
+    /// (`coverage.rs:7794-7816` as of that review): a recipient-scoped
+    /// `unless` tail with no runtime binding authority falls back to
+    /// `Not(Unrecognized{..})`, a NESTED unrecognized leaf. Before the fix,
+    /// `is_static_supported` matched only a TOP-LEVEL
+    /// `StaticCondition::Unrecognized`, so this shape was reported supported
+    /// even though the wrapping `Not` permanently negates the (always-true)
+    /// `Unrecognized` leaf, making the CantUntap restriction inert forever.
+    #[test]
+    fn cant_untap_nested_unrecognized_condition_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        let def = StaticDefinition::new(StaticMode::CantUntap).condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "that player is the monarch".to_string(),
+            }),
+        });
+
+        assert!(
+            !is_static_supported(&def, &trigger_registry, &static_registry),
+            "a CantUntap static gated on Not(Unrecognized) must be reported \
+             unsupported, not silently accepted as fully parsed"
+        );
+
+        // Sanity: the ordinary controller-scoped Bombur shape (Not(HasEnduringStory),
+        // no Unrecognized anywhere in the tree) remains supported — proving the
+        // gap signal comes from the nested Unrecognized leaf, not from CantUntap
+        // or the Not wrapper themselves.
+        let supported =
+            StaticDefinition::new(StaticMode::CantUntap).condition(StaticCondition::Not {
+                condition: Box::new(StaticCondition::HasEnduringStory),
+            });
+        assert!(
+            is_static_supported(&supported, &trigger_registry, &static_registry),
+            "Not(HasEnduringStory) must remain supported"
         );
     }
 

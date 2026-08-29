@@ -7430,6 +7430,7 @@ mod tests {
         )
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
     }
 
     /// One beat of the shared dump drive policy (`tests/integration/loop_shortcut.rs`'s
@@ -15468,12 +15469,13 @@ mod tests {
         // `reject_legacy_raw_prompt_authority` and `decode_persisted_resolution_state`
         // first, so this row exercises the chokepoint the server's `from_persisted` and
         // WASM's `decode_restored_game_state` actually funnel through.
-        // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+        // The test unwraps the fallible persistence boundary after asserting this fixture decodes.
         let state = serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )
         .expect("gameState deserializes through the production decoder")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
         // ── reach-guards: the subject really is present, in a never-cast-from zone ─────
         let spear = state
@@ -18575,7 +18577,8 @@ mod tests {
         let raw = serde_json::to_value(&state).expect("the state serializes");
         let restored = serde_json::from_value::<PersistedGameState>(raw.clone())
             .expect("decodes through the production persistence boundary")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             restored.waiting_for, wait,
             "the restored wait must carry the SAME per-cycle signature, not a dropped or \
@@ -18584,7 +18587,8 @@ mod tests {
         let text = serde_json::to_string(&raw).expect("serializes to text");
         let via_str = serde_json::from_str::<PersistedGameState>(&text)
             .expect("and through the WASM bridge's own `from_str::<PersistedGameState>`")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(via_str.waiting_for, wait);
 
         // (iii) MUST-NOT-FLIP: a proposal stating no signature stays absent from the wire.

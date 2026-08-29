@@ -1544,7 +1544,9 @@ mod tests {
         let serialized = serde_json::to_string(&persisted).expect("paused batch serializes");
         let persisted: PersistedGameState =
             serde_json::from_str(&serialized).expect("paused batch deserializes");
-        let mut restored = persisted.into_game_state();
+        let mut restored = persisted
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let first_resume =
             apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
                 .expect("replacement choice resumes the serial batch");

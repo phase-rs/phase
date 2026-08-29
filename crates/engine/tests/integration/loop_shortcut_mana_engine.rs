@@ -663,7 +663,9 @@ fn loop_action_sequence_conditional_load_migration() {
         2,
         "the sequence deserializes NORMALLY (len 2) — the drop is the load hook, not the derive"
     );
-    let restored = PersistedGameState::Raw(Box::new(at_priority)).into_game_state();
+    let restored = PersistedGameState::Raw(Box::new(at_priority))
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert!(
         restored.last_loop_action_sequence.is_empty(),
         "FIX-3: a Priority-captured save DROPS the transient sequence on load"
@@ -689,7 +691,9 @@ fn loop_action_sequence_conditional_load_migration() {
     at_offer.last_loop_action_sequence = vec![pinned_step()];
     let json = serde_json::to_string(&at_offer).expect("serialize offer save");
     let reloaded: GameState = serde_json::from_str(&json).expect("deserialize offer save");
-    let restored_offer = PersistedGameState::Raw(Box::new(reloaded)).into_game_state();
+    let restored_offer = PersistedGameState::Raw(Box::new(reloaded))
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert_eq!(
         restored_offer.last_loop_action_sequence.len(),
         1,

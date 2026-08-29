@@ -294,7 +294,9 @@ fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
     let encoded = serde_json::to_string(&persisted).expect("mid-stack state serializes");
     let persisted: PersistedGameState =
         serde_json::from_str(&encoded).expect("mid-stack state deserializes");
-    let restored = persisted.into_game_state();
+    let restored = persisted
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     assert!(
         restored.pending_trigger_event_batch.is_empty(),
@@ -762,7 +764,9 @@ fn persisted_pending_consent_decline_restores_the_captured_baseline() {
     let encoded = serde_json::to_string(&persisted).expect("pending consent serializes");
     let persisted: PersistedGameState =
         serde_json::from_str(&encoded).expect("pending consent deserializes");
-    let mut restored = persisted.into_game_state();
+    let mut restored = persisted
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert!(matches!(
         restored.waiting_for,
         WaitingFor::ResolveAllConsent { epoch: restored_epoch, representative } if restored_epoch == epoch && representative == P1
@@ -802,7 +806,8 @@ fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
         .expect("legacy pending run serializes without a baseline");
     let mut restored = serde_json::from_str::<PersistedGameState>(&encoded)
         .expect("legacy pending run deserializes")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert!(restored
         .resolve_all_consent_run
         .as_ref()
@@ -839,7 +844,9 @@ fn restored_mid_stack_priority_can_start_a_new_resolve_all_consent_run() {
     let encoded = serde_json::to_string(&persisted).expect("mid-stack priority serializes");
     let persisted: PersistedGameState =
         serde_json::from_str(&encoded).expect("mid-stack priority deserializes");
-    let mut restored = persisted.into_game_state();
+    let mut restored = persisted
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     let epoch = begin(&mut restored);
     assert!(matches!(
@@ -1355,7 +1362,8 @@ fn persisted_restore_classifies_without_advancing_stack_automation() {
     let encoded = serde_json::to_string(&persisted).expect("Ready state serializes");
     let restored = serde_json::from_str::<PersistedGameState>(&encoded)
         .expect("Ready state deserializes")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     assert_eq!(
         classify_restored_stack_automation(&restored),
@@ -1439,7 +1447,8 @@ fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
         .expect("the active rechecking session serializes");
     let mut state = serde_json::from_str::<PersistedGameState>(&encoded)
         .expect("the active rechecking session deserializes")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert_eq!(
         classify_restored_stack_automation(&state),
         RestoredStackAutomation::ActiveSession

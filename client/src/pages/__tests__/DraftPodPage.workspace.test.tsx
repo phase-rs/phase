@@ -319,6 +319,7 @@ describe("DraftPodPage workspace", () => {
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.workspace?.responsiveLayout).toBe(responsiveLayout);
+    expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
     expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
 
     act(() => { store.state.phase = "deckbuilding"; });
@@ -327,5 +328,6 @@ describe("DraftPodPage workspace", () => {
     expect(captured.progressVariant).toBe("pod");
     expect(captured.showProgress).toBe(true);
     expect(captured.builderLayout).toBe(responsiveLayout);
+    expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
   });
   });

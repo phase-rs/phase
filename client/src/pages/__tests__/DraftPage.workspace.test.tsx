@@ -287,6 +287,7 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(captured.shellMode).toBe("tablet-deckbuilding");
     expect(captured.steps).toBeNull();
     expect(container.querySelector("[data-draft-steps-spacing]")).not.toBeInTheDocument();
+    expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(screen.getByTestId("limited-deck-builder")).toBeInTheDocument();
   });
 
@@ -317,7 +318,10 @@ describe("DraftPage local deckbuilding wiring", () => {
         <MenuShell
           layout="stacked"
           contentWidthClass="max-w-none"
-          compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+          compactTopPadding={
+            (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+            || tabletDeckbuilding
+          }
         >`);
   });
 

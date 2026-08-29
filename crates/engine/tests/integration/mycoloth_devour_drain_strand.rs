@@ -99,6 +99,7 @@ use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolution::ResolutionStateWire;
 use engine::types::zones::Zone;
 
 fn gunzip(gz: &[u8]) -> String {
@@ -110,10 +111,12 @@ fn gunzip(gz: &[u8]) -> String {
     json
 }
 
-/// Load a capture's `["gameState"]` through the REAL production restore
-/// chokepoint `PersistedGameState::into_game_state` — never a bare `GameState`
-/// decode, which would skip `reject_legacy_raw_prompt_authority` and
-/// `decode_persisted_resolution_state`.
+/// Decode a capture's `["gameState"]` through the versioned resolution wire.
+///
+/// These rows exercise the live action-boundary repair, so they deliberately
+/// stop before the production restore finalizer, which now repairs the terminal
+/// strand at load time. The dedicated persisted-restore row below covers that
+/// external boundary.
 ///
 /// One projection is required first, and it is worth stating exactly why rather
 /// than hiding it in a helper. `client/src/services/gameStateExport.ts` writes a
@@ -127,13 +130,8 @@ fn gunzip(gz: &[u8]) -> String {
 /// transformation `ResolutionStateWire::to_value` performs when persisting a
 /// live state: move `resolution_stack` to `resolution_frames` and stamp version
 /// 2. Nothing else is touched — in particular the wedged frame and its
-/// `Dispatching` drain cross verbatim. The decode then runs the FULL v2 reader:
-/// the three allocator recovery passes, `ResolutionStack::validate`,
-/// `project_frames_into_legacy_state` → `canonicalize_legacy_resolution_state`
-/// and the derived-`PartialEq` identity gate, and
-/// `validate_trigger_firing_coherence` — a strictly stronger chokepoint than the
-/// v1 path, not a weaker one.
-fn load_capture(gz: &[u8]) -> GameState {
+/// `Dispatching` drain cross verbatim.
+fn projected_capture_snapshot(gz: &[u8]) -> serde_json::Value {
     let json = gunzip(gz);
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
@@ -155,9 +153,22 @@ fn load_capture(gz: &[u8]) -> GameState {
             serde_json::Value::from(2),
         );
     }
+    snapshot
+}
+
+fn load_capture(gz: &[u8]) -> GameState {
+    let snapshot = projected_capture_snapshot(gz);
+    serde_json::from_value::<ResolutionStateWire>(snapshot)
+        .expect("the projected snapshot deserializes through the versioned resolution decoder")
+        .into_game_state()
+}
+
+fn restore_capture(gz: &[u8]) -> GameState {
+    let snapshot = projected_capture_snapshot(gz);
     serde_json::from_value::<PersistedGameState>(snapshot)
         .expect("the projected snapshot deserializes through the production decoder")
         .into_game_state()
+        .expect("the persisted capture satisfies the checked restore contract")
 }
 
 fn load_turn15() -> GameState {
@@ -170,6 +181,24 @@ fn load_turn20() -> GameState {
     load_capture(include_bytes!(
         "fixtures/mycoloth_devour_wedge_turn20.json.gz"
     ))
+}
+
+#[test]
+fn persisted_wedged_captures_settle_before_publication() {
+    for capture in [
+        include_bytes!("fixtures/mycoloth_devour_wedge_turn15.json.gz").as_slice(),
+        include_bytes!("fixtures/mycoloth_devour_wedge_turn20.json.gz").as_slice(),
+    ] {
+        let state = restore_capture(capture);
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the production restore must not publish the ownerless frame"
+        );
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "the production restore must settle the terminal stack carrier"
+        );
+    }
 }
 
 /// The per-`PostReplacement`-frame drain statuses of the LOADED runtime state,
@@ -363,8 +392,27 @@ fn a1_wedged_turn15_capture_retires_its_ownerless_dispatching_frame() {
 fn a2_wedged_turn15_capture_drains_its_parked_triggers() {
     let mut state = load_turn15();
     assert_turn15_wedge_present(&state);
+    // Non-vacuity: the capture freezes priority OFF the active seat, so the
+    // CR 117.3b row below is a real question rather than a restatement.
+    assert_ne!(
+        state.priority_player, state.active_player,
+        "the turn-15 capture must freeze priority off the active seat"
+    );
 
     apply(&mut state, PlayerId(1), GameAction::PassPriority).expect("PassPriority is legal");
+    let priority_player = state.priority_player;
+    // CR 117.3b: the active player receives priority after a spell or ability
+    // resolves. Recovery must hand the refreshed window to the ACTIVE player,
+    // not back to the holder the capture froze. Asserting the rule rather than
+    // a literal seat: the correct seat differs between this row (PlayerId(0))
+    // and A4 (PlayerId(1)), so a hardcoded id would re-encode a fixture
+    // constant instead of the rule.
+    assert_eq!(
+        priority_player, state.active_player,
+        "CR 117.3b: the recovered window returns priority to the active player"
+    );
+    apply(&mut state, priority_player, GameAction::PassPriority)
+        .expect("the recovered priority holder accepts the next pass");
 
     assert!(
         state.deferred_triggers.is_empty(),
@@ -437,11 +485,9 @@ fn a3_wedged_turn15_capture_settles_its_stale_resolving_carrier() {
 /// that one: without the strand removal the queue could not drain no matter how
 /// many boundaries offered it the chance.
 ///
-/// What this row therefore claims is still strand removal, plus the drain the
-/// strand was blocking — including the ARRIVAL half of that drain, since an
-/// emptied queue alone is equally satisfied by a discarded one. It pins NOTHING
-/// about the terminal `waiting_for` — that shape is recorded above, not
-/// asserted, because it is produced by a seam this change does not own.
+/// The first pass repairs the stale boundary without consuming that pass. The
+/// next ordinary pass then drains the parked triggers, proving both the repair
+/// and the resumed action path.
 #[test]
 fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
     let mut state = load_turn20();
@@ -454,6 +500,18 @@ fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
         "both stranded drains and their frame must be gone, got {:?}",
         post_replacement_drain_statuses(&state)
     );
+
+    let priority_player = state.priority_player;
+    // CR 117.3b, as in A2. This row's capture holds priority on the active seat
+    // already, so on its own it does NOT discriminate; A2 carries that weight.
+    // It is asserted here so the two recovery rows state one shared invariant.
+    assert_eq!(
+        priority_player, state.active_player,
+        "CR 117.3b: the recovered window returns priority to the active player"
+    );
+    apply(&mut state, priority_player, GameAction::PassPriority)
+        .expect("the recovered priority holder accepts the next pass");
+
     assert!(
         state.deferred_triggers.is_empty(),
         "CR 603.3 + CR 603.3b: with the strand gone, `resolution_completion_can_settle` is true \

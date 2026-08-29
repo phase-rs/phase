@@ -97,7 +97,8 @@ fn load_dina_raw() -> (GameState, serde_json::Value) {
     let envelope: serde_json::Value = serde_json::from_str(&json).expect("dina dump parses");
     let mut state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("dina gameState decodes through the production decoder")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     state.loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     let raw_seq = envelope["gameState"]["last_loop_action_sequence"].clone();
     (state, raw_seq)

@@ -50,6 +50,7 @@ fn load_dina_noff() -> GameState {
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// The saved ChaCha20 high-water this board carries (`gameState.rng_word_pos`). Also the

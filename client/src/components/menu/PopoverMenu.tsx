@@ -18,6 +18,7 @@ interface PopoverMenuStyle {
   top: number | "auto";
   bottom: number | "auto";
   left: number;
+  width: number;
   maxHeight: number;
 }
 
@@ -73,6 +74,7 @@ export function PopoverMenu({
     top: 0,
     bottom: "auto",
     left: 0,
+    width: menuWidthPx,
     maxHeight: 320,
   });
 
@@ -102,11 +104,15 @@ export function PopoverMenu({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
+    const width = Math.min(
+      menuWidthPx,
+      Math.max(0, window.innerWidth - MENU_VIEWPORT_PADDING_PX * 2),
+    );
     const left = Math.max(
       MENU_VIEWPORT_PADDING_PX,
       Math.min(
-        rect.right - menuWidthPx,
-        window.innerWidth - menuWidthPx - MENU_VIEWPORT_PADDING_PX,
+        rect.right - width,
+        window.innerWidth - width - MENU_VIEWPORT_PADDING_PX,
       ),
     );
     const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP_PX - MENU_VIEWPORT_PADDING_PX;
@@ -116,6 +122,7 @@ export function PopoverMenu({
       top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
       bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
       left,
+      width,
       maxHeight: Math.max(120, openUp ? spaceAbove : spaceBelow),
     });
   }, [menuWidthPx]);
@@ -204,7 +211,7 @@ export function PopoverMenu({
               top: style.top,
               bottom: style.bottom,
               left: style.left,
-              width: menuWidthPx,
+              width: style.width,
               maxHeight: style.maxHeight,
             }}
             className="fixed z-[120] flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"

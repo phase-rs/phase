@@ -3448,6 +3448,63 @@ mod tests {
         }
     }
 
+    /// CR 702.195a-b (Storied) + CR 502.3 (untap-step restriction): Bombur, Gentle
+    /// Dreamer pairs the already-implemented `Storied` keyword with a conditional
+    /// "doesn't untap ... unless you have an enduring story" restriction. This
+    /// full-card parse proves both halves land correctly in the SAME parse: the
+    /// `Storied` reminder-text keyword extraction is untouched, and the second line
+    /// becomes a `CantUntap` static gated on `Not(HasEnduringStory)` rather than an
+    /// `Effect::Unimplemented` swallow.
+    #[test]
+    fn parse_oracle_text_bombur_gentle_dreamer_storied_and_conditional_cant_untap() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{StaticCondition, TargetFilter};
+        use crate::types::statics::StaticMode;
+
+        let parsed = parse_oracle_text(
+            "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nBombur doesn't untap during your untap step unless you have an enduring story.",
+            "Bombur, Gentle Dreamer",
+            &[],
+            &["Creature".to_string()],
+            &["Dwarf".to_string(), "Bard".to_string()],
+        );
+
+        // Storied itself must still be recognized exactly as it is on every other
+        // card that carries it (Balin, Ori) — this task must not touch that path.
+        assert!(
+            parsed.extracted_keywords.contains(&Keyword::Storied),
+            "Bombur must extract Storied: {:?}",
+            parsed.extracted_keywords
+        );
+
+        // No Unimplemented fallback ability anywhere in the parse.
+        assert!(
+            parsed.abilities.is_empty(),
+            "Bombur must not retain any unimplemented fallback ability: {:?}",
+            parsed.abilities
+        );
+
+        // The "doesn't untap ... unless ..." line must become exactly one CantUntap
+        // static, self-targeted, gated on the negated enduring-story condition.
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "expected exactly one static (CantUntap), got {:?}",
+            parsed.statics
+        );
+        let cant_untap = &parsed.statics[0];
+        assert_eq!(cant_untap.mode, StaticMode::CantUntap);
+        assert_eq!(cant_untap.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            cant_untap.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::HasEnduringStory),
+            }),
+            "unless-clause must negate HasEnduringStory, got {:?}",
+            cant_untap.condition
+        );
+    }
+
     #[test]
     fn parse_granted_keyword_fragment_toxic() {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text

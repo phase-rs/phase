@@ -16,6 +16,7 @@ vi.mock("../draft-adapter", async (importOriginal) => {
 import { P2PDraftHost } from "../p2p-draft-host";
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchBinding } from "../../network/draftProtocol";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 
 function pairing(round: number, table: number): PairingView {
@@ -191,5 +192,53 @@ describe("P2PDraftHost.restoreFromPersisted — pairing-window recovery", () => 
 
     expect(adapter.importSession).toHaveBeenCalled();
     expect(adapter.generatePairings).not.toHaveBeenCalled();
+  });
+
+  it("rotates only an active legacy bot authority to its human participant", async () => {
+    const activePairing = {
+      ...pairing(1, 0),
+      match_id: "bot-active",
+      seat_a: 1,
+      name_a: "Bot",
+      seat_b: 2,
+      name_b: "Human",
+      status: "InProgress" as const,
+    };
+    const restoredView = viewFor("MatchInProgress", 1, [activePairing]);
+    restoredView.seats = [
+      { seat_index: 1, is_bot: true },
+      { seat_index: 2, is_bot: false },
+    ] as DraftPlayerView["seats"];
+    const { host } = makeHost(restoredView);
+    const legacyBinding: DraftMatchBinding = {
+      podId: "draft-12345678",
+      matchId: "bot-active",
+      round: 1,
+      sessionKey: "session",
+      lease: "lease",
+      nonce: "nonce",
+      revision: 0,
+      matchAuthoritySeat: 1,
+    };
+    const futureBinding: DraftMatchBinding = {
+      ...legacyBinding,
+      matchId: "future-match",
+      round: 2,
+      matchAuthoritySeat: 1,
+    };
+
+    await host.restoreFromPersisted({
+      ...persistedSession(),
+      matchBindings: [legacyBinding, futureBinding],
+    });
+
+    const bindings = (host as unknown as {
+      matchBindings: Map<string, DraftMatchBinding>;
+      dispatchMatchLaunch: ReturnType<typeof vi.fn>;
+    }).matchBindings;
+    expect(bindings.get("bot-active")).toEqual({ ...legacyBinding, matchAuthoritySeat: 2 });
+    expect(bindings.get("future-match")).toEqual(futureBinding);
+    expect((host as unknown as { dispatchMatchLaunch: ReturnType<typeof vi.fn> }).dispatchMatchLaunch)
+      .not.toHaveBeenCalled();
   });
 });

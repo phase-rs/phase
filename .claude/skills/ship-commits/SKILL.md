@@ -1,6 +1,6 @@
 ---
 name: ship-commits
-description: Use when shipping local commits to main via the merge queue. Creates an isolated worktree based on origin/main, cherry-picks the named commits into a fresh branch, pushes with --no-verify, opens a PR with `gh pr create --fill`, and enqueues with `gh pr merge --squash --auto`. Outbound counterpart to `pr-contribution-handler`. Use when the user says "ship this", "push to main", "send through the queue", "PR this work", or has finished a chunk of work and wants it on main.
+description: Use when shipping local commits to main via the merge queue. Creates an isolated worktree based on origin/main, cherry-picks the named commits into a fresh branch, pushes with --no-verify, opens a PR with `gh pr create --fill`, and enqueues with `gh pr merge --auto`. Outbound counterpart to `pr-contribution-handler`. Use when the user says "ship this", "push to main", "send through the queue", "PR this work", or has finished a chunk of work and wants it on main.
 ---
 
 # Ship Commits
@@ -34,7 +34,7 @@ A worktree based on `origin/main` gives a clean branch we cherry-pick into, isol
 
 | Convention | Why |
 |------------|-----|
-| **Squash-only merges.** `--squash` is mandatory; `--merge` and `--rebase` are server-disabled. | Repo keeps `main` as one-commit-per-feature. |
+| **The merge queue owns the merge strategy — do NOT pass `--squash`.** `gh pr merge --squash --auto` is rejected with `The merge strategy for main is set by the merge queue`. Pass `--auto` alone. The queue still produces a squash commit, which is why Step 0's reconciliation must stay squash-aware. | Repo keeps `main` as one-commit-per-feature, enforced queue-side rather than client-side. |
 | **`--auto` is mandatory on `gh pr merge`.** | Without it, the merge bypasses the queue and tries to merge immediately — fails on protected `main`. |
 | **`--no-verify` on push.** | Pre-push hooks duplicate validation that Tilt/CI has already done locally. CI/queue will re-validate. |
 | **Branch protection on `main` blocks direct push for non-admins.** | Queue handles serialization for parallel PRs. |
@@ -111,16 +111,35 @@ If the user named commits explicitly (SHAs, "the last commit", "HEAD~3..HEAD"), 
 
 Use this checklist before creating the ship worktree:
 
+**Use an array, and quote the expansion.** A space-separated *string* silently
+breaks every check below: this shell is zsh, which does not word-split unquoted
+parameters, so `git status --short -- $SHIPPED_PATHS` passes the whole string as
+**one** pathspec, matches nothing, and exits `0` with empty output — byte-identical
+to the "clean" result you are looking for. The paired `git add` fails loudly
+(`fatal: pathspec '…' did not match any files`), but the `git status` hygiene gate
+degrades to a warning and reports success for paths it never examined. A check
+that can only ever print nothing is not a check.
+
 ```bash
 # 1) Identify the paths that belong to the work being shipped.
-SHIPPED_PATHS="path/one path/two ..."
+#    ARRAY, not a string — see above.
+SHIPPED_PATHS=(path/one path/two)
 
-# 2) If any shipped path is dirty, commit it in the source worktree first.
-git status --short -- $SHIPPED_PATHS
-# If output is non-empty: run /commit or create a normal local commit scoped to $SHIPPED_PATHS.
+# 2) Positive control: every path must exist, or a clean result below is vacuous.
+#    This is what catches a typo, a stale path, or a mis-quoted expansion.
+for p in "${SHIPPED_PATHS[@]}"; do
+  [ -e "$p" ] || echo "MISSING PATHSPEC (fix before trusting any check): $p"
+done
 
-# 3) Re-check. This must print nothing before shipping.
-git status --short -- $SHIPPED_PATHS
+# 3) If any shipped path is dirty, commit it in the source worktree first.
+git status --short -- "${SHIPPED_PATHS[@]}"
+# If output is non-empty: run /commit, or stage exactly these paths and commit:
+#   git add -- "${SHIPPED_PATHS[@]}"
+#   git diff --cached --name-only   # verify the staged set is exactly what you expect
+#   git commit
+
+# 4) Re-check. This must print nothing before shipping.
+git status --short -- "${SHIPPED_PATHS[@]}"
 ```
 
 If the re-check still shows shipped paths dirty, stop and fix that before shipping. Do not proceed with a PR while the same work remains as uncommitted local `main` changes. This prevents the user from seeing the work both "shipped" and still dirty locally.
@@ -224,7 +243,7 @@ If the commits were shipped from a feature branch (not `main`), leave that branc
 Then verify source-worktree hygiene for the shipped paths recorded in Step 1:
 
 ```bash
-git status --short -- $SHIPPED_PATHS
+git status --short -- "${SHIPPED_PATHS[@]}"   # array + quotes: see Step 1
 ```
 
 This must print nothing for work that was originally uncommitted on local `main`. If it prints shipped paths, the shipment is incomplete operationally: either the work was not committed before shipping, or the source worktree still contains duplicate local modifications. Do not silently leave that state. Clean only files you own and only after confirming they are represented by the shipped commits; otherwise stop and report the exact dirty paths.

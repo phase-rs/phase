@@ -34,6 +34,18 @@ use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
 
+/// Controls whether card-database rehydration may publish a state immediately.
+///
+/// Persisted-game restore must defer publication until the restore owner has
+/// installed every runtime-only field and the engine has completed its single
+/// restore finalization boundary. Ordinary in-memory callers retain the
+/// immediate behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardDbRehydrationFinalization {
+    Immediate,
+    Defer,
+}
+
 /// CR 205.3m: Look up printed core types for a card name from deck-pool faces or
 /// the card-face registry when a runtime `GameObject` lacks characteristic data.
 pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Option<&'a [CoreType]> {
@@ -1219,6 +1231,22 @@ fn restore_legacy_swap_snapshot_provenance(state: &mut GameState) {
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    rehydrate_game_from_card_db_with_finalization(
+        state,
+        db,
+        CardDbRehydrationFinalization::Immediate,
+    );
+}
+
+/// Rehydrate printed-card state while explicitly choosing whether this call is
+/// its public-state boundary. Restore owners use [`CardDbRehydrationFinalization::Defer`]
+/// so the prepared restore token can perform the sole finalization after all
+/// runtime fields are present.
+pub fn rehydrate_game_from_card_db_with_finalization(
+    state: &mut GameState,
+    db: &CardDatabase,
+    finalization: CardDbRehydrationFinalization,
+) {
     rehydrate_card_db_metadata(state, db);
     restore_legacy_swap_snapshot_provenance(state);
     let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
@@ -1227,7 +1255,9 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
     if changed_any || state.layers_dirty.is_dirty() {
         bump_state_revision(state);
         mark_public_state_all_dirty(state);
-        finalize_public_state(state);
+        if matches!(finalization, CardDbRehydrationFinalization::Immediate) {
+            finalize_public_state(state);
+        }
     }
 }
 

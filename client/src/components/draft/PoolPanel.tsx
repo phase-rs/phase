@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import type { ReactNode } from "react";
 
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
@@ -21,6 +22,8 @@ import type {
   DraftZone,
 } from "./workspace/types";
 import type { DraftBoardPreferences, DraftBoardSort } from "./workspace/workspacePreferences";
+import { PopoverMenu } from "../menu/PopoverMenu";
+import { menuButtonClass } from "../menu/buttonStyles";
 
 const EMPTY_COLOR_COUNTS: DraftPoolColorCounts = {
   white: 0,
@@ -97,6 +100,14 @@ export interface ControlledWorkspacePool {
   onFilterChange(filter: DraftWorkspaceFilter): void;
   onSortChange(sort: DraftBoardSort): void;
   onWorkspaceChange(next: DraftWorkspaceState): void;
+  /** Primary control shown after sorting, such as Add lands. */
+  compactPrimaryControls?: ReactNode;
+  /** Optional deck counts shown immediately after the primary control. */
+  compactCount?: ReactNode;
+  /** Trailing control, such as the Visual builder switch. */
+  compactTrailingControls?: ReactNode;
+  /** Phone/tablet builder compact uses a single grouping menu. */
+  builderCompact?: boolean;
 }
 
 interface PoolPanelProps {
@@ -152,6 +163,9 @@ function ControlledPoolPanel({
   const sorts: DraftBoardSort[] = value.poolGroups.workspace_capabilities.rarity_group_order === null
     ? ["cmc", "color", "type"]
     : ["cmc", "color", "rarity", "type"];
+  const sortButtonClass = (sort: DraftBoardSort, compactTouchTarget = false) => (
+    `${compactTouchTarget ? "min-h-11" : "min-h-8"} px-2 text-xs ${effectiveSort === sort ? "bg-white/15 text-white" : "text-white/50"}`
+  );
 
   const activate = (instanceId: string) => {
     const next = activateWorkspaceInstance(
@@ -210,7 +224,7 @@ function ControlledPoolPanel({
   };
 
   return (
-    <section className="flex h-full flex-col" aria-label={t("workspace.pool.label")}>
+    <section className="flex h-full min-h-0 flex-col overflow-hidden" aria-label={t("workspace.pool.label")}>
       <div role="group" aria-label={t("workspace.pool.filterLabel")} className="grid grid-cols-3 border-b border-white/10">
         {(["combined", "deck", "sideboard"] as const).map((filter) => (
           <button
@@ -225,19 +239,62 @@ function ControlledPoolPanel({
         ))}
       </div>
       <div role="group" aria-label={t("workspace.pool.sortLabel")} className="flex flex-wrap gap-1 border-b border-white/10 p-2">
-        {sorts.map((sort) => (
-          <button
-            key={sort}
-            type="button"
-            aria-pressed={effectiveSort === sort}
-            onClick={() => value.onSortChange(sort)}
-            className={`min-h-8 px-2 text-xs ${effectiveSort === sort ? "bg-white/15 text-white" : "text-white/50"}`}
-          >
-            {t(`workspace.sort.${sort}`)}
-          </button>
-        ))}
+        <div data-compact-pool-primary-controls className={`flex min-w-0 shrink-0 items-center gap-1 ${value.builderCompact ? "w-full flex-nowrap" : "flex-wrap"}`}>
+          {value.builderCompact ? (
+            <PopoverMenu
+              ariaLabel={t("workspace.sort.group")}
+              menuWidthPx={160}
+              renderTrigger={({ ref, open, toggle }) => (
+                <button
+                  ref={ref}
+                  type="button"
+                  aria-expanded={open}
+                  aria-haspopup="menu"
+                  onClick={toggle}
+                  className={menuButtonClass({ tone: "neutral", size: "xs", className: "min-h-11 shrink-0 whitespace-nowrap" })}
+                >
+                  {t("workspace.sort.group")}
+                </button>
+              )}
+            >
+              {(close) => sorts.map((sort) => (
+                <button
+                  key={sort}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={effectiveSort === sort}
+                  aria-pressed={effectiveSort === sort}
+                  onClick={() => {
+                    value.onSortChange(sort);
+                    close();
+                  }}
+                  className={sortButtonClass(sort, true)}
+                >
+                  {t(`workspace.sort.${sort}`)}
+                </button>
+              ))}
+            </PopoverMenu>
+          ) : sorts.map((sort) => (
+            <button
+              key={sort}
+              type="button"
+              aria-pressed={effectiveSort === sort}
+              onClick={() => value.onSortChange(sort)}
+              className={sortButtonClass(sort)}
+            >
+              {t(`workspace.sort.${sort}`)}
+            </button>
+          ))}
+          {value.compactPrimaryControls}
+          {value.compactCount}
+          {value.compactTrailingControls && (
+            <div data-compact-pool-trailing-controls className={value.builderCompact ? "ml-auto" : undefined}>
+              {value.compactTrailingControls}
+            </div>
+          )}
+        </div>
       </div>
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {renderedGroups.map((group) => (
           <section key={group.key} className="mb-3">
             <h3 className="mb-1 text-xs font-semibold uppercase text-white/45">

@@ -27,18 +27,22 @@ use engine::game::preview::{
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::game::deck_validation::draft_set_concessions_for;
+use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
-    evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db, resolve_deck_list,
+    evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
+    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::DebugAction;
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
-use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
+use engine::types::game_state::{
+    PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
+    TrustedGameStateEnvelope, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
@@ -136,12 +140,18 @@ fn format_diagnostic_value(value: &serde_json::Value) -> String {
 }
 
 #[derive(Debug)]
+struct PreparedRestoredGameState {
+    state: PreparedPersistedGameState,
+    debug_permitted_was_serialized: bool,
+}
+
+#[derive(Debug)]
 struct DecodedRestoredGameState {
     state: GameState,
     debug_permitted_was_serialized: bool,
 }
 
-fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState, String> {
+fn prepare_restored_game_state(json_str: &str) -> Result<PreparedRestoredGameState, String> {
     let serialized = serde_json::from_str::<serde_json::Value>(json_str)
         .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
     let state = serialized
@@ -151,15 +161,28 @@ fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState
     let debug_permitted_was_serialized =
         state.is_some_and(|state| state.contains_key("debug_permitted"));
     let state = serde_json::from_value::<PersistedGameState>(serialized)
-        .map(PersistedGameState::into_game_state)
-        .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
-    state
-        .format_config
-        .reject_unimplemented_range_of_influence()
+        .map_err(|error| format!("Failed to deserialize GameState: {error}"))?
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .map_err(|error| format!("Failed to restore GameState: {error}"))?;
+    Ok(PreparedRestoredGameState {
+        state,
+        debug_permitted_was_serialized,
+    })
+}
+
+/// Native-only decode helper for restore-boundary tests that do not need card
+/// database rehydration. Production callers use `prepare_restored_game_state`
+/// and finalize only after their card database is present.
+#[cfg(test)]
+fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState, String> {
+    let restored = prepare_restored_game_state(json_str)?;
+    let state = restored
+        .state
+        .finalize_after_rehydration(|_| Ok(()))
         .map_err(|error| format!("Failed to restore GameState: {error}"))?;
     Ok(DecodedRestoredGameState {
         state,
-        debug_permitted_was_serialized,
+        debug_permitted_was_serialized: restored.debug_permitted_was_serialized,
     })
 }
 
@@ -2221,19 +2244,36 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), St
             "Cannot restore game state: card database is not loaded. Call load_card_database first."
                 .to_string()
         })?;
-        rehydrate_game_from_card_db(state, db);
+        rehydrate_game_from_card_db_with_finalization(
+            state,
+            db,
+            CardDbRehydrationFinalization::Defer,
+        );
         Ok(())
     })
 }
 
 fn decode_and_rehydrate_restored_game_state(
     json_str: &str,
+    restore_runtime: impl FnOnce(&mut GameState),
 ) -> Result<DecodedRestoredGameState, String> {
-    let mut restored = decode_restored_game_state(json_str)?;
-    rehydrate_restored_state_from_card_db(&mut restored.state)?;
-    // Combat declaration snapshots are display data derived from the rehydrated
-    // live board. Rebuild them before this external state becomes interactive.
-    engine::game::combat::refresh_combat_declaration_waiting_for(&mut restored.state);
+    let restored = prepare_restored_game_state(json_str)?;
+    let debug_permitted_was_serialized = restored.debug_permitted_was_serialized;
+    let state = restored
+        .state
+        .finalize_after_rehydration(|state| {
+            rehydrate_restored_state_from_card_db(state)?;
+            // Combat declaration snapshots are display data derived from the rehydrated
+            // live board. Rebuild them before this external state becomes interactive.
+            engine::game::combat::refresh_combat_declaration_waiting_for(state);
+            restore_runtime(state);
+            Ok(())
+        })
+        .map_err(|error| format!("Failed to restore GameState: {error}"))?;
+    let restored = DecodedRestoredGameState {
+        state,
+        debug_permitted_was_serialized,
+    };
     Ok(restored)
 }
 
@@ -2306,17 +2346,10 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err("restore_game_state refused: undo is disabled in multiplayer sessions".into());
     }
-    let restored = decode_and_rehydrate_restored_game_state(json_str)?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str, GameState::rehydrate_rng)?;
     let mut state = restored.state;
-    // Reseed the skipped `rng` and fast-forward it to the offset captured at
-    // export (issue #5466) so the restored game draws the values that would have
-    // come NEXT rather than replaying from origin. The engine owns this logic
-    // (`GameState::rehydrate_rng`); pre-#5466 snapshots carry `rng_word_pos == 0`
-    // and reproduce the previous rewind-to-origin behavior.
-    state.rehydrate_rng();
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
-    finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
@@ -2415,23 +2448,16 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
         ));
     }
 
-    let restored = decode_and_rehydrate_restored_game_state(json_str)
-        .map_err(|error| JsValue::from_str(&error))?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        let fresh_seed: u64 = rand::rng().random();
+        state.rng_seed = fresh_seed;
+        state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
+        state.rng_word_pos = 0;
+    })
+    .map_err(|error| JsValue::from_str(&error))?;
     let mut state = restored.state;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
-    // Deliberately re-roll a fresh seed on multiplayer host resume so continued
-    // play diverges from any pre-save sequence (mirrors server-core). This is a
-    // multiplayer-resume policy choice, independent of the #5466 undo fix: even
-    // though the stream position now round-trips via `rng_word_pos`, a resumed
-    // host should NOT replay the exact saved randomness. Reset the offset to 0
-    // to match the freshly seeded stream.
-    let fresh_seed: u64 = rand::rng().random();
-    state.rng_seed = fresh_seed;
-    state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
-    state.rng_word_pos = 0;
-
-    finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
@@ -2455,7 +2481,7 @@ mod restored_card_db_requirements_tests {
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
         let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
 
-        let error = decode_and_rehydrate_restored_game_state(&json)
+        let error = decode_and_rehydrate_restored_game_state(&json, |_| {})
             .expect_err("restore must require CARD_DB");
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));

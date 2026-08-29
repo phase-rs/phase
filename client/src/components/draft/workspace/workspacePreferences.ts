@@ -4,7 +4,7 @@ import { DRAFT_WORKSPACE_COLUMN_MAX } from "./types";
 
 export { DRAFT_WORKSPACE_COLUMN_MAX };
 
-export const DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION = 2 as const;
+export const DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION = 3 as const;
 export const DRAFT_WORKSPACE_BOARD_BREAKPOINT_PX = 1024;
 export const DRAFT_WORKSPACE_COLUMN_MIN = 2;
 export const DRAFT_WORKSPACE_PACK_SCALE_DEFAULT = 1.65;
@@ -38,6 +38,11 @@ export interface DraftPhoneDeckVisualColumnCaps {
   landscape: number;
 }
 
+export interface DraftTabletDeckVisualColumnCaps {
+  portrait: number;
+  landscape: number;
+}
+
 export interface DraftWorkspacePreferences {
   schemaVersion: typeof DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION;
   explicitView: DraftWorkspaceView | null;
@@ -46,6 +51,7 @@ export interface DraftWorkspacePreferences {
   sideboardCollapsed: boolean | null;
   builderPhoneSideboardCollapsed: boolean;
   phoneDeckVisualColumnCaps: DraftPhoneDeckVisualColumnCaps;
+  tabletDeckVisualColumnCaps: DraftTabletDeckVisualColumnCaps;
   deck: DraftBoardPreferences;
   sideboard: DraftBoardPreferences;
 }
@@ -65,6 +71,11 @@ const SIDEBOARD_DEFAULTS: Readonly<DraftBoardPreferences> = {
 };
 
 const PHONE_DECK_VISUAL_COLUMN_CAPS_DEFAULTS: Readonly<DraftPhoneDeckVisualColumnCaps> = {
+  portrait: 3,
+  landscape: 5,
+};
+
+const TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS: Readonly<DraftTabletDeckVisualColumnCaps> = {
   portrait: 3,
   landscape: 5,
 };
@@ -135,6 +146,21 @@ function clampPhoneDeckVisualColumnCap(value: unknown, fallback: number): number
   return Math.min(5, Math.max(1, value));
 }
 
+function repairTabletDeckVisualColumnCaps(value: unknown): DraftTabletDeckVisualColumnCaps {
+  if (!isRecord(value)) return { ...TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS };
+  return {
+    portrait: clampTabletDeckVisualColumnCap(value.portrait, TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS.portrait),
+    landscape: clampTabletDeckVisualColumnCap(value.landscape, TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS.landscape),
+  };
+}
+
+function clampTabletDeckVisualColumnCap(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return fallback;
+  }
+  return Math.min(15, Math.max(1, value));
+}
+
 function repairSchemaV1Preferences(value: Record<string, unknown>): DraftWorkspacePreferences {
   return {
     schemaVersion: DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION,
@@ -148,6 +174,7 @@ function repairSchemaV1Preferences(value: Record<string, unknown>): DraftWorkspa
       : null,
     builderPhoneSideboardCollapsed: true,
     phoneDeckVisualColumnCaps: { ...PHONE_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
+    tabletDeckVisualColumnCaps: { ...TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
     deck: repairBoardPreferences(value.deck, DECK_DEFAULTS),
     sideboard: repairBoardPreferences(value.sideboard, SIDEBOARD_DEFAULTS),
   };
@@ -162,6 +189,7 @@ export function createDefaultDraftWorkspacePreferences(): DraftWorkspacePreferen
     sideboardCollapsed: null,
     builderPhoneSideboardCollapsed: true,
     phoneDeckVisualColumnCaps: { ...PHONE_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
+    tabletDeckVisualColumnCaps: { ...TABLET_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
     deck: { ...DECK_DEFAULTS },
     sideboard: { ...SIDEBOARD_DEFAULTS },
   };
@@ -172,6 +200,27 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
     return createDefaultDraftWorkspacePreferences();
   }
   if (value.schemaVersion === 1) return repairSchemaV1Preferences(value);
+  if (value.schemaVersion === 2) {
+    const phoneDeckVisualColumnCaps = repairPhoneDeckVisualColumnCaps(value.phoneDeckVisualColumnCaps);
+    return {
+      schemaVersion: DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION,
+      explicitView: value.explicitView === null || isDraftWorkspaceView(value.explicitView)
+        ? value.explicitView
+        : null,
+      cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
+      packScale: repairDraftWorkspacePackScale(value.packScale),
+      sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
+        ? value.sideboardCollapsed
+        : null,
+      builderPhoneSideboardCollapsed: typeof value.builderPhoneSideboardCollapsed === "boolean"
+        ? value.builderPhoneSideboardCollapsed
+        : true,
+      phoneDeckVisualColumnCaps,
+      tabletDeckVisualColumnCaps: { ...phoneDeckVisualColumnCaps },
+      deck: repairBoardPreferences(value.deck, DECK_DEFAULTS),
+      sideboard: repairBoardPreferences(value.sideboard, SIDEBOARD_DEFAULTS),
+    };
+  }
   if (value.schemaVersion !== DRAFT_WORKSPACE_PREFERENCES_SCHEMA_VERSION) {
     return createDefaultDraftWorkspacePreferences();
   }
@@ -190,6 +239,7 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
       ? value.builderPhoneSideboardCollapsed
       : true,
     phoneDeckVisualColumnCaps: repairPhoneDeckVisualColumnCaps(value.phoneDeckVisualColumnCaps),
+    tabletDeckVisualColumnCaps: repairTabletDeckVisualColumnCaps(value.tabletDeckVisualColumnCaps),
     deck: repairBoardPreferences(value.deck, DECK_DEFAULTS),
     sideboard: repairBoardPreferences(value.sideboard, SIDEBOARD_DEFAULTS),
   };
@@ -245,14 +295,25 @@ export function getResponsiveDraftLayout(
 
 export function resolveDraftWorkspaceVisualColumnCap(
   responsiveLayout: ResponsiveDraftLayout,
-  _responsiveContext: "draft" | "builder",
+  responsiveContext: "draft" | "builder",
   phoneDeckVisualColumnCaps: DraftPhoneDeckVisualColumnCaps,
+  tabletDeckVisualColumnCaps: DraftTabletDeckVisualColumnCaps,
 ): number | undefined {
-  if (responsiveLayout === "phone-portrait" || responsiveLayout === "tablet-portrait") {
+  if (responsiveLayout === "phone-portrait") {
     return phoneDeckVisualColumnCaps.portrait;
   }
-  if (responsiveLayout === "phone-landscape" || responsiveLayout === "tablet-landscape") {
+  if (responsiveLayout === "phone-landscape") {
     return phoneDeckVisualColumnCaps.landscape;
+  }
+  if (responsiveLayout === "tablet-portrait") {
+    return responsiveContext === "builder"
+      ? tabletDeckVisualColumnCaps.portrait
+      : phoneDeckVisualColumnCaps.portrait;
+  }
+  if (responsiveLayout === "tablet-landscape") {
+    return responsiveContext === "builder"
+      ? tabletDeckVisualColumnCaps.landscape
+      : phoneDeckVisualColumnCaps.landscape;
   }
   return undefined;
 }

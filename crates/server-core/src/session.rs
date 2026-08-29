@@ -18,7 +18,8 @@ use engine::game::public_state::{
 };
 use engine::game::{
     create_debug_cards_with_rejection, debug_card_entry_source, load_and_hydrate_decks,
-    rehydrate_game_from_card_db, DebugCardCreateRequest,
+    rehydrate_game_from_card_db_with_finalization, CardDbRehydrationFinalization,
+    DebugCardCreateRequest,
 };
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
@@ -1149,33 +1150,41 @@ impl GameSession {
     /// one. It is the saved high-water of the stream the old seed generated, and has no
     /// meaning against the new one.
     pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
-        let mut state = ps.state.into_game_state();
-        state
-            .format_config
-            .validate_for_player_count(ps.player_count)?;
-        state
-            .format_config
-            .reject_unimplemented_range_of_influence()?;
+        let mut state = ps
+            .state
+            .prepare_for_restore(
+                engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
+            )
+            .map_err(|error| error.to_string())?
+            .finalize_after_rehydration(|state| {
+                state
+                    .format_config
+                    .validate_for_player_count(ps.player_count)?;
+                state
+                    .format_config
+                    .reject_unimplemented_range_of_influence()?;
 
-        // Restore #[serde(skip)] fields
-        state.all_card_names = db.card_names().into();
-        state.log_player_names = ps.display_names.clone();
-        rehydrate_game_from_card_db(&mut state, db);
+                // Restore #[serde(skip)] fields before the engine computes the
+                // first externally visible state from this snapshot.
+                state.all_card_names = db.card_names().into();
+                state.log_player_names = ps.display_names.clone();
+                rehydrate_game_from_card_db_with_finalization(
+                    state,
+                    db,
+                    CardDbRehydrationFinalization::Defer,
+                );
 
-        // Re-seed RNG with fresh randomness (stale rng_seed would produce
-        // deterministic sequences identical across all restored games)
-        let fresh_seed: u64 = rand::rng().random();
-        state.rng_seed = fresh_seed;
-        state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
-        // A fresh stream starts at word 0, so the saved high-water — which indexes into the
-        // OLD keystream and is meaningless against this one — has to go with the old seed.
-        // Leaving it behind is what broke restore: the chokepoint's `rehydrate_rng` had put
-        // live and high-water in agreement, the re-seed above rewound live to 0, and the next
-        // `capture_rng_word_pos` (`game::library::resolve_and_apply_library_shuffle` performs
-        // one before every shuffle) `.expect`-panicked `HighWaterRegression`. Same three-
-        // statement resume policy as `engine-wasm`'s `resume_multiplayer_host_state`.
-        state.rng_word_pos = 0;
-        finalize_public_state(&mut state);
+                // Re-seed RNG with fresh randomness (stale rng_seed would produce
+                // deterministic sequences identical across all restored games)
+                let fresh_seed: u64 = rand::rng().random();
+                state.rng_seed = fresh_seed;
+                state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
+                // A fresh stream starts at word 0, so the saved high-water — which indexes into the
+                // OLD keystream and is meaningless against this one — has to go with the old seed.
+                state.rng_word_pos = 0;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         // Re-bind rather than trusting any id the blob carries, on the same
         // principle that `restore_session` re-stamps `hosting` and revokes an
         // unentitled debug capability: a persisted blob never drives authority.
@@ -2396,7 +2405,10 @@ mod tests {
         let mut mgr = SessionManager::new();
         let (code, _token) = mgr.create_game(make_deck());
         let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
-        let mut state = persisted.state.into_game_state();
+        let mut state = persisted
+            .state
+            .into_game_state()
+            .expect("test snapshot satisfies the checked restore contract");
         state.format_config.range_of_influence =
             Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
                 default_range: 0,
@@ -5145,7 +5157,11 @@ mod tests {
         let blob: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
 
         // Premise 2, measured: the position survives disk AND the chokepoint resumes it.
-        let chokepoint_only = blob.state.clone().into_game_state();
+        let chokepoint_only = blob
+            .state
+            .clone()
+            .into_game_state()
+            .expect("test snapshot satisfies the checked restore contract");
         assert_eq!(
             chokepoint_only.rng_word_pos, SAVED_WORD_POS,
             "premise: the persisted blob carries the position across disk",

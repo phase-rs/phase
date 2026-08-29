@@ -1,4 +1,4 @@
-use engine::types::game_state::{GameState, PersistedGameState};
+use engine::types::game_state::{GameState, PersistedGameState, PersistedRestoreFinalization};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -11,15 +11,13 @@ struct Saved {
 pub fn load_saved_game_state(raw: &str) -> Result<GameState, serde_json::Error> {
     let mut value = serde_json::from_str(raw)?;
     migrate_saved_state(&mut value);
-    serde_json::from_value::<Saved>(value).map(|saved| {
-        let mut state = saved.game_state.into_game_state();
-        // A deserialized state carries `layers_dirty = Full` and a conservative
-        // all-present `static_mode_presence`. `choose_action` takes `&GameState`
-        // and cannot flush, so flush here — otherwise every presence-gated scan
-        // falls through and read-only AI consumers pay full O(battlefield) scans
-        // per query (mirrors the WASM bridge's flush-before-enumeration idiom).
-        engine::game::layers::flush_layers(&mut state);
-        state
+    serde_json::from_value::<Saved>(value).and_then(|saved| {
+        saved
+            .game_state
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .map_err(serde::de::Error::custom)?
+            .finalize_immediately()
+            .map_err(serde::de::Error::custom)
     })
 }
 

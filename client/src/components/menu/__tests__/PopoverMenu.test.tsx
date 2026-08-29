@@ -98,4 +98,21 @@ describe("PopoverMenu", () => {
     expect(ancestorClick).not.toHaveBeenCalled();
     expect(screen.queryByRole("menuitem", { name: "Do the thing" })).not.toBeInTheDocument();
   });
+
+  it("clamps_an_oversized_menu_to_viewport_edges_before_positioning_it", () => {
+    const originalWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 120 });
+    render(
+      <PopoverMenu ariaLabel="Wide menu" menuWidthPx={224}>
+        {() => <button type="button" role="menuitem">Action</button>}
+      </PopoverMenu>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Wide menu" }));
+    const menu = screen.getByRole("menu", { name: "Wide menu" });
+    expect(menu).toHaveStyle({ left: "8px", width: "104px" });
+
+    if (originalWidth === undefined) delete (window as { innerWidth?: number }).innerWidth;
+    else Object.defineProperty(window, "innerWidth", originalWidth);
+  });
 });

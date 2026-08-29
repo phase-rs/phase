@@ -20,6 +20,7 @@ fn load_state() -> GameState {
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 fn token_count(state: &GameState) -> usize {

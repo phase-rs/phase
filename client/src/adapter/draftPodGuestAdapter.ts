@@ -471,17 +471,21 @@ export class DraftPodGuestAdapter {
    * explicit participant leave is allowed to revoke durable guest recovery.
    */
   async dispose({ preserveRecovery = true }: { preserveRecovery?: boolean } = {}): Promise<void> {
-    if (this.guestEventUnsub) {
-      this.guestEventUnsub();
-      this.guestEventUnsub = null;
-    }
     if (this.guest) {
       if (preserveRecovery) {
+        this.guest.dispose();
+      } else if (this.guest.isRecoveryRevoked) {
+        // Terminal host events already removed the capability, so there is
+        // no live participant session left to acknowledge another leave.
         this.guest.dispose();
       } else {
         await this.guest.leave();
       }
       this.guest = null;
+    }
+    if (this.guestEventUnsub) {
+      this.guestEventUnsub();
+      this.guestEventUnsub = null;
     }
     if (this.joinResult) {
       this.joinResult.destroyPeer();

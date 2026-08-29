@@ -113,6 +113,191 @@ fn parse(
     parse_oracle_text(oracle_text, card_name, &keyword_names, &types, &subtypes)
 }
 
+/// CR 118.12 + CR 603.12: the measured resolution-time disjunctive optional-
+/// payment family is exact. Every member must lower a root PayCost(OneOf), and
+/// none may retain the dedicated strict-gap marker.
+#[test]
+fn msh_resolution_optional_payment_family_has_no_strict_gaps() {
+    use engine::types::ability::{
+        AbilityCondition, AbilityCost, AbilityDefinition, TargetFilter, TypeFilter,
+    };
+    use engine::types::mana::{ManaCost, ManaCostShard};
+
+    fn has_strict_gap(ability: &AbilityDefinition) -> bool {
+        matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "reflexive optional payment"
+        ) || ability.sub_ability.as_deref().is_some_and(has_strict_gap)
+            || ability.else_ability.as_deref().is_some_and(has_strict_gap)
+    }
+
+    fn has_type(filter: &TargetFilter, expected: &TypeFilter) -> bool {
+        matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(expected))
+    }
+
+    fn sacrifice_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(cost, AbilityCost::Sacrifice(cost) if has_type(&cost.target, expected))
+    }
+
+    fn discard_leaf(cost: &AbilityCost, expected: &TypeFilter) -> bool {
+        matches!(
+            cost,
+            AbilityCost::Discard { filter: Some(filter), .. } if has_type(filter, expected)
+        )
+    }
+
+    const CARDS: [(&str, &str); 12] = [
+        ("Contract Hero", "When this creature enters, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\nWhenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, this creature gets +2/+0 until end of turn."),
+        ("K'un-Lun Warrior", "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card."),
+        ("Anthropede", "Reach\nWhen this creature enters, you may discard a card or pay {2}. When you do, destroy target Room."),
+        ("Treetop Sentries", "Reach\nWhen this creature enters, you may forage. If you do, draw a card. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Nimble Hobbit", "Whenever this creature attacks, you may sacrifice a Food or pay {2}{W}. When you do, tap target creature an opponent controls."),
+        ("Euru, Acorn Scrounger", "When Euru, Acorn Scrounger enters, you may forage. When you do, conjure a card named Chitterspitter onto the battlefield.\nWhenever one or more Squirrels you control deal combat damage to a player, you may sacrifice a token. If you do, put an acorn counter on each permanent you control named Chitterspitter."),
+        ("Reckless Detective", "Whenever this creature attacks, you may sacrifice an artifact or discard a card. If you do, draw a card and this creature gets +2/+0 until end of turn."),
+        ("Isu the Abominable", "You may look at the top card of your library any time.\nYou may play snow lands and cast snow spells from the top of your library.\nWhenever another snow permanent you control enters, you may pay {G}, {W}, or {U}. If you do, put a +1/+1 counter on Isu."),
+        ("Crypt Lurker", "When this creature enters, you may sacrifice a creature or discard a creature card. If you do, draw a card."),
+        ("Bushy Bodyguard", "Offspring {2} (You may pay an additional {2} as you cast this spell. If you do, when this creature enters, create a 1/1 token copy of it.)\nWhen this creature enters, you may forage. If you do, put two +1/+1 counters on it. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+        ("Bullseye, Death Dealer", "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.\n{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target."),
+        ("Curious Forager", "When this creature enters, you may forage. When you do, return target permanent card from your graveyard to your hand. (To forage, exile three cards from your graveyard or sacrifice a Food.)"),
+    ];
+    for (name, oracle) in CARDS {
+        let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .chain(
+                    parsed
+                        .triggers
+                        .iter()
+                        .filter_map(|trigger| trigger.execute.as_deref())
+                )
+                .all(|ability| !has_strict_gap(ability)),
+            "{name} retained the dedicated strict gap: {parsed:#?}"
+        );
+        let root = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| {
+                trigger.execute.as_deref().filter(|ability| {
+                    matches!(
+                        ability.effect.as_ref(),
+                        Effect::PayCost {
+                            cost: AbilityCost::OneOf { .. },
+                            ..
+                        }
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("{name} did not lower PayCost(OneOf): {parsed:#?}"));
+        let Effect::PayCost {
+            cost: AbilityCost::OneOf { costs },
+            ..
+        } = root.effect.as_ref()
+        else {
+            unreachable!();
+        };
+        assert!(root.optional, "{name} must preserve its printed may");
+        let when_you_do = matches!(
+            root.sub_ability
+                .as_deref()
+                .and_then(|tail| tail.condition.as_ref()),
+            Some(AbilityCondition::WhenYouDo)
+        );
+        match name {
+            "Contract Hero" | "K'un-Lun Warrior" | "Reckless Detective" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact), "{name}");
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert!(!when_you_do);
+            }
+            "Anthropede" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Discard { filter: None, .. }
+                ));
+                assert_eq!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2)
+                    }
+                );
+                assert!(when_you_do);
+            }
+            "Treetop Sentries"
+            | "Bushy Bodyguard"
+            | "Curious Forager"
+            | "Euru, Acorn Scrounger" => {
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::Exile {
+                        count: 3,
+                        zone: Some(Zone::Graveyard),
+                        ..
+                    }
+                ));
+                assert!(sacrifice_leaf(
+                    &costs[1],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert_eq!(
+                    when_you_do,
+                    matches!(name, "Curious Forager" | "Euru, Acorn Scrounger")
+                );
+            }
+            "Nimble Hobbit" => {
+                assert!(sacrifice_leaf(
+                    &costs[0],
+                    &TypeFilter::Subtype("Food".into())
+                ));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 2, ref shards }
+                    } if shards == &[ManaCostShard::White]
+                ));
+                assert!(when_you_do);
+            }
+            "Isu the Abominable" => {
+                let shards: Vec<_> = costs
+                    .iter()
+                    .map(|cost| match cost {
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 0, shards },
+                        } if shards.len() == 1 => shards[0],
+                        other => panic!("Isu branch must be one colored pip: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    shards,
+                    vec![
+                        ManaCostShard::Green,
+                        ManaCostShard::White,
+                        ManaCostShard::Blue
+                    ]
+                );
+                assert!(!when_you_do);
+            }
+            "Crypt Lurker" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Creature));
+                assert!(discard_leaf(&costs[1], &TypeFilter::Creature));
+                assert!(!when_you_do);
+            }
+            "Bullseye, Death Dealer" => {
+                assert!(sacrifice_leaf(&costs[0], &TypeFilter::Artifact));
+                assert!(discard_leaf(
+                    &costs[1],
+                    &TypeFilter::Non(Box::new(TypeFilter::Land))
+                ));
+                assert!(when_you_do);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[test]
 fn snapshot_lightning_bolt() {
     let result = parse(

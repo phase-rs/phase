@@ -1261,6 +1261,16 @@ impl SocketIdentity {
             self.player_token.as_deref()?,
         ))
     }
+
+    /// The draft seat claimed by this socket. A complete triple is required
+    /// before the socket can exercise a draft seat-scoped capability.
+    fn draft_seat(&self) -> Option<(&str, usize, &str)> {
+        Some((
+            self.draft_code.as_deref()?,
+            self.draft_seat?,
+            self.draft_token.as_deref()?,
+        ))
+    }
 }
 
 /// Full-mode authority required before a message reaches its handler.
@@ -1333,6 +1343,28 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
 const FULL_SOCKET_AUTHORITY_REJECTION: &str =
     "This socket's game session identity is no longer current";
 const FULL_SOCKET_FRESH_REJECTION: &str = "This socket is already attached to a game session";
+const DRAFT_SOCKET_AUTHORITY_REJECTION: &str =
+    "This socket's draft session identity is no longer current";
+const DRAFT_SOCKET_FRESH_REJECTION: &str = "This socket is already attached to a draft session";
+
+/// Draft creation and joining install a new seat identity. They therefore need
+/// the same fresh-socket rule as full-game creation and joining: an attached
+/// socket, including one whose sender has since been replaced, must not be
+/// allowed to overwrite the identity its close handler will later clean up.
+///
+/// Reconnecting is deliberately excluded. A new websocket has no draft seat
+/// identity and may reconnect, while an attached websocket is governed by the
+/// exact-seat checks in [`reconnect_draft_seat`].
+fn draft_socket_admission_rejection(
+    message: &ClientMessage,
+    identity: &SocketIdentity,
+) -> Option<&'static str> {
+    (matches!(
+        message,
+        ClientMessage::CreateDraftWithSettings { .. } | ClientMessage::JoinDraftWithPassword { .. }
+    ) && identity.draft_seat().is_some())
+    .then_some(DRAFT_SOCKET_FRESH_REJECTION)
+}
 
 /// Verifies a Full seat while the caller already owns the session-state lock.
 ///
@@ -1511,6 +1543,141 @@ async fn disconnect_full_seat_if_current(
     for sender in notify_senders {
         let _ = sender.send(message.clone());
     }
+}
+
+/// Verifies a draft seat while the caller already owns the draft-state lock.
+///
+/// This is the authority linearization point for draft mutations: the token
+/// resolves against the exact [`DraftSessionManager`] snapshot being mutated,
+/// then the draft sender-map entry must still belong to this socket. Both
+/// guards are released before persistence, socket I/O, or fan-out.
+async fn draft_socket_is_current_while_state_locked(
+    manager: &DraftSessionManager,
+    connections: &SharedConnections,
+    identity: &SocketIdentity,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> bool {
+    let Some((draft_code, seat, player_token)) = identity.draft_seat() else {
+        return false;
+    };
+    let resolved_seat = manager
+        .sessions
+        .get(draft_code)
+        .and_then(|session| session.seat_for_token(player_token));
+    if resolved_seat != Some(seat) {
+        return false;
+    }
+
+    let conns = connections.lock().await;
+    conns
+        .get(draft_code)
+        .and_then(|players| players.get(&PlayerId(seat as u8)))
+        .is_some_and(|sender| sender.same_channel(tx))
+}
+
+/// A pre-dispatch authority check for reconnect attempts from an already
+/// attached draft socket. The reconnect transaction below rechecks under the
+/// draft-state lock before it replaces the sender.
+async fn draft_socket_is_current_preflight(
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    identity: &SocketIdentity,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> bool {
+    let manager = draft_state.lock().await;
+    draft_socket_is_current_while_state_locked(&manager, connections, identity, tx).await
+}
+
+/// Install a draft-seat sender while the caller owns the draft-state lock.
+/// The draft state -> connections nesting makes replacement and reconnect one
+/// transaction, so later broadcasts and match launches observe the new sender.
+async fn install_draft_sender_while_state_locked(
+    connections: &SharedConnections,
+    draft_code: &str,
+    seat: usize,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
+    let mut conns = connections.lock().await;
+    conns
+        .entry(draft_code.to_string())
+        .or_default()
+        .insert(PlayerId(seat as u8), tx.clone());
+}
+
+/// Reconnect a draft seat and install its sender before assigning socket
+/// identity. The session operation and map replacement share draft-state ->
+/// connections lock ordering, preventing a fan-out from observing a renewed
+/// seat paired with its former socket.
+async fn reconnect_draft_seat(
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    identity: &mut SocketIdentity,
+    draft_code: String,
+    player_token: String,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let mut manager = draft_state.lock().await;
+    if let Some((attached_code, _attached_seat, attached_token)) = identity.draft_seat() {
+        if attached_code != draft_code
+            || attached_token != player_token
+            || !draft_socket_is_current_while_state_locked(&manager, connections, identity, tx)
+                .await
+        {
+            return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
+        }
+    }
+    let seat = manager
+        .sessions
+        .get(&draft_code)
+        .and_then(|session| session.seat_for_token(&player_token))
+        .ok_or_else(|| "Invalid player token".to_string())?;
+    let view = manager.handle_reconnect(&draft_code, &player_token)?;
+    install_draft_sender_while_state_locked(connections, &draft_code, seat, tx).await;
+    drop(manager);
+
+    identity.draft_code = Some(draft_code);
+    identity.draft_seat = Some(seat);
+    identity.draft_token = Some(player_token);
+    Ok(view)
+}
+
+/// Mark a draft seat disconnected only if this socket still owns its sender
+/// entry. A superseded socket's close event must leave the replacement's seat
+/// connected and must not remove its sender from broadcasts or match launches.
+async fn disconnect_draft_seat_if_current(
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    identity: &SocketIdentity,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
+    let Some((draft_code, seat, player_token)) = identity.draft_seat() else {
+        return;
+    };
+
+    let mut manager = draft_state.lock().await;
+    if manager
+        .sessions
+        .get(draft_code)
+        .and_then(|session| session.seat_for_token(player_token))
+        != Some(seat)
+    {
+        return;
+    }
+
+    let mut conns = connections.lock().await;
+    let Some(players) = conns.get_mut(draft_code) else {
+        return;
+    };
+    let player_id = PlayerId(seat as u8);
+    if !players
+        .get(&player_id)
+        .is_some_and(|sender| sender.same_channel(tx))
+    {
+        return;
+    }
+
+    players.remove(&player_id);
+    manager.handle_disconnect(draft_code, seat);
 }
 
 /// `thread_stack_size` governs Tokio's worker and blocking threads, but
@@ -2020,16 +2187,7 @@ async fn serve() {
                 drop(mgr);
                 for draft_code in &affected_drafts {
                     // Broadcast to players
-                    let views: Vec<_> = {
-                        let mgr = bg_draft_state.lock().await;
-                        let Some(session) = mgr.sessions.get(draft_code) else {
-                            continue;
-                        };
-                        let pod_size = session.player_tokens.len();
-                        (0..pod_size).map(|i| session.view_for_seat(i)).collect()
-                    };
-                    broadcast_draft_views(draft_code, &views, &bg_connections, &bg_draft_state)
-                        .await;
+                    broadcast_draft_views(draft_code, &bg_connections, &bg_draft_state).await;
                     // Broadcast to spectators
                     broadcast_draft_spectator_views(
                         draft_code,
@@ -2954,11 +3112,7 @@ async fn handle_socket(
         player = ?identity.player_id,
         "client disconnected"
     );
-    // Handle draft session disconnect
-    if let (Some(draft_code), Some(seat)) = (&identity.draft_code, identity.draft_seat) {
-        let mut mgr = draft_state.lock().await;
-        mgr.handle_disconnect(draft_code, seat);
-    }
+    disconnect_draft_seat_if_current(&draft_state, &connections, &identity, &tx).await;
 
     disconnect_full_seat_if_current(&state, &connections, &identity, &tx).await;
 
@@ -3895,14 +4049,14 @@ async fn report_draft_game_over(
         "auto-reporting draft match result from GameOver"
     );
 
-    let views = {
+    {
         let mut mgr = draft_state.lock().await;
         let action = draft_core::types::DraftAction::ReportMatchResult {
             match_id,
             winner_seat,
         };
         match mgr.apply_system_action(&draft_code, action, None) {
-            Ok(views) => views,
+            Ok(_) => {}
             Err(e) => {
                 warn!(draft = %draft_code, error = %e, "failed to auto-report draft match result");
                 return;
@@ -3910,16 +4064,7 @@ async fn report_draft_game_over(
         }
     };
 
-    // Broadcast updated views to all draft pod members
-    let conns = connections.lock().await;
-    if let Some(players) = conns.get(&draft_code) {
-        for (pid, sender) in players.iter() {
-            let seat = pid.0 as usize;
-            if let Some(view) = views.get(seat) {
-                let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
-            }
-        }
-    }
+    broadcast_draft_views(&draft_code, connections, draft_state).await;
 }
 
 /// When the draft pod is pairing or in match play, generate pairings (server-internal)
@@ -3960,6 +4105,10 @@ async fn maybe_spawn_draft_matches(
         return;
     }
 
+    // Reacquire draft state before the sender map so a reconnect cannot renew
+    // its engine state between pairing generation and match-start delivery.
+    // Draft reconnects use the same draft state -> connections ordering.
+    let _draft_manager = draft_state.lock().await;
     let conns = connections.lock().await;
     let Some(players) = conns.get(draft_code) else {
         return;
@@ -3995,25 +4144,28 @@ async fn maybe_spawn_draft_matches(
 /// connections map keyed by draft_code.
 async fn broadcast_draft_views(
     draft_code: &str,
-    views: &[draft_core::view::DraftPlayerView],
     connections: &SharedConnections,
     draft_state: &SharedDraftState,
 ) {
+    // Serialize sender fan-out with reconnect's state -> connections
+    // transaction. Without this guard, a reconnect could mark its seat live
+    // while a concurrent broadcast still selected its superseded sender.
+    let draft_manager = draft_state.lock().await;
+    let Some(session) = draft_manager.sessions.get(draft_code) else {
+        return;
+    };
     let conns = connections.lock().await;
     // Draft connections are stored under the draft_code in the connections map
     if let Some(players) = conns.get(draft_code) {
         for (pid, sender) in players.iter() {
             let seat = pid.0 as usize;
-            if let Some(view) = views.get(seat) {
-                let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
+            if seat < session.player_tokens.len() {
+                let msg = ServerMessage::DraftStateUpdate {
+                    view: session.view_for_seat(seat),
+                };
                 let _ = sender.send(msg);
             }
         }
-    } else {
-        // Fallback: broadcast to all sockets that have a matching draft_code
-        // by sending the first view (for reconnect cases where identity is set
-        // but connection may not be in the draft_code map yet)
-        let _ = draft_state; // suppress unused
     }
 }
 
@@ -4021,8 +4173,10 @@ async fn broadcast_draft_timer_sync(
     draft_code: &str,
     remaining_ms: u32,
     connections: &SharedConnections,
+    draft_state: &SharedDraftState,
 ) {
     let msg = ServerMessage::DraftTimerSync { remaining_ms };
+    let _draft_manager = draft_state.lock().await;
     let conns = connections.lock().await;
     if let Some(players) = conns.get(draft_code) {
         for sender in players.values() {
@@ -4068,7 +4222,13 @@ fn spawn_pick_timer(
                 session.timer_remaining_ms = Some(remaining_ms);
             }
 
-            broadcast_draft_timer_sync(&timer_draft_code, remaining_ms, &timer_connections).await;
+            broadcast_draft_timer_sync(
+                &timer_draft_code,
+                remaining_ms,
+                &timer_connections,
+                &timer_draft_state,
+            )
+            .await;
 
             if remaining_ms == 0 {
                 break;
@@ -4130,21 +4290,8 @@ fn spawn_pick_timer(
 
         session.timer_remaining_ms = None;
 
-        // Broadcast updated views
-        let views: Vec<_> = (0..pod_size).map(|i| session.view_for_seat(i)).collect();
         drop(mgr);
-
-        {
-            let conns = timer_connections.lock().await;
-            if let Some(players) = conns.get(&timer_draft_code) {
-                for (pid, sender) in players.iter() {
-                    let seat = pid.0 as usize;
-                    if let Some(view) = views.get(seat) {
-                        let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
-                    }
-                }
-            }
-        }
+        broadcast_draft_views(&timer_draft_code, &timer_connections, &timer_draft_state).await;
 
         // Re-arm for the next pick window if the draft is still in progress.
         let still_drafting = {
@@ -5512,6 +5659,16 @@ async fn handle_client_message(
         {
             let msg = operation_failed_message(&client_msg, reason.to_string())
                 .unwrap_or_else(|| ServerMessage::error(reason.to_string()));
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+
+        if let Some(reason) = draft_socket_admission_rejection(&client_msg, identity) {
+            let msg = ServerMessage::DraftActionRejected {
+                reason: reason.to_string(),
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -8860,35 +9017,41 @@ async fn handle_client_message(
 
             let result = {
                 let mut mgr = draft_state.lock().await;
-                let before_window = mgr.sessions.get(&draft_code).map(|s| {
-                    (
-                        s.session.status,
-                        s.session.current_pack_number,
-                        s.session.pick_number,
-                    )
-                });
-                let result = mgr.handle_draft_action(
-                    &draft_code,
-                    &token,
-                    action,
-                    pack_generator
-                        .as_ref()
-                        .map(|generator| generator as &dyn draft_core::pack_source::PackSource),
-                );
-                let after_window = mgr.sessions.get(&draft_code).map(|s| {
-                    (
-                        s.session.status,
-                        s.session.current_pack_number,
-                        s.session.pick_number,
-                    )
-                });
-                let should_rearm_timer =
-                    result.is_ok() && should_rearm_pick_timer(before_window, after_window);
-                result.map(|views| (views, should_rearm_timer))
+                if !draft_socket_is_current_while_state_locked(&mgr, connections, identity, tx)
+                    .await
+                {
+                    Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string())
+                } else {
+                    let before_window = mgr.sessions.get(&draft_code).map(|s| {
+                        (
+                            s.session.status,
+                            s.session.current_pack_number,
+                            s.session.pick_number,
+                        )
+                    });
+                    let result = mgr.handle_draft_action(
+                        &draft_code,
+                        &token,
+                        action,
+                        pack_generator
+                            .as_ref()
+                            .map(|generator| generator as &dyn draft_core::pack_source::PackSource),
+                    );
+                    let after_window = mgr.sessions.get(&draft_code).map(|s| {
+                        (
+                            s.session.status,
+                            s.session.current_pack_number,
+                            s.session.pick_number,
+                        )
+                    });
+                    let should_rearm_timer =
+                        result.is_ok() && should_rearm_pick_timer(before_window, after_window);
+                    result.map(|_| should_rearm_timer)
+                }
             };
 
             match result {
-                Ok((views, should_rearm_timer)) => {
+                Ok(should_rearm_timer) => {
                     if is_start {
                         let removed = {
                             let mut lob_guard = lobby.lock().await;
@@ -8909,7 +9072,7 @@ async fn handle_client_message(
                     }
 
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
-                    broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
+                    broadcast_draft_views(&draft_code, connections, draft_state).await;
 
                     // (Re)arm only when a new pick window begins: StartDraft
                     // or a completed round that advanced pack/pick position.
@@ -8958,26 +9121,34 @@ async fn handle_client_message(
                 return;
             }
 
-            let result = {
-                let mut mgr = draft_state.lock().await;
-                mgr.handle_reconnect(&draft_code, &player_token)
-            };
+            if let Some((attached_code, _attached_seat, attached_token)) = identity.draft_seat() {
+                if attached_code != draft_code
+                    || attached_token != player_token
+                    || !draft_socket_is_current_preflight(draft_state, connections, identity, tx)
+                        .await
+                {
+                    let msg = ServerMessage::DraftActionRejected {
+                        reason: DRAFT_SOCKET_AUTHORITY_REJECTION.to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            }
+
+            let result = reconnect_draft_seat(
+                draft_state,
+                connections,
+                identity,
+                draft_code.clone(),
+                player_token,
+                tx,
+            )
+            .await;
 
             match result {
                 Ok(view) => {
-                    // Restore identity
-                    let seat = {
-                        let mgr = draft_state.lock().await;
-                        mgr.sessions
-                            .get(&draft_code)
-                            .and_then(|s| s.seat_for_token(&player_token))
-                    };
-                    if let Some(seat) = seat {
-                        identity.draft_code = Some(draft_code.clone());
-                        identity.draft_seat = Some(seat);
-                        identity.draft_token = Some(player_token);
-                    }
-
                     let msg = ServerMessage::DraftStateUpdate { view };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -10010,6 +10181,313 @@ mod full_socket_authority_tests {
         })
         .await
         .expect("state -> connections ordering must not deadlock");
+    }
+}
+
+#[cfg(test)]
+mod draft_socket_authority_tests {
+    use super::*;
+    use draft_core::types::{
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
+        TournamentFormat,
+    };
+
+    fn empty_identity() -> SocketIdentity {
+        SocketIdentity {
+            game_code: None,
+            player_id: None,
+            player_token: None,
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        }
+    }
+
+    fn test_draft() -> (SharedDraftState, SharedConnections, String, String) {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let mut manager = DraftSessionManager::new();
+        let (draft_code, player_token, _) = manager.create_draft(config, "Alice".to_string());
+        (
+            Arc::new(Mutex::new(manager)),
+            Arc::new(Mutex::new(HashMap::new())),
+            draft_code,
+            player_token,
+        )
+    }
+
+    fn draft_admission_messages(draft_code: &str) -> [ClientMessage; 2] {
+        [
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "Alice".to_string(),
+                set_codes: vec!["TST".to_string()],
+                kind: DraftKind::Premier,
+                public: false,
+                password: None,
+                timer_seconds: Some(75),
+                tournament_format: TournamentFormat::Swiss,
+                pod_policy: PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::JoinDraftWithPassword {
+                draft_code: draft_code.to_string(),
+                display_name: "Bob".to_string(),
+                password: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn fresh_socket_keeps_draft_admission_and_reconnect_paths() {
+        let fresh = empty_identity();
+        for message in draft_admission_messages("DRAFT01") {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &fresh),
+                None,
+                "a fresh socket must reach {message:?}'s handler"
+            );
+        }
+        assert_eq!(
+            draft_socket_admission_rejection(
+                &ClientMessage::ReconnectDraft {
+                    draft_code: "DRAFT01".to_string(),
+                    player_token: "player-token".to_string(),
+                },
+                &fresh,
+            ),
+            None,
+            "a fresh socket must retain draft reconnect eligibility"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_draft_socket_cannot_create_or_join_without_replacing_its_seat() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity,
+            draft_code.clone(),
+            player_token,
+            &tx,
+        )
+        .await
+        .expect("attach draft seat");
+        let original_identity = (
+            identity.draft_code.clone(),
+            identity.draft_seat,
+            identity.draft_token.clone(),
+        );
+
+        for message in draft_admission_messages(&draft_code) {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &identity),
+                Some(DRAFT_SOCKET_FRESH_REJECTION),
+                "the gate must reject {message:?} before its handler mutates draft state"
+            );
+        }
+
+        assert_eq!(
+            (
+                identity.draft_code.clone(),
+                identity.draft_seat,
+                identity.draft_token.clone(),
+            ),
+            original_identity,
+            "the gate must not overwrite the socket's existing draft identity"
+        );
+        assert_eq!(draft_state.lock().await.sessions.len(), 1);
+        assert!(
+            connections
+                .lock()
+                .await
+                .get(&draft_code)
+                .and_then(|players| players.get(&PlayerId(0)))
+                .is_some_and(|sender| sender.same_channel(&tx)),
+            "the rejected admission must leave the original sender installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_draft_socket_cannot_create_or_join_another_pod() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
+        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let mut stale_identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut stale_identity,
+            draft_code.clone(),
+            player_token.clone(),
+            &stale_tx,
+        )
+        .await
+        .expect("attach original socket");
+        let mut current_identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut current_identity,
+            draft_code.clone(),
+            player_token,
+            &current_tx,
+        )
+        .await
+        .expect("replace original socket");
+
+        for message in draft_admission_messages("OTHER01") {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &stale_identity),
+                Some(DRAFT_SOCKET_FRESH_REJECTION),
+                "a stale seat must be rejected before {message:?} can overwrite its identity"
+            );
+        }
+        assert!(
+            connections
+                .lock()
+                .await
+                .get(&draft_code)
+                .and_then(|players| players.get(&PlayerId(0)))
+                .is_some_and(|sender| sender.same_channel(&current_tx)),
+            "the stale socket must not displace the current sender"
+        );
+        assert_eq!(draft_state.lock().await.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconnect_replaces_the_draft_seat_sender_before_identity_is_exposed() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let mut identity_a = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_a,
+            draft_code.clone(),
+            player_token.clone(),
+            &a_tx,
+        )
+        .await
+        .expect("initial reconnect attaches A");
+        let mut identity_b = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_b,
+            draft_code.clone(),
+            player_token.clone(),
+            &b_tx,
+        )
+        .await
+        .expect("replacement reconnect attaches B");
+
+        assert!(
+            !draft_socket_is_current_preflight(&draft_state, &connections, &identity_a, &a_tx)
+                .await,
+            "A must lose draft mutation authority once B replaces its sender"
+        );
+        assert!(
+            draft_socket_is_current_preflight(&draft_state, &connections, &identity_b, &b_tx).await
+        );
+        let err = reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_a,
+            draft_code.clone(),
+            player_token,
+            &a_tx,
+        )
+        .await
+        .expect_err("superseded A must not replace B after a stale reconnect");
+        assert_eq!(err, DRAFT_SOCKET_AUTHORITY_REJECTION);
+        assert!(
+            connections
+                .lock()
+                .await
+                .get(&draft_code)
+                .and_then(|players| players.get(&PlayerId(0)))
+                .is_some_and(|sender| sender.same_channel(&b_tx)),
+            "the sender map must point at B before B receives its draft identity"
+        );
+
+        broadcast_draft_views(&draft_code, &connections, &draft_state).await;
+        assert!(matches!(
+            b_rx.try_recv(),
+            Ok(ServerMessage::DraftStateUpdate { .. })
+        ));
+        assert!(
+            a_rx.try_recv().is_err(),
+            "a broadcast after replacement must not target A's superseded sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_draft_close_cannot_disconnect_the_replacement_seat() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (a_tx, _a_rx) = mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = mpsc::unbounded_channel();
+        let mut identity_a = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_a,
+            draft_code.clone(),
+            player_token.clone(),
+            &a_tx,
+        )
+        .await
+        .unwrap();
+        let mut identity_b = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_b,
+            draft_code.clone(),
+            player_token,
+            &b_tx,
+        )
+        .await
+        .unwrap();
+
+        disconnect_draft_seat_if_current(&draft_state, &connections, &identity_a, &a_tx).await;
+
+        assert!(
+            draft_state
+                .lock()
+                .await
+                .sessions
+                .get(&draft_code)
+                .is_some_and(|session| session.connected[0]),
+            "A's late close must not mark B's draft seat disconnected"
+        );
+        assert!(
+            draft_socket_is_current_preflight(&draft_state, &connections, &identity_b, &b_tx).await
+        );
     }
 }
 

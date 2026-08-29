@@ -16668,11 +16668,10 @@ fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
     }
 }
 
-/// CR 118.12 + CR 603.12: Phase 1 admits only direct disjunctive resolution
-/// costs. Sacrifice-bearing alternatives remain strict until the replacement-
-/// aware payment continuation exists.
+/// CR 118.12 + CR 603.12: the structural classifier admits direct disjunctive
+/// resolution costs and only fixed, typed, non-self sacrifice alternatives.
 #[test]
-fn anthropede_and_isu_unlock_without_sacrifice_leak() {
+fn resolution_optional_payment_family_accepts_fixed_typed_sacrifice() {
     fn root_cost(def: &TriggerDefinition) -> (&Vec<AbilityCost>, &AbilityDefinition) {
         let execute = def.execute.as_ref().expect("execute");
         let Effect::PayCost {
@@ -16747,21 +16746,97 @@ fn anthropede_and_isu_unlock_without_sacrifice_leak() {
         );
     }
 
-    for (name, text) in [
+    for (name, text, connector) in [
         (
             "K'un-Lun Warrior",
             "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card.",
+            AbilityCondition::effect_performed(),
         ),
         (
             "Bullseye, Death Dealer",
             "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.",
+            AbilityCondition::WhenYouDo,
         ),
     ] {
-        let strict = parse_trigger_line(text, name);
-        assert!(matches!(
-            strict.execute.as_deref().map(|ability| ability.effect.as_ref()),
-            Some(Effect::Unimplemented { name, .. }) if name == "reflexive optional payment"
-        ), "sacrifice alternative must remain the exact Phase-1 strict gap for {name}");
+        let parsed = parse_trigger_line(text, name);
+        let (costs, execute) = root_cost(&parsed);
+        assert_eq!(costs.len(), 2, "{name}");
+        assert!(matches!(costs[0], AbilityCost::Sacrifice(_)), "{name}");
+        assert!(matches!(costs[1], AbilityCost::Discard { .. }), "{name}");
+        assert_eq!(
+            execute.sub_ability.as_ref().expect("affirmative tail").condition,
+            Some(connector),
+            "{name} must preserve its printed connector"
+        );
+    }
+}
+
+#[test]
+fn resolution_optional_payment_sacrifice_allowlist_fails_closed() {
+    fn strict(text: &str) {
+        let parsed = parse_trigger_line(text, "Strict Sacrifice Probe");
+        assert!(
+            matches!(
+                parsed.execute.as_deref().map(|ability| ability.effect.as_ref()),
+                Some(Effect::Unimplemented { name, .. })
+                    if name == "reflexive optional payment"
+            ),
+            "unsupported sacrifice form must reach the exact strict classifier: {text}"
+        );
+    }
+
+    // Paired reach guard: punctuation and connector are valid, and the exact
+    // fixed typed form reaches PayCost(OneOf).
+    let positive = parse_trigger_line(
+        "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card.",
+        "Positive Sacrifice Probe",
+    );
+    assert!(matches!(
+        positive
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::PayCost {
+            cost: AbilityCost::OneOf { .. },
+            ..
+        })
+    ));
+
+    strict("When this creature enters, you may sacrifice this creature or discard a card. If you do, draw a card.");
+    strict("When this creature enters, you may sacrifice any number of artifacts or discard a card. If you do, draw a card.");
+    strict("When this creature enters, you may sacrifice X artifacts or discard a card. If you do, draw a card.");
+
+    use crate::types::ability::{SacrificeAggregateStat, SacrificeCost, SacrificeRequirement};
+    let typed = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+    assert!(
+        reflexive_optional_direct_cost(&AbilityCost::Sacrifice(SacrificeCost::count(
+            typed.clone(),
+            1,
+        ))),
+        "the fixed typed count-1 sacrifice must be admitted by the structural allowlist"
+    );
+    for forbidden in [
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::GrantingObject, 1)),
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
+        AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), 0)),
+        AbilityCost::Sacrifice(SacrificeCost::count(typed.clone(), u32::MAX)),
+        AbilityCost::Sacrifice(SacrificeCost::new(
+            typed.clone(),
+            SacrificeRequirement::Aggregate {
+                stat: SacrificeAggregateStat::TotalPower,
+                comparator: Comparator::GE,
+                value: 3,
+            },
+        )),
+        AbilityCost::Composite {
+            costs: vec![AbilityCost::Sacrifice(SacrificeCost::count(typed, 1))],
+        },
+    ] {
+        assert!(
+            !reflexive_optional_direct_cost(&forbidden),
+            "forbidden shape leaked through the structural allowlist: {forbidden:?}"
+        );
     }
 }
 

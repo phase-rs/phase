@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -92,10 +92,18 @@ function ControlledHarness({
   onCardHover,
   raritySupported = true,
   initialSort = "cmc",
+  compactPrimaryControls,
+  compactCount,
+  compactTrailingControls,
+  builderCompact = false,
 }: {
   onCardHover?: (info: CardHoverInfo | null) => void;
   raritySupported?: boolean;
   initialSort?: DraftBoardSort;
+  compactPrimaryControls?: ReactNode;
+  compactCount?: ReactNode;
+  compactTrailingControls?: ReactNode;
+  builderCompact?: boolean;
 }) {
   const [state, setState] = useState(workspace);
   const [filter, setFilter] = useState<DraftWorkspaceFilter>("combined");
@@ -113,6 +121,10 @@ function ControlledHarness({
         onFilterChange: setFilter,
         onSortChange: setSort,
         onWorkspaceChange: setState,
+        compactPrimaryControls,
+        compactCount,
+        compactTrailingControls,
+        builderCompact,
       }}
     />
   );
@@ -164,6 +176,54 @@ describe("controlled workspace pool panel", () => {
 
     expect(screen.queryByRole("button", { name: "Rarity" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mana value" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps_mana_value_compact_controls_together_before_wrappable_sorts", () => {
+    const { container } = render(
+      <ControlledHarness
+        compactPrimaryControls={<button type="button">Lands</button>}
+        compactTrailingControls={<button type="button">Visual builder</button>}
+      />,
+    );
+
+    const primary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    expect(primary).toHaveClass("flex-wrap");
+    expect(within(primary).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["Mana value", "Color", "Rarity", "Type", "Lands", "Visual builder"]);
+    expect(within(primary).getByRole("button", { name: "Color" })).toHaveClass("min-h-8");
+  });
+
+  it("uses_a_capability_aware_group_menu_only_for_builder_phone_compact", () => {
+    const { container } = render(
+      <ControlledHarness
+        raritySupported={false}
+        builderCompact
+        compactPrimaryControls={<button type="button">Add Lands</button>}
+        compactCount={<button type="button">Counts</button>}
+        compactTrailingControls={<button type="button">Visual builder</button>}
+      />,
+    );
+
+    const primary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    expect(within(primary).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["Group", "Add Lands", "Counts", "Visual builder"]);
+    expect(primary).toHaveClass("flex-nowrap", "w-full");
+    expect(container.querySelector("[data-compact-pool-trailing-controls]")).toHaveClass("ml-auto");
+    expect(within(primary).getByRole("button", { name: "Group" })).toHaveClass("min-h-11", "bg-slate-950/80");
+    expect(screen.getByRole("region", { name: "Card pool" })).toHaveClass("min-h-0", "overflow-hidden");
+    expect(container.querySelector<HTMLElement>("[data-instance-id]")?.parentElement?.parentElement)
+      .toHaveClass("min-h-0", "overflow-y-auto");
+    expect(screen.queryByRole("button", { name: "Mana value" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(primary).getByRole("button", { name: "Group" }));
+    const menu = screen.getByRole("menu", { name: "Group" });
+    for (const sort of ["Mana value", "Color", "Type"]) {
+      expect(within(menu).getByRole("menuitemradio", { name: sort })).toHaveClass("min-h-11");
+    }
+    expect(within(menu).getByRole("menuitemradio", { name: "Mana value" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(menu).queryByRole("menuitemradio", { name: "Rarity" })).not.toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Color" }));
+    expect(screen.queryByRole("menu", { name: "Group" })).not.toBeInTheDocument();
   });
 
   it("preserves_legacy_pool_panel_when_controlled_workspace_props_are_absent", () => {

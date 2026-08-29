@@ -3511,10 +3511,21 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
 /// CR 608.2d: every offered branch must be legal; CR 118.12: only exact
 /// resolution-time payment shapes enter this parser family.
 ///
-/// Phase-1 structural allowlist for immediate direct payment leaves. Sacrifice
-/// remains an honest strict gap until its replacement-safe resume exists.
+/// Direct payment leaves remain centralized in the runtime classifier.
+/// Sacrifice is deliberately limited here to a positive, finite fixed count of
+/// a typed permanent population. This excludes self/granting-object/any
+/// targets, aggregate requirements, and the `u32::MAX` X/any-number sentinel.
 fn reflexive_optional_direct_cost(cost: &AbilityCost) -> bool {
     crate::game::costs::is_direct_resolution_optional_payment_branch(cost)
+        || matches!(
+            cost,
+            AbilityCost::Sacrifice(cost)
+                if matches!(cost.target, TargetFilter::Typed(_))
+                    && cost
+                        .requirement
+                        .fixed_count()
+                        .is_some_and(|count| count > 0 && count != u32::MAX)
+        )
 }
 
 fn cost_contains_tap_creatures(cost: &AbilityCost) -> bool {

@@ -1182,7 +1182,15 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
     let affected = defs[0].affected.clone()?;
     // CR 502.3: a trailing "as long as …"/"if …" rider on the untap clause
     // belongs on the CantUntap companion; otherwise inherit the grant's gate.
-    let condition = extract_cant_untap_condition(&lower).or_else(|| defs[0].condition.clone());
+    // An inherited gate has to clear the same untap-step enforceability bar as a
+    // rider — the first conjunct's own enforcement point may supply a binding
+    // authority (a recipient, a combat anchor) that CR 502.3's turn-based untap
+    // never does, so it cannot be copied onto a CantUntap unchecked.
+    let condition = extract_cant_untap_condition(&lower).or_else(|| {
+        defs[0].condition.clone().map(|inherited| {
+            gate_cant_untap_condition(inherited, text, UntapGatePolarity::Positive)
+        })
+    });
     let mut companion = StaticDefinition::new(StaticMode::CantUntap)
         .affected(affected)
         .description(text.to_string());
@@ -2542,39 +2550,20 @@ fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefiniti
     let condition = super::shared::parse_unless_static_condition(&tp)?;
     // Coverage-honesty gate (CR 604.1): only emit the forced-attack static when the
     // `unless` gate is a FULLY-MODELED condition. `parse_unless_static_condition`
-    // wraps an unrecognized inner clause as `Not(Unrecognized)` — which (a) the
-    // coverage detector's TOP-LEVEL `Unrecognized` check misses, so the card is
-    // falsely reported supported, and (b) evaluates permanently false at runtime
-    // (`Unrecognized` is true; the wrapping `Not` negates it), silently disabling
-    // the whole requirement. Decline instead so the line stays honestly unsupported
-    // (coverage red) rather than shipping a broken static.
-    if static_condition_contains_unrecognized(&condition) {
+    // wraps an unrecognized inner clause as `Not(Unrecognized)` — which (a) would
+    // falsely report the card supported if checked with a top-level-only match, and
+    // (b) evaluates permanently false at runtime (`Unrecognized` is true; the
+    // wrapping `Not` negates it), silently disabling the whole requirement. Decline
+    // instead so the line stays honestly unsupported (coverage red) rather than
+    // shipping a broken static. `contains_unrecognized` (`types/ability.rs`) is the
+    // single shared authority for this recursive check — every coverage/support
+    // gate in the codebase (`game::coverage`) delegates to the same method so this
+    // parser-time decline and the coverage report can never disagree.
+    if condition.contains_unrecognized() {
         return None;
     }
     def.condition = Some(condition);
     Some(def)
-}
-
-/// True when `condition` contains an `Unrecognized` clause ANYWHERE in its tree
-/// (recursing through the `Not` / `And` / `Or` combinators). Used by the
-/// forced-attack parser to decline a not-fully-modeled `unless` gate: the
-/// coverage detector only flags a TOP-LEVEL `Unrecognized`, so a nested one
-/// (`Not(Unrecognized)`, the shape `parse_unless_static_condition` emits for an
-/// unknown clause) would otherwise mark the card supported while its requirement
-/// is permanently inert at runtime.
-fn static_condition_contains_unrecognized(condition: &StaticCondition) -> bool {
-    match condition {
-        StaticCondition::Unrecognized { .. } => true,
-        // The only sub-condition-embedding variants — recurse through them. If a NEW
-        // combinator variant that nests `StaticCondition` is added, extend this match;
-        // the leaf wildcard below would otherwise hide an unrecognized clause inside
-        // it. Every remaining variant is a leaf that cannot contain a nested clause.
-        StaticCondition::Not { condition } => static_condition_contains_unrecognized(condition),
-        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
-            .iter()
-            .any(static_condition_contains_unrecognized),
-        _ => false,
-    }
 }
 
 /// CR 702.122a / 702.171a / 702.184c: nom parser for the crew/saddle/station

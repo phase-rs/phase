@@ -232,7 +232,10 @@ pub use engine_resolve_batch::{
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
-pub use printed_cards::rehydrate_game_from_card_db;
+pub use printed_cards::{
+    rehydrate_game_from_card_db, rehydrate_game_from_card_db_with_finalization,
+    CardDbRehydrationFinalization,
+};
 pub use public_state::finalize_public_state;
 pub use replay::{reconstruct_initial_state, ReplayError, ReplayPlayer};
 pub use triggers::process_triggers;

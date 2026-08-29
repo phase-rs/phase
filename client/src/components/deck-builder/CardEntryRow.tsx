@@ -67,9 +67,9 @@ export interface CardEntryRowProps {
   /** Eligibility predicate paired with `onSetAsCommander`. The row consults it
    *  per-entry so the parent doesn't have to fan out card-data lookups. */
   isCommanderEligible?: (name: string) => boolean;
-  /** "compact" (default) keeps the row controls hover-revealed — used by the
-   *  in-game BO3 sideboard modal. "comfortable" makes them always-visible and
-   *  touch-sized for the deck builder (hover reveal is invisible on touch). */
+  /** "compact" (default) keeps the row controls hover-revealed. "comfortable"
+   *  makes them always-visible and touch-sized, which is what any surface
+   *  reachable on touch needs (hover reveal is invisible there). */
   density?: "comfortable" | "compact";
   /** When provided, the alternate-art (✦) badge becomes a tap target that
    *  opens the printing picker — the touch path for art selection (right-click

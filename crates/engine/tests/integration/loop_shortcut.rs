@@ -6182,12 +6182,13 @@ fn restore_dump(json: &str) -> GameState {
     // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
     // `decode_persisted_resolution_state`, which is the rest of the production chokepoint
     // — including the CR 732.2a load-seam bound invariant `w15_*` below pins.
-    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+    // The test unwraps the fallible persistence boundary after asserting this fixture decodes.
     serde_json::from_value::<engine::types::game_state::PersistedGameState>(
         envelope["gameState"].clone(),
     )
     .expect("gameState deserializes through the production decoder")
     .into_game_state()
+    .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// The migrated dellian dump's `gameState`, as a raw `serde_json::Value`.
@@ -6301,12 +6302,15 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
     let legacy_restored = {
         let raw: GameState = serde_json::from_value(migrated.clone())
             .expect("the pre-routing loader form: a bare GameState decode");
-        engine::types::game_state::PersistedGameState::Raw(Box::new(raw)).into_game_state()
+        engine::types::game_state::PersistedGameState::Raw(Box::new(raw))
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract")
     };
     let routed_restored =
         serde_json::from_value::<engine::types::game_state::PersistedGameState>(migrated.clone())
             .expect("the routed loader form: decode AS PersistedGameState")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
     let routed_value = serialized(&routed_restored);
     let mut diffs = Vec::new();
     differences(
@@ -13395,7 +13399,8 @@ fn r28_c_a_restored_proposal_with_a_foreign_template_owner_is_refused_at_consump
                     .unwrap_or_else(|error| {
                         panic!("{label}: decodes through the production boundary: {error}")
                     })
-                    .into_game_state();
+                    .into_game_state()
+                    .expect("persisted test snapshot satisfies the checked restore contract");
 
             // (c″) — the wait and its tampered owner SURVIVE the decode. On the Raw branch the
             // scrubber ran and left it alone (its `semantic_owner` match names only the two

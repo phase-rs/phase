@@ -855,7 +855,8 @@ mod tests {
             .expect("persisted game state serializes");
         let restored = serde_json::from_str::<PersistedGameState>(&json)
             .expect("persisted game state deserializes")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted game state satisfies the checked restore contract");
         let after = deck_pools_fingerprint(&restored);
 
         assert_eq!(

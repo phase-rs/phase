@@ -144,7 +144,8 @@ fn restored_token_commander_choice_resumes_sba_cleanup() {
         .expect("the captured command-zone choice serializes");
     let mut restored = serde_json::from_str::<PersistedGameState>(&serialized)
         .expect("the captured command-zone choice restores")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     assert!(matches!(
         &restored.waiting_for,
@@ -202,7 +203,8 @@ fn restored_token_commander_choice_respects_turn_control_priority_authority() {
         .expect("the controlled stale command-zone choice serializes");
     let mut restored = serde_json::from_str::<PersistedGameState>(&serialized)
         .expect("the controlled stale command-zone choice restores")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     assert!(matches!(
         &restored.waiting_for,
@@ -249,7 +251,8 @@ fn restored_genuine_commander_choice_remains_actionable() {
         .expect("the genuine command-zone choice serializes");
     let restored = serde_json::from_str::<PersistedGameState>(&serialized)
         .expect("the genuine command-zone choice restores")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     assert!(matches!(
         restored.waiting_for,

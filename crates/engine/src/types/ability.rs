@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use serde::de;
@@ -9181,6 +9182,44 @@ pub enum CommanderOwnership {
     Any,
 }
 
+/// Engine limitation, not CR-mandated: the out-of-layer-pipeline continuation
+/// that decides a [`StaticCondition`] LEAF's truth value, for the handful of
+/// leaves that have one.
+///
+/// `game::layers::evaluate_condition_with_context` is a pure function of
+/// `(GameState, controller, source_id, recipient_id)`. A few leaves are not
+/// answerable from that tuple at all: their truth is established by an
+/// interactive payment round-trip, or by an in-flight cast, both of which live
+/// OUTSIDE the layer pipeline. For those, the pipeline hard-codes a degenerate
+/// answer (`false`) rather than computing one.
+///
+/// That is correct wherever the enforcement point actually runs the
+/// continuation — a combat-tax `UnlessPay` is resolved by
+/// `WaitingFor::CombatTaxPayment` at attack/block declaration, and a
+/// cast-variant gate is resolved by `collect_self_spell_cost_modifiers`. It is
+/// NOT correct anywhere else: an enforcement point that never runs the
+/// continuation can only ever see the degenerate answer, so the condition is
+/// unsatisfiable by construction. Any parser gate that would attach such a leaf
+/// to a static whose enforcement point lacks the matching continuation must
+/// decline — otherwise the parser reports a condition "supported" that no
+/// player can ever satisfy.
+///
+/// A typed reason rather than a bare `bool` so the axis stays self-documenting
+/// and each future gate can ask about the specific continuation IT provides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionContinuation {
+    /// CR 118.12a: the optional-cost payment round-trip ("unless [a player]
+    /// pays [cost]"). Offered only at attack/block declaration via
+    /// `WaitingFor::CombatTaxPayment`; the layer pipeline hard-codes `false`
+    /// for [`StaticCondition::UnlessPay`] everywhere else.
+    OptionalCostPayment,
+    /// CR 601.2f: the in-flight cast (`GameState::pending_cast`), consulted by
+    /// `collect_self_spell_cost_modifiers` when computing self-spell cost
+    /// modifiers. Outside a cast of the source object these leaves are `false`
+    /// unconditionally.
+    PendingCast,
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -9593,8 +9632,8 @@ pub enum StaticCondition {
 }
 
 impl StaticCondition {
-    /// CR 109.4 + CR 725.5: the player whose DESIGNATION this leaf tests, when
-    /// the leaf is a designation predicate at all.
+    /// Engine limitation, not CR-mandated: the player whose DESIGNATION this
+    /// leaf tests, when the leaf is a designation predicate at all.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm. This is
     /// the guard that makes the static-side polarity boundary gate in
@@ -9669,6 +9708,291 @@ impl StaticCondition {
             | StaticCondition::CastingAsVariant { .. }
             | StaticCondition::None => None,
         }
+    }
+
+    /// Engine limitation (not CR-mandated): true when this condition (or a
+    /// Boolean sub-condition of it) tests a [`PlayerScope`] designation anchor
+    /// other than `Controller` — a "that player" / "that opponent" / other
+    /// scoped-player reference that has no runtime binding authority outside a
+    /// triggering event or combat context (a recipient id, a combat-tax
+    /// defender, etc.).
+    ///
+    /// Single authority shared by the runtime layer evaluator
+    /// (`game::layers::evaluate_condition`, which has no triggering event to
+    /// bind a scoped player against and must reject the condition outright) and
+    /// any parser-time gate that would otherwise mark such a condition
+    /// "supported" while it can never actually apply at runtime. Recipient-
+    /// bearing evaluators (`evaluate_condition_with_recipient`) intentionally do
+    /// NOT call this — a recipient id is exactly the binding authority a
+    /// `ScopedPlayer` anchor needs.
+    pub(crate) fn has_unbindable_designation_anchor(&self) -> bool {
+        self.any_leaf(|leaf| {
+            leaf.designation_player_anchor()
+                .is_some_and(|scope| !matches!(scope, PlayerScope::Controller))
+        })
+    }
+
+    /// Engine limitation, not CR-mandated: the out-of-layer-pipeline
+    /// [`ConditionContinuation`] this leaf's truth value is decided by, when it
+    /// has one. See that type for why a leaf can have no answer inside the
+    /// layer pipeline at all.
+    ///
+    /// Exhaustive by design — there is deliberately no wildcard arm, mirroring
+    /// [`Self::designation_player_anchor`]. A future leaf whose truth is
+    /// established by an interactive round-trip (a "unless you discard a card"
+    /// tax, a "unless you sacrifice" gate) is a COMPILE ERROR here, not a
+    /// latent false green in every gate that consults this.
+    ///
+    /// Boolean combinators return `None`; the tree-level view
+    /// ([`Self::requires_out_of_layer_continuation`]) walks them.
+    pub(crate) fn required_continuation(&self) -> Option<ConditionContinuation> {
+        match self {
+            // CR 118.12a: resolved by `WaitingFor::CombatTaxPayment` at
+            // attack/block declaration; `layers::evaluate_condition` returns
+            // `false` (restriction active) everywhere else.
+            StaticCondition::UnlessPay { .. } => Some(ConditionContinuation::OptionalCostPayment),
+            // CR 702.166a + CR 601.2f: read off `state.pending_cast` for the
+            // source object; there is no pending cast outside a cast of it.
+            StaticCondition::AdditionalCostPaid => Some(ConditionContinuation::PendingCast),
+            // CR 702.34a + CR 601.2f: evaluated in
+            // `collect_self_spell_cost_modifiers`, NOT in the layer pipeline,
+            // which hard-codes `false` for it.
+            StaticCondition::CastingAsVariant { .. } => Some(ConditionContinuation::PendingCast),
+            // Everything else is a pure function of the game state plus the
+            // source/recipient anchors the layer pipeline already supplies.
+            // Combat-scoped leaves (`SourceIsAttacking`, `SourceAttackingAlone`,
+            // `RecipientAttackingOwnerTarget`, …) belong HERE, not above: they
+            // are computed correctly from `state.combat` and are legitimately
+            // `false` outside combat, which is the rules-correct answer rather
+            // than a missing continuation.
+            StaticCondition::DevotionGE { .. }
+            | StaticCondition::IsPresent { .. }
+            | StaticCondition::ChosenColorIs { .. }
+            | StaticCondition::ChosenLabelIs { .. }
+            | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::HasMaxSpeed
+            | StaticCondition::SpeedGE { .. }
+            | StaticCondition::And { .. }
+            | StaticCondition::Or { .. }
+            | StaticCondition::Not { .. }
+            | StaticCondition::DayNightIs { .. }
+            | StaticCondition::HasCounters { .. }
+            | StaticCondition::CastVariantPaid { .. }
+            | StaticCondition::RecipientHasCounters { .. }
+            | StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::SourceAttackingAlone
+            | StaticCondition::SourceIsAttacking
+            | StaticCondition::SourceIsBlocking
+            | StaticCondition::SourceIsBlocked
+            | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsInitiative
+            | StaticCondition::NoMonarch
+            | StaticCondition::HasCityBlessing
+            | StaticCondition::HasEnduringStory
+            | StaticCondition::CompletedADungeon
+            | StaticCondition::WasStartingPlayer { .. }
+            | StaticCondition::SpellCastWithVariantThisTurn { .. }
+            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::Unrecognized { .. }
+            | StaticCondition::DuringYourTurn
+            | StaticCondition::DuringOpponentsTurn
+            | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+            | StaticCondition::SourceEnteredThisTurn
+            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::WasCast { .. }
+            | StaticCondition::IsRingBearer
+            | StaticCondition::RingLevelAtLeast { .. }
+            | StaticCondition::ControlsCommander { .. }
+            | StaticCondition::SourceIsTapped
+            | StaticCondition::IsTapped { .. }
+            | StaticCondition::SourceIsFaceUp
+            | StaticCondition::SourceIsSaddled
+            | StaticCondition::SourceControllerEquals { .. }
+            | StaticCondition::SourceIsEquipped
+            | StaticCondition::SourceIsEnchanted
+            | StaticCondition::SourceIsMonstrous
+            | StaticCondition::SourceIsHarnessed
+            | StaticCondition::SourceAttachedToCreature
+            | StaticCondition::SourceMatchesFilter { .. }
+            | StaticCondition::TopOfLibraryMatches { .. }
+            | StaticCondition::RecipientMatchesFilter { .. }
+            | StaticCondition::RecipientAttackingOwnerTarget { .. }
+            | StaticCondition::SourceIsPaired
+            | StaticCondition::SourceInZone { .. }
+            | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::None => None,
+        }
+    }
+
+    /// True when this condition, or a Boolean sub-condition of it at ANY
+    /// nesting depth, has a leaf whose truth is decided by an out-of-layer
+    /// [`ConditionContinuation`].
+    ///
+    /// Callers must only use this where the enforcement point does NOT run the
+    /// continuation in question. The untap step (CR 502.3) is such a point: it
+    /// is a turn-based action with no cast in flight and no payment prompt, so
+    /// BOTH continuations are unavailable and any such leaf is unsatisfiable
+    /// there. The combat-tax and self-spell-cost gates deliberately do NOT call
+    /// this — they are the continuations.
+    pub(crate) fn requires_out_of_layer_continuation(&self) -> bool {
+        self.any_leaf(|leaf| leaf.required_continuation().is_some())
+    }
+
+    /// True when this condition (or a Boolean sub-condition of it, at ANY
+    /// nesting depth) is an [`StaticCondition::Unrecognized`] leaf.
+    ///
+    /// Single authority for "does this condition tree contain a parser gap,"
+    /// shared by every coverage-honesty gate in the codebase. Recursing through
+    /// `And`/`Or`/`Not` is load-bearing: a parser fallback that wraps an
+    /// unparsed clause as `Not(Unrecognized)` (the shape
+    /// `extract_cant_untap_condition` and `parse_unless_static_condition`
+    /// produce for an `unless <condition we can't decompose>` gate — see
+    /// `oracle_static/static_helpers.rs` and `oracle_static/shared.rs`) is a
+    /// TOP-LEVEL `Not`, not a top-level `Unrecognized`. A caller that only
+    /// checks `matches!(condition, StaticCondition::Unrecognized { .. })`
+    /// misses it entirely and reports the card as fully supported even though
+    /// the wrapped restriction is permanently inert at runtime (`Unrecognized`
+    /// evaluates `true`; the wrapping `Not` negates it to `false` forever).
+    /// Every coverage/support check MUST call this method instead of matching
+    /// `Unrecognized` directly. The recursion itself lives in
+    /// [`Self::walk_leaves`], which is exhaustive over `StaticCondition`, so a
+    /// future nesting variant cannot silently escape this view.
+    pub(crate) fn contains_unrecognized(&self) -> bool {
+        self.any_leaf(|leaf| matches!(leaf, StaticCondition::Unrecognized { .. }))
+    }
+
+    /// Returns the text of every [`StaticCondition::Unrecognized`] leaf found
+    /// anywhere in this condition tree, for use in coverage gap labels.
+    /// Derived from [`Self::walk_leaves`] — the same single traversal
+    /// [`Self::contains_unrecognized`] uses — so the two can never disagree
+    /// about what counts as "unrecognized."
+    pub(crate) fn unrecognized_texts(&self) -> Vec<&str> {
+        let mut texts = Vec::new();
+        // The collector never breaks, so the traversal always runs to
+        // completion and the `ControlFlow` result carries no information.
+        let _: ControlFlow<()> = self.walk_leaves(&mut |leaf| {
+            if let StaticCondition::Unrecognized { text } = leaf {
+                texts.push(text.as_str());
+            }
+            ControlFlow::Continue(())
+        });
+        texts
+    }
+
+    /// THE `StaticCondition` tree traversal. Visits every LEAF of this
+    /// condition tree in Oracle order, descending through the Boolean
+    /// combinators, and stops early the moment `visit` returns
+    /// [`ControlFlow::Break`].
+    ///
+    /// Single authority for tree recursion over `StaticCondition`. Every
+    /// tree-level view — [`Self::contains_unrecognized`],
+    /// [`Self::unrecognized_texts`], [`Self::has_unbindable_designation_anchor`],
+    /// [`Self::requires_out_of_layer_continuation`] — is DERIVED from this one
+    /// walk rather than reimplementing its own `And`/`Or`/`Not` recursion.
+    /// Parallel walks are exactly how a nested `Unrecognized` came to be seen by
+    /// one coverage check and missed by another (PR #8012, review rounds 2-5):
+    /// with one traversal they cannot drift.
+    ///
+    /// Exhaustive by design — there is deliberately no wildcard arm, mirroring
+    /// [`Self::designation_player_anchor`]. Adding a future variant that NESTS a
+    /// `StaticCondition` (a ternary combinator, an `Xor`, a quantified
+    /// sub-condition) is a COMPILE ERROR here, forcing an explicit
+    /// descend-or-treat-as-leaf decision, instead of silently returning
+    /// "no unrecognized leaves / no unbindable anchor" from every derived view
+    /// at once.
+    ///
+    /// Takes `&mut dyn FnMut` rather than `impl FnMut` because the recursive
+    /// call would otherwise monomorphize infinitely (`&mut &mut F`, `&mut &mut
+    /// &mut F`, …).
+    fn walk_leaves<'a>(
+        &'a self,
+        visit: &mut dyn FnMut(&'a StaticCondition) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        match self {
+            // Boolean combinators are STRUCTURE, not leaves: descend, never visit.
+            StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+                for condition in conditions {
+                    condition.walk_leaves(visit)?;
+                }
+                ControlFlow::Continue(())
+            }
+            StaticCondition::Not { condition } => condition.walk_leaves(visit),
+            // Every non-combinator variant is a leaf.
+            StaticCondition::DevotionGE { .. }
+            | StaticCondition::IsPresent { .. }
+            | StaticCondition::ChosenColorIs { .. }
+            | StaticCondition::ChosenLabelIs { .. }
+            | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::HasMaxSpeed
+            | StaticCondition::SpeedGE { .. }
+            | StaticCondition::DayNightIs { .. }
+            | StaticCondition::HasCounters { .. }
+            | StaticCondition::CastVariantPaid { .. }
+            | StaticCondition::RecipientHasCounters { .. }
+            | StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::SourceAttackingAlone
+            | StaticCondition::SourceIsAttacking
+            | StaticCondition::SourceIsBlocking
+            | StaticCondition::SourceIsBlocked
+            | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsInitiative
+            | StaticCondition::NoMonarch
+            | StaticCondition::HasCityBlessing
+            | StaticCondition::HasEnduringStory
+            | StaticCondition::CompletedADungeon
+            | StaticCondition::WasStartingPlayer { .. }
+            | StaticCondition::SpellCastWithVariantThisTurn { .. }
+            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::UnlessPay { .. }
+            | StaticCondition::Unrecognized { .. }
+            | StaticCondition::DuringYourTurn
+            | StaticCondition::DuringOpponentsTurn
+            | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+            | StaticCondition::SourceEnteredThisTurn
+            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::WasCast { .. }
+            | StaticCondition::IsRingBearer
+            | StaticCondition::RingLevelAtLeast { .. }
+            | StaticCondition::ControlsCommander { .. }
+            | StaticCondition::SourceIsTapped
+            | StaticCondition::IsTapped { .. }
+            | StaticCondition::SourceIsFaceUp
+            | StaticCondition::SourceIsSaddled
+            | StaticCondition::SourceControllerEquals { .. }
+            | StaticCondition::SourceIsEquipped
+            | StaticCondition::SourceIsEnchanted
+            | StaticCondition::SourceIsMonstrous
+            | StaticCondition::SourceIsHarnessed
+            | StaticCondition::SourceAttachedToCreature
+            | StaticCondition::SourceMatchesFilter { .. }
+            | StaticCondition::TopOfLibraryMatches { .. }
+            | StaticCondition::RecipientMatchesFilter { .. }
+            | StaticCondition::RecipientAttackingOwnerTarget { .. }
+            | StaticCondition::SourceIsPaired
+            | StaticCondition::SourceInZone { .. }
+            | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::AdditionalCostPaid
+            | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::None => visit(self),
+        }
+    }
+
+    /// True when any LEAF of this condition tree satisfies `predicate`.
+    /// Short-circuiting projection of [`Self::walk_leaves`]; combinator nodes
+    /// are never passed to `predicate`.
+    fn any_leaf(&self, mut predicate: impl FnMut(&StaticCondition) -> bool) -> bool {
+        self.walk_leaves(&mut |leaf| {
+            if predicate(leaf) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
     }
 }
 
@@ -33457,5 +33781,168 @@ mod monarch_subject_axis_tests {
 
         let mut object_axis = QuantityRef::SelfManaValue;
         assert!(object_axis.player_scope_mut().is_none());
+    }
+}
+
+/// PR #8012 (Bombur, Gentle Dreamer), maintainer review round 5 [MED]:
+/// `contains_unrecognized`, `unrecognized_texts` and
+/// `has_unbindable_designation_anchor` used to be three INDEPENDENT
+/// wildcard-recursive walks that could silently diverge. They — plus the new
+/// `requires_out_of_layer_continuation` — are now all derived from the single
+/// exhaustive [`StaticCondition::walk_leaves`]. These tests pin that
+/// derivation: every view must agree on the same tree at the same depth.
+#[cfg(test)]
+mod static_condition_traversal_tests {
+    use super::*;
+
+    /// Builds `And[ Or[ Not(inner), <filler leaf> ], <filler leaf> ]` — the
+    /// deepest nesting the combinator set can express, with the probe leaf
+    /// buried under all three combinators plus sibling leaves on either side
+    /// (so a walk that stops at the first branch, or never revisits siblings,
+    /// fails here).
+    fn nested_at_depth(inner: StaticCondition) -> StaticCondition {
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::Or {
+                    conditions: vec![
+                        StaticCondition::Not {
+                            condition: Box::new(inner),
+                        },
+                        StaticCondition::DuringYourTurn,
+                    ],
+                },
+                StaticCondition::HasCityBlessing,
+            ],
+        }
+    }
+
+    #[test]
+    fn static_condition_views_find_unrecognized_at_full_nesting_depth() {
+        let tree = nested_at_depth(StaticCondition::Unrecognized {
+            text: "you have an enduring story and also something extra".to_string(),
+        });
+
+        assert!(
+            tree.contains_unrecognized(),
+            "an Unrecognized leaf under And(Or(Not(..))) must be found, got {tree:?}"
+        );
+        assert_eq!(
+            tree.unrecognized_texts(),
+            vec!["you have an enduring story and also something extra"],
+            "the text view must surface the same leaf the boolean view found —              these are two projections of one walk and cannot disagree"
+        );
+    }
+
+    #[test]
+    fn static_condition_unrecognized_views_agree_when_absent() {
+        // Same shape, no Unrecognized leaf anywhere: both views must say "clean".
+        let tree = nested_at_depth(StaticCondition::HasEnduringStory);
+        assert!(!tree.contains_unrecognized());
+        assert!(tree.unrecognized_texts().is_empty());
+    }
+
+    #[test]
+    fn static_condition_unrecognized_texts_collects_every_leaf_in_oracle_order() {
+        let tree = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::Unrecognized {
+                    text: "first".to_string(),
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::Or {
+                        conditions: vec![
+                            StaticCondition::Unrecognized {
+                                text: "second".to_string(),
+                            },
+                            StaticCondition::Unrecognized {
+                                text: "third".to_string(),
+                            },
+                        ],
+                    }),
+                },
+            ],
+        };
+        assert_eq!(
+            tree.unrecognized_texts(),
+            vec!["first", "second", "third"],
+            "every Unrecognized leaf must be collected, in Oracle order — a              coverage label that dropped siblings would under-report the gap"
+        );
+    }
+
+    /// Engine limitation, not CR-mandated. CR 725.1 designation leaves carry a
+    /// [`PlayerScope`]; only `Controller` can be bound by the layer pipeline.
+    #[test]
+    fn static_condition_designation_anchor_view_recurses_to_full_depth() {
+        let unbindable = nested_at_depth(StaticCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer,
+        });
+        assert!(
+            unbindable.has_unbindable_designation_anchor(),
+            "a ScopedPlayer designation nested under And(Or(Not(..))) must be found"
+        );
+
+        let bindable = nested_at_depth(StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        });
+        assert!(
+            !bindable.has_unbindable_designation_anchor(),
+            "a Controller-scoped designation binds fine at any depth and must NOT be rejected"
+        );
+    }
+
+    /// CR 118.12a / CR 601.2f: leaves whose truth is decided by an
+    /// out-of-layer-pipeline continuation, found at full nesting depth.
+    /// Maintainer-flagged HIGH on PR #8012 (round 5) — `UnlessPay` nested in
+    /// `And`/`Or` was the specific escape route called out.
+    #[test]
+    fn static_condition_continuation_view_recurses_to_full_depth() {
+        for leaf in [
+            StaticCondition::UnlessPay {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+                scaling: UnlessPayScaling::Flat,
+                defended: None,
+            },
+            StaticCondition::AdditionalCostPaid,
+            StaticCondition::CastingAsVariant {
+                variant: crate::types::game_state::CastingVariant::Flashback,
+            },
+        ] {
+            assert!(
+                leaf.required_continuation().is_some(),
+                "{leaf:?} has no layer-pipeline answer and must report a required continuation"
+            );
+            assert!(
+                nested_at_depth(leaf.clone()).requires_out_of_layer_continuation(),
+                "{leaf:?} nested under And(Or(Not(..))) must still be found"
+            );
+        }
+    }
+
+    /// The complement of the test above: the leaves that DO have real layer
+    /// pipeline backing must not be swept up. Combat-scoped leaves are the
+    /// interesting case — they are legitimately `false` outside combat, which
+    /// is the rules-correct answer, not a missing continuation.
+    #[test]
+    fn static_condition_continuation_view_accepts_state_backed_leaves() {
+        for leaf in [
+            StaticCondition::HasEnduringStory,
+            StaticCondition::SourceIsAttacking,
+            StaticCondition::SourceAttackingAlone,
+            StaticCondition::RecipientAttackingOwnerTarget {
+                target: crate::types::triggers::AttackTargetFilter::Player,
+            },
+            StaticCondition::SourceIsTapped,
+            StaticCondition::None,
+        ] {
+            assert_eq!(
+                leaf.required_continuation(),
+                None,
+                "{leaf:?} is a pure function of game state and must stay enforceable"
+            );
+            assert!(!nested_at_depth(leaf.clone()).requires_out_of_layer_continuation());
+        }
     }
 }

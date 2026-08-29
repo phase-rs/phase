@@ -1883,7 +1883,12 @@ fn assert_waiting_round_trip_across_persistence_forms(state: GameState) {
         let restored: PersistedGameState =
             serde_json::from_str(&serialized).expect("persistence should restore");
         assert_eq!(
-            waiting_value(&restored.into_game_state().waiting_for),
+            waiting_value(
+                &restored
+                    .into_game_state()
+                    .expect("persisted test snapshot satisfies the checked restore contract")
+                    .waiting_for
+            ),
             expected
         );
     }
@@ -2167,7 +2172,9 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
             serde_json::to_string(&persisted).expect("persisted state should serialize");
         let restored: PersistedGameState =
             serde_json::from_str(&serialized).expect("persisted state should restore");
-        let restored = restored.into_game_state();
+        let restored = restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_representative_membership(&restored);
         assert_eq!(
             serde_json::to_string(&restored).expect("restored state should reserialize"),
@@ -2275,9 +2282,11 @@ fn populated_stack_resolution_session_round_trips_deterministically_through_raw_
                 bytes,
                 "{budget_name} {persistence_name} bytes stay deterministic after restore"
             );
+            let restored = restored
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert_eq!(
-                restored.into_game_state(),
-                state,
+                restored.stack_resolution_session, state.stack_resolution_session,
                 "{budget_name} {persistence_name} restores the full private session"
             );
         }

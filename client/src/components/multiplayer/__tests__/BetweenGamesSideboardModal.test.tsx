@@ -67,6 +67,38 @@ describe("BetweenGamesSideboardModal", () => {
     expect(screen.getByText(/Sideboard \(4\/15\)/)).toBeInTheDocument();
   });
 
+  it("lets a card be moved without hovering the row", () => {
+    // happy-dom resolves class selectors via getComputedStyle, so this local
+    // rule reproduces the one Tailwind utility under test; without it the
+    // hidden state is unobservable and the assertion would pass against the
+    // bug. Do NOT use toBeVisible() here — the modal's framer-motion root keeps
+    // opacity:0 under happy-dom, which makes every element in it fail that
+    // matcher unconditionally. This rule must track the utility class on
+    // CardEntryRow's `controlVisibility`: `visibility:hidden` is what removes
+    // the button from the accessibility tree, so if that ever becomes
+    // `opacity-0 group-hover:opacity-100` this test goes silently green while
+    // the bug returns.
+    render(
+      <>
+        <style>{".invisible{visibility:hidden}"}</style>
+        <BetweenGamesSideboardModal
+          pool={basePool}
+          gameNumber={2}
+          score={score}
+          {...bounds}
+          onSubmit={vi.fn()}
+        />
+      </>,
+    );
+    // Under the bug the control is visibility:hidden, so it is absent from the
+    // accessibility tree and this query throws.
+    fireEvent.click(
+      screen.getByRole("button", { name: /move one lightning bolt to sideboard/i }),
+    );
+    expect(screen.getByText(/Main \(16, min 17\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Sideboard \(4\/15\)/)).toBeInTheDocument();
+  });
+
   it("disables submit when the main deck falls below the minimum deck size", () => {
     render(
       <BetweenGamesSideboardModal

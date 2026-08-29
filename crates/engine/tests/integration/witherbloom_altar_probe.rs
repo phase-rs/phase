@@ -69,6 +69,7 @@ fn load_wb() -> GameState {
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// Put a real parsed Altar of the Brood on `seat`'s battlefield.
