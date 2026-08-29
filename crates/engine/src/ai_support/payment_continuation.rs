@@ -247,8 +247,8 @@ fn witness_payment_continuations_inner(
             successors: empty(),
         };
     }
-    let attempt_budget = (noncancel_roots * 2)
-        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS / 2)
+    let attempt_budget = (noncancel_roots * 4)
+        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
         .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
     let Some(baseline) = WitnessBaseline::capture(state, &root) else {
         return PaymentContinuationBatch {
