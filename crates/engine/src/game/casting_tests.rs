@@ -16730,16 +16730,21 @@ fn granted_blitz_offers_blitz_variant() {
     );
 }
 
-/// CR 702.152a + CR 604.1 + CR 118.9: Henzie "Toolbox" Torre — "Each creature
-/// spell you cast with mana value 4 or greater has blitz. The blitz cost is
-/// equal to its mana cost." The grant carries `Blitz(ManaCost::SelfManaCost)`, so
-/// the offered Blitz option must surface the self-referential cost (resolved to
-/// the spell's own mana cost at payment time by the shared `SelfManaCost` path,
-/// the same one the granted-flashback cost uses). This pins that a granted
-/// alternative cost equal to the card's mana cost flows intact through the
-/// casting-variant choice set rather than being dropped or fixed to a constant.
+/// CR 702.152a + CR 604.1 + CR 118.9 + CR 601.2f: Henzie "Toolbox" Torre —
+/// "Each creature spell you cast with mana value 4 or greater has blitz. The
+/// blitz cost is equal to its mana cost." The grant carries
+/// `Blitz(ManaCost::SelfManaCost)`, but that placeholder must be concretized
+/// against the recipient spell's own mana cost at the grant-collector exit
+/// (`resolve_self_cost_spell_keyword`, called from `granted_spell_keywords_for`
+/// / `granted_spell_keyword_instances_for`) — BEFORE cost modifiers and
+/// affordability are evaluated — not left unresolved to be "resolved at
+/// payment time" (issue #5435: an unresolved `SelfManaCost` has mana value 0
+/// but is not "without paying mana", so it silently acted as a real {0}
+/// alternative cost, letting AI blitz-cast unaffordable creatures for free).
+/// This pins that the offered Blitz option carries the spell's concrete mana
+/// cost, not the raw placeholder.
 #[test]
-fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
+fn granted_blitz_self_mana_cost_resolves_to_spell_mana_cost() {
     use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
     use crate::types::keywords::Keyword;
     use crate::types::statics::StaticMode;
@@ -16797,14 +16802,80 @@ fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
         .find(|o| o.variant == CastingVariant::Blitz)
         .expect("granted Blitz must surface the Blitz option");
     assert_eq!(
-        blitz.mana_cost,
-        ManaCost::SelfManaCost,
-        "granted Blitz must carry the self-referential cost (resolved to the \
-         spell's own mana cost at payment time), got {:?}",
+        blitz.mana_cost, spell_cost,
+        "granted Blitz must carry the concretized cost (the spell's own mana \
+         cost), not the unresolved SelfManaCost placeholder, got {:?}",
         blitz.mana_cost
     );
     // The recipient really is MV >= 4, so the grant's filter admits it.
     assert_eq!(state.objects.get(&spell).unwrap().mana_cost, spell_cost);
+}
+
+/// CR 702.137a + CR 604.1 + CR 118.9: Building-block sibling of the granted-Blitz
+/// test above. `resolve_self_cost_spell_keyword` is a shared mapper over the whole
+/// cast-time alternative-cost family, so pin a SECOND keyword through it —
+/// otherwise every test of that helper is Blitz-shaped and a Blitz-only special
+/// case would pass unnoticed. Spectacle is the discriminating pick: unlike Blitz
+/// it is gated on an opponent having lost life this turn (CR 702.137a), so the
+/// concretized cost has to survive a different candidate-enumeration path.
+#[test]
+fn granted_spectacle_self_mana_cost_resolves_to_spell_mana_cost() {
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    // CR 702.137a: Spectacle only functions while an opponent lost life this turn.
+    state.players[1].life_lost_this_turn = 2;
+
+    let grantor = create_object(
+        &mut state,
+        CardId(9120),
+        PlayerId(0),
+        "Spectacle Grantor".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&grantor).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Spectacle(ManaCost::SelfManaCost),
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+        obj.static_definitions = vec![def].into();
+    }
+
+    // Recipient: a {3} instant in hand with no printed Spectacle.
+    let spell_cost = ManaCost::generic(3);
+    let spell = create_object(
+        &mut state,
+        CardId(9121),
+        PlayerId(0),
+        "Some Instant".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.base_card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = spell_cost.clone();
+        obj.base_mana_cost = spell_cost.clone();
+    }
+
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
+    let spectacle = choices
+        .options
+        .iter()
+        .find(|o| o.variant == CastingVariant::Spectacle)
+        .expect("granted Spectacle must surface the Spectacle option");
+    assert_eq!(
+        spectacle.mana_cost, spell_cost,
+        "granted Spectacle must carry the concretized cost (the spell's own mana \
+         cost), not the unresolved SelfManaCost placeholder, got {:?}",
+        spectacle.mana_cost
+    );
 }
 
 /// CR 702.141a + CR 604.1 (seam 4: activated-ability-on-grant): Encore

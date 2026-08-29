@@ -2316,6 +2316,18 @@ fn granted_spell_keywords_for(
     // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
     apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false, fused);
 
+    // CR 118.9 + CR 601.2f: Concretize any self-referential (`SelfManaCost` /
+    // `SelfManaValue` / `SelfManaCostReduced`) alt-cost payload against this
+    // spell's own mana cost before it reaches affordability checks or payment
+    // (Henzie, "Toolbox" Torre's granted blitz — issue #5435). Resolving at
+    // this single exit covers all three grant sources uniformly (the
+    // `CastWithKeyword` static loop above, `transient_granted_spell_keywords_for`,
+    // and `apply_pending_next_spell_keyword_grants`) without touching any of
+    // the individual cost-extraction call sites that read this collector.
+    for keyword in &mut keywords {
+        *keyword = super::keywords::resolve_self_cost_spell_keyword(state, object_id, keyword);
+    }
+
     keywords
 }
 
@@ -2375,6 +2387,17 @@ fn granted_spell_keyword_instances_for(
         fused,
     );
     apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, true, fused);
+
+    // CR 118.9 + CR 601.2f: see the matching comment in `granted_spell_keywords_for`.
+    // `object_id` here is the recipient spell itself (not the fused-half object,
+    // if any), so `SelfManaCost` correctly resolves against that spell's own
+    // mana cost — matching "The blitz cost is equal to its mana cost." A fused
+    // split spell's `SelfManaCost` reads `obj.mana_cost`, which is the front
+    // half only; no real card grants a self-referential alt cost to a split
+    // card, so that edge is documented here rather than specially handled.
+    for keyword in &mut keywords {
+        *keyword = super::keywords::resolve_self_cost_spell_keyword(state, object_id, keyword);
+    }
 
     keywords
 }
