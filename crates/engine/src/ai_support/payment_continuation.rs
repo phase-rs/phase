@@ -26,9 +26,9 @@ pub const PAYMENT_CONTINUATION_MAX_ROOTS: usize = 64;
 ///
 /// Root actions and their continuation search share this bound, so inspecting
 /// many engine-issued options cannot multiply the work of the payment oracle.
-/// The bound reserves three continuation applications for every admitted root:
-/// a full 64-root wave must never consume the whole budget before any root can
-/// reach its next payment carrier or finalization step.
+/// Each decision uses a smaller root-proportional slice, with this value as its
+/// ceiling; a full 64-root wave still leaves one continuation application per
+/// root after its first reducer application.
 pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = PAYMENT_CONTINUATION_MAX_ROOTS * 4;
 const PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS: usize = 16;
 
@@ -247,8 +247,8 @@ fn witness_payment_continuations_inner(
             successors: empty(),
         };
     }
-    let attempt_budget = (noncancel_roots * 4)
-        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
+    let attempt_budget = (noncancel_roots * 2)
+        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS / 2)
         .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
     let Some(baseline) = WitnessBaseline::capture(state, &root) else {
         return PaymentContinuationBatch {
@@ -265,7 +265,9 @@ fn witness_payment_continuations_inner(
         .filter(|(_, action)| !matches!(action, GameAction::CancelCast))
         .collect();
     order.sort_by(|(left_index, left), (right_index, right)| {
-        left.cmp_stable(right)
+        payment_action_priority(left)
+            .cmp(&payment_action_priority(right))
+            .then_with(|| left.cmp_stable(right))
             .then_with(|| left_index.cmp(right_index))
     });
 
@@ -408,6 +410,16 @@ struct WitnessNode {
     remaining_actions: Option<(Vec<GameAction>, usize)>,
 }
 
+fn payment_action_priority(action: &GameAction) -> u8 {
+    match action {
+        // Convoke, Improvise, and Delve all use this engine action. It changes
+        // only the announced cost and cannot create a stack object, so explore
+        // it before mana-source activations that may open a priority window.
+        GameAction::TapForConvoke { .. } => 0,
+        _ => 1,
+    }
+}
+
 impl WitnessNode {
     fn next_action(&mut self) -> Option<GameAction> {
         if self.remaining_actions.is_none() {
@@ -419,7 +431,11 @@ impl WitnessNode {
                 .into_iter()
                 .map(|candidate| candidate.action)
                 .collect();
-            actions.sort_by(|left, right| left.cmp_stable(right));
+            actions.sort_by(|left, right| {
+                payment_action_priority(left)
+                    .cmp(&payment_action_priority(right))
+                    .then_with(|| left.cmp_stable(right))
+            });
             self.remaining_actions = Some((actions, 0));
         }
         let (actions, next_index) = self.remaining_actions.as_mut().unwrap();
