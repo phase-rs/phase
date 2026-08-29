@@ -57,7 +57,7 @@ describe("P2P draft first-contact gate", () => {
     });
   });
 
-  it("rejects an old first frame before it can allocate a seat", async () => {
+  it("rejects a pre-selection-mode peer before it can allocate a seat", async () => {
     sessionState.firstContact = null;
     sessionState.send.mockClear();
     sessionState.close.mockClear();
@@ -83,6 +83,7 @@ describe("P2P draft first-contact gate", () => {
     const rejected = sessionState.firstContact!({
       type: "draft_join",
       displayName: "Alice",
+      draftProtocolVersion: DRAFT_PROTOCOL_VERSION - 1,
     } as never);
 
     expect(allocate).not.toHaveBeenCalled();

@@ -132,8 +132,11 @@ import type {
  *       and its acknowledgement both carry the exact protocol version and
  *       capability token, so a guest clears recoverable state only after the
  *       host has durably revoked that exact seat.
+ *  23 — `pick_selection_mode` on player views. A v22 peer lacks the
+ *       engine-owned selection procedure and can render Commander Draft as a
+ *       direct selection, so the first-contact gate must refuse the pairing.
  */
-export const DRAFT_PROTOCOL_VERSION = 22 as const;
+export const DRAFT_PROTOCOL_VERSION = 23 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
