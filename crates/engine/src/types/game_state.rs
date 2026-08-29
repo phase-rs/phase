@@ -2121,6 +2121,21 @@ impl ResolveAllConsentRun {
             .find(|participant| !participant.granted)
             .map(|participant| participant.representative)
     }
+
+    /// The single authority for whether a `RespondResolveAllConsent` naming
+    /// `epoch` and `representative` is still answerable.
+    ///
+    /// The public `WaitingFor::ResolveAllConsent` prompt and this private run
+    /// are separate fields, and a run can be absent behind a standing prompt —
+    /// a viewer projection redacts the run (`visibility.rs`) while retaining
+    /// the prompt, so any state reconstructed from one carries the prompt with
+    /// no run behind it. Every producer of the prompt's action domain must ask
+    /// this before offering Grant or Decline: an offer the reducer can only
+    /// reject leaves the representative hammering an unanswerable prompt with
+    /// no other legal action, which no later boundary can undo.
+    pub fn accepts_response_from(&self, epoch: u64, representative: PlayerId) -> bool {
+        self.epoch == epoch && self.next_pending_representative() == Some(representative)
+    }
 }
 
 /// CR 609.7a: A source of damage chosen while creating a prevention or

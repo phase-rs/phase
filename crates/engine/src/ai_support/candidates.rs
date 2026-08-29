@@ -388,24 +388,39 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             epoch,
             representative,
         } => {
-            let mut actions = vec![
-                candidate(
-                    GameAction::RespondResolveAllConsent {
-                        epoch: *epoch,
-                        decision: ResolveAllConsentDecision::Grant,
-                    },
-                    TacticalClass::Selection,
-                    Some(*representative),
-                ),
-                candidate(
-                    GameAction::RespondResolveAllConsent {
-                        epoch: *epoch,
-                        decision: ResolveAllConsentDecision::Decline,
-                    },
-                    TacticalClass::Selection,
-                    Some(*representative),
-                ),
-            ];
+            // The consent prompt alone does not prove the reducer will accept a
+            // response to it. `ResolveAllConsentRun::accepts_response_from` is
+            // the same authority `respond_resolve_all_consent` applies, so a
+            // prompt standing over an absent or superseded run issues nothing
+            // rather than a Grant that can only be rejected. This prompt's
+            // contract is issued without reducer simulation
+            // (`decision_contract_requires_reducer_validation`), so this is the
+            // only place the mismatch can be caught before an AI submits.
+            let mut actions = Vec::new();
+            if state
+                .resolve_all_consent_run
+                .as_ref()
+                .is_some_and(|run| run.accepts_response_from(*epoch, *representative))
+            {
+                actions.extend([
+                    candidate(
+                        GameAction::RespondResolveAllConsent {
+                            epoch: *epoch,
+                            decision: ResolveAllConsentDecision::Grant,
+                        },
+                        TacticalClass::Selection,
+                        Some(*representative),
+                    ),
+                    candidate(
+                        GameAction::RespondResolveAllConsent {
+                            epoch: *epoch,
+                            decision: ResolveAllConsentDecision::Decline,
+                        },
+                        TacticalClass::Selection,
+                        Some(*representative),
+                    ),
+                ]);
+            }
             append_resolve_all_revocations(state, *epoch, &mut actions);
             actions
         }

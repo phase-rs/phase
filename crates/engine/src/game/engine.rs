@@ -9251,7 +9251,7 @@ fn respond_resolve_all_consent(
         let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
             EngineError::InvalidAction("Resolve All consent is not active".to_string())
         })?;
-        if run.epoch != epoch || run.next_pending_representative() != Some(representative) {
+        if !run.accepts_response_from(epoch, representative) {
             return Err(EngineError::InvalidAction(
                 "Resolve All consent response is no longer pending".to_string(),
             ));
