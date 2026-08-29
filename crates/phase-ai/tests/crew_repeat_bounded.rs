@@ -90,30 +90,36 @@ fn setup_with(name: &str, crew_power: u32) -> GameState {
     state
 }
 
-/// Drive the AI decision loop until it passes (or the bound is hit) and return
-/// every body tapped across all non-empty Crew selections.
-fn driven_crewed_bodies(state: &mut GameState) -> Vec<ObjectId> {
+/// every body tapped across all non-empty Crew selections, plus the action the
+/// loop terminated on: `Some(GameAction::PassPriority)` when the AI passed;
+/// `Some(action)` when the loop broke because applying that action errored;
+/// `None` when `choose_action` returned no action or the step bound was hit.
+///
+/// Returning the terminating action lets both tests assert the loop ended by
+/// PASSING, so a future regression that errored after exactly one tap could not
+/// pass the body-count assertion without the AI ever having passed.
+fn driven_crewed_bodies(state: &mut GameState) -> (Vec<ObjectId>, Option<GameAction>) {
     let config = AiConfig::default();
     let mut rng = SmallRng::seed_from_u64(42);
     let mut crewed_bodies: Vec<ObjectId> = Vec::new();
 
     for _ in 0..MAX_STEPS {
         let Some(action) = choose_action(state, P0, &config, &mut rng) else {
-            break;
+            return (crewed_bodies, None);
         };
-        if matches!(action, GameAction::PassPriority) {
-            break;
-        }
         if let GameAction::CrewVehicle { creature_ids, .. } = &action {
             if !creature_ids.is_empty() {
                 crewed_bodies.extend(creature_ids.iter().copied());
             }
         }
+        if matches!(action, GameAction::PassPriority) {
+            return (crewed_bodies, Some(action));
+        }
         if apply_as_current_for_simulation(state, action.clone()).is_err() {
-            break;
+            return (crewed_bodies, Some(action));
         }
     }
-    crewed_bodies
+    (crewed_bodies, None)
 }
 
 #[test]
@@ -124,7 +130,13 @@ fn ai_crews_crew1_vehicle_exactly_once() {
     // CR 702.122a) is already in force after the first crew, so every later
     // re-crew just taps a fresh body for nothing.
     let mut state = setup_with("Cargo Ship", 1);
-    let crewed = driven_crewed_bodies(&mut state);
+    let (crewed, terminating_action) = driven_crewed_bodies(&mut state);
+    assert_eq!(
+        terminating_action.as_ref(),
+        Some(&GameAction::PassPriority),
+        "the AI decision loop must terminate by PASSING — not by an apply error or \
+         the step bound, or a one-tap count would falsely pass without the AI ever passing"
+    );
     assert_eq!(
         crewed.len(),
         1,
@@ -142,8 +154,21 @@ fn ai_crews_crew2_vehicle_with_exactly_the_required_two() {
     // (Crew only needs total power N; extra taps are waste). Guards that the
     // redundant-crew reject does not over-correct and prevent the AI from
     // correctly crewing a higher-N Vehicle.
+    //
+    // NOTE (test asymmetry): this test intentionally does NOT fail on pre-fix
+    // code — with 3 bodies, after a 2-body crew one 1/1 remains with power
+    // 1 < 2, so no legal non-empty subset exists and pre-fix code also settles
+    // on pass. It guards over-correction, which only exists post-fix, and the
+    // exact-2 selection — not the original crew-repeat pathology (that is
+    // Crew 1's test).
     let mut state = setup_with("Adventurer's Airship", 2);
-    let crewed = driven_crewed_bodies(&mut state);
+    let (crewed, terminating_action) = driven_crewed_bodies(&mut state);
+    assert_eq!(
+        terminating_action.as_ref(),
+        Some(&GameAction::PassPriority),
+        "the AI decision loop must terminate by PASSING — not by an apply error or \
+         the step bound, or a two-tap count would falsely pass without the AI ever passing"
+    );
     assert_eq!(
         crewed.len(),
         2,

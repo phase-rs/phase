@@ -77,25 +77,41 @@ impl TacticalPolicy for CrewTimingPolicy {
         }
 
         // CR 702.122a: Crew N's only effect is "This permanent becomes an artifact
-        // creature until end of turn." If the Vehicle has ALREADY been crewed this
-        // turn — recorded by the engine's single crew-cadence authority at crew
-        // announcement — then that effect is already in force (once resolved, or
-        // even while its crew ability sits pending on the stack), and re-activating
-        // Crew is pure waste: the payoff is already applied, and the only remaining
+        // creature until end of turn." If that payoff is ALREADY in force — a
+        // `KeywordAction::Crew` for this Vehicle pending on the stack, or the
+        // resolved crew's transient UEOT `AddType(Creature)` effect currently live
+        // on the Vehicle — then re-activating Crew is pure waste: the payoff is
+        // already owed (pending) or already applied (live), and the only remaining
         // consequence is tapping a fresh untapped body for nothing.
         //
-        // This is the crew-repeat pathology: after the first successful crew the
-        // Vehicle is a legal attacker, so `crew_has_exact_combat_use` returns true
-        // and would shield a redundant re-crew — letting the AI tap every body it
-        // controls. The already-crewed check MUST come before that combat-use gate
-        // so it cannot be masked by "the crewed Vehicle could attack".
+        // The engine authorities (`crew_pending_on_stack` / `crew_payoff_live`)
+        // are consulted at PAYOFF-IN-FORCE, deliberately NOT at the
+        // announcement-cadence set (`crew_activated_this_turn`): that set is
+        // recorded at crew announcement and cleared only at turn start, so it
+        // persists even when the crew is countered (CR 701.6a — Stifle/Tale's
+        // End-class effects counter the pending keyword action before it
+        // resolves). The countered case has neither a pending entry nor a live
+        // effect, so keying the veto on the cadence set would wrongly forfeit an
+        // engine-legal re-crew for the rest of the turn and leave the Vehicle
+        // uncrewed — yet the unrestrained Vehicles this guard targets are NOT
+        // blocked by the engine's CR 602.5b once-each-turn gate.
         //
-        // Using the engine's crew-cadence authority rather than reading the
-        // vehicle's `core_types` is deliberate: crewing materializes the Creature
-        // type through a transient continuous effect that the layer system only
-        // folds into `core_types` lazily, so the raw field is not a reliable
-        // layer-independent "is it already a creature" test here.
-        if engine::game::engine::crew_activated_this_turn_contains(ctx.state, *vehicle_id) {
+        // The redundant-crew veto MUST come before the combat-use gate: after a
+        // successful crew the Vehicle is a legal attacker, so
+        // `crew_has_exact_combat_use` would return true and shield the redundant
+        // re-crew — letting the AI tap every body it controls (the crew-repeat
+        // pathology).
+        //
+        // Advisory scope boundary: non-crew animation (Ensoul Artifact,
+        // Tezzeret-class "becomes an artifact creature") can produce the same
+        // tap-every-body pathology — the Vehicle is already a creature, so the
+        // combat-use gate shields re-crews — yet its transient effect is sourced
+        // from a DIFFERENT object, so `crew_payoff_live` (keyed to Vehicle-as-its-
+        // own-source) cannot see it, and neither can the round-1 cadence set.
+        // Covering that sibling is a deliberate scope limit of this fix.
+        if engine::game::engine::crew_pending_on_stack(ctx.state, *vehicle_id)
+            || engine::game::engine::crew_payoff_live(ctx.state, *vehicle_id)
+        {
             return PolicyVerdict::reject(PolicyReason::new(
                 "crew_timing_redundant_already_creature",
             ));
@@ -186,7 +202,9 @@ mod tests {
     use crate::config::AiConfig;
     use crate::context::AiContext;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::effects::counter;
     use engine::game::zones::create_object;
+    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
     use engine::types::identifiers::ObjectId;
@@ -355,38 +373,198 @@ mod tests {
 
     #[test]
     fn already_crewed_vehicle_recrew_is_penalized_before_combat_use() {
-        // Once a Vehicle has been crewed this turn, Crew N's sole payoff —
-        // becoming an artifact creature until end of turn — is already in force.
-        // Re-activating Crew then only taps a fresh body for nothing. The engine
-        // records the crew at announcement via its crew-cadence single authority
-        // (`crew_activated_this_turn_contains`), which is also the layer-independent
-        // test the policy consumes. And because the crewed Vehicle is a legal
-        // attacker, `crew_has_exact_combat_use` would return true and shield the
-        // redundant re-crew — so the already-crewed check must come first. Since
-        // re-crewing is never beneficial, the policy rejects it outright (a hard
-        // veto, not a penalty the search could out-weigh). This is the crew-repeat
-        // pathology regression.
-        let (mut state, vehicle, _) = crew_fixture();
-        // Mark the Vehicle as already crewed this turn, exactly as a prior crew
-        // announcement would via the engine's single write authority (inserting
-        // the object's incarnation ref into `crew_activated_this_turn`).
-        state.crew_activated_this_turn.insert(
-            engine::types::identifiers::ObjectIncarnationRef::from_object(
-                state.objects.get(&vehicle).unwrap(),
-            ),
-        );
+        // Once a Vehicle's Crew payoff is in force, re-activating Crew only taps a
+        // fresh body for nothing. The payoff-in-force state is established HERE
+        // through the REAL engine mechanism (not raw cadence-set insertion): the
+        // first crew is announced by driving priority activation → subset
+        // selection → cost payment + stack push through `apply`, then left
+        // pending on the stack or resolved (installing the transient UEOT
+        // `AddType(Creature)` effect). Both in-force states must be vetoed. And
+        // because the crewed Vehicle is a legal attacker,
+        // `crew_has_exact_combat_use` would shield the re-crew — so the
+        // redundant-crew veto must come before the combat-use gate. This is the
+        // crew-repeat pathology regression (CR 702.122a).
+        let (mut state, vehicle, crew_member) = crew_fixture();
         let activation = GameAction::CrewVehicle {
             vehicle_id: vehicle,
             creature_ids: Vec::new(),
         };
+
+        // ── pending-on-stack: the first crew is announced but unresolved. ──
+        apply_as_current_for_simulation(&mut state, activation.clone())
+            .expect("priority crew activation enters the subset prompt");
+        apply_as_current_for_simulation(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: vec![crew_member],
+            },
+        )
+        .expect("engine accepts the announced crew and pushes the stack entry");
+
         assert!(
-            crew_has_exact_combat_use(&state, AI, vehicle, &activation),
-            "the already-crewed Vehicle is a legal attacker, so the combat-use gate alone would shield it"
+            state.crew_activated_this_turn.contains(
+                &engine::types::identifiers::ObjectIncarnationRef::from_object(
+                    state.objects.get(&vehicle).unwrap(),
+                ),
+            ),
+            "reach-guard: the announcement recorded the cadence set"
+        );
+        assert!(
+            engine::game::engine::crew_pending_on_stack(&state, vehicle),
+            "reach-guard: the crew entry is pending on the stack"
+        );
+        assert!(
+            !engine::game::engine::crew_payoff_live(&state, vehicle),
+            "reach-guard: the Vehicle is not yet a creature (the payoff applies at resolution)"
+        );
+        let result = verdict(
+            &state,
+            WaitingFor::Priority { player: AI },
+            activation.clone(),
+        );
+        assert!(
+            matches!(&result, PolicyVerdict::Reject { reason } if reason.kind == "crew_timing_redundant_already_creature"),
+            "a re-crew while the first crew is pending on the stack must be rejected; got {result:?}"
+        );
+
+        // ── live-payoff: resolve the pending crew through the engine's fast
+        // forward — the transient UEOT AddType(Creature) effect is now live. ──
+        resolve_all_fast_forward(&mut state, AI, 1, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        });
+        assert!(
+            engine::game::engine::crew_payoff_live(&state, vehicle),
+            "reach-guard: resolving the crew installed the live UEOT animation effect"
+        );
+        assert!(
+            get_valid_attacker_ids(&state).contains(&vehicle),
+            "the crewed Vehicle is a legal attacker, so the exact-combat-use gate alone would shield the re-crew"
         );
         let result = verdict(&state, WaitingFor::Priority { player: AI }, activation);
         assert!(
             matches!(&result, PolicyVerdict::Reject { reason } if reason.kind == "crew_timing_redundant_already_creature"),
-            "redundant re-crew must be rejected even though the Vehicle could attack; got {result:?}"
+            "redundant re-crew of a live-crewed Vehicle must be rejected even though the Vehicle could attack; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn countered_crew_does_not_block_an_engine_legal_recrew() {
+        // MED (CR 702.122a + CR 701.6a): the cadence set is recorded at crew
+        // ANNOUNCEMENT and cleared only at turn start. If the pending
+        // `KeywordAction::Crew` is countered (a mass-counter path — `Effect::CounterAll`
+        // with a StackAbility target scores `StackEntryKind::KeywordAction`; the
+        // single-target `Effect::Counter` resolver flavor is not exercised here),
+        // the Vehicle never becomes a creature
+        // (the payoff applies at stack resolution), yet a cadence-set-keyed veto
+        // — round-1's `crew_activated_this_turn_contains` — would keep rejecting
+        // the re-crew all turn, leaving unrestrained Vehicles (not blocked by the
+        // engine's CR 602.5b once-each-turn gate) uncrewed. The guard must key on
+        // PAYOFF-IN-FORCE: with no pending entry and no live animation effect the
+        // re-crew is engine-legal and must reach the combat-use gate, not be
+        // vetoed.
+        let (mut state, vehicle, crew_member) = crew_fixture();
+
+        // Announce the first crew through the real engine path (cadence recorded,
+        // cost paid, `KeywordAction::Crew` pushed on the stack)…
+        apply_as_current_for_simulation(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: Vec::new(),
+            },
+        )
+        .expect("priority crew activation enters the subset prompt");
+        apply_as_current_for_simulation(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle,
+                creature_ids: vec![crew_member],
+            },
+        )
+        .expect("engine accepts the announced crew and pushes the stack entry");
+
+        // …then counter the pending keyword action through the engine's production
+        // mass-counter path (`counter::resolve_all` with `Effect::CounterAll`),
+        // which matches and removes the entry without moving any card (abilities
+        // aren't cards, CR 701.6a). The single-target `Effect::Counter` resolver
+        // flavor is intentionally not covered here — CounterAll is sufficient to
+        // prove the fix (any production counter must clear the pending entry).
+        let mut events = Vec::new();
+        counter::resolve_all(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::CounterAll {
+                    target: TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                        kind: None,
+                    },
+                },
+                Vec::new(),
+                ObjectId(999),
+                AI,
+            ),
+            &mut events,
+        )
+        .expect("counter resolves");
+
+        // Discriminator setup: the cadence set STILL records the announcement
+        // (it is cleared only at turn start), so this is exactly the state that
+        // fooled the round-1 cadence-keyed veto — yet the payoff is not in force.
+        assert!(
+            state.crew_activated_this_turn.contains(
+                &engine::types::identifiers::ObjectIncarnationRef::from_object(
+                    state.objects.get(&vehicle).unwrap(),
+                ),
+            ),
+            "discriminator: the stale cadence record persists after the counter"
+        );
+        assert!(
+            !engine::game::engine::crew_pending_on_stack(&state, vehicle),
+            "reach-guard: the counter removed the pending crew entry"
+        );
+        assert!(
+            !engine::game::engine::crew_payoff_live(&state, vehicle),
+            "reach-guard: the countered crew never installed its animation effect"
+        );
+
+        let activation = GameAction::CrewVehicle {
+            vehicle_id: vehicle,
+            creature_ids: Vec::new(),
+        };
+        let result = verdict(
+            &state,
+            WaitingFor::Priority { player: AI },
+            activation.clone(),
+        );
+        assert!(
+            !matches!(result, PolicyVerdict::Reject { .. }),
+            "a re-crew after the first crew was countered MUST NOT be vetoed (payoff not in force); got {result:?}"
+        );
+
+        // With a fresh untapped body the re-crew is also an exact combat use, so
+        // it is judged neutrally by the combat-use gate rather than penalized —
+        // the fullest production shape of "the AI re-crews with a fresh body".
+        let body2 = create_object(
+            &mut state,
+            CardId(99),
+            AI,
+            "Second Crew Member".to_string(),
+            Zone::Battlefield,
+        );
+        let body2_obj = state.objects.get_mut(&body2).expect("body2 exists");
+        body2_obj.card_types.core_types.push(CoreType::Creature);
+        body2_obj.power = Some(1);
+        body2_obj.toughness = Some(1);
+        assert!(
+            crew_has_exact_combat_use(&state, AI, vehicle, &activation),
+            "reach-guard: with a fresh body the re-crew crews the Vehicle into an exact attack use"
+        );
+        let result = verdict(&state, WaitingFor::Priority { player: AI }, activation);
+        assert!(
+            matches!(&result, PolicyVerdict::Score { delta: 0.0, reason } if reason.kind == "crew_timing_combat_use"),
+            "re-crewing after a countered crew reaches the combat-use gate and is judged on its merits, not vetoed; got {result:?}"
         );
     }
 

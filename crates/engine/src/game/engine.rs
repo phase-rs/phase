@@ -15605,21 +15605,72 @@ fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: Player
     })
 }
 
-/// CR 602.5b + CR 702.122a: "activate only once each turn" is keyed to the exact
-/// object incarnation, so a Vehicle that leaves and returns (a new object per
-/// CR 400.7) may be crewed again. Single authority for reading the crew-cadence
-/// set — callers never touch `crew_activated_this_turn` directly.
-///
-/// Also the AI crate's single, layer-independent test for "has this Vehicle
-/// already been crewed this turn": `record_crew_activation` runs at crew
-/// announcement (before stack resolution), so the set is authoritative even
-/// while a crew ability sits pending on the stack.
-pub fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
+/// CAVEAT: the set is recorded at crew ANNOUNCEMENT and cleared only at turn
+/// start (CR 602.5b). It is therefore NOT a layer-independent test for "the
+/// crew payoff is in force": a Stifle-class counter (CR 701.6a) removes the
+/// pending crew entry before it resolves, leaving the cadence record stale all
+/// turn while the Vehicle never became a creature. Consumers that must reject
+/// a redundant re-crew should test PAYOFF-IN-FORCE instead — see
+/// [`crew_pending_on_stack`] / [`crew_payoff_live`].
+pub(crate) fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
     state
         .objects
         .get(&vehicle_id)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
         .is_some_and(|r| state.crew_activated_this_turn.contains(&r))
+}
+
+/// CR 702.122a + CR 113.3b: Is a Crew activation for this Vehicle currently
+/// pending on the stack? Crew's payoff — the transient UEOT
+/// `AddType(Creature)` effect — is applied at stack RESOLUTION, not at
+/// announcement (CR 113.3b opens a priority window for counterspell-class
+/// effects between the two). Between announcement and resolution the pending
+/// `KeywordAction::Crew` entry is the proof that the payoff is owed; the
+/// cadence set alone is not (see [`crew_activated_this_turn_contains`]).
+pub fn crew_pending_on_stack(state: &GameState, vehicle_id: ObjectId) -> bool {
+    state.stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::KeywordAction {
+                action: KeywordAction::Crew {
+                    vehicle_id: pending,
+                    ..
+                },
+            } if *pending == vehicle_id
+        )
+    })
+}
+
+/// CR 702.122a + CR 611.2a: Is the resolved Crew payoff currently live on this
+/// Vehicle — the transient UEOT `AddType(Creature)` continuous effect the
+/// engine installs when the `KeywordAction::Crew` entry resolves? The layer
+/// system folds it into `core_types` lazily, so this predicate (not the raw
+/// type field) is the layer-independent "the crew payoff is in force" test.
+///
+/// Keyed to the crew payoff's exact shape — source is the Vehicle itself,
+/// self-targeting, `Duration::UntilEndOfTurn`, `AddType(Creature)` — so an
+/// external animator (Ensoul Artifact, Tezzeret-class "becomes an artifact
+/// creature") is deliberately NOT matched: its transient effect is sourced
+/// from a different object. That sibling pathology is out of scope for the
+/// crew-repeat guard.
+pub fn crew_payoff_live(state: &GameState, vehicle_id: ObjectId) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.source_id == vehicle_id
+            && tce.duration == crate::types::ability::Duration::UntilEndOfTurn
+            && matches!(
+                &tce.affected,
+                crate::types::ability::TargetFilter::SpecificObject { id }
+                    if *id == vehicle_id
+            )
+            && tce.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::AddType {
+                        core_type: crate::types::card_type::CoreType::Creature,
+                    }
+                )
+            })
+    })
 }
 
 /// CR 602.5b + CR 702.122a: record a crew activation against the Vehicle's current
