@@ -6,7 +6,7 @@
 //! only after bounded reducer simulation reaches the matching root's real stack
 //! finalization.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::ai_support::legal_actions;
 use crate::game::engine::apply_as_current_for_simulation;
@@ -20,13 +20,16 @@ use crate::types::game_state::{
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 
-/// Maximum reducer applications made while witnessing one proposed successor.
+/// Maximum non-cancellation roots the bounded batch can safely enumerate.
+pub const PAYMENT_CONTINUATION_MAX_ROOTS: usize = 64;
+/// Maximum reducer applications made while witnessing one payment decision.
 ///
-/// The supplied action counts as one application. The bound is per witness,
-/// not per candidate list: callers that inspect `A` raw payment candidates may
-/// therefore cause at most `PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS * A`
-/// applications.
-pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = 64;
+/// Root actions and their continuation search share this bound, so inspecting
+/// many engine-issued options cannot multiply the work of the payment oracle.
+/// The bound reserves three continuation applications for every admitted root:
+/// a full 64-root wave must never consume the whole budget before any root can
+/// reach its next payment carrier or finalization step.
+pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = PAYMENT_CONTINUATION_MAX_ROOTS * 4;
 
 /// Mode-free identity of the announced spell or activated ability being paid.
 ///
@@ -81,6 +84,40 @@ pub enum PaymentContinuationUnsupported {
 pub struct AcceptedPaymentSuccessor {
     pub action: GameAction,
     pub state: GameState,
+}
+
+/// The completedness of one decision-wide payment proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationBatchStatus {
+    NotAffiliated,
+    UnsupportedAffiliated(PaymentContinuationUnsupported),
+    /// Every supplied root was considered within the shared bound. An empty
+    /// certificate vector is the only proof that no supplied payment finishes.
+    Complete,
+    /// The search stopped before it could make a no-payment claim. Consumers
+    /// must not use partial certificates as evidence that payment is available.
+    Indeterminate(PaymentContinuationIndeterminate),
+}
+
+/// Why a batch payment witness could not prove a complete answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationIndeterminate {
+    OverRootCapacity,
+    AttemptBudgetExhausted,
+}
+
+/// Index-aligned result for exactly the input action slice.
+#[derive(Debug, Clone)]
+pub struct PaymentContinuationBatch {
+    pub status: PaymentContinuationBatchStatus,
+    pub successors: Vec<Option<AcceptedPaymentSuccessor>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaymentContinuationWitnessCounters {
+    pub root_applies: usize,
+    pub continuation_applies: usize,
+    pub total_attempts: usize,
 }
 
 /// Classify the current payment carrier without guessing cross-carrier state.
@@ -148,29 +185,248 @@ pub fn witness_payment_continuation(
     state: &GameState,
     action: &GameAction,
 ) -> Option<AcceptedPaymentSuccessor> {
-    let PaymentContinuationState::Affiliated(root) = classify_payment_continuation(state) else {
-        return None;
+    let batch = witness_payment_continuations(state, std::slice::from_ref(action));
+    matches!(batch.status, PaymentContinuationBatchStatus::Complete)
+        .then(|| batch.successors.into_iter().next().flatten())
+        .flatten()
+}
+
+/// Witness all raw actions for one exact payment decision with a shared bounded
+/// reducer search. The output has one entry for every input position; callers
+/// must retain that position rather than re-associating equivalent actions.
+pub fn witness_payment_continuations(
+    state: &GameState,
+    actions: &[GameAction],
+) -> PaymentContinuationBatch {
+    witness_payment_continuations_inner(state, actions, None)
+}
+
+#[cfg(feature = "test-support")]
+pub fn witness_payment_continuations_with_counters(
+    state: &GameState,
+    actions: &[GameAction],
+    counters: &mut PaymentContinuationWitnessCounters,
+) -> PaymentContinuationBatch {
+    witness_payment_continuations_inner(state, actions, Some(counters))
+}
+
+fn witness_payment_continuations_inner(
+    state: &GameState,
+    actions: &[GameAction],
+    #[allow(unused_mut, unused_variables)] mut counters: Option<
+        &mut PaymentContinuationWitnessCounters,
+    >,
+) -> PaymentContinuationBatch {
+    let empty = || vec![None; actions.len()];
+    let root = match classify_payment_continuation(state) {
+        PaymentContinuationState::NotAffiliated => {
+            return PaymentContinuationBatch {
+                status: PaymentContinuationBatchStatus::NotAffiliated,
+                successors: empty(),
+            };
+        }
+        PaymentContinuationState::UnsupportedAffiliated(reason) => {
+            return PaymentContinuationBatch {
+                status: PaymentContinuationBatchStatus::UnsupportedAffiliated(reason),
+                successors: empty(),
+            };
+        }
+        PaymentContinuationState::Affiliated(root) => root,
     };
-    if matches!(action, GameAction::CancelCast) {
-        return None;
+    let noncancel_roots = actions
+        .iter()
+        .filter(|action| !matches!(action, GameAction::CancelCast))
+        .count();
+    if noncancel_roots > PAYMENT_CONTINUATION_MAX_ROOTS {
+        return PaymentContinuationBatch {
+            status: PaymentContinuationBatchStatus::Indeterminate(
+                PaymentContinuationIndeterminate::OverRootCapacity,
+            ),
+            successors: empty(),
+        };
+    }
+    let Some(baseline) = WitnessBaseline::capture(state, &root) else {
+        return PaymentContinuationBatch {
+            status: PaymentContinuationBatchStatus::Complete,
+            successors: empty(),
+        };
+    };
+
+    let mut order: Vec<_> = actions
+        .iter()
+        .enumerate()
+        .filter(|(_, action)| !matches!(action, GameAction::CancelCast))
+        .collect();
+    order.sort_by(|(left_index, left), (right_index, right)| {
+        left.cmp_stable(right)
+            .then_with(|| left_index.cmp(right_index))
+    });
+
+    let mut attempts = 0;
+    let mut successors = empty();
+    let mut queue = VecDeque::new();
+    for (index, action) in order {
+        if attempts == PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
+            return indeterminate_batch(
+                PaymentContinuationIndeterminate::AttemptBudgetExhausted,
+                actions.len(),
+                attempts,
+                counters,
+            );
+        }
+        attempts += 1;
+        #[cfg(feature = "test-support")]
+        if let Some(counters) = &mut counters {
+            counters.root_applies += 1;
+        }
+        let mut successor = state.clone();
+        let Ok(result) = apply_as_current_for_simulation(&mut successor, action.clone()) else {
+            continue;
+        };
+        if !root_present(&successor, &root) {
+            if finalized_root_matches(&successor, &root, &baseline, &result.events) {
+                successors[index] = Some(AcceptedPaymentSuccessor {
+                    action: action.clone(),
+                    state: successor,
+                });
+            }
+            continue;
+        }
+        if matches!(
+            classify_payment_continuation(&successor),
+            PaymentContinuationState::Affiliated(ref current_root) if current_root == &root
+        ) {
+            queue.push_back(WitnessNode {
+                root_index: index,
+                root_action: action.clone(),
+                root_successor: successor.clone(),
+                state: successor,
+                events: result.events,
+                remaining_actions: None,
+            });
+        }
     }
 
-    let baseline = WitnessBaseline::capture(state, &root)?;
-    let mut successor = state.clone();
-    let first_result = apply_as_current_for_simulation(&mut successor, action.clone()).ok()?;
-    let mut attempts = 1;
-    record_witness_attempts(attempts);
-    let mut events = first_result.events;
+    while let Some(mut node) = queue.pop_front() {
+        let Some(next_action) = node.next_action() else {
+            continue;
+        };
+        if attempts == PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
+            return indeterminate_batch(
+                PaymentContinuationIndeterminate::AttemptBudgetExhausted,
+                actions.len(),
+                attempts,
+                counters,
+            );
+        }
+        attempts += 1;
+        #[cfg(feature = "test-support")]
+        if let Some(counters) = &mut counters {
+            counters.continuation_applies += 1;
+        }
+        let mut next_state = node.state.clone();
+        let result = apply_as_current_for_simulation(&mut next_state, next_action);
 
-    if witness_completion(&successor, &root, &baseline, &mut events, &mut attempts) {
-        record_witness_attempts(attempts);
-        Some(AcceptedPaymentSuccessor {
-            action: action.clone(),
-            state: successor,
-        })
-    } else {
-        record_witness_attempts(attempts);
+        // One continuation action per dequeue gives every root (and every
+        // forked descendant) a turn before a high-branching lane can spend a
+        // second reducer attempt.
+        if node.has_remaining_actions() {
+            queue.push_back(node.clone());
+        }
+
+        let Ok(result) = result else {
+            continue;
+        };
+        let mut events = node.events.clone();
+        events.extend(result.events);
+        if !root_present(&next_state, &root) {
+            if finalized_root_matches(&next_state, &root, &baseline, &events) {
+                successors[node.root_index] = Some(AcceptedPaymentSuccessor {
+                    action: node.root_action,
+                    state: node.root_successor,
+                });
+            }
+            continue;
+        }
+        if matches!(
+            classify_payment_continuation(&next_state),
+            PaymentContinuationState::Affiliated(ref current_root) if current_root == &root
+        ) {
+            queue.push_back(WitnessNode {
+                root_index: node.root_index,
+                root_action: node.root_action,
+                root_successor: node.root_successor,
+                state: next_state,
+                events,
+                remaining_actions: None,
+            });
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    if let Some(counters) = &mut counters {
+        counters.total_attempts = attempts;
+    }
+    PaymentContinuationBatch {
+        status: PaymentContinuationBatchStatus::Complete,
+        successors,
+    }
+}
+
+fn indeterminate_batch(
+    reason: PaymentContinuationIndeterminate,
+    action_count: usize,
+    attempts: usize,
+    #[allow(unused_mut, unused_variables)] mut counters: Option<
+        &mut PaymentContinuationWitnessCounters,
+    >,
+) -> PaymentContinuationBatch {
+    #[cfg(feature = "test-support")]
+    if let Some(counters) = &mut counters {
+        counters.total_attempts = attempts;
+    }
+    PaymentContinuationBatch {
+        status: PaymentContinuationBatchStatus::Indeterminate(reason),
+        successors: vec![None; action_count],
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WitnessNode {
+    root_index: usize,
+    root_action: GameAction,
+    root_successor: GameState,
+    state: GameState,
+    events: Vec<GameEvent>,
+    remaining_actions: Option<(Vec<GameAction>, usize)>,
+}
+
+impl WitnessNode {
+    fn next_action(&mut self) -> Option<GameAction> {
+        if self.remaining_actions.is_none() {
+            let mut actions = legal_actions(&self.state);
+            actions.sort_by(|left, right| left.cmp_stable(right));
+            self.remaining_actions = Some((actions, 0));
+        }
+        let (actions, next_index) = self.remaining_actions.as_mut().unwrap();
+        while *next_index < actions.len() {
+            let action = actions[*next_index].clone();
+            *next_index += 1;
+            if !matches!(action, GameAction::CancelCast) {
+                return Some(action);
+            }
+        }
         None
+    }
+
+    fn has_remaining_actions(&self) -> bool {
+        self.remaining_actions
+            .as_ref()
+            .is_some_and(|(actions, next_index)| {
+                actions[*next_index..]
+                    .iter()
+                    .any(|action| !matches!(action, GameAction::CancelCast))
+            })
     }
 }
 
@@ -230,51 +486,6 @@ impl WitnessBaseline {
             completion,
         })
     }
-}
-
-fn witness_completion(
-    state: &GameState,
-    root: &PaymentContinuationRoot,
-    baseline: &WitnessBaseline,
-    events: &mut Vec<GameEvent>,
-    attempts: &mut usize,
-) -> bool {
-    if !root_present(state, root) {
-        return finalized_root_matches(state, root, baseline, events);
-    }
-    if *attempts >= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
-        return false;
-    }
-
-    match classify_payment_continuation(state) {
-        PaymentContinuationState::Affiliated(current_root) if current_root == *root => {}
-        PaymentContinuationState::Affiliated(_)
-        | PaymentContinuationState::NotAffiliated
-        | PaymentContinuationState::UnsupportedAffiliated(_) => return false,
-    }
-
-    let mut actions = legal_actions(state);
-    actions.sort_by(|left, right| left.cmp_stable(right));
-    for next_action in actions {
-        if matches!(next_action, GameAction::CancelCast)
-            || *attempts >= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS
-        {
-            continue;
-        }
-
-        *attempts += 1;
-        let mut next_state = state.clone();
-        let Ok(result) = apply_as_current_for_simulation(&mut next_state, next_action) else {
-            continue;
-        };
-        let event_len = events.len();
-        events.extend(result.events);
-        if witness_completion(&next_state, root, baseline, events, attempts) {
-            return true;
-        }
-        events.truncate(event_len);
-    }
-    false
 }
 
 fn finalized_root_matches(
@@ -765,22 +976,6 @@ impl PaymentContinuationRoot {
     }
 }
 
-// This counter deliberately records one witness invocation's reducer work;
-// callers may invoke the oracle once per raw action, so it is not a global
-// candidate-list cap. Kept test-only so production hot paths stay allocation-
-// and synchronization-free.
-#[cfg(test)]
-static LAST_WITNESS_REDUCER_ATTEMPTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-fn record_witness_attempts(attempts: usize) {
-    LAST_WITNESS_REDUCER_ATTEMPTS.store(attempts, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(not(test))]
-fn record_witness_attempts(_: usize) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,17 +1000,59 @@ mod tests {
     }
 
     #[test]
-    fn witness_attempts_remain_bounded_per_proposed_action() {
+    fn unsupported_payment_batch_does_not_apply_actions() {
         let mut state = GameState::new_two_player(1);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: None,
         };
 
-        assert!(witness_payment_continuation(&state, &GameAction::CancelCast).is_none());
+        let batch = witness_payment_continuations(&state, &[GameAction::CancelCast]);
+        assert!(matches!(
+            batch.status,
+            PaymentContinuationBatchStatus::UnsupportedAffiliated(
+                PaymentContinuationUnsupported::MissingPendingCast
+            )
+        ));
+        assert_eq!(batch.successors, vec![None]);
+    }
+
+    #[test]
+    fn continuation_scheduler_rotates_before_a_high_branch_lane_retries() {
+        let state = GameState::new_two_player(1);
+        let node = |actions| WitnessNode {
+            root_index: 0,
+            root_action: GameAction::PassPriority,
+            root_successor: state.clone(),
+            state: state.clone(),
+            events: Vec::new(),
+            remaining_actions: Some((actions, 0)),
+        };
+        let mut queue = VecDeque::from([
+            node(vec![
+                GameAction::PassPriority,
+                GameAction::BackToManaPayment,
+            ]),
+            node(vec![GameAction::BackToManaPayment]),
+        ]);
+
+        let mut first = queue.pop_front().unwrap();
+        assert!(matches!(
+            first.next_action(),
+            Some(GameAction::PassPriority)
+        ));
+        if first.has_remaining_actions() {
+            queue.push_back(first);
+        }
+
+        let mut later_root = queue.pop_front().unwrap();
+        assert!(matches!(
+            later_root.next_action(),
+            Some(GameAction::BackToManaPayment)
+        ));
         assert!(
-            LAST_WITNESS_REDUCER_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)
-                <= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS
+            queue.front().is_some(),
+            "the high-branch root's second action waits until the later root receives a turn"
         );
     }
 

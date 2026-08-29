@@ -18,6 +18,7 @@ use engine::types::player::PlayerId;
 use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
+use crate::planner::PreparedCandidate;
 use crate::policies::context::{collect_ability_effects, PolicyContext};
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
@@ -36,6 +37,7 @@ pub enum GateDecision {
 
 #[derive(Debug, Clone)]
 pub struct GatedCandidate {
+    pub source_index: usize,
     pub candidate: CandidateAction,
     pub penalty: f64,
 }
@@ -108,9 +110,31 @@ pub fn gate_candidates(
     config: &AiConfig,
     context: &AiContext,
 ) -> Vec<GatedCandidate> {
+    let prepared = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(source_index, candidate)| PreparedCandidate {
+            source_index,
+            candidate,
+            payment_successor: None,
+        })
+        .collect();
+    gate_prepared_candidates(state, decision, prepared, ai_player, config, context)
+}
+
+pub(crate) fn gate_prepared_candidates(
+    state: &GameState,
+    decision: &AiDecisionContext,
+    candidates: Vec<PreparedCandidate>,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    context: &AiContext,
+) -> Vec<GatedCandidate> {
     candidates
         .into_iter()
-        .filter_map(|candidate| {
+        .filter_map(|prepared| {
+            let source_index = prepared.source_index;
+            let candidate = prepared.candidate;
             let decision_result = {
                 let policy_ctx = PolicyContext {
                     state,
@@ -127,12 +151,15 @@ pub fn gate_candidates(
             match decision_result {
                 GateDecision::Reject => None,
                 GateDecision::Allow => Some(GatedCandidate {
+                    source_index,
                     candidate,
                     penalty: 0.0,
                 }),
-                GateDecision::AllowWithPenalty(penalty) => {
-                    Some(GatedCandidate { candidate, penalty })
-                }
+                GateDecision::AllowWithPenalty(penalty) => Some(GatedCandidate {
+                    source_index,
+                    candidate,
+                    penalty,
+                }),
             }
         })
         .collect()

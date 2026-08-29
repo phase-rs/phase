@@ -2,7 +2,10 @@
 
 use engine::ai_support::{
     classify_payment_continuation, legal_actions, witness_payment_continuation,
-    PaymentContinuationRoot, PaymentContinuationState,
+    witness_payment_continuations, witness_payment_continuations_with_counters,
+    PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
+    PaymentContinuationState, PaymentContinuationWitnessCounters,
+    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::scenario::{GameScenario, P0};
@@ -208,10 +211,9 @@ fn flexible_mana_witness_keeps_every_completing_product() {
             .expect("every generated colour product remains reducer-legal");
     }
 
-    let accepted: Vec<_> = actions
-        .iter()
-        .filter_map(|action| witness_payment_continuation(&state, action))
-        .collect();
+    let batch = witness_payment_continuations(&state, &actions);
+    assert_eq!(batch.status, PaymentContinuationBatchStatus::Complete);
+    let accepted: Vec<_> = batch.successors.into_iter().flatten().collect();
     assert_eq!(
         accepted
             .iter()
@@ -219,5 +221,54 @@ fn flexible_mana_witness_keeps_every_completing_product() {
             .collect::<Vec<_>>(),
         expected[..3].iter().collect::<Vec<_>>(),
         "only the products that leave blue available complete the exact root"
+    );
+}
+
+#[test]
+fn payment_batch_over_capacity_returns_no_partial_certificate_without_applying_roots() {
+    let state = flexible_mana_payment_state();
+    let root = legal_actions(&state)
+        .into_iter()
+        .next()
+        .expect("live color prompt issues a root action");
+    let actions = vec![root; 65];
+    let mut counters = PaymentContinuationWitnessCounters::default();
+    let batch = witness_payment_continuations_with_counters(&state, &actions, &mut counters);
+
+    assert_eq!(
+        batch.status,
+        PaymentContinuationBatchStatus::Indeterminate(
+            PaymentContinuationIndeterminate::OverRootCapacity
+        )
+    );
+    assert!(batch.successors.iter().all(Option::is_none));
+    assert_eq!(counters.root_applies, 0);
+    assert_eq!(counters.total_attempts, 0);
+}
+
+#[test]
+fn payment_batch_reserves_continuation_budget_after_a_full_root_wave() {
+    let state = flexible_mana_payment_state();
+    let root = legal_actions(&state)
+        .into_iter()
+        .next()
+        .expect("live color prompt issues a root action");
+    let actions = vec![root; 64];
+    let mut counters = PaymentContinuationWitnessCounters::default();
+    let batch = witness_payment_continuations_with_counters(&state, &actions, &mut counters);
+
+    assert_eq!(batch.status, PaymentContinuationBatchStatus::Complete);
+    assert!(
+        batch.successors.iter().all(Option::is_some),
+        "every equivalent root needs the reducer's next payment/finalization step"
+    );
+    assert_eq!(counters.root_applies, 64);
+    assert!(
+        counters.continuation_applies >= 64,
+        "the full root wave must leave enough shared budget to advance every root"
+    );
+    assert!(
+        counters.total_attempts <= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+        "all root and continuation work remains under the single decision bound"
     );
 }

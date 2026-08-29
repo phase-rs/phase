@@ -60,9 +60,15 @@ pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
 pub use payment_continuation::{
-    classify_payment_continuation, witness_payment_continuation, AcceptedPaymentSuccessor,
-    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
-    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+    classify_payment_continuation, witness_payment_continuation, witness_payment_continuations,
+    AcceptedPaymentSuccessor, PaymentContinuationBatch, PaymentContinuationBatchStatus,
+    PaymentContinuationIndeterminate, PaymentContinuationRoot, PaymentContinuationState,
+    PaymentContinuationUnsupported, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+    PAYMENT_CONTINUATION_MAX_ROOTS,
+};
+#[cfg(feature = "test-support")]
+pub use payment_continuation::{
+    witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
 pub use prospective_mana::{
     certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,

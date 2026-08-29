@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use engine::ai_support::{
-    classify_payment_continuation, legal_actions, witness_payment_continuation,
-    PaymentContinuationState,
+    classify_payment_continuation, legal_actions, witness_payment_continuations,
+    PaymentContinuationBatchStatus, PaymentContinuationState,
 };
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_for_simulation, EngineError};
@@ -48,6 +48,7 @@ pub enum BailReason {
     MulliganOrSideboardEncountered,
     NoLegalAction { waiting_for: String },
     NoLegalManaPayment,
+    IncompleteManaPaymentWitness,
     EngineRejected(EngineError),
 }
 
@@ -405,11 +406,22 @@ fn resolve_choice(
         PaymentContinuationState::Affiliated(_) => {
             let mut actions = actions;
             actions.sort_by(|left, right| left.cmp_stable(right));
-            let accepted = actions
-                .into_iter()
-                .find_map(|action| witness_payment_continuation(state, &action))
-                .ok_or(BailReason::NoLegalManaPayment)?;
-            return Ok((acting, accepted.action, true, Some(accepted.state)));
+            let batch = witness_payment_continuations(state, &actions);
+            let accepted = match batch.status {
+                PaymentContinuationBatchStatus::Complete => actions
+                    .into_iter()
+                    .zip(batch.successors)
+                    .find_map(|(action, successor)| successor.map(|successor| (action, successor)))
+                    .ok_or(BailReason::NoLegalManaPayment)?,
+                PaymentContinuationBatchStatus::Indeterminate(_) => {
+                    return Err(BailReason::IncompleteManaPaymentWitness);
+                }
+                PaymentContinuationBatchStatus::NotAffiliated
+                | PaymentContinuationBatchStatus::UnsupportedAffiliated(_) => {
+                    return Err(BailReason::NoLegalManaPayment);
+                }
+            };
+            return Ok((acting, accepted.0, true, Some(accepted.1.state)));
         }
     }
 

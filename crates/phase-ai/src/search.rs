@@ -51,7 +51,7 @@ use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 use crate::policies::tutor::score_search_choice_selection;
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::session::AiSession;
-use crate::tactical_gate::gate_candidates;
+use crate::tactical_gate::{gate_candidates, gate_prepared_candidates};
 use crate::threat_profile::{
     build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
 };
@@ -2826,7 +2826,7 @@ fn rank_root_payment_candidates(
             let ranked = prepared
                 .iter()
                 .find(|prepared_candidate| {
-                    prepared_candidate.candidate.action == gated_candidate.candidate.action
+                    prepared_candidate.source_index == gated_candidate.source_index
                 })
                 .and_then(|prepared_candidate| prepared_candidate.payment_successor.clone())
                 .map_or_else(
@@ -3143,17 +3143,11 @@ fn score_candidates_core(
     let mut services =
         PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
-    let candidates = services.validate_candidates(
-        state,
-        prepared
-            .iter()
-            .map(|candidate| candidate.candidate.clone())
-            .collect(),
-    );
-    let gated = gate_candidates(
+    let prepared = services.validate_prepared_candidates(state, prepared);
+    let gated = gate_prepared_candidates(
         state,
         &ctx,
-        candidates,
+        prepared.clone(),
         ai_player,
         config,
         &services.context,
@@ -8371,17 +8365,11 @@ mod tests {
         let services = PlannerServices::with_deadline(P0, &enabled, policies, context, None);
         let decision = build_decision_context(&state);
         let prepared = prepare_payment_candidates(&state, decision.candidates.clone());
-        let validated = services.validate_candidates(
-            &state,
-            prepared
-                .iter()
-                .map(|candidate| candidate.candidate.clone())
-                .collect(),
-        );
-        let gated = gate_candidates(
+        let prepared = services.validate_prepared_candidates(&state, prepared);
+        let gated = gate_prepared_candidates(
             &state,
             &decision,
-            validated,
+            prepared.clone(),
             P0,
             &enabled,
             &services.context,
@@ -8418,6 +8406,36 @@ mod tests {
             .as_ref()
             .is_some_and(|action| expected.contains(action)));
         assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn payment_certificates_remain_bound_to_issued_positions_not_action_equality() {
+        let state = flexible_mana_payment_state();
+        let decision = build_decision_context(&state);
+        let original = decision.candidates[0].clone();
+        let mut equivalent = original.clone();
+        equivalent.metadata.tactical_class = TacticalClass::Utility;
+
+        let prepared = prepare_payment_candidates(&state, vec![original, equivalent]);
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|candidate| candidate.source_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "equivalent raw actions keep distinct engine-issued provenance"
+        );
+        assert!(
+            prepared
+                .iter()
+                .all(|candidate| candidate.payment_successor.is_some()),
+            "both issued positions retain their own cached reducer certificate"
+        );
+        assert_ne!(
+            prepared[0].candidate.metadata.tactical_class,
+            prepared[1].candidate.metadata.tactical_class,
+            "reach-guard: the positions differ in metadata even though their actions match"
+        );
     }
 
     #[test]
@@ -10577,17 +10595,11 @@ mod tests {
     fn build_root_beam(state: &GameState, services: &PlannerServices<'_>) -> Vec<RankedCandidate> {
         let ctx = build_decision_context(state);
         let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
-        let candidates = services.validate_candidates(
-            state,
-            prepared
-                .iter()
-                .map(|candidate| candidate.candidate.clone())
-                .collect(),
-        );
-        let gated = gate_candidates(
+        let prepared = services.validate_prepared_candidates(state, prepared);
+        let gated = gate_prepared_candidates(
             state,
             &ctx,
-            candidates,
+            prepared.clone(),
             services.ai_player,
             services.config,
             &services.context,
