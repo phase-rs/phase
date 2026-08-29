@@ -392,9 +392,25 @@ fn a1_wedged_turn15_capture_retires_its_ownerless_dispatching_frame() {
 fn a2_wedged_turn15_capture_drains_its_parked_triggers() {
     let mut state = load_turn15();
     assert_turn15_wedge_present(&state);
+    // Non-vacuity: the capture freezes priority OFF the active seat, so the
+    // CR 117.3b row below is a real question rather than a restatement.
+    assert_ne!(
+        state.priority_player, state.active_player,
+        "the turn-15 capture must freeze priority off the active seat"
+    );
 
     apply(&mut state, PlayerId(1), GameAction::PassPriority).expect("PassPriority is legal");
     let priority_player = state.priority_player;
+    // CR 117.3b: the active player receives priority after a spell or ability
+    // resolves. Recovery must hand the refreshed window to the ACTIVE player,
+    // not back to the holder the capture froze. Asserting the rule rather than
+    // a literal seat: the correct seat differs between this row (PlayerId(0))
+    // and A4 (PlayerId(1)), so a hardcoded id would re-encode a fixture
+    // constant instead of the rule.
+    assert_eq!(
+        priority_player, state.active_player,
+        "CR 117.3b: the recovered window returns priority to the active player"
+    );
     apply(&mut state, priority_player, GameAction::PassPriority)
         .expect("the recovered priority holder accepts the next pass");
 
@@ -486,6 +502,13 @@ fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
     );
 
     let priority_player = state.priority_player;
+    // CR 117.3b, as in A2. This row's capture holds priority on the active seat
+    // already, so on its own it does NOT discriminate; A2 carries that weight.
+    // It is asserted here so the two recovery rows state one shared invariant.
+    assert_eq!(
+        priority_player, state.active_player,
+        "CR 117.3b: the recovered window returns priority to the active player"
+    );
     apply(&mut state, priority_player, GameAction::PassPriority)
         .expect("the recovered priority holder accepts the next pass");
 
