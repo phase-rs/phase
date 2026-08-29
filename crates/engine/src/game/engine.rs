@@ -15609,7 +15609,12 @@ fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: Player
 /// object incarnation, so a Vehicle that leaves and returns (a new object per
 /// CR 400.7) may be crewed again. Single authority for reading the crew-cadence
 /// set — callers never touch `crew_activated_this_turn` directly.
-pub(crate) fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
+///
+/// Also the AI crate's single, layer-independent test for "has this Vehicle
+/// already been crewed this turn": `record_crew_activation` runs at crew
+/// announcement (before stack resolution), so the set is authoritative even
+/// while a crew ability sits pending on the stack.
+pub fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
     state
         .objects
         .get(&vehicle_id)

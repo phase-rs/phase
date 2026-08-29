@@ -76,6 +76,31 @@ impl TacticalPolicy for CrewTimingPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("crew_timing_na"));
         }
 
+        // CR 702.122a: Crew N's only effect is "This permanent becomes an artifact
+        // creature until end of turn." If the Vehicle has ALREADY been crewed this
+        // turn — recorded by the engine's single crew-cadence authority at crew
+        // announcement — then that effect is already in force (once resolved, or
+        // even while its crew ability sits pending on the stack), and re-activating
+        // Crew is pure waste: the payoff is already applied, and the only remaining
+        // consequence is tapping a fresh untapped body for nothing.
+        //
+        // This is the crew-repeat pathology: after the first successful crew the
+        // Vehicle is a legal attacker, so `crew_has_exact_combat_use` returns true
+        // and would shield a redundant re-crew — letting the AI tap every body it
+        // controls. The already-crewed check MUST come before that combat-use gate
+        // so it cannot be masked by "the crewed Vehicle could attack".
+        //
+        // Using the engine's crew-cadence authority rather than reading the
+        // vehicle's `core_types` is deliberate: crewing materializes the Creature
+        // type through a transient continuous effect that the layer system only
+        // folds into `core_types` lazily, so the raw field is not a reliable
+        // layer-independent "is it already a creature" test here.
+        if engine::game::engine::crew_activated_this_turn_contains(ctx.state, *vehicle_id) {
+            return PolicyVerdict::reject(PolicyReason::new(
+                "crew_timing_redundant_already_creature",
+            ));
+        }
+
         if crew_has_exact_combat_use(ctx.state, ctx.ai_player, *vehicle_id, &ctx.candidate.action) {
             PolicyVerdict::neutral(PolicyReason::new("crew_timing_combat_use"))
         } else {
@@ -326,6 +351,43 @@ mod tests {
         };
 
         assert!(crew_has_exact_combat_use(&state, AI, vehicle, &activation));
+    }
+
+    #[test]
+    fn already_crewed_vehicle_recrew_is_penalized_before_combat_use() {
+        // Once a Vehicle has been crewed this turn, Crew N's sole payoff —
+        // becoming an artifact creature until end of turn — is already in force.
+        // Re-activating Crew then only taps a fresh body for nothing. The engine
+        // records the crew at announcement via its crew-cadence single authority
+        // (`crew_activated_this_turn_contains`), which is also the layer-independent
+        // test the policy consumes. And because the crewed Vehicle is a legal
+        // attacker, `crew_has_exact_combat_use` would return true and shield the
+        // redundant re-crew — so the already-crewed check must come first. Since
+        // re-crewing is never beneficial, the policy rejects it outright (a hard
+        // veto, not a penalty the search could out-weigh). This is the crew-repeat
+        // pathology regression.
+        let (mut state, vehicle, _) = crew_fixture();
+        // Mark the Vehicle as already crewed this turn, exactly as a prior crew
+        // announcement would via the engine's single write authority (inserting
+        // the object's incarnation ref into `crew_activated_this_turn`).
+        state.crew_activated_this_turn.insert(
+            engine::types::identifiers::ObjectIncarnationRef::from_object(
+                state.objects.get(&vehicle).unwrap(),
+            ),
+        );
+        let activation = GameAction::CrewVehicle {
+            vehicle_id: vehicle,
+            creature_ids: Vec::new(),
+        };
+        assert!(
+            crew_has_exact_combat_use(&state, AI, vehicle, &activation),
+            "the already-crewed Vehicle is a legal attacker, so the combat-use gate alone would shield it"
+        );
+        let result = verdict(&state, WaitingFor::Priority { player: AI }, activation);
+        assert!(
+            matches!(&result, PolicyVerdict::Reject { reason } if reason.kind == "crew_timing_redundant_already_creature"),
+            "redundant re-crew must be rejected even though the Vehicle could attack; got {result:?}"
+        );
     }
 
     // ─── review #6790: zero cached commitment must NOT silence the safeguard ──
