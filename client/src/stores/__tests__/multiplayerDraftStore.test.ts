@@ -156,6 +156,7 @@ function mockView(status: string): DraftPlayerView {
     // produce a null pack alongside a positive count. The one test that
     // supplies a real pack overrides this field alongside it.
     required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pool: [],
     draft_effects: [],
     pool_groups: {
