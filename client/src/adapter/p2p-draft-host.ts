@@ -891,6 +891,9 @@ export class P2PDraftHost {
 
   private async startDraftInner(botFillEmptySeats: boolean): Promise<void> {
     if (this.draftStarted) return;
+    if (this.disconnectedSeats.size > 0) {
+      throw new Error("Cannot start draft while a player is reconnecting");
+    }
 
     const seed = Math.floor(Math.random() * 0xffffffff);
     this.draftSeed = seed;
@@ -1446,11 +1449,14 @@ export class P2PDraftHost {
         }
         try {
           await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
-          if (this.draftStarted) this.reconcileEffectivePause();
-          else this.syncLobbyToGuests();
         } catch (persistError) {
           this.reportDetachedMutationFailure("leave disconnect recovery", persistError);
         }
+        // A second persistence failure cannot make this lost connection look
+        // live. Pause/synchronize from the restored local state regardless of
+        // whether its recovery snapshot made it to storage.
+        if (this.draftStarted) this.reconcileEffectivePause();
+        else this.syncLobbyToGuests();
       }
       throw error;
     } finally {
