@@ -466,11 +466,9 @@ fn a3_wedged_turn15_capture_settles_its_stale_resolving_carrier() {
 /// that one: without the strand removal the queue could not drain no matter how
 /// many boundaries offered it the chance.
 ///
-/// What this row therefore claims is still strand removal, plus the drain the
-/// strand was blocking — including the ARRIVAL half of that drain, since an
-/// emptied queue alone is equally satisfied by a discarded one. It pins NOTHING
-/// about the terminal `waiting_for` — that shape is recorded above, not
-/// asserted, because it is produced by a seam this change does not own.
+/// The first pass repairs the stale boundary without consuming that pass. The
+/// next ordinary pass then drains the parked triggers, proving both the repair
+/// and the resumed action path.
 #[test]
 fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
     let mut state = load_turn20();
@@ -483,6 +481,10 @@ fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
         "both stranded drains and their frame must be gone, got {:?}",
         post_replacement_drain_statuses(&state)
     );
+
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("the refreshed priority window accepts the next pass");
+
     assert!(
         state.deferred_triggers.is_empty(),
         "CR 603.3 + CR 603.3b: with the strand gone, `resolution_completion_can_settle` is true \
