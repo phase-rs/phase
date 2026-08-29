@@ -305,8 +305,9 @@ interface MultiplayerDraftActions {
   requestPause: () => void;
   /** Host: resume the draft. */
   requestResume: () => void;
-  /** Both: tear down the connection and reset state. */
-  leave: (preserveSession?: boolean) => Promise<void>;
+  /** Both: tear down the connection and reset state. Lifecycle callers retain
+   * recovery; an explicit leave revokes it only after host acknowledgement. */
+  leave: (preserveRecovery?: boolean) => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
   /** Both: start the match for the current pairing. */
@@ -1897,20 +1898,31 @@ export const useMultiplayerDraftStore = create<
     });
   },
 
-  leave: async (preserveSession = false) => {
+  leave: async (preserveRecovery = false) => {
+    const host = activeHostAdapter;
+    const guest = activeGuestAdapter;
+
+    // An explicit guest leave is host-acknowledged. Until that completes, the
+    // live adapter remains the recovery owner; tearing down the lifecycle here
+    // would discard the session that must reconnect after a dropped ACK.
+    if (host) {
+      await host.dispose({ preserveSession: preserveRecovery });
+    }
+    if (guest) {
+      await guest.dispose({ preserveRecovery });
+    }
+
     beginDraftLifecycle();
-    // Dispose match adapter first (game P2P connection)
+    // The pod session has now ended, so its game transport can follow it.
     disposeMatchAdapter(set);
 
-    if (activeHostAdapter) {
-      await activeHostAdapter.dispose({ preserveSession });
+    if (activeHostAdapter === host) {
       activeHostAdapter = null;
-      if (!preserveSession) {
+      if (!preserveRecovery) {
         clearActiveDraftPod();
       }
     }
-    if (activeGuestAdapter) {
-      await activeGuestAdapter.dispose();
+    if (activeGuestAdapter === guest) {
       activeGuestAdapter = null;
     }
     set({ ...initialState, interactionGeneration: lifecycleGeneration });

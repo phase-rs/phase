@@ -91,6 +91,27 @@ describe("draftPersistence", () => {
       expect(loaded).toEqual({ ...testSession, perSeatWorkspaceSnapshots: {} });
     });
 
+    it("retains validated absolute reconnect deadlines", async () => {
+      const deadline = Date.now() + 60_000;
+      await saveDraftHostSession("deadline-session", {
+        ...testSession,
+        reconnectDeadlines: { 1: deadline },
+      });
+
+      await expect(loadDraftHostSession("deadline-session")).resolves.toMatchObject({
+        reconnectDeadlines: { 1: deadline },
+      });
+    });
+
+    it("rejects malformed reconnect deadlines", async () => {
+      mockStore.set("phase-draft-host:bad-deadline", {
+        ...testSession,
+        reconnectDeadlines: { 1: "later" },
+      });
+
+      await expect(loadDraftHostSession("bad-deadline")).resolves.toBeNull();
+    });
+
     it("returns null for non-existent session", async () => {
       const loaded = await loadDraftHostSession("nonexistent");
       expect(loaded).toBeNull();

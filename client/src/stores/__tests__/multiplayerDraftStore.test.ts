@@ -834,6 +834,46 @@ describe("multiplayerDraftStore", () => {
     });
   });
 
+  describe("leave", () => {
+    it("routes an explicit guest leave through recovery revocation", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+
+      await useMultiplayerDraftStore.getState().leave();
+
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: false });
+    });
+
+    it("keeps the guest lifecycle live when an acknowledged leave cannot complete", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+      const liveGuestEvent = capturedGuestEventHandler!;
+      const phaseBeforeLeave = useMultiplayerDraftStore.getState().phase;
+      mockGuestAdapter.dispose.mockRejectedValueOnce(
+        new Error("Draft host disconnected before acknowledging leave"),
+      );
+
+      await expect(useMultiplayerDraftStore.getState().leave()).rejects.toThrow(
+        "disconnected before acknowledging leave",
+      );
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: phaseBeforeLeave });
+
+      liveGuestEvent({
+        type: "lobbyUpdate",
+        seats: [],
+        joined: 2,
+        total: 8,
+      });
+      expect(useMultiplayerDraftStore.getState().joined).toBe(2);
+
+      await useMultiplayerDraftStore.getState().leave();
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledTimes(2);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+    });
+  });
+
   describe("shared actions", () => {
     it.each([
       {

@@ -1325,7 +1325,7 @@ export function DraftPodPage() {
   }, [enterKind, searchParams]);
 
   const handleLeave = useCallback(async () => {
-    await leave(true);
+    await leave(false);
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);

@@ -640,6 +640,8 @@ describe("P2P draft workspace persistence", () => {
     await expect(acknowledgement.promise).resolves.toMatchObject({ workspaceState: null });
     expect(privateHost.perSeatWorkspaceSnapshots.has(1)).toBe(false);
     expect(privateHost.perSeatWorkspaceSnapshots.has(2)).toBe(true);
-    expect(privateHost.persistSessionStrict).toHaveBeenCalledTimes(2);
+    // The reconnect durably records the handoff before persisting removal of
+    // the corrupt workspace entry.
+    expect(privateHost.persistSessionStrict).toHaveBeenCalledTimes(3);
   });
 });

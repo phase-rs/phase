@@ -419,6 +419,63 @@ describe("P2PDraftHost Bo3", () => {
       ]);
     });
 
+    it("assigns a bot match settlement to the human even when the bot has the lower seat", async () => {
+      const botPairing = pairing("bot-12", 2, 1, 2);
+      const botView = {
+        current_round: 2,
+        seats: [
+          { seat_index: 1, is_bot: true },
+          { seat_index: 2, is_bot: false },
+        ],
+      } as DraftPlayerView;
+      const privateHost = host as unknown as {
+        adapter: { exportSession: () => Promise<string> };
+        botDeckForSeat: () => Promise<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+        sendMatchLaunch: (seat: number, launch: DraftMatchLaunch) => Promise<void>;
+        dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+        matchBindings: Map<string, DraftMatchBinding>;
+      };
+      privateHost.adapter.exportSession = vi.fn(async () => JSON.stringify({
+        pools: [[], [], []],
+        submitted_decks: {
+          human: { seat: 2, main_deck: ["Plains"] },
+        },
+      }));
+      privateHost.botDeckForSeat = vi.fn(async () => ({ main_deck: ["Island"], sideboard: [], commander: [] }));
+      privateHost.sendMatchLaunch = vi.fn(async () => {});
+
+      await privateHost.dispatchMatchLaunch(botPairing, botView);
+
+      expect(privateHost.sendMatchLaunch).toHaveBeenCalledWith(2, expect.objectContaining({
+        type: "Bot",
+        binding: expect.objectContaining({ matchAuthoritySeat: 2 }),
+      }));
+      const issuedBinding = privateHost.matchBindings.get("bot-12")!;
+      setHostView({ current_round: 2, pairings: [botPairing] });
+      await deliverSettlement(2, issuedBinding);
+      expect(reportSpy).toHaveBeenCalledWith("bot-12", 1);
+    });
+
+    it("does not create a participant binding for a bot-only pairing", async () => {
+      const botPairing = pairing("bots-12", 2, 1, 2);
+      const botView = {
+        current_round: 2,
+        seats: [
+          { seat_index: 1, is_bot: true },
+          { seat_index: 2, is_bot: true },
+        ],
+      } as DraftPlayerView;
+      const privateHost = host as unknown as {
+        dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+        matchBindings: Map<string, DraftMatchBinding>;
+      };
+
+      await privateHost.dispatchMatchLaunch(botPairing, botView);
+
+      expect(privateHost.matchBindings.has("bots-12")).toBe(false);
+      expect(reportSpy).toHaveBeenCalledWith("bots-12", 1);
+    });
+
     it("rejects the raw result shape", async () => {
       await deliverRaw(1, "m-12", 1);
       expect(reportSpy).not.toHaveBeenCalled();
