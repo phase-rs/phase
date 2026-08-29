@@ -136,6 +136,13 @@ export class P2PDraftGuest {
   private draftCode: string | null = null;
   private seatIndex: number | null = null;
   private terminated = false;
+  /**
+   * A host may explicitly revoke the persisted capability (kick, terminal
+   * host shutdown, or an acknowledged leave).  This is intentionally
+   * narrower than `terminated`: a protocol mismatch is terminal for this
+   * transport attempt but should retain recovery for a refreshed client.
+   */
+  private recoveryRevoked = false;
   private currentView: DraftPlayerView | null = null;
   private handshake: DraftHandshake | null = null;
   private reconnecting = false;
@@ -528,8 +535,7 @@ export class P2PDraftGuest {
         this.rejectHandshake(session, new Error(msg.reason));
         if (msg.kind === "Kicked" || msg.kind === "UnknownToken") {
           this.terminated = true;
-          void clearDraftGuestRecovery(this.hostPeerId);
-          void clearDraftDeckSubmission(this.hostPeerId);
+          await this.revokeRecovery();
         } else if (msg.kind === "ProtocolMismatch") {
           // Refresh can restore compatibility, so retain credentials, but a
           // version mismatch cannot be repaired by transport retries.
@@ -591,8 +597,7 @@ export class P2PDraftGuest {
 
       case "draft_kicked": {
         this.terminated = true;
-        void clearDraftGuestRecovery(this.hostPeerId);
-        void clearDraftDeckSubmission(this.hostPeerId);
+        await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "kicked", reason: msg.reason });
         break;
@@ -664,8 +669,7 @@ export class P2PDraftGuest {
 
       case "draft_host_left": {
         this.terminated = true;
-        await clearDraftGuestRecovery(this.hostPeerId);
-        await clearDraftDeckSubmission(this.hostPeerId);
+        await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "hostLeft", reason: msg.reason });
         break;
@@ -808,8 +812,7 @@ export class P2PDraftGuest {
     }
 
     this.terminated = true;
-    await clearDraftGuestRecovery(this.hostPeerId);
-    await clearDraftDeckSubmission(this.hostPeerId);
+    await this.revokeRecovery();
     this.dispose();
     try {
       this.guestPeer.destroy();
@@ -828,6 +831,17 @@ export class P2PDraftGuest {
 
   get token(): string | null {
     return this.draftToken;
+  }
+
+  /** Whether the host has durably revoked this guest's reconnect capability. */
+  get isRecoveryRevoked(): boolean {
+    return this.recoveryRevoked;
+  }
+
+  private async revokeRecovery(): Promise<void> {
+    await clearDraftGuestRecovery(this.hostPeerId);
+    await clearDraftDeckSubmission(this.hostPeerId);
+    this.recoveryRevoked = true;
   }
 
   private async persistRecoveryIdentity(data: { draftToken: string; seatIndex: number; draftCode: string }): Promise<void> {

@@ -1367,6 +1367,12 @@ export class P2PDraftHost {
     const priorName = this.seatNames.get(seat);
     const wasKicked = this.kickedTokens.has(draftToken);
     const wasExpired = this.expiredDisconnectedSeats.has(seat);
+    let sessionEnded = false;
+    let sessionEndedAt: number | null = null;
+    const stopWatchingSession = session.onDisconnect(() => {
+      sessionEnded = true;
+      sessionEndedAt = Date.now();
+    });
 
     let attemptedDisconnect = false;
     try {
@@ -1397,9 +1403,17 @@ export class P2PDraftHost {
       // authoritative. Restore its complete in-memory counterpart before
       // returning without an acknowledgement, so the existing recovery
       // capability stays usable.
-      this.guestSessions.set(seat, session);
-      if (priorGraceDeadline !== undefined) this.scheduleReconnectGrace(seat, priorGraceDeadline);
-      else if (priorReconnectDeadline !== undefined) this.reconnectDeadlines.set(seat, priorReconnectDeadline);
+      if (!sessionEnded) this.guestSessions.set(seat, session);
+      const reconnectDeadline = priorGraceDeadline
+        ?? priorReconnectDeadline
+        ?? (sessionEndedAt === null ? undefined : sessionEndedAt + this.gracePeriodMs);
+      if (sessionEnded && reconnectDeadline !== undefined) {
+        this.scheduleReconnectGrace(seat, reconnectDeadline);
+      } else if (priorGraceDeadline !== undefined) {
+        this.scheduleReconnectGrace(seat, priorGraceDeadline);
+      } else if (priorReconnectDeadline !== undefined) {
+        this.reconnectDeadlines.set(seat, priorReconnectDeadline);
+      }
       if (priorWorkspace !== undefined) this.perSeatWorkspaceSnapshots.set(seat, priorWorkspace);
       if (priorToken !== undefined) this.seatTokens.set(seat, priorToken);
       if (priorName !== undefined) this.seatNames.set(seat, priorName);
@@ -1407,7 +1421,7 @@ export class P2PDraftHost {
       else this.kickedTokens.delete(draftToken);
       if (wasExpired) this.expiredDisconnectedSeats.add(seat);
       else this.expiredDisconnectedSeats.delete(seat);
-      if (this.draftStarted && attemptedDisconnect) {
+      if (this.draftStarted && attemptedDisconnect && !sessionEnded) {
         try {
           await this.adapter.setSeatConnected(seat, true);
         } catch (rollbackError) {
@@ -1419,7 +1433,28 @@ export class P2PDraftHost {
           this.emit({ type: "error", message: `leave rollback connectivity failed: ${message}` });
         }
       }
+      if (sessionEnded) {
+        if (this.draftStarted) {
+          try {
+            // A connection that closed during the failed leave is still gone.
+            // Keep the engine paused/disconnected for its recovered grace
+            // window instead of compensating it back to a live seat.
+            await this.adapter.setSeatConnected(seat, false);
+          } catch (disconnectError) {
+            this.reportDetachedMutationFailure("leave disconnect recovery", disconnectError);
+          }
+        }
+        try {
+          await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+          if (this.draftStarted) this.reconcileEffectivePause();
+          else this.syncLobbyToGuests();
+        } catch (persistError) {
+          this.reportDetachedMutationFailure("leave disconnect recovery", persistError);
+        }
+      }
       throw error;
+    } finally {
+      stopWatchingSession();
     }
     await session.send({
       type: "draft_leave_ack",

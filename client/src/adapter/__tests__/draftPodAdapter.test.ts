@@ -95,6 +95,7 @@ const mockGuestSubmitDeck = vi.fn(async () => {});
 const mockGuestUpdateWorkspace = vi.fn(async () => {});
 const mockGuestLeave = vi.fn(async () => {});
 const mockGuestDispose = vi.fn();
+let mockGuestRecoveryRevoked = false;
 
 vi.mock("../p2p-draft-guest", () => ({
   P2PDraftGuest: vi.fn().mockImplementation(function () {
@@ -107,6 +108,7 @@ vi.mock("../p2p-draft-guest", () => ({
       updateWorkspace: mockGuestUpdateWorkspace,
       leave: mockGuestLeave,
       dispose: mockGuestDispose,
+      get isRecoveryRevoked() { return mockGuestRecoveryRevoked; },
       view: null,
       seat: null,
       token: null,
@@ -820,6 +822,7 @@ describe("DraftPodGuestAdapter", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockGuestRecoveryRevoked = false;
     const { joinRoom } = await import("../../network/connection");
     (joinRoom as ReturnType<typeof vi.fn>).mockResolvedValue(mockJoinResult());
 
@@ -952,6 +955,17 @@ describe("DraftPodGuestAdapter", () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
     await adapter.dispose({ preserveRecovery: false });
     expect(mockGuestLeave).toHaveBeenCalled();
+  });
+
+  it("locally disposes an explicitly exited guest after its recovery is revoked", async () => {
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
+    mockGuestRecoveryRevoked = true;
+    guestEventHandler({ type: "hostLeft", reason: "Host left" });
+
+    await expect(adapter.dispose({ preserveRecovery: false })).resolves.toBeUndefined();
+    expect(mockGuestDispose).toHaveBeenCalled();
+    expect(mockGuestLeave).not.toHaveBeenCalled();
   });
 
   it("emits error on connection failure", async () => {

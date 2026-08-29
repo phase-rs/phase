@@ -431,6 +431,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
     await vi.waitFor(() => expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE"));
     expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+    await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
   });
 
   it("waits for token persistence before completing a reconnect acknowledgement", async () => {

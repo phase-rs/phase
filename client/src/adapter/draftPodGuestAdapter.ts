@@ -478,6 +478,10 @@ export class DraftPodGuestAdapter {
     if (this.guest) {
       if (preserveRecovery) {
         this.guest.dispose();
+      } else if (this.guest.isRecoveryRevoked) {
+        // Terminal host events already removed the capability, so there is
+        // no live participant session left to acknowledge another leave.
+        this.guest.dispose();
       } else {
         await this.guest.leave();
       }
