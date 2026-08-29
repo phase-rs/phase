@@ -53,8 +53,8 @@ Namespaces: `common` (default), `menu`, `game`, `deck-builder`, `draft`,
 - Plurals: `key_one` / `key_other` + `t(key, { count })` (CLDR rules per locale).
   Don't hand-roll `count === 1 ? "" : "s"`.
 - Numbers needing locale grouping: `{{value, number}}`.
-- The store owns the active language; never call `i18n.changeLanguage` directly —
-  use `usePreferencesStore.getState().setLanguage(lng)`.
+- The store owns the active language; the i18n bootstrap mirrors it to i18next
+  and `<html lang>`, so use `usePreferencesStore.getState().setLanguage(lng)`.
 - English (`en`) is the typing oracle: add a key to `en/<ns>.json` **before**
   referencing it, or it won't type-check. Other locales fall back to English.
 - Encoding: catalogs are **UTF-8 with literal accented characters** (write
