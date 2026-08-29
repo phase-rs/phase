@@ -2939,7 +2939,7 @@ export class P2PDraftHost {
    */
   private rotateLegacyBotMatchAuthorities(view: DraftPlayerView): boolean {
     let changed = false;
-    for (const pairing of view.pairings) {
+    for (const pairing of view.pairings ?? []) {
       if (pairing.round !== view.current_round || pairing.status !== "InProgress") continue;
 
       const seatAIsBot = this.isBotSeatFromView(view, pairing.seat_a);
