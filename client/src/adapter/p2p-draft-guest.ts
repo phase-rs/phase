@@ -300,7 +300,6 @@ export class P2PDraftGuest {
       if (this.leaveAcknowledgement?.session === session) {
         this.leaveAcknowledgement.reject(new Error("Draft host disconnected before acknowledging leave"));
         this.leaveAcknowledgement = null;
-        return;
       }
       this.handleHostDisconnect();
     }

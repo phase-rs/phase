@@ -957,6 +957,22 @@ describe("DraftPodGuestAdapter", () => {
     expect(mockGuestLeave).toHaveBeenCalled();
   });
 
+  it("retains guest event ownership when an explicit leave is not acknowledged", async () => {
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
+    const guestEventUnsub = mockGuestOnEvent.mock.results[0]!.value as ReturnType<typeof vi.fn>;
+    mockGuestLeave.mockRejectedValueOnce(new Error("Draft host disconnected before acknowledging leave"));
+
+    await expect(adapter.dispose({ preserveRecovery: false })).rejects.toThrow("disconnected before acknowledging leave");
+    expect(guestEventUnsub).not.toHaveBeenCalled();
+
+    guestEventHandler({ type: "reconnecting", attempt: 1 });
+    expect(events).toContainEqual({ type: "reconnecting", attempt: 1 });
+
+    await adapter.dispose({ preserveRecovery: false });
+    expect(guestEventUnsub).toHaveBeenCalledOnce();
+  });
+
   it("locally disposes an explicitly exited guest after its recovery is revoked", async () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];

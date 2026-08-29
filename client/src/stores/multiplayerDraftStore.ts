@@ -1899,19 +1899,30 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveRecovery = false) => {
+    const host = activeHostAdapter;
+    const guest = activeGuestAdapter;
+
+    // An explicit guest leave is host-acknowledged. Until that completes, the
+    // live adapter remains the recovery owner; tearing down the lifecycle here
+    // would discard the session that must reconnect after a dropped ACK.
+    if (host) {
+      await host.dispose({ preserveSession: preserveRecovery });
+    }
+    if (guest) {
+      await guest.dispose({ preserveRecovery });
+    }
+
     beginDraftLifecycle();
-    // Dispose match adapter first (game P2P connection)
+    // The pod session has now ended, so its game transport can follow it.
     disposeMatchAdapter(set);
 
-    if (activeHostAdapter) {
-      await activeHostAdapter.dispose({ preserveSession: preserveRecovery });
+    if (activeHostAdapter === host) {
       activeHostAdapter = null;
       if (!preserveRecovery) {
         clearActiveDraftPod();
       }
     }
-    if (activeGuestAdapter) {
-      await activeGuestAdapter.dispose({ preserveRecovery });
+    if (activeGuestAdapter === guest) {
       activeGuestAdapter = null;
     }
     set({ ...initialState, interactionGeneration: lifecycleGeneration });
