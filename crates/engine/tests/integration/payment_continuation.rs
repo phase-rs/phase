@@ -107,14 +107,14 @@ fn flexible_mana_payment_state() -> engine::types::game_state::GameState {
     runner.state().clone()
 }
 
-/// Reach a live Improvise carrier where two artifact taps and finalization are
+/// Reach a live Improvise carrier where three artifact taps and finalization are
 /// required to pay the whole generic cost.
-fn two_artifact_improvise_payment_state() -> engine::types::game_state::GameState {
+fn three_artifact_improvise_payment_state() -> engine::types::game_state::GameState {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Improvise Witness", true, DRAW_ORACLE)
-        .with_mana_cost(ManaCost::generic(2))
+        .with_mana_cost(ManaCost::generic(3))
         .with_keyword(Keyword::Improvise)
         .id();
     scenario
@@ -122,6 +122,9 @@ fn two_artifact_improvise_payment_state() -> engine::types::game_state::GameStat
         .as_artifact();
     scenario
         .add_creature(P0, "Second Artifact", 1, 1)
+        .as_artifact();
+    scenario
+        .add_creature(P0, "Third Artifact", 1, 1)
         .as_artifact();
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -212,16 +215,16 @@ fn cancellation_is_never_a_payment_witness() {
 }
 
 #[test]
-fn partial_improvise_search_retains_a_multitap_payment_certificate() {
-    let state = two_artifact_improvise_payment_state();
+fn partial_improvise_search_retains_a_three_tap_payment_certificate() {
+    let state = three_artifact_improvise_payment_state();
     let taps: Vec<_> = legal_actions(&state)
         .into_iter()
         .filter(|action| matches!(action, GameAction::TapForConvoke { .. }))
         .collect();
     assert_eq!(
         taps.len(),
-        2,
-        "the live Improvise carrier exposes both artifacts"
+        3,
+        "the live Improvise carrier exposes all three artifacts"
     );
 
     let batch = witness_payment_continuations(&state, &taps);
@@ -234,7 +237,7 @@ fn partial_improvise_search_retains_a_multitap_payment_certificate() {
     );
     assert!(
         batch.successors.iter().any(Option::is_some),
-        "a two-tap Improvise path followed by finalization must retain its certificate"
+        "a three-tap Improvise path followed by finalization must retain its certificate"
     );
     assert!(
         witness_payment_continuation(&state, &taps[0]).is_some(),
