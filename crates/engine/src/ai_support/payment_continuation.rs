@@ -106,6 +106,7 @@ pub enum PaymentContinuationIndeterminate {
     OverRootCapacity,
     AttemptBudgetExhausted,
     MissingFinalizationBaseline,
+    PartialDirectPaymentSearch,
 }
 
 /// Index-aligned result for exactly the input action slice.
@@ -270,6 +271,14 @@ fn witness_payment_continuations_inner(
             .then_with(|| left.cmp_stable(right))
             .then_with(|| left_index.cmp(right_index))
     });
+    let direct_root_count = order
+        .iter()
+        .take_while(|(_, action)| payment_action_priority(action) == 0)
+        .count();
+    let partial_direct_payment_search = direct_root_count > 0;
+    if partial_direct_payment_search {
+        order.truncate(direct_root_count);
+    }
 
     let mut attempts = 0;
     let mut successors = empty();
@@ -377,7 +386,13 @@ fn witness_payment_continuations_inner(
         counters.total_attempts = attempts;
     }
     PaymentContinuationBatch {
-        status: PaymentContinuationBatchStatus::Complete,
+        status: if partial_direct_payment_search {
+            PaymentContinuationBatchStatus::Indeterminate(
+                PaymentContinuationIndeterminate::PartialDirectPaymentSearch,
+            )
+        } else {
+            PaymentContinuationBatchStatus::Complete
+        },
         successors,
     }
 }
