@@ -299,7 +299,7 @@ fn drive_collect(runner: &mut GameRunner, cap: usize) -> (Vec<GameEvent>, Waitin
 ///
 /// Why that witnesses the classification: the sampler only pushes a prior while the stack is
 /// non-empty at a `Priority` beat, and `GameState`'s `PartialEq` compares both, so a ring hit
-/// forces the §3 bridge conjuncts (engine.rs) to have held at that state — i.e.
+/// forces the reconcile bridge conjuncts (engine.rs) to have held at that state — i.e.
 /// `find_live_loop_winner` → `live_mandatory_loop_winner` ran on it. It is deliberately STRONGER
 /// than "the classifier ran": the classifier is called on every sampled beat, so a `false` here
 /// does not mean it never ran — it means the loop never recurred, which is the regime every
@@ -791,7 +791,8 @@ fn interactive_offer_separates_priority_proposer_from_predicted_winner() {
 
 /// T-3p-draw: a ≥3p MANDATORY, net-progress, no-loss, unstoppable loop draws under
 /// `Interactive` (CR 732.4). Discriminator: the SAME fixture under `Off` does NOT draw (it
-/// grinds / halts, no §b-B branch), proving the draw is the Interactive path, not a
+/// grinds / halts, never reaching the draw branch), proving the draw is the Interactive path,
+/// not a
 /// pre-existing outcome.
 #[test]
 fn interactive_3p_mandatory_no_loss_draw() {
@@ -804,7 +805,7 @@ fn interactive_3p_mandatory_no_loss_draw() {
         "Interactive: an all-mandatory, no-loss, unstoppable net-progress loop is a CR 732.4 draw"
     );
 
-    // Discriminator: under Off the same fixture never draws via §b-B (it grinds to the
+    // Discriminator: under Off the same fixture never draws via that branch (it grinds to the
     // iteration/growth backstop or keeps going — not GameOver{None} by this branch).
     let (mut orunner, okickoff) = setup_3p_draw(LoopDetectionMode::Off);
     let _ = orunner.cast(okickoff).resolve();
@@ -2574,7 +2575,7 @@ fn setup_2p_optional_drain_poison(mode: LoopDetectionMode) -> (GameRunner, Objec
 ///
 /// SCOPE (measured — do NOT overclaim): the loop's DECIDING win_kind here is `LethalDamage`
 /// (CR 704.5a life drain — classify checks opponent-life-loss before poison), so this is NOT the
-/// `win_kind == PoisonLoss` full-drive witness. That witness is WAIVED (§6 rung-3): NO
+/// `win_kind == PoisonLoss` full-drive witness. That witness is WAIVED: NO
 /// single-compound-trigger poison-DECIDING loop can drive the live sampler —
 ///   • the self-refilling PROLIFERATE form (`"...you gain 1 life, then proliferate."`) opens a
 ///     `ProliferateChoice` beat every cycle, which is neither `Priority{active}` nor
@@ -3162,27 +3163,108 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     );
 }
 
+/// **CR 708.2a + CR 732.2a: a face-down permanent moves neither the offer verdict nor either
+/// projection leaf's job.**
+///
+/// The offering board with ONE grafted face-down permanent still reaches `LoopShortcut` under
+/// either controller, which is what licenses `proposer_hidden_view`'s `FaceDownRevealed` no-op
+/// arm as a rules decision rather than a verdict-moving one — the driven clone may carry no
+/// name (CR 708.2a) and the verdict does not depend on which name it carries. The ungrafted
+/// arm is the control: the graft is not what produces the offer. The wire projection is the
+/// reach guard — in the SAME run the controller's copy carries the back-face name and the
+/// other seat's carries the hidden-card name, so the two-sided pair keeps BOTH its entries.
+#[test]
+fn object_growth_offer_survives_a_face_down_permanent_under_either_controller() {
+    use engine::game::game_object::BackFaceData;
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::game::zones::create_object;
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+
+    // A typeless inert permanent: the face-down leaves key on `face_down && back_face`, and
+    // giving it no card types keeps it out of both the fodder class and every SBA.
+    let run = |grafted_controller: Option<PlayerId>| -> (GameRunner, Option<ObjectId>) {
+        let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
+        let grafted = grafted_controller.map(|controller| {
+            let id = create_object(
+                runner.state_mut(),
+                CardId(900),
+                controller,
+                "Grafted Permanent".into(),
+                Zone::Battlefield,
+            );
+            let obj = runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .expect("just created");
+            obj.face_down = true;
+            obj.back_face = Some(BackFaceData {
+                name: "Grizzly Bears".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                ..Default::default()
+            });
+            id
+        });
+        let outcome = runner
+            .cast(sprout)
+            .accept_optional()
+            .convoke_with(&[fodder[0]])
+            .commit()
+            .resolve();
+        assert!(
+            matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+            ),
+            "expected a LoopShortcut offer to P0 (grafted controller {grafted_controller:?}), \
+             got {:?}",
+            outcome.final_waiting_for()
+        );
+        (runner, grafted)
+    };
+
+    // CONTROL: the same board with no face-down permanent offers.
+    run(None);
+
+    for controller in [P0, P1] {
+        let (runner, grafted) = run(Some(controller));
+        let id = grafted.expect("the grafted arm builds a permanent");
+        let observer = if controller == P0 { P1 } else { P0 };
+
+        let to_controller = filter_state_for_viewer(runner.state(), controller);
+        assert_eq!(
+            to_controller.objects.get(&id).map(|o| o.name.as_str()),
+            Some("Grizzly Bears"),
+            "CR 708.5: the controller's wire copy carries the back-face name"
+        );
+
+        let to_observer = filter_state_for_viewer(runner.state(), observer);
+        assert_eq!(
+            to_observer.objects.get(&id).map(|o| o.name.as_str()),
+            Some("Hidden Card"),
+            "and the other seat's carries the hidden-card name in the SAME run — the \
+             observer-side face-down redaction leaf is what writes this entry"
+        );
+    }
+}
+
 /// Kodama of the East Tree's growing-class-reading trigger (Scryfall / card-data).
 /// Its body puts a permanent "with equal or lesser mana value" from hand onto the
 /// battlefield — a `ChangeZone` whose target filter reads a mutable board aggregate,
 /// so `fire_time_conditions_read_growing_class` flags it IF it is scanned.
 const KODAMA_TRIGGER_ORACLE: &str = "Whenever another permanent you control enters, if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.";
 
-/// REGRESSION (user 2026-07-18): a growing-class-reading trigger sitting in a zone
-/// where it CANNOT function (here P0's LIBRARY) must NOT suppress the loop-shortcut
-/// offer. This reproduces the real 4-player game where Witherbloom + Sprout Swarm
-/// failed to prompt because Kodama of the East Tree — a deck card in the library —
-/// was scanned by the object-growth cover's `fire_time_conditions_read_growing_class`
-/// firewall as if it were a live observer (CR 603.4 / CR 113.6: a permanent trigger
-/// functions only on the battlefield). The board is otherwise the passing 51st
-/// fixture, so the ONLY variable is the inert library observer.
-///
-/// DISCRIMINATING (revert-probe verified): reverting the block-(1) zone gate in
-/// `fire_time_conditions_read_growing_class` flips this to NO offer — Kodama's
-/// library trigger is re-scanned, `cover_ok` goes false, and `final_waiting_for`
-/// stays `Priority`. So this fails without the fix.
-#[test]
-fn object_growth_library_observer_does_not_suppress_offer() {
+/// The 51st fixture with Kodama relocated into `zone`, where its "another permanent you
+/// control enters" trigger cannot function: CR 113.6 puts a permanent's abilities on the
+/// battlefield unless the ability declares otherwise (CR 113.6b), and this one declares
+/// nothing. Kodama parses ON the battlefield, so the definition is a real parse before it is
+/// moved. Everything else is the passing fixture, so the ONLY variable either row below
+/// carries is the inert observer's zone.
+fn growing_class_observer_outside_the_battlefield(
+    zone: engine::types::zones::Zone,
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
     use engine::types::zones::Zone;
 
     let mut scenario = GameScenario::new();
@@ -3194,8 +3276,8 @@ fn object_growth_library_observer_does_not_suppress_offer() {
         5,
         WITHERBLOOM_AFFINITY_ORACLE,
     );
-    // Kodama parses ON the battlefield (so its trigger is a real parsed def), then we
-    // relocate it into the library below — where it cannot function.
+    // Kodama parses ON the battlefield, so its trigger is a real parsed def before the
+    // relocation below.
     let kodama = scenario
         .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 6, KODAMA_TRIGGER_ORACLE)
         .id();
@@ -3219,22 +3301,25 @@ fn object_growth_library_observer_does_not_suppress_offer() {
         for &id in &fodder {
             st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
         }
-        // Move Kodama from the battlefield into P0's LIBRARY (CR 603.4: its
-        // "another permanent enters" trigger no longer functions there).
         st.battlefield.retain(|&id| id != kodama);
         let obj = st.objects.get_mut(&kodama).unwrap();
-        obj.zone = Zone::Library;
+        obj.zone = zone;
         let p0 = st.players.iter_mut().find(|p| p.id == P0).unwrap();
-        p0.library.insert(0, kodama);
+        match zone {
+            Zone::Library => p0.library.insert(0, kodama),
+            Zone::Graveyard => p0.graveyard.push_back(kodama),
+            other => panic!(
+                "this fixture places the observer in a library or a graveyard, not {other:?}"
+            ),
+        }
     }
 
-    // Sanity: Kodama really is in the library (not the battlefield), so any offer
-    // must come from correctly IGNORING it, not from it having been removed.
+    // The observer really sits where the caller asked, so an offer must come from correctly
+    // IGNORING it and not from its having been removed.
     let kodama_obj = &runner.state().objects[&kodama];
     assert_eq!(
-        kodama_obj.zone,
-        Zone::Library,
-        "the growing-class observer must sit in the library for this to discriminate",
+        kodama_obj.zone, zone,
+        "the growing-class observer must sit in {zone:?} for the row to discriminate",
     );
     assert_eq!(
         kodama_obj.trigger_definitions.len(),
@@ -3244,6 +3329,17 @@ fn object_growth_library_observer_does_not_suppress_offer() {
         kodama_obj.trigger_definitions.len()
     );
 
+    (runner, sprout, kodama, fodder)
+}
+
+/// Drive the fixture's one Sprout Swarm cycle and assert the CR 732.2a offer surfaces naming
+/// the token-growth axis — the loop genuinely detected, not an unrelated fall-through.
+fn assert_growing_class_observer_is_ignored(
+    mut runner: GameRunner,
+    sprout: ObjectId,
+    fodder: &[ObjectId],
+    why: &str,
+) {
     let outcome = runner
         .cast(sprout)
         .accept_optional()
@@ -3256,18 +3352,74 @@ fn object_growth_library_observer_does_not_suppress_offer() {
             outcome.final_waiting_for(),
             WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
         ),
-        "a growing-class trigger in the LIBRARY must not suppress the offer, got {:?}",
+        "{why}, got {:?}",
         outcome.final_waiting_for()
     );
-    // The offer still names the token-growth axis (the loop is genuinely detected,
-    // not an unrelated fall-through).
     let WaitingFor::LoopShortcut { certificate, .. } = outcome.final_waiting_for() else {
         unreachable!()
     };
     assert!(
         certificate.unbounded.contains(&ResourceAxis::TokensCreated),
-        "the detected loop's unbounded axis must be TokensCreated, got {:?}",
+        "{why}: the detected loop's unbounded axis must be TokensCreated, got {:?}",
         certificate.unbounded
+    );
+}
+
+/// REGRESSION (user 2026-07-18): a growing-class-reading trigger sitting in a zone where it
+/// CANNOT function must NOT suppress the loop-shortcut offer. This reproduces the real
+/// 4-player game where Witherbloom + Sprout Swarm failed to prompt because Kodama of the East
+/// Tree — a deck card in the library — was scanned by the object-growth cover's
+/// `fire_time_conditions_read_growing_class` firewall as if it were a live observer.
+///
+/// This row pins the SHAPE, not the zone gate. CR 400.2 makes a library a hidden zone, so
+/// the detection drive reads P0's library through the proposer's own hidden view and this
+/// Kodama reaches the firewall already blanked — block (1)'s zone gate has no definition to
+/// re-scan here, so its revert does not flip this row.
+/// [`object_growth_public_zone_observer_does_not_suppress_offer`] is the sibling that
+/// discriminates the gate.
+#[test]
+fn object_growth_library_observer_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, sprout, _kodama, fodder) =
+        growing_class_observer_outside_the_battlefield(Zone::Library);
+    assert_growing_class_observer_is_ignored(
+        runner,
+        sprout,
+        &fodder,
+        "a growing-class trigger in the LIBRARY must not suppress the offer",
+    );
+}
+
+/// The zone-of-function gate's DISCRIMINATING row: the same observer in P0's GRAVEYARD.
+///
+/// CR 404.2 entitles every player to examine a graveyard, so no hidden-zone redaction touches
+/// this object and its parsed definition reaches the firewall intact — asserted below. What
+/// refuses it is block (1)'s zone gate alone: with `trigger_zones` empty, CR 113.6 makes the
+/// trigger function only on the battlefield.
+///
+/// DISCRIMINATING: delete the `trigger_definition_functions_in_zone` `continue` at the head of
+/// block (1) in `analysis::resource::fire_time_conditions_read_growing_class_scoped` ⇒ Kodama's
+/// graveyard trigger is scanned as a live observer, the cover goes false, and this row's
+/// `LoopShortcut` assertion reddens at `Priority{P0}`.
+#[test]
+fn object_growth_public_zone_observer_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, sprout, kodama, fodder) =
+        growing_class_observer_outside_the_battlefield(Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&kodama].trigger_definitions.len(),
+        1,
+        "reach-guard, and the whole reason this row replaces the library one as the gate's \
+         discriminator: a graveyard is public (CR 404.2), so the definition survives to the \
+         firewall and the zone gate is the only thing that can refuse it"
+    );
+    assert_growing_class_observer_is_ignored(
+        runner,
+        sprout,
+        &fodder,
+        "a growing-class trigger in a PUBLIC non-battlefield zone must not suppress the offer",
     );
 }
 
@@ -5269,7 +5421,7 @@ fn predicted_winner_concede_mid_apnap_does_not_drive() {
 /// trigger `execute` body carries the CR 608.2i
 /// `QuantityRef::BattlefieldEntriesThisTurn` read, which
 /// `fire_time_conditions_read_growing_class` block (1) scans at the
-/// `ability_definition_reads_sibling_mutable_for_loop` call site.
+/// `ability_definition_reads_growing_class_for_loop` call site.
 const PARK_HEIGHTS_PEGASUS_ORACLE: &str = "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card if you had two or more creatures enter the battlefield under your control this turn.";
 
 /// ANTI-VACUITY CONTROL: the same board shape with a trigger that reads NOTHING
@@ -5351,8 +5503,8 @@ fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId
 /// battlefield-entry-ledger observer anywhere on a functioning battlefield
 /// SUPPRESSES a CR 732.2a object-growth offer that fires without it.
 ///
-/// This asserts the SUPPRESSION as the sound behaviour. Per the plan's §0.5
-/// ruling, the engine already classifies `battlefield_entries_this_turn` as a
+/// This asserts the SUPPRESSION as the sound behaviour: the engine classifies
+/// `battlefield_entries_this_turn` as a
 /// journal a loop pumps (`project_out_resources` clears it), so `sibling: false`
 /// let the firewall hand out a false ∞ certificate while a live observer read the
 /// growing class — the one error direction `ability_scan`'s ADD-1 contract
@@ -5743,15 +5895,22 @@ const AGGREGATE_MANA_ORACLE: &str = "Flying, trample\n{T}: Add {G} for each crea
 /// unclassifiable by phase, so X2 cannot relieve it either.
 const AGGREGATE_TWO_SURFACE_ORACLE: &str = "Flying, trample\n{2}: Draw a card for each creature you control.\nWhenever this creature attacks, draw a card for each creature you control.";
 
-/// X1-2 — CR 117.1b's relief is keyed on the OBSERVER'S CONTROLLER, and the matched
-/// pair moves exactly that one variable. The DRIVER'S OWN class-reading activated
-/// ability keeps vetoing (the driver holds priority inside its own shortcut and can
-/// activate it); the identical ability under an OPPONENT is relieved.
+/// CR 732.2a / CR 732.2c: the driver's OWN class-reading activated ability, which the
+/// accepted shortcut proposal does not contain, is RELIEVED. CR 117.1b grants only a
+/// permission, and one never exercised changes nothing at the proposed ending point: a
+/// shortcut is "a sequence of game choices, for all players" (CR 732.2a) advanced "with all
+/// game choices contained in the shortcut proposal having been taken" (CR 732.2c). This is
+/// tighter than the foreign relief, not looser — CR 732.2b gives the deviation mechanism to
+/// "each other player", never the proposer, so the driver cannot take its non-activation back.
 ///
-/// REVERT-PROBE: invert the `obj.controller != driver` comparison ⇒ the two halves swap
-/// ⇒ BOTH assertions FAIL.
+/// The foreign half below is now carried by both the CR 117.1b `relieved` arm and the
+/// `not_proposed` arm, so it no longer isolates `obj.controller != driver`; that axis is
+/// guarded by `analysis::resource::foreign_relief_still_keys_on_the_controller_for_a_proposed_ability`.
+///
+/// REVERT-PROBE: delete the `&& !not_proposed` conjunct at block (2) ⇒ the driver's-own
+/// half returns to REFUSES ⇒ FAILS.
 #[test]
-fn driver_own_activated_ability_still_vetoes() {
+fn driver_own_unproposed_activated_ability_is_relieved() {
     use engine::types::ability::AbilityKind;
     use engine::types::zones::Zone;
 
@@ -5773,10 +5932,12 @@ fn driver_own_activated_ability_still_vetoes() {
     let (own_runner, bystander) =
         object_growth_with_bystander_at(Phase::PreCombatMain, P0, AGGREGATE_ACTIVATED_ORACLE);
 
-    // (3) reach-guards — the veto must come from the ONE named ACTIVATED-ability surface.
-    // `kind == Activated` is what item A makes load-bearing on the very relief this row
-    // exercises, and `trigger_definitions.is_empty()` keeps block (1) silent so the verdict
-    // is attributable to block (2).
+    // (3) reach-guards — the RELIEF must be attributable to the ONE named ACTIVATED-ability
+    // surface, and the anti-vacuity arm below moves exactly one variable against them.
+    // `kind == Activated` is load-bearing on the very relief this row exercises — the
+    // predicate short-circuits on any other kind (CR 117.1b) — and
+    // `trigger_definitions.is_empty()` keeps block (1) silent so the verdict is
+    // attributable to block (2).
     let obj = &own_runner.state().objects[&bystander];
     assert_eq!(
         obj.zone,
@@ -5803,14 +5964,53 @@ fn driver_own_activated_ability_still_vetoes() {
         obj.trigger_definitions.len()
     );
 
+    // Pinned POSITIVELY at `LoopShortcut { proposer: P0 }` and never merely `!Priority`:
+    // a negative match would also be satisfied by any other
+    // waiting state the pipeline could wander into.
     assert!(
-        !matches!(
-            own_runner.state().waiting_for,
-            WaitingFor::LoopShortcut { .. }
-        ),
-        "X1-2: the DRIVER's own class-reading activated ability must keep vetoing — the \
-         driver does hold priority inside its own window; got {:?}",
+        matches!(own_runner.state().waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "X1-2 (MIGRATED, CR 732.2a + CR 732.2c): the accepted proposal does not CONTAIN this \
+         activation, so it is never taken inside the window and cannot read the growing \
+         class — the driver's own unproposed class-reading activated ability must NOT \
+         suppress the offer. CR 117.1b's permission ('the driver does hold priority inside \
+         its own shortcut') is not a prediction, and CR 732.2b gives the proposer no \
+         mechanism to deviate from its own accepted proposal; got {:?}",
         own_runner.state().waiting_for
+    );
+
+    // ANTI-VACUITY ARM. Both halves above are POSITIVES, and a firewall that offered on
+    // everything would pass them. This arm is the same driver-controlled
+    // object carrying a SECOND, non-activated surface (a trigger body with the same
+    // `ObjectCount` aggregate), which block (1) scans and which block (2)'s relief does
+    // not reach — the relief is PER-ABILITY, so the board must keep REFUSING. Pinned
+    // POSITIVELY at `Priority { player: P0 }`.
+    let (two_surface, two_surface_bystander) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P0, AGGREGATE_TWO_SURFACE_ORACLE);
+    let two_obj = &two_surface.state().objects[&two_surface_bystander];
+    assert_eq!(
+        two_obj.trigger_definitions.len(),
+        1,
+        "M-6 reach-guard: the second surface really is a trigger definition, else this arm \
+         is the subject half again under a different name"
+    );
+    assert_eq!(
+        two_obj.abilities.len(),
+        1,
+        "M-6 reach-guard: the FIRST surface is still exactly the one relieved activated \
+         ability; got {:?}",
+        two_obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        two_obj.controller, P0,
+        "M-6 reach-guard: same controller as the subject half, so the only variable against \
+         it is the added surface"
+    );
+    assert!(
+        matches!(two_surface.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "M-6 anti-vacuity: this relief is PER-ABILITY and block (1) is untouched, so the \
+         SAME driver-controlled object with one extra class-reading TRIGGER surface must \
+         keep refusing. If this offers, the two positives above are vacuous; got {:?}",
+        two_surface.state().waiting_for
     );
 }
 
@@ -5892,7 +6092,7 @@ fn foreign_mana_ability_still_vetoes() {
 /// offering is what proves half B's veto comes from the second surface and not from the
 /// object's mere presence.
 ///
-/// This is also the closure for the §I `ActivationRestriction` composition hazard at
+/// This is also the closure for the `ActivationRestriction` composition hazard at
 /// the offer level: the firewall never reads `activation_restrictions`
 /// (`game/ability_scan.rs`'s `ability_definition_axes` destructures it as `_`), so a row keyed on that field would
 /// be dominated. This row instead asserts the property the revert-probes actually flip.
@@ -7852,13 +8052,13 @@ const X1_SPROUT: ObjectId = ObjectId(64);
 /// An untapped P0 fodder Saproling to convoke for the {G}.
 const X1_FODDER: ObjectId = ObjectId(421);
 
-/// X1-1 (⛔ the §H.2-gated row). The real 4-player Witherbloom / Sprout Swarm /
+/// X1-1. The real 4-player Witherbloom / Sprout Swarm /
 /// Lumaret capture: P0 drives a Saproling object-growth loop while three opponents sit
 /// on utility lands whose activated abilities read the growing class, plus P0's own
 /// Jadar (a `{Phase, End}` observer). Pre-fix the CR 732.2a firewall vetoed and no offer
 /// surfaced.
 ///
-/// ⛔ BLOCKING PRECONDITIONS (plan §H.2), MEASURED BEFORE THIS ROW WAS WRITTEN, at the
+/// ⛔ BLOCKING PRECONDITIONS, MEASURED BEFORE THIS ROW WAS WRITTEN, at the
 /// C-2 firewall call on this exact board:
 /// * `scope.sole_driver == Some(PlayerId(0))` — the driving player. X1's own key.
 /// * `scope.phase_invariant == Some(PreCombatMain)` — the value is REPORTED here, not
@@ -7877,8 +8077,17 @@ const X1_FODDER: ObjectId = ObjectId(421);
 /// `fire_time_conditions_read_growing_class_scoped`). The offer-level assertion below is
 /// what carries this row's claim; the BASE figure is provenance, not proof.
 ///
-/// REVERT-PROBE: delete the `obj.controller != driver` conjunct in block (2) ⇒ the
-/// opponents' utility-land abilities veto again ⇒ the offer disappears ⇒ FAILS.
+/// This row's relief is OVER-DETERMINED, so no single-conjunct deletion can redden it: block
+/// (2) relieves the opponents' utility lands both on the CR 117.1b `relieved` arm
+/// (`obj.controller != driver`) and, independently, on the CR 732.2a `not_proposed` arm (the
+/// accepted proposal names no activation at all on this dump — the recorded sequence is a
+/// single `Recast`). Deleting a conjunct from an `&&` chain widens relief rather than moving
+/// it, so removing either arm alone hands the subject to the other; the `obj.controller` axis
+/// is driven instead by `analysis::resource::foreign_relief_still_keys_on_the_controller_for_a_proposed_ability`.
+///
+/// REVERT-PROBE: invert `obj.controller != driver` to `==` AND delete the `&& !not_proposed`
+/// conjunct at block (2) together ⇒ both relief arms are gone at once ⇒ the opponents'
+/// utility-land abilities veto again ⇒ the offer disappears ⇒ FAILS.
 #[test]
 fn witherbloom_lumaret_4p_offers_with_opponent_utility_lands() {
     use engine::types::ability::AbilityKind;
@@ -9052,6 +9261,28 @@ fn ai_collapse_candidate_is_clamped_to_the_accepted_bound() {
     // a restatement of the generator.
     apply(&mut state, P0, candidates[0].clone())
         .expect("the AI's generated candidate must be accepted by the reducer");
+
+    // (5) CR 732.2a: the submit lands on an ending point a seat can act at. Asserted in the
+    // uniform shape rather than with a `Priority` matcher, because this board's entered phase owes
+    // CR 508.1's declare-attackers turn-based action before the CR 117.3a grant — a `Priority`
+    // matcher would red on a beat the rule is satisfied by.
+    super::wba_loop_firewall_interposition::answer_terminal_beat(
+        &state,
+        "CR 732.2a: the Fixed(0) accept's ending point",
+    );
+
+    // (6) And on THIS row's own instrument — the production candidate generator, not the viewer
+    // surface — an AI-seated controller has somewhere to go. A collapse that hands back a beat no
+    // generator can answer strands exactly the seat (3) exists to keep playing.
+    let next = engine::ai_support::legal_actions(&state);
+    assert!(
+        !next.is_empty(),
+        "CR 732.2a: the generator must offer the AI a candidate at the collapse's ending point, \
+         got [] at {:?}",
+        state.waiting_for
+    );
+    apply(&mut state, P0, next[0].clone())
+        .expect("the generator's candidate at the ending point must be accepted by the reducer");
 }
 
 // ===========================================================================
@@ -12327,7 +12558,7 @@ fn a_zero_count_declaration_validates_over_an_empty_range_but_still_checks_cardi
 /// A SYNTHETIC harness prop, deliberately NOT named after any printing: it exists only to be
 /// the thing that makes the pinned seat illegal mid-window, and inventing a real card name for
 /// non-verbatim text is the fabrication hazard CLAUDE.md's "verify the card, not just the rule"
-/// principle warns about. Plan §12 scopes the verbatim-Oracle rule to the card under test; the
+/// principle warns about. The verbatim-Oracle rule is scoped to the card under test; the
 /// card under test here is the SANGUINE_BOND drain, whose text IS verbatim.
 const HEXPROOF_GRANT: &str = "You have hexproof.";
 
@@ -12337,7 +12568,7 @@ const P3: PlayerId = PlayerId(3);
 /// (`SANGUINE_BOND` × `BLOODTHIRSTY_CONQUEROR`), P1/P2/P3 at 1000 life so the drive never
 /// crosses lethal inside the declared window.
 ///
-/// FOUR SEATS, and that is the §6 reach-guard rather than padding: killing the pinned seat
+/// FOUR SEATS, and that is a reach-guard rather than padding: killing the pinned seat
 /// must leave **at least two** other legal seats standing. A one-element surviving set cannot
 /// witness "did not re-choose" — a retargeting engine would have exactly one place to go and
 /// a stopped engine and a retargeting engine would be indistinguishable at the seat level.
@@ -12485,8 +12716,8 @@ fn r5_probe_delta() -> i32 {
 ///
 /// # Constructed-board deviation, DISCLOSED (constructibility-first)
 ///
-/// This row is built on a constructed 4-seat board rather than on a dump fixture, which §6
-/// licenses explicitly. Two measurements forced it, and both are INLINED here rather than
+/// This row is built on a constructed 4-seat board rather than on a dump fixture. Two
+/// measurements forced it, and both are INLINED here rather than
 /// cited, because the probe archive that holds them is untracked and never ships: (i) the
 /// real `dellian_emblem_conqueror_4p` dump — the only tracked fixture whose loop targets a
 /// player — runs **309 beats to `GameOver` and raises no `LoopShortcut` at all** under the
@@ -12495,7 +12726,7 @@ fn r5_probe_delta() -> i32 {
 /// whichever fixture carries it. The construction itself is the tracked one —
 /// `declare_illegal_pin_falls_back_legal_ingests` builds its declare-seam board the same way.
 ///
-/// # The four-assertion anti-retarget set (§6), each named at its assertion below
+/// # The four-assertion anti-retarget set, each named at its assertion below
 ///
 /// 1. the drive **stops short** — zero of `N` cycles commit, and `N * delta` is what the same
 ///    board commits with the refuser absent;
@@ -12512,7 +12743,7 @@ fn r5_probe_delta() -> i32 {
 ///   firing and not a dead harness;
 /// * `player_has_hexproof(P1)` flips `false → true` across the move, so the setup cannot
 ///   silently no-op;
-/// * **the surviving legal set has `len() >= 2`** — §6's own reach-guard. A one-element set
+/// * **the surviving legal set has `len() >= 2`** — this row's own reach-guard. A one-element set
 ///   cannot witness "did not re-choose";
 /// * the declare firewall **passed** (`RespondToShortcut` opened) and the offer publishes
 ///   **no points**, so the refusal is attributable to the drive and not to `validate_pins`.
@@ -12527,7 +12758,7 @@ fn r5_probe_delta() -> i32 {
 /// are named and measured below. The enumeration is deliberately open — a fourth, the
 /// pre-drive `decision_template::resolve` re-check at the top of `materialize_fixed_shortcut`'s
 /// `'cycles` loop, exists and simply is not engaged by THIS refuser (measured: it fires in
-/// neither arm, which is exactly §6's reason for ruling hexproof over phasing).
+/// neither arm, which is exactly the reason for ruling hexproof over phasing).
 ///
 /// * **GUARD 1 — the drive's per-slot CR 608.2b target-legality rejection**
 ///   (`ability_utils::validate_selected_slots_with_specs`, its "Illegal target selected" arm),
@@ -12654,7 +12885,7 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
         !engine::game::targeting::player_is_legal_target(runner.state(), P1, bond, P0),
         "CR 702.11c: the pinned seat must now be an ILLEGAL target of the Bond's ability"
     );
-    // §6's REACH-GUARD, asserted as a count so a shrinking board fails loudly: after the kill
+    // REACH-GUARD, asserted as a count so a shrinking board fails loudly: after the kill
     // at least TWO other seats are still legal, so a retargeting engine has somewhere to go.
     let surviving_legal: Vec<PlayerId> = [P2, P3]
         .into_iter()

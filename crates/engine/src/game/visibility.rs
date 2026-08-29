@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::types::action_rejection::ActionRejection;
@@ -236,6 +236,522 @@ fn pins_name_hidden_source(
     })
 }
 
+/// CR 701.20e + CR 723.4: every object this viewer has been privately SHOWN — the
+/// looked-at set behind a `private_look_player` peek, unioned with the exact objects
+/// each active search session taught them (CR 400.7 keys that by incarnation, so a card
+/// that has since moved teaches nothing).
+///
+/// One authority with two readers inside this module: the identity decision, and the
+/// pin-carrier target redaction, which must answer "may this viewer see that object?"
+/// the same way — a per-caller copy is what let two of the pin carriers drift apart.
+fn privately_looked_at_ids(
+    state: &GameState,
+    viewer: PlayerId,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> HashSet<ObjectId> {
+    let mut visible: HashSet<ObjectId> = match state.private_look_player {
+        Some(looker) if can_view_private_for_player(looker) => {
+            state.private_look_ids.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
+    for (_, search) in state.active_library_searches.iter() {
+        if search.learned_audience().contains(&viewer) {
+            for (owner, zone, identity) in search.looked_at() {
+                if state
+                    .objects
+                    .get(&identity.object_id)
+                    .is_some_and(|object| {
+                        object.owner == *owner
+                            && object.zone == *zone
+                            && object.incarnation == identity.incarnation
+                    })
+                {
+                    visible.insert(identity.object_id);
+                }
+            }
+        }
+    }
+    visible
+}
+
+/// Which of the three shipped identity leaves applies to one object in one viewer's
+/// projection.
+///
+/// Carried as the VALUE of the authority's map rather than as three parallel id sets,
+/// so a consumer matches it exhaustively and can neither drop a leaf nor apply the
+/// wrong one; a future fourth leaf is a compile error instead of a wire defect.
+/// The three are separate look-permission rules the engine already resolves separately
+/// — CR 400.2 (hidden zones), CR 406.3 (face-down cards in exile) and CR 708.5 (a
+/// face-down permanent's controller) — not three values of one axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentityProjection {
+    /// [`hide_card`]: a hidden-zone card, a supplementary-deck card, or a face-down
+    /// exiled card the viewer holds no look permission for.
+    Hidden,
+    /// [`redact_face_down_identity_from_observer`]: a face-down permanent or spell the
+    /// viewer neither controls nor may look under (CR 708.5).
+    FaceDownRedacted,
+    /// [`reveal_face_down_identity_to_controller`]: the other side of the same
+    /// two-sided pair — a face-down permanent or spell the viewer may look under, whose
+    /// back face's name is written onto the projected object.
+    FaceDownRevealed,
+}
+
+/// CR 601.2a + CR 406.3b: an object `player` may cast from where it currently sits must
+/// stay identifiable to them, because casting moves THAT CARD from that zone to the
+/// stack. CR 406.3b states the coupling in the look -> cast direction; this is its
+/// CONVERSE, so it may fire only where the admission has a SUBJECT.
+///
+/// Two conjuncts, and each answers a different way the inference can fail:
+/// * [`casting::cast_permissions_name_their_grantee`] — where the admission rests on a
+///   permission the OBJECT carries, an absent `granted_to` admits every player, which
+///   as a disclosure rule would name every seat as entitled to look. Where it rests on
+///   a `player`-parameterised static the object carries no permission and this is
+///   vacuously true, the subject being the `player` the gate was asked about.
+/// * CR 723.4: information visible to a controlled player is visible to their
+///   controller. The gate is therefore asked about every player the viewer holds
+///   private access to — the same closure every other exemption in this projection
+///   already shares — never about the seat alone.
+///
+/// CR 708.5 + CR 708.2a: a face-down permanent's look permission belongs to its
+/// CONTROLLER and its live characteristics are already public, so the face-down
+/// battlefield/stack pair sits OUTSIDE this exemption and keeps its shipped decision.
+///
+/// The shipped `MayLookAtTopOfLibrary` and `player_may_look_at_facedown_exile`
+/// exemptions stay exactly where they are; this generalises them, and because it only
+/// ever REMOVES `Hidden` entries a refusal by either conjunct leaves shipped behaviour
+/// untouched.
+///
+/// Conjunct order is load-bearing for cost, not for meaning: `casting_permissions` is
+/// empty on almost every object and `can_view_private_for_player` is true for exactly
+/// one player outside turn control, so the gate is asked once per candidate rather than
+/// once per seat. One cost is named rather than discovered: `filter_state_for_viewer`
+/// runs on every state update and `castable_from_current_zone` performs a
+/// battlefield-static scan for the TOP card of each own library — its own
+/// `library.front()` guard keeps the rest of the library off that path. If that residue
+/// measures hot the remedy is to hoist the scan's per-viewer result out of the loop
+/// exactly as the shipped top-of-library visible set already does — never to narrow the
+/// rule.
+fn exempt_from_hiding(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    crate::game::casting::cast_permissions_name_their_grantee(obj)
+        && state.players.iter().any(|pl| {
+            can_view_private_for_player(pl.id)
+                && crate::game::casting::castable_from_current_zone(state, obj, pl.id, None)
+        })
+}
+
+/// CR 400.2: THE single "what may this player see" identity decision, for every object
+/// in every collection this projection redacts, keyed by `ObjectId`.
+///
+/// Two consumers read it: [`filter_state_for_viewer`], which applies all three leaves to
+/// build the wire snapshot, and [`proposer_hidden_view`], which applies the two that
+/// HIDE to build a detection-drive clone. Because there is exactly one such rule, the
+/// drive inherits the shipped answer instead of asserting a second one beside it.
+///
+/// Behaviour-preserving as a hoist because the collections are DISJOINT — a battlefield
+/// or stack object is in no hand, library, supplementary deck or exile list — and all
+/// three leaves mutate only `state.objects[id]`, so no collection's predicate can read a
+/// field another collection's leaf wrote. Every membership computation below reads the
+/// unredacted `state`, which is what the shipped loops read too.
+pub(crate) fn identity_projection_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+) -> BTreeMap<ObjectId, IdentityProjection> {
+    let mut projections: BTreeMap<ObjectId, IdentityProjection> = BTreeMap::new();
+    let can_view_private_for_player =
+        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
+    let hide = |projections: &mut BTreeMap<ObjectId, IdentityProjection>, obj_id: ObjectId| {
+        let exempt = state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| exempt_from_hiding(state, obj, &can_view_private_for_player));
+        if !exempt {
+            projections.insert(obj_id, IdentityProjection::Hidden);
+        }
+    };
+
+    let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
+
+    let opponents = players::opponents(state, viewer);
+    let opp_hand_ids: Vec<ObjectId> = opponents
+        .iter()
+        .copied()
+        .filter(|&opp| !can_view_private_for_player(opp))
+        .flat_map(|opp| state.players[opp.0 as usize].hand.iter().copied())
+        .collect();
+    for obj_id in opp_hand_ids {
+        if !is_visible_revealed_card(state, viewer, obj_id)
+            && !state.viewer_knows_card_identity(viewer, obj_id)
+            && !private_look_visible.contains(&obj_id)
+        {
+            hide(&mut projections, obj_id);
+        }
+    }
+
+    let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
+        if let WaitingFor::ManifestDreadChoice {
+            player, ref cards, ..
+        } = state.waiting_for
+        {
+            let all_cards: HashSet<ObjectId> = cards.iter().copied().collect();
+            if can_view_private_for_player(player) {
+                (all_cards.clone(), all_cards)
+            } else {
+                (HashSet::new(), all_cards)
+            }
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
+
+    let dig_visible: HashSet<ObjectId> = if let WaitingFor::DigChoice {
+        player, ref cards, ..
+    } = state.waiting_for
+    {
+        if can_view_private_for_player(player) {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
+
+    // CR 701.22a: Scry instructs the player to look at the top N cards of
+    // their library before ordering them. Those cards remain in the library,
+    // so explicitly preserve their identities for the player making the choice.
+    let scry_visible: HashSet<ObjectId> = if let WaitingFor::ScryChoice {
+        player, ref cards, ..
+    } = state.waiting_for
+    {
+        if can_view_private_for_player(player) {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
+
+    let search_visible: HashSet<ObjectId> =
+        if let WaitingFor::SearchChoice {
+            player, ref cards, ..
+        } = state.waiting_for
+        {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
+    let effect_zone_hand_cards: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
+        zone: Zone::Hand,
+        ref cards,
+        ..
+    } = state.waiting_for
+    {
+        cards.iter().copied().collect()
+    } else {
+        HashSet::new()
+    };
+    let effect_zone_library_visible: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
+        player,
+        zone: Zone::Library,
+        ref cards,
+        ..
+    } = state.waiting_for
+    {
+        if can_view_private_for_player(player) {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
+    let drawn_choice_hand_cards: HashSet<ObjectId> =
+        if let WaitingFor::DrawnThisTurnTopdeckChoice { ref cards, .. } = state.waiting_for {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        };
+
+    // Heist (Arena digital-only keyword action) and any future
+    // `ChooseFromZoneChoice` that operates over a hidden zone (library,
+    // opponent's hand) parks candidate object ids on the prompt. The loop
+    // below hides every library object by default; the prompt player is
+    // supposed to *look at* the candidates (Heist reminder: "Look at three
+    // random nonland cards"), so the underlying object identities must be
+    // visible to that player. Opponents and spectators keep seeing redacted
+    // placeholders — `can_view_private_for_player(player)` is the same gate
+    // the manifest/dig/private-look/search prompts use. The cards ARRAY is
+    // also redacted for non-prompt viewers in `filter_state_for_viewer`
+    // (the `ChooseFromZoneChoice` redact block); the two protections
+    // compose: prompt player sees both the array and the object contents,
+    // everyone else sees neither.
+    let choose_from_zone_hidden_visible: HashSet<ObjectId> =
+        if let WaitingFor::ChooseFromZoneChoice {
+            player, ref cards, ..
+        } = state.waiting_for
+        {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
+    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
+    // specified player." A player with a continuous "you may look at the top
+    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
+    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
+    // library top. Engine-authoritative exposure (never client-side): the
+    // top-of-library object is the source/render target of cast-from-top
+    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
+    // would be redacted for the very player allowed to act on it. The derived
+    // `can_look_at_top_of_library` flag already encodes the static check;
+    // `can_view_private_for_player` extends the look to a player controlling
+    // this player's turn, mirroring the private-look / face-down look paths.
+    let look_top_visible: HashSet<ObjectId> = state
+        .players
+        .iter()
+        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
+        .filter_map(|p| p.library.front().copied())
+        .collect();
+    let all_library_ids: Vec<ObjectId> = state
+        .players
+        .iter()
+        .flat_map(|p| p.library.iter().copied())
+        .collect();
+    for obj_id in all_library_ids {
+        let visible = manifest_dread_visible.contains(&obj_id)
+            || dig_visible.contains(&obj_id)
+            || scry_visible.contains(&obj_id)
+            || private_look_visible.contains(&obj_id)
+            || search_visible.contains(&obj_id)
+            || effect_zone_library_visible.contains(&obj_id)
+            // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
+            // `choose_from_zone_hidden_visible` above.
+            || choose_from_zone_hidden_visible.contains(&obj_id)
+            // CR 701.20a: revealing shows the card to all players. For reveal-digs
+            // ("reveal the top N"), dig cards are also in revealed_cards and must remain
+            // public during DigChoice. For private digs ("look at"), revealed_cards won't
+            // contain dig cards, so the exclusion still applies.
+            || (state.revealed_cards.contains(&obj_id)
+                && !manifest_dread_cards.contains(&obj_id))
+            || state.viewer_knows_card_identity(viewer, obj_id)
+            // CR 701.20e: own (or controlled-turn) library top under a
+            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
+            || look_top_visible.contains(&obj_id);
+        if !visible
+            && !effect_zone_hand_cards.contains(&obj_id)
+            && !drawn_choice_hand_cards.contains(&obj_id)
+        {
+            hide(&mut projections, obj_id);
+        }
+    }
+
+    // CR 717.2: A player's Attraction deck is a hidden-order supplementary
+    // deck, like a library — even its owner doesn't know the order. Redact
+    // every unrevealed Attraction card's identity for all viewers, mirroring
+    // the library treatment above, so the serialized state can't leak the
+    // contents or order of any player's Attraction deck.
+    let all_attraction_ids: Vec<ObjectId> = state
+        .players
+        .iter()
+        .flat_map(|p| p.attraction_deck.iter().copied())
+        .collect();
+    for obj_id in all_attraction_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide(&mut projections, obj_id);
+        }
+    }
+
+    let all_contraption_ids: Vec<ObjectId> = state
+        .players
+        .iter()
+        .flat_map(|p| p.contraption_deck.iter().copied())
+        .collect();
+    for obj_id in all_contraption_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide(&mut projections, obj_id);
+        }
+    }
+
+    // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
+    // supplementary decks whose face-down cards live in the command zone. Redact
+    // every unrevealed card identity for all viewers, matching the library and
+    // Attraction deck treatment above.
+    let supplementary_deck_ids: Vec<ObjectId> = state
+        .planar_deck
+        .iter()
+        .chain(state.scheme_deck.iter())
+        .copied()
+        .collect();
+    for obj_id in supplementary_deck_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide(&mut projections, obj_id);
+        }
+    }
+
+    // CR 406.3: A card exiled face down can't be examined by any player
+    // except when an instruction allows it. Two modeled look-permission classes:
+    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
+    // controller of the permanent that exiled the card may look, keyed on the
+    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
+    // exile class — including plain `TrackedBySource` exiles that grant no
+    // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
+    // Asmodeus) — fails closed and redacts the card for every viewer.
+    let hidden_facedown_exile_ids: Vec<ObjectId> = state
+        .exile
+        .iter()
+        .copied()
+        .filter(|obj_id| {
+            state.objects.get(obj_id).is_some_and(|obj| {
+                if !obj.face_down {
+                    return false;
+                }
+                // CR 702.143e: foretold card — its owner may look.
+                let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+                // CR 702.75a + CR 607.2a: the controller of the permanent that
+                // exiled this card under Hideaway may look at it. Keyed on the
+                // dedicated `HideawayLookable` link kind so plain
+                // `TrackedBySource` face-down exiles that grant no look-permission
+                // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
+                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+                    link.exiled_id == *obj_id
+                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
+                        && state
+                            .objects
+                            .get(&link.source_id)
+                            .is_some_and(|src| can_view_private_for_player(src.controller))
+                });
+                // CR 406.3a + CR 406.3b: a player who holds an active
+                // play-from-exile grant for this face-down card may look at it —
+                // the grant that lets them cast it is the same authority that
+                // lets them look (single source:
+                // `casting::player_may_look_at_facedown_exile`). Scoped by the
+                // grant's `granted_to`, so a face-down card exiled by a different
+                // source (no grant to this viewer) stays redacted, and the
+                // targeted opponent (no grant) cannot see the cards either.
+                let play_from_exile_lookable = state.players.iter().any(|pl| {
+                    can_view_private_for_player(pl.id)
+                        && crate::game::casting::player_may_look_at_facedown_exile(
+                            state, obj, pl.id,
+                        )
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer || play_from_exile_lookable)
+            })
+        })
+        .collect();
+    for obj_id in hidden_facedown_exile_ids {
+        hide(&mut projections, obj_id);
+    }
+
+    // CR 708.5: "At any time, you may look at a face-down permanent you control
+    // (even if it's phased out). You can't look at face-down spells or
+    // permanents controlled by another player." Face-down objects on the
+    // battlefield (manifest / morph / disguise / cloak) and any future modeled
+    // face-down stack spells keep their real identity in `back_face`. That
+    // hidden identity is look-permission of the *controller* alone. Strip
+    // `back_face` for every viewer who is not the controller so the underlying
+    // card never leaks to opponents over the wire. The controller (turn-control
+    // aware, matching the rest of this filter) retains it and gets only display
+    // identity projected onto the filtered object; CR 708.2 face-down rules
+    // characteristics stay intact. DFC back faces (`face_down == false`) are
+    // public information and are intentionally left untouched.
+    //
+    // This is the one TWO-SIDED collection, so absence from the map is not a
+    // decision here: dropping an entry would skip the redaction leaf entirely and
+    // publish the hidden card's own name. Both sides therefore get an explicit
+    // entry, and `exempt_from_hiding` deliberately does not reach either.
+    let facedown_object_ids: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .chain(state.stack.iter().map(|entry| entry.id))
+        .filter(|obj_id| {
+            state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| obj.face_down && obj.back_face.is_some())
+        })
+        .collect();
+    for obj_id in facedown_object_ids {
+        let Some(source) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        // CR 708.5: the controller always sees their own face-down
+        // permanents. A non-controller viewer may additionally see this
+        // face-down permanent if they control an active "you may look at
+        // face-down [filter] any time" static (CR 708.5 exception) whose
+        // affected filter matches this permanent.
+        let viewer_may_look = can_view_private_for_player(source.controller)
+            || viewer_may_look_at_face_down(state, obj_id, &can_view_private_for_player);
+        projections.insert(
+            obj_id,
+            if viewer_may_look {
+                IdentityProjection::FaceDownRevealed
+            } else {
+                IdentityProjection::FaceDownRedacted
+            },
+        );
+    }
+
+    projections
+}
+
+/// CR 732.2a: the board a loop-shortcut DETECTION drive is entitled to reason about — a
+/// clone of `state` with every object `proposer` may not look at blanked.
+///
+/// A proposal may rest only on "the current game state and the predictable results of the
+/// sequence of choices", and a proposer who may not look at a card cannot predict what it
+/// does. CR 400.6 puts the reading of a moving card's own abilities with its OWNER, so a
+/// card milled inside the drive arrives in the graveyard still blank; CR 732.2b gives the
+/// player who can see it the deviation point where that information re-enters.
+///
+/// The `FaceDownRevealed` arm is a deliberate NO-OP, and CR 708.2a is why: a face-down
+/// permanent has no name. [`filter_state_for_viewer`] produces a wire snapshot nothing
+/// re-executes, so writing the back face's name onto it is a display projection for the
+/// one player entitled to it; this clone is `apply()`ed, so it may not carry one. The
+/// proposer loses no information by the omission — what the reveal writes is derived from
+/// `back_face`, which this clone still carries unredacted.
+///
+/// DETECTION ONLY. `analysis`'s boundary collapse is the shortcut being TAKEN
+/// (CR 732.2c) and runs on authoritative state; it must never call this. And this is
+/// deliberately NOT [`filter_state_for_viewer`], which additionally clears
+/// rules-execution carriers, zeroes the RNG whose word position the offer hook compares,
+/// and RETAINS `cards_drawn_this_turn` only for the players the viewer holds private
+/// access to — deleting every opponent's entry from the very journal an instructed-
+/// departure certificate reads. This wrapper is structurally incapable of that strip: it
+/// clones and then applies leaves through an `ObjectId`-keyed map that no `GameState`
+/// journal is reachable from.
+pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> GameState {
+    let mut view = state.clone();
+    for (obj_id, projection) in identity_projection_for_viewer(state, proposer) {
+        match projection {
+            IdentityProjection::Hidden => hide_card(&mut view, obj_id),
+            IdentityProjection::FaceDownRedacted => {
+                if let Some(obj) = view.objects.get_mut(&obj_id) {
+                    redact_face_down_identity_from_observer(obj);
+                }
+            }
+            // CR 708.2a: the driven clone may carry no name for a face-down permanent.
+            IdentityProjection::FaceDownRevealed => {}
+        }
+    }
+    view
+}
+
 /// Returns a filtered copy of the game state for the given viewer.
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
@@ -410,35 +926,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         filtered.pending_replacement = None;
     }
 
-    // CR 701.20e: A bare "look at" peek privately reveals card(s) to the looking
-    // player only. `dig.rs` and `reveal_hand.rs` record the looker in
-    // `private_look_player`; surface the peeked cards to that player without
-    // leaking them to opponents.
-    let mut private_look_visible: HashSet<ObjectId> = match state.private_look_player {
-        Some(looker) if can_view_private_for_player(looker) => {
-            state.private_look_ids.iter().copied().collect()
-        }
-        _ => HashSet::new(),
-    };
-    // CR 723.4 + CR 400.7: union ordinary private access with only the exact
-    // hidden objects learned by this viewer in every active search session.
-    for (_, search) in state.active_library_searches.iter() {
-        if search.learned_audience().contains(&viewer) {
-            for (owner, zone, identity) in search.looked_at() {
-                if state
-                    .objects
-                    .get(&identity.object_id)
-                    .is_some_and(|object| {
-                        object.owner == *owner
-                            && object.zone == *zone
-                            && object.incarnation == identity.incarnation
-                    })
-                {
-                    private_look_visible.insert(identity.object_id);
-                }
-            }
-        }
-    }
     filtered
         .active_library_searches
         .retain(|_, search| search.learned_audience().contains(&viewer));
@@ -448,25 +935,41 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             state.waiting_for.acting_players().contains(searcher)
                 && turn_control::authorized_submitter_for_player(state, *searcher) == viewer
         });
+    let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
 
-    let opponents = players::opponents(state, viewer);
-    let opp_hand_ids: Vec<ObjectId> = opponents
-        .iter()
-        .copied()
-        .filter(|&opp| !can_view_private_for_player(opp))
-        .flat_map(|opp| filtered.players[opp.0 as usize].hand.iter().copied())
-        .collect();
-    for obj_id in opp_hand_ids {
-        if !is_visible_revealed_card(state, viewer, obj_id)
-            && !state.viewer_knows_card_identity(viewer, obj_id)
-            && !private_look_visible.contains(&obj_id)
-        {
-            hide_card(&mut filtered, obj_id);
-            record_hidden_replacement_candidate_source(
-                replacement_candidate_source_ids.as_ref(),
-                &mut hidden_replacement_candidate_source_ids,
-                obj_id,
-            );
+    // CR 400.2 + CR 406.3 + CR 708.5: ONE identity decision per object, taken by the
+    // single authority both this projection and the detection-drive view read, then
+    // dispatched here to the leaf it names. The `match` is wildcard-free, so no leaf can
+    // be dropped or misapplied and a future fourth one build-breaks.
+    //
+    // Every leaf that HIDES records its replacement-candidate source immediately after
+    // its write; `FaceDownRevealed` records nothing, because it discloses rather than
+    // hides.
+    for (obj_id, projection) in identity_projection_for_viewer(state, viewer) {
+        match projection {
+            IdentityProjection::Hidden => {
+                hide_card(&mut filtered, obj_id);
+                record_hidden_replacement_candidate_source(
+                    replacement_candidate_source_ids.as_ref(),
+                    &mut hidden_replacement_candidate_source_ids,
+                    obj_id,
+                );
+            }
+            IdentityProjection::FaceDownRedacted => {
+                if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                    redact_face_down_identity_from_observer(obj);
+                    record_hidden_replacement_candidate_source(
+                        replacement_candidate_source_ids.as_ref(),
+                        &mut hidden_replacement_candidate_source_ids,
+                        obj_id,
+                    );
+                }
+            }
+            IdentityProjection::FaceDownRevealed => {
+                if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                    reveal_face_down_identity_to_controller(obj);
+                }
+            }
         }
     }
 
@@ -569,344 +1072,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     .rposition(|a| matches!(a, crate::types::ability::ChosenAttribute::Number(_)))
                 {
                     obj.chosen_attributes.remove(pos);
-                }
-            }
-        }
-    }
-
-    let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
-        if let WaitingFor::ManifestDreadChoice {
-            player, ref cards, ..
-        } = filtered.waiting_for
-        {
-            let all_cards: HashSet<ObjectId> = cards.iter().copied().collect();
-            if can_view_private_for_player(player) {
-                (all_cards.clone(), all_cards)
-            } else {
-                (HashSet::new(), all_cards)
-            }
-        } else {
-            (HashSet::new(), HashSet::new())
-        };
-
-    let dig_visible: HashSet<ObjectId> = if let WaitingFor::DigChoice {
-        player, ref cards, ..
-    } = filtered.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
-        }
-    } else {
-        HashSet::new()
-    };
-
-    // CR 701.22a: Scry instructs the player to look at the top N cards of
-    // their library before ordering them. Those cards remain in the library,
-    // so explicitly preserve their identities for the player making the choice.
-    let scry_visible: HashSet<ObjectId> = if let WaitingFor::ScryChoice {
-        player, ref cards, ..
-    } = filtered.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
-        }
-    } else {
-        HashSet::new()
-    };
-
-    let search_visible: HashSet<ObjectId> =
-        if let WaitingFor::SearchChoice {
-            player, ref cards, ..
-        } = filtered.waiting_for
-        {
-            if can_view_private_for_player(player) {
-                cards.iter().copied().collect()
-            } else {
-                HashSet::new()
-            }
-        } else {
-            HashSet::new()
-        };
-
-    let effect_zone_hand_cards: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
-        zone: Zone::Hand,
-        ref cards,
-        ..
-    } = filtered.waiting_for
-    {
-        cards.iter().copied().collect()
-    } else {
-        HashSet::new()
-    };
-    let effect_zone_library_visible: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
-        player,
-        zone: Zone::Library,
-        ref cards,
-        ..
-    } = filtered.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
-        }
-    } else {
-        HashSet::new()
-    };
-    let drawn_choice_hand_cards: HashSet<ObjectId> =
-        if let WaitingFor::DrawnThisTurnTopdeckChoice { ref cards, .. } = filtered.waiting_for {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
-        };
-
-    // Heist (Arena digital-only keyword action) and any future
-    // `ChooseFromZoneChoice` that operates over a hidden zone (library,
-    // opponent's hand) parks candidate object ids on the prompt. The loop
-    // below hides every library object by default; the prompt player is
-    // supposed to *look at* the candidates (Heist reminder: "Look at three
-    // random nonland cards"), so the underlying object identities must be
-    // visible to that player. Opponents and spectators keep seeing redacted
-    // placeholders — `can_view_private_for_player(player)` is the same gate
-    // the manifest/dig/private-look/search prompts use. The cards ARRAY is
-    // also redacted for non-prompt viewers at the bottom of this function
-    // (the `ChooseFromZoneChoice` redact block); the two protections
-    // compose: prompt player sees both the array and the object contents,
-    // everyone else sees neither.
-    let choose_from_zone_hidden_visible: HashSet<ObjectId> =
-        if let WaitingFor::ChooseFromZoneChoice {
-            player, ref cards, ..
-        } = filtered.waiting_for
-        {
-            if can_view_private_for_player(player) {
-                cards.iter().copied().collect()
-            } else {
-                HashSet::new()
-            }
-        } else {
-            HashSet::new()
-        };
-
-    // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
-    // specified player." A player with a continuous "you may look at the top
-    // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
-    // Menagerie, Fblthp, Lost on the Range, etc.) privately sees their OWN
-    // library top. Engine-authoritative exposure (never client-side): the
-    // top-of-library object is the source/render target of cast-from-top
-    // (CR 601.2a) and plot-from-top (CR 702.170f) actions, so without this it
-    // would be redacted for the very player allowed to act on it. The derived
-    // `can_look_at_top_of_library` flag already encodes the static check;
-    // `can_view_private_for_player` extends the look to a player controlling
-    // this player's turn, mirroring the private-look / face-down look paths.
-    let look_top_visible: HashSet<ObjectId> = filtered
-        .players
-        .iter()
-        .filter(|p| p.can_look_at_top_of_library && can_view_private_for_player(p.id))
-        .filter_map(|p| p.library.front().copied())
-        .collect();
-    let all_library_ids: Vec<ObjectId> = filtered
-        .players
-        .iter()
-        .flat_map(|p| p.library.iter().copied())
-        .collect();
-    for obj_id in all_library_ids {
-        let visible = manifest_dread_visible.contains(&obj_id)
-            || dig_visible.contains(&obj_id)
-            || scry_visible.contains(&obj_id)
-            || private_look_visible.contains(&obj_id)
-            || search_visible.contains(&obj_id)
-            || effect_zone_library_visible.contains(&obj_id)
-            // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
-            // `choose_from_zone_hidden_visible` above.
-            || choose_from_zone_hidden_visible.contains(&obj_id)
-            // CR 701.20b: Revealed cards are visible to all players. For reveal-digs
-            // ("reveal the top N"), dig cards are also in revealed_cards and must remain
-            // public during DigChoice. For private digs ("look at"), revealed_cards won't
-            // contain dig cards, so the exclusion still applies.
-            || (state.revealed_cards.contains(&obj_id)
-                && !manifest_dread_cards.contains(&obj_id))
-            || state.viewer_knows_card_identity(viewer, obj_id)
-            // CR 701.20e: own (or controlled-turn) library top under a
-            // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
-            || look_top_visible.contains(&obj_id);
-        if !visible
-            && !effect_zone_hand_cards.contains(&obj_id)
-            && !drawn_choice_hand_cards.contains(&obj_id)
-        {
-            hide_card(&mut filtered, obj_id);
-            record_hidden_replacement_candidate_source(
-                replacement_candidate_source_ids.as_ref(),
-                &mut hidden_replacement_candidate_source_ids,
-                obj_id,
-            );
-        }
-    }
-
-    // CR 717.2: A player's Attraction deck is a hidden-order supplementary
-    // deck, like a library — even its owner doesn't know the order. Redact
-    // every unrevealed Attraction card's identity for all viewers, mirroring
-    // the library treatment above, so the serialized state can't leak the
-    // contents or order of any player's Attraction deck.
-    let all_attraction_ids: Vec<ObjectId> = filtered
-        .players
-        .iter()
-        .flat_map(|p| p.attraction_deck.iter().copied())
-        .collect();
-    for obj_id in all_attraction_ids {
-        if !state.revealed_cards.contains(&obj_id) {
-            hide_card(&mut filtered, obj_id);
-            record_hidden_replacement_candidate_source(
-                replacement_candidate_source_ids.as_ref(),
-                &mut hidden_replacement_candidate_source_ids,
-                obj_id,
-            );
-        }
-    }
-
-    let all_contraption_ids: Vec<ObjectId> = filtered
-        .players
-        .iter()
-        .flat_map(|p| p.contraption_deck.iter().copied())
-        .collect();
-    for obj_id in all_contraption_ids {
-        if !state.revealed_cards.contains(&obj_id) {
-            hide_card(&mut filtered, obj_id);
-            record_hidden_replacement_candidate_source(
-                replacement_candidate_source_ids.as_ref(),
-                &mut hidden_replacement_candidate_source_ids,
-                obj_id,
-            );
-        }
-    }
-
-    // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
-    // supplementary decks whose face-down cards live in the command zone. Redact
-    // every unrevealed card identity for all viewers, matching the library and
-    // Attraction deck treatment above.
-    let supplementary_deck_ids: Vec<ObjectId> = filtered
-        .planar_deck
-        .iter()
-        .chain(filtered.scheme_deck.iter())
-        .copied()
-        .collect();
-    for obj_id in supplementary_deck_ids {
-        if !state.revealed_cards.contains(&obj_id) {
-            hide_card(&mut filtered, obj_id);
-            record_hidden_replacement_candidate_source(
-                replacement_candidate_source_ids.as_ref(),
-                &mut hidden_replacement_candidate_source_ids,
-                obj_id,
-            );
-        }
-    }
-
-    // CR 406.3: A card exiled face down can't be examined by any player
-    // except when an instruction allows it. Two modeled look-permission classes:
-    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
-    // controller of the permanent that exiled the card may look, keyed on the
-    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
-    // exile class — including plain `TrackedBySource` exiles that grant no
-    // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
-    // Asmodeus) — fails closed and redacts the card for every viewer.
-    let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
-        .exile
-        .iter()
-        .copied()
-        .filter(|obj_id| {
-            state.objects.get(obj_id).is_some_and(|obj| {
-                if !obj.face_down {
-                    return false;
-                }
-                // CR 702.143e: foretold card — its owner may look.
-                let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
-                // CR 702.75a + CR 607.2a: the controller of the permanent that
-                // exiled this card under Hideaway may look at it. Keyed on the
-                // dedicated `HideawayLookable` link kind so plain
-                // `TrackedBySource` face-down exiles that grant no look-permission
-                // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
-                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
-                    link.exiled_id == *obj_id
-                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
-                        && state
-                            .objects
-                            .get(&link.source_id)
-                            .is_some_and(|src| can_view_private_for_player(src.controller))
-                });
-                // CR 406.3a + CR 406.3b: a player who holds an active
-                // play-from-exile grant for this face-down card may look at it —
-                // the grant that lets them cast it is the same authority that
-                // lets them look (single source:
-                // `casting::player_may_look_at_facedown_exile`). Scoped by the
-                // grant's `granted_to`, so a face-down card exiled by a different
-                // source (no grant to this viewer) stays redacted, and the
-                // targeted opponent (no grant) cannot see the cards either.
-                let play_from_exile_lookable = state.players.iter().any(|pl| {
-                    can_view_private_for_player(pl.id)
-                        && crate::game::casting::player_may_look_at_facedown_exile(
-                            state, obj, pl.id,
-                        )
-                });
-                !(foretell_ok || hideaway_lookable_by_viewer || play_from_exile_lookable)
-            })
-        })
-        .collect();
-    for obj_id in hidden_facedown_exile_ids {
-        hide_card(&mut filtered, obj_id);
-        record_hidden_replacement_candidate_source(
-            replacement_candidate_source_ids.as_ref(),
-            &mut hidden_replacement_candidate_source_ids,
-            obj_id,
-        );
-    }
-
-    // CR 708.5: "At any time, you may look at a face-down permanent you control
-    // (even if it's phased out). You can't look at face-down spells or
-    // permanents controlled by another player." Face-down objects on the
-    // battlefield (manifest / morph / disguise / cloak) and any future modeled
-    // face-down stack spells keep their real identity in `back_face`. That
-    // hidden identity is look-permission of the *controller* alone. Strip
-    // `back_face` for every viewer who is not the controller so the underlying
-    // card never leaks to opponents over the wire. The controller (turn-control
-    // aware, matching the rest of this filter) retains it and gets only display
-    // identity projected onto the filtered object; CR 708.2 face-down rules
-    // characteristics stay intact. DFC back faces (`face_down == false`) are
-    // public information and are intentionally left untouched.
-    let facedown_object_ids: Vec<ObjectId> = filtered
-        .battlefield
-        .iter()
-        .copied()
-        .chain(filtered.stack.iter().map(|entry| entry.id))
-        .filter(|obj_id| {
-            state
-                .objects
-                .get(obj_id)
-                .is_some_and(|obj| obj.face_down && obj.back_face.is_some())
-        })
-        .collect();
-    for obj_id in facedown_object_ids {
-        if let Some(source) = state.objects.get(&obj_id) {
-            let controller = source.controller;
-            // CR 708.5: the controller always sees their own face-down
-            // permanents. A non-controller viewer may additionally see this
-            // face-down permanent if they control an active "you may look at
-            // face-down [filter] any time" static (CR 708.5 exception) whose
-            // affected filter matches this permanent.
-            let viewer_may_look = can_view_private_for_player(controller)
-                || viewer_may_look_at_face_down(state, obj_id, &can_view_private_for_player);
-            if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-                if viewer_may_look {
-                    reveal_face_down_identity_to_controller(obj);
-                } else {
-                    redact_face_down_identity_from_observer(obj);
-                    record_hidden_replacement_candidate_source(
-                        replacement_candidate_source_ids.as_ref(),
-                        &mut hidden_replacement_candidate_source_ids,
-                        obj_id,
-                    );
                 }
             }
         }
@@ -1896,7 +2061,28 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             viewer,
             *object_id,
             *to,
-            record,
+            record.owner,
+            &can_view_private_for_player,
+        ),
+        // CR 701.17c + CR 400.2: a milled card can be found "as long as that
+        // zone is a public zone". Gate the action event with the SAME
+        // predicate as the library departure beside it, so the two wire
+        // channels can never disagree about one departure. CR 400.3 +
+        // CR 401.1: a library holds its owner's cards, so `player_id` is the
+        // owner when the object has already left `state.objects`.
+        GameEvent::Milled {
+            player_id,
+            object_id,
+            to,
+        } => library_zone_change_visible_to_viewer(
+            state,
+            viewer,
+            *object_id,
+            *to,
+            state
+                .objects
+                .get(object_id)
+                .map_or(*player_id, |obj| obj.owner),
             &can_view_private_for_player,
         ),
         // CR 400.2: A mulligan moves cards from one hidden zone to another.
@@ -1940,11 +2126,11 @@ fn library_zone_change_visible_to_viewer(
     viewer: PlayerId,
     object_id: ObjectId,
     to: Zone,
-    record: &crate::types::game_state::ZoneChangeRecord,
+    owner: PlayerId,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     if matches!(to, Zone::Hand | Zone::Library) {
-        return viewer_has_private_access_to_player(state, viewer, record.owner);
+        return viewer_has_private_access_to_player(state, viewer, owner);
     }
 
     let Some(obj) = state.objects.get(&object_id) else {
@@ -2253,6 +2439,43 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    /// CR 701.17c + CR 400.2: an effect can find a milled card only when the
+    /// zone it moved to from the library is a PUBLIC zone. The action event
+    /// carries an `ObjectId` handle to the departed card, so a viewer without
+    /// private access must not receive one whose destination is hidden — the
+    /// same predicate that already gates the paired library-origin `ZoneChanged`.
+    #[test]
+    fn milled_event_is_gated_on_a_public_destination() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Milled Card".to_string(),
+            Zone::Library,
+        );
+        let milled = |to: Zone| GameEvent::Milled {
+            player_id: PlayerId(1),
+            object_id: card,
+            to,
+        };
+        let events = vec![milled(Zone::Library), milled(Zone::Graveyard)];
+
+        // The opponent (no private access to P1's library) sees only the
+        // public-destination mill. The surviving graveyard event is the live
+        // control: a filter that dropped everything, or never ran, fails here.
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(0)),
+            vec![milled(Zone::Graveyard)]
+        );
+
+        // The owner receives both.
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(1)),
+            events
+        );
+    }
 
     #[test]
     fn choose_one_prompt_redacts_runtime_continuation_for_every_viewer() {
@@ -4387,6 +4610,91 @@ mod tests {
         );
         assert_eq!(filtered.planar_deck, im::vector![plane_id]);
         assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
+    }
+
+    /// CR 400.2 makes the command zone public "except for those cards that some rule or
+    /// effect specifically allow to be face down". No rule states outright that an
+    /// Attraction deck is face down; three ENTAIL it. CR 701.51b opens one by turning the
+    /// card face up, which presupposes it was not. CR 717.6a contrasts the junkyard as "a
+    /// single face-up pile separate from any player's Attraction deck". CR 729.5a turns a
+    /// supplementary-deck card face down — at subgame cleanup only, reaching Attraction
+    /// decks because CR 717.2 + CR 100.2d make one a supplementary deck. Deck members are
+    /// therefore hidden until revealed, mirroring the library. The paired revealed card is
+    /// the discriminator: only the `revealed_cards` exclusion separates the two, so a
+    /// projection that dropped the Attraction collection reddens the first assertion while
+    /// a projection that hid the whole collection reddens the second.
+    #[test]
+    fn attraction_deck_cards_are_hidden_unless_revealed() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Costume Shop".to_string(),
+            Zone::Command,
+        );
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Balloon Stand".to_string(),
+            Zone::Command,
+        );
+        state.players[0].attraction_deck.push_back(hidden);
+        state.players[0].attraction_deck.push_back(revealed);
+        state.revealed_cards.insert(revealed);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&hidden).map(|obj| obj.name.as_str()),
+            Some(HIDDEN_CARD_NAME),
+            "the owner's own unrevealed Attraction card is redacted for every viewer"
+        );
+        assert_eq!(
+            filtered.objects.get(&revealed).map(|obj| obj.name.as_str()),
+            Some("Balloon Stand"),
+            "CR 701.20a: a revealed Attraction card keeps its identity"
+        );
+    }
+
+    /// Contraptions are an Unstable mechanic the Comprehensive Rules expressly exclude
+    /// (CR 701.45a), so the engine models the deck on the Attraction deck's hidden-order
+    /// shape rather than under a rule. The row pins that modelling decision the same way:
+    /// unrevealed member redacted, revealed member intact.
+    #[test]
+    fn contraption_deck_cards_are_hidden_unless_revealed() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hard Hat Area".to_string(),
+            Zone::Command,
+        );
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bee-Bee Gun".to_string(),
+            Zone::Command,
+        );
+        state.players[0].contraption_deck.push_back(hidden);
+        state.players[0].contraption_deck.push_back(revealed);
+        state.revealed_cards.insert(revealed);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&hidden).map(|obj| obj.name.as_str()),
+            Some(HIDDEN_CARD_NAME),
+            "the owner's own unrevealed Contraption card is redacted for every viewer"
+        );
+        assert_eq!(
+            filtered.objects.get(&revealed).map(|obj| obj.name.as_str()),
+            Some("Bee-Bee Gun"),
+            "a revealed Contraption card keeps its identity"
+        );
     }
 
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
@@ -7134,5 +7442,503 @@ mod tests {
             d5h_projected_declaration(&public_state, D5H_VIEWER).is_some(),
             "and it is genuinely present, not two matching `None`s"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // CR 400.2 — the hoisted identity authority. Every row asserts the MAP
+    // `identity_projection_for_viewer` returns, never a wire field, so a leaf that is
+    // applied at the wrong place cannot pass by producing the same bytes.
+    // ─────────────────────────────────────────────────────────────────────────────────────
+
+    use crate::game::game_object::GameObject;
+
+    /// CR 601.2a: `top_of_library_permission_source` requires a non-`None` `affected`
+    /// filter — the permission scopes WHICH top cards it names — so a bare
+    /// `StaticDefinition::new` would make every row below vacuously refuse.
+    fn top_of_library_static() -> crate::types::ability::StaticDefinition {
+        use crate::types::ability::{CardPlayMode, StaticDefinition};
+        use crate::types::statics::{CastFrequency, StaticMode};
+        let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: CardPlayMode::Cast,
+            frequency: CastFrequency::Unlimited,
+            alt_cost: None,
+        });
+        def.affected = Some(TargetFilter::Any);
+        def
+    }
+
+    fn proj(state: &GameState, viewer: PlayerId, id: ObjectId) -> Option<IdentityProjection> {
+        identity_projection_for_viewer(state, viewer)
+            .get(&id)
+            .copied()
+    }
+
+    /// **The hand collection is scoped to opponents.** Both cards sit in a hand; only the
+    /// owner differs, so the entry is the ownership rule speaking and not the zone.
+    #[test]
+    fn the_authority_hides_an_opponents_hand_card_and_leaves_the_viewers_own_alone() {
+        let mut state = GameState::new_two_player(7);
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Hand,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".into(),
+            Zone::Hand,
+        );
+
+        assert_eq!(
+            proj(&state, PlayerId(0), theirs),
+            Some(IdentityProjection::Hidden)
+        );
+        assert_eq!(
+            proj(&state, PlayerId(0), mine),
+            None,
+            "absence is the decision for a hand card: the viewer's own hand is never hidden"
+        );
+    }
+
+    /// **CR 400.2: every library is hidden, the viewer's own included.** The battlefield
+    /// control is what proves the entry is the LIBRARY's, not a blanket hide.
+    #[test]
+    fn the_authority_hides_every_library_including_the_viewers_own() {
+        let mut state = GameState::new_two_player(7);
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Library,
+        );
+        state.players[0].library.push_back(mine);
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".into(),
+            Zone::Library,
+        );
+        state.players[1].library.push_back(theirs);
+        let board = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Board".into(),
+            Zone::Battlefield,
+        );
+        state.battlefield.push_back(board);
+
+        assert_eq!(
+            proj(&state, PlayerId(0), mine),
+            Some(IdentityProjection::Hidden)
+        );
+        assert_eq!(
+            proj(&state, PlayerId(0), theirs),
+            Some(IdentityProjection::Hidden)
+        );
+        assert_eq!(
+            proj(&state, PlayerId(0), board),
+            None,
+            "a public zone gets no entry"
+        );
+    }
+
+    /// **CR 708.5: the face-down battlefield pair is TWO-SIDED, and both sides are explicit
+    /// entries.** The same permanent under two controllers takes the two different leaves;
+    /// neither side is ever `None`, which is what makes absence unusable as a decision there.
+    #[test]
+    fn a_face_down_permanent_reveals_to_its_controller_and_redacts_for_an_observer() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Face Down".into(),
+            Zone::Battlefield,
+        );
+        state.battlefield.push_back(id);
+        {
+            let obj = state.objects.get_mut(&id).expect("just created");
+            obj.face_down = true;
+            obj.back_face = Some(snapshot_object_face(&GameObject::new(
+                ObjectId(999),
+                CardId(42),
+                PlayerId(0),
+                "Grizzly Bears".into(),
+                Zone::Battlefield,
+            )));
+        }
+
+        assert_eq!(
+            proj(&state, PlayerId(0), id),
+            Some(IdentityProjection::FaceDownRevealed),
+            "CR 708.5: the controller may look"
+        );
+        assert_eq!(
+            proj(&state, PlayerId(1), id),
+            Some(IdentityProjection::FaceDownRedacted),
+            "an observer may not, and gets an explicit redaction entry rather than absence"
+        );
+    }
+
+    /// **CR 601.2a + CR 406.3b: the cast exemption drops exactly the card the gate admits.**
+    ///
+    /// The static admits only the TOP card of its controller's library, so the second library
+    /// card is the in-row paired positive: it stays `Hidden` on the same board, which is what
+    /// proves the exemption is the gate's verdict and not "a library under a permanent".
+    /// The wrong-owner arm moves the same static to a player who does not own the library,
+    /// where the gate refuses for every seat and the card is hidden again.
+    #[test]
+    fn the_cast_exemption_drops_only_the_library_card_the_gate_admits() {
+        let build = |static_controller: PlayerId| -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let top = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Top".into(),
+                Zone::Library,
+            );
+            let next = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Next".into(),
+                Zone::Library,
+            );
+            state.players[0].library.push_back(top);
+            state.players[0].library.push_back(next);
+            let source = create_object(
+                &mut state,
+                CardId(3),
+                static_controller,
+                "Realmwalker".into(),
+                Zone::Battlefield,
+            );
+            state.battlefield.push_back(source);
+            let def = top_of_library_static();
+            state
+                .objects
+                .get_mut(&source)
+                .expect("just created")
+                .static_definitions = vec![def].into();
+            (state, top, next)
+        };
+
+        let (state, top, next) = build(PlayerId(0));
+        assert_eq!(
+            proj(&state, PlayerId(0), top),
+            None,
+            "the admitted top card is exempt from hiding"
+        );
+        assert_eq!(
+            proj(&state, PlayerId(0), next),
+            Some(IdentityProjection::Hidden),
+            "PAIRED POSITIVE on the same board: the card the gate does NOT admit stays hidden"
+        );
+
+        // The gate refuses for every seat when the static's controller owns no library the
+        // permission can name, so the exemption does not fire.
+        let (state, top, _next) = build(PlayerId(1));
+        assert_eq!(
+            proj(&state, PlayerId(0), top),
+            Some(IdentityProjection::Hidden),
+            "a static under a non-owner admits nothing and the top card is hidden again"
+        );
+    }
+
+    /// **The exemption is scoped by private access, not by the seat's own gate verdict.**
+    ///
+    /// Same board both times; the only difference is which viewer asks. CR 723.4 gives the
+    /// exemption to a viewer holding private access to the admitted player; a bare opponent
+    /// holds none, so the card stays hidden for them.
+    #[test]
+    fn the_cast_exemption_does_not_reach_a_viewer_without_private_access() {
+        let mut state = GameState::new_two_player(7);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".into(),
+            Zone::Library,
+        );
+        state.players[0].library.push_back(top);
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Realmwalker".into(),
+            Zone::Battlefield,
+        );
+        state.battlefield.push_back(source);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("just created")
+            .static_definitions = vec![top_of_library_static()].into();
+
+        assert_eq!(
+            proj(&state, PlayerId(0), top),
+            None,
+            "reach guard: P0 is exempted"
+        );
+        assert_eq!(
+            proj(&state, PlayerId(1), top),
+            Some(IdentityProjection::Hidden),
+            "an opponent holds no private access to P0 and gets no exemption"
+        );
+    }
+
+    /// The OBJECT-CARRIED permission route into the exemption. Every row above takes the
+    /// `player`-parameterised static route, where the object holds no `CastingPermission` and
+    /// the grantee predicate is vacuously true. P1 ownership is what lets the gate's
+    /// `obj.owner != player` exile disjunct admit P0; `face_down` is what makes the exile
+    /// collection walk the card at all.
+    fn face_down_exile_under_alt_cost_grant(granted_to: Option<PlayerId>) -> (GameState, ObjectId) {
+        use crate::types::ability::{AbilityCost, CastingPermission};
+        let mut state = GameState::new_two_player(7);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Exiled Card".into(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&card).expect("just created");
+        obj.face_down = true;
+        obj.casting_permissions = vec![CastingPermission::ExileWithAltAbilityCost {
+            cost: AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::zero(),
+            },
+            constraint: None,
+            granted_to,
+        }];
+        (state, card)
+    }
+
+    /// **CR 406.3b: the exemption fires only where the grant NAMES its grantee.**
+    ///
+    /// `casting::exile_alt_cost_permission_grants_to_player` reads an absent `granted_to` as
+    /// granting to EVERY player, so the gate admits a seat no effect named. An exemption
+    /// inheriting that reading un-redacts a face-down exiled card on the wire for that seat;
+    /// `casting::cast_permissions_name_their_grantee` is what refuses. The `Some` arm is the
+    /// paired positive on the same board, so the row cannot pass by an exemption that refuses
+    /// everything.
+    #[test]
+    fn the_cast_exemption_refuses_a_grant_that_names_no_grantee() {
+        let (unnamed, card) = face_down_exile_under_alt_cost_grant(None);
+        assert!(
+            crate::game::casting::castable_from_current_zone(
+                &unnamed,
+                unnamed.objects.get(&card).expect("live"),
+                PlayerId(0),
+                None,
+            ),
+            "reach guard: the gate ADMITS the unnamed seat, so the exemption is what refuses"
+        );
+        assert_eq!(
+            proj(&unnamed, PlayerId(0), card),
+            Some(IdentityProjection::Hidden),
+            "an absent `granted_to` names no subject, so the card stays hidden for that seat"
+        );
+
+        let (named, card) = face_down_exile_under_alt_cost_grant(Some(PlayerId(0)));
+        assert_eq!(
+            proj(&named, PlayerId(0), card),
+            None,
+            "PAIRED POSITIVE: the same grant naming the viewer exempts the same card"
+        );
+        assert_eq!(
+            proj(&named, PlayerId(1), card),
+            Some(IdentityProjection::Hidden),
+            "and it names ONE seat: the card's own owner is not the grantee and stays hidden"
+        );
+    }
+
+    /// **The exemption asks about an ORDINARY announcement — the `variant_override: None`
+    /// scope.**
+    ///
+    /// CR 702.35a: a madness card is exiled on discard and its owner "may cast it by paying
+    /// [cost] rather than paying its mana cost" — an announcement, never a standing one — and
+    /// the exemption passes `None`, so the card keeps its `Hidden` entry. The two gate calls
+    /// are the in-row reach guard: the same card on the same board is admitted under
+    /// `Some(Madness)` and refused under `None`, so the entry is the override scope speaking
+    /// and not a card the gate refuses outright.
+    #[test]
+    fn the_cast_exemption_asks_about_an_ordinary_announcement_not_a_madness_one() {
+        use crate::game::casting::castable_from_current_zone;
+        use crate::types::game_state::CastingVariant;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Madness Card".into(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&card).expect("just created");
+            obj.face_down = true;
+            obj.keywords = vec![Keyword::Madness(crate::types::mana::ManaCost::zero())];
+        }
+
+        let live = state.objects.get(&card).expect("live");
+        assert!(
+            castable_from_current_zone(&state, live, PlayerId(0), Some(CastingVariant::Madness)),
+            "reach guard: the madness announcement DOES admit this card from exile"
+        );
+        assert!(
+            !castable_from_current_zone(&state, live, PlayerId(0), None),
+            "and an ordinary announcement does not — the two verdicts differ on this board"
+        );
+        assert_eq!(
+            proj(&state, PlayerId(0), card),
+            Some(IdentityProjection::Hidden),
+            "so the card a madness cast would move stays hidden under the exemption's scope"
+        );
+    }
+
+    /// **CR 708.5: the exemption does not reach the two-sided face-down pair.**
+    ///
+    /// `has_during_resolution_alt_cost_permission` is the gate's one disjunct with no zone
+    /// test, so a BATTLEFIELD object carrying that grant is admitted — and the pair still
+    /// keeps its explicit entry, because the face-down leaf is what writes the redacted name
+    /// and dropping the entry would publish the hidden card's own name instead. Both arms are
+    /// the same permanent under the same grant; only the controller differs.
+    #[test]
+    fn the_cast_exemption_leaves_the_two_sided_face_down_pair_alone() {
+        use crate::types::ability::{
+            CastingPermission, ExileGrantCostProvenance, ResolutionCastCleanup,
+            ResolutionMvRejectAction,
+        };
+
+        let build = |controller: PlayerId| -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                "Face Down".into(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).expect("just created");
+            obj.face_down = true;
+            obj.back_face = Some(snapshot_object_face(&GameObject::new(
+                ObjectId(999),
+                CardId(42),
+                controller,
+                "Grizzly Bears".into(),
+                Zone::Battlefield,
+            )));
+            obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                cost: crate::types::mana::ManaCost::zero(),
+                cost_provenance: ExileGrantCostProvenance::Alternative,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: Some(ResolutionCastCleanup {
+                    source_id: ObjectId(998),
+                    exiled_misses: Vec::new(),
+                    reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                    success_action: Default::default(),
+                }),
+                duration: None,
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            }];
+            (state, id)
+        };
+
+        let (observed, id) = build(PlayerId(1));
+        assert!(
+            crate::game::casting::castable_from_current_zone(
+                &observed,
+                observed.objects.get(&id).expect("live"),
+                PlayerId(0),
+                None,
+            ),
+            "reach guard: the zone-test-free disjunct ADMITS P0 for a battlefield object"
+        );
+        assert_eq!(
+            proj(&observed, PlayerId(0), id),
+            Some(IdentityProjection::FaceDownRedacted),
+            "the admitted non-controller still gets the redaction entry, never absence"
+        );
+
+        let (controlled, id) = build(PlayerId(0));
+        assert_eq!(
+            proj(&controlled, PlayerId(0), id),
+            Some(IdentityProjection::FaceDownRevealed),
+            "PAIRED POSITIVE: the same permanent under the same grant, controlled by the \
+             viewer, takes the other leaf of the same pair"
+        );
+    }
+
+    /// **`proposer_hidden_view` applies the two leaves that HIDE and skips the one that
+    /// reveals.**
+    ///
+    /// CR 708.2a: the drive clone is `apply()`ed, so it must not carry a name a face-down
+    /// permanent does not have. The hand card is the paired positive proving the clone
+    /// redacts at all.
+    #[test]
+    fn proposer_hidden_view_hides_but_never_writes_a_face_down_name() {
+        let mut state = GameState::new_two_player(7);
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Theirs".into(),
+            Zone::Hand,
+        );
+        let fd = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Face Down".into(),
+            Zone::Battlefield,
+        );
+        state.battlefield.push_back(fd);
+        {
+            let obj = state.objects.get_mut(&fd).expect("just created");
+            obj.face_down = true;
+            obj.back_face = Some(snapshot_object_face(&GameObject::new(
+                ObjectId(999),
+                CardId(42),
+                PlayerId(0),
+                "Grizzly Bears".into(),
+                Zone::Battlefield,
+            )));
+        }
+
+        let view = proposer_hidden_view(&state, PlayerId(0));
+        assert_eq!(
+            view.objects[&theirs].name, HIDDEN_CARD_NAME,
+            "the opponent's hand card is blanked on the drive clone"
+        );
+        assert_eq!(
+            view.objects[&fd].name, "Face Down",
+            "CR 708.2a: the reveal leaf is a no-op here — the clone keeps the face-down object \
+             untouched rather than gaining the back face's name"
+        );
+        assert!(
+            view.objects[&fd].back_face.is_some(),
+            "and loses no information: `back_face` is still carried unredacted"
+        );
+
+        // The wire projection is the other consumer and DOES write the display name — the
+        // control that proves the assertion above is about this consumer, not about the leaf
+        // never firing anywhere.
+        let wire = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(wire.objects[&fd].name, "Grizzly Bears");
     }
 }

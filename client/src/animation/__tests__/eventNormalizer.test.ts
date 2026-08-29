@@ -77,6 +77,7 @@ describe("normalizeEvents", () => {
       { type: "CardDrawn", data: { player_id: 0, object_id: 1, nth_in_turn: 1, nth_in_step: 1 } },
       { type: "PermanentTapped", data: { object_id: 1 } },
       { type: "PermanentUntapped", data: { object_id: 1 } },
+      { type: "Milled", data: { player_id: 0, object_id: 1, to: "Graveyard" } },
     ];
 
     expect(normalizeEvents(events)).toEqual([]);

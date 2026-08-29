@@ -1411,12 +1411,15 @@ fn apply_action_boundary_core(
     // defers to the next boundary at which the flag is clear. No "outermost"
     // depth test is added: gating on it would leave AI-probe clones unrepaired
     // while the real state is repaired.
+    let pre_recovery_pass_was_authorized = matches!(&action, GameAction::PassPriority)
+        && check_actor_authorization(state, authenticated_actor, &action).is_ok();
     effects::sweep_ownerless_post_replacement_strand(state);
-    state.remove_empty_active_post_replacement_frame();
     let recovered_devour_rest_boundary =
-        recover_orphaned_devour_completion_at_priority_boundary(state);
+        recover_orphaned_devour_completion_at_priority_boundary(state)
+            || recover_orphaned_spell_resolution_at_priority_boundary(state);
+    state.remove_empty_active_post_replacement_frame();
     let recovered_stale_priority_pass =
-        recovered_devour_rest_boundary && matches!(action, GameAction::PassPriority);
+        recovered_devour_rest_boundary && matches!(&action, GameAction::PassPriority);
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -1437,6 +1440,25 @@ fn apply_action_boundary_core(
         Some(semantic_owner)
     };
     let preserve_interaction = interaction::action_preserves_interaction(&action);
+    // Clear transient inter-effect state at the start of each player action.
+    // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
+    // consumed by sub_ability continuations via EventContextAmount fallback.
+    state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
+    state.exiled_from_hand_this_resolution = 0;
+    state.die_result_this_resolution = None;
+    state.consumed_before_priority_trigger_events.clear();
+    if recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
+        lifecycle.discard();
+        return Err(EngineError::WrongPlayer);
+    }
+    if !recovered_stale_priority_pass {
+        if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+            lifecycle.discard();
+            *state = boundary_snapshot;
+            return Err(err);
+        }
+    }
     if recovered_stale_priority_pass {
         return Ok(RawActionApplication {
             result: ActionResult {
@@ -1454,19 +1476,6 @@ fn apply_action_boundary_core(
             preserve_interaction,
             lifecycle,
         });
-    }
-    // Clear transient inter-effect state at the start of each player action.
-    // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
-    // consumed by sub_ability continuations via EventContextAmount fallback.
-    state.last_effect_count = None;
-    state.last_effect_counts_by_player.clear();
-    state.exiled_from_hand_this_resolution = 0;
-    state.die_result_this_resolution = None;
-    state.consumed_before_priority_trigger_events.clear();
-    if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
-        lifecycle.discard();
-        *state = boundary_snapshot;
-        return Err(err);
     }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
@@ -1556,18 +1565,67 @@ fn recover_orphaned_devour_completion_at_priority_boundary(state: &mut GameState
         return false;
     }
 
-    let cleared = state.clear_completed_active_devour_snapshot();
+    let mut recovered = state.clone();
+    let cleared = recovered.clear_completed_active_devour_snapshot();
     debug_assert!(cleared, "the guarded Devour frame must be consumable");
-    state.remove_empty_active_post_replacement_frame();
-    settle_resolving_stack_entry_after_continuation_resume(state);
-    if state.resolving_stack_entry.is_some() {
+    recovered.remove_empty_active_post_replacement_frame();
+    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    if recovered.resolving_stack_entry.is_some() {
         return false;
     }
 
-    priority::reset_priority(state);
-    state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
+    priority::reset_priority(&mut recovered);
+    recovered.waiting_for = WaitingFor::Priority {
+        player: recovered.active_player,
     };
+    *state = recovered;
+    true
+}
+
+/// CR 117.3b + CR 608.2c: A persisted permanent-spell epilogue may retain its
+/// sole `SpellResolution` frame after every other instruction has completed.
+/// Consume only that exact bare carrier rest, then route settlement through the
+/// ordinary completed-carrier authority.
+fn recover_orphaned_spell_resolution_at_priority_boundary(state: &mut GameState) -> bool {
+    let Some(pending) = state.active_spell_resolution() else {
+        return false;
+    };
+    let exact_bare_spell_resolution_rest = matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && state.resolution_stack.len() == 1
+        && state.active_ability_continuation().is_none()
+        && state.pending_cast.is_none()
+        && state.pending_resolution_completion.is_none()
+        && matches!(
+            state.resolving_stack_entry.as_ref(),
+            Some(crate::types::game_state::StackEntry {
+                id,
+                kind: StackEntryKind::Spell { .. },
+                ..
+            }) if *id == pending.object_id
+        );
+    if !exact_bare_spell_resolution_rest {
+        return false;
+    }
+
+    let mut recovered = state.clone();
+    let pending = recovered
+        .take_active_spell_resolution()
+        .expect("the guarded bare spell-resolution frame must be active");
+    debug_assert!(matches!(
+        recovered.resolving_stack_entry.as_ref(),
+        Some(crate::types::game_state::StackEntry { id, .. }) if *id == pending.object_id
+    ));
+    settle_resolving_stack_entry_after_continuation_resume(&mut recovered);
+    if recovered.resolving_stack_entry.is_some() {
+        return false;
+    }
+
+    priority::reset_priority(&mut recovered);
+    recovered.waiting_for = WaitingFor::Priority {
+        player: recovered.active_player,
+    };
+    *state = recovered;
     true
 }
 
@@ -1668,8 +1726,8 @@ fn finish_action_boundary_with_lifecycle(
 thread_local! {
     /// PR-3 (Option C): set while inside a legality/search simulation probe
     /// (`ai_support::SimulationFilter`'s clone-and-apply). Loop-shortcut detection
-    /// (`reconcile_terminal_result` §3) and ring accumulation
-    /// (`pass_priority_once_with_pipeline` §2) are TOP-LEVEL-ONLY — a hypothetical
+    /// (`reconcile_terminal_result`) and ring accumulation
+    /// (`pass_priority_once_with_pipeline`) are TOP-LEVEL-ONLY — a hypothetical
     /// single-action probe is NOT a real CR 732.2a play sequence, so it must neither
     /// shortcut nor accumulate. Engine game logic is single-threaded (no rayon /
     /// par_iter / std::thread::spawn in the apply or legal_actions path), `apply()` is
@@ -1681,7 +1739,8 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// True while inside a `SimulationFilter` legality probe. Read by §2 and §3.
+/// True while inside a `SimulationFilter` legality probe. Read by the ring-accumulation and
+/// loop-shortcut-detection sites above.
 pub(crate) fn in_simulation_probe() -> bool {
     IN_SIMULATION_PROBE.with(|f| f.get())
 }
@@ -1729,7 +1788,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // 704.5a SBA first and this never preempts or double-fires a legitimate win — it
     // only fires when the game would otherwise grind on (high victim life, or mid-drain
     // before 0). The `!GameOver` guard makes it idempotent across the two
-    // `reconcile_terminal_result` calls in `apply` (`:326` and `:330`).
+    // `reconcile_terminal_result` calls in `apply`.
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. }) // a player would get priority (CR 704.3)
         // CR 732.2a: the mandatory-loop game-ending shortcut is gated behind the
@@ -1748,15 +1807,14 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         && !state.stack.is_empty()
         && !state.loop_detect_ring.is_empty()
         // PR-3 Defect-2: loop-shortcut detection is TOP-LEVEL-ONLY. Inside a
-        // `SimulationFilter` legality probe the flag is set, so §3 is skipped. This
+        // `SimulationFilter` legality probe the flag is set, so detection is skipped. This
         // enforces the invariant that a hypothetical single-action probe never runs
         // game-ending shortcut logic, and guards the
-        // reconcile→§3→§9→legal_actions→SimulationFilter→reconcile path against
-        // unbounded re-entry. (In the current architecture the §9 gate's pass-state
-        // reset already makes those nested probes handoffs that do not re-resolve, so
-        // the path is bounded even without this conjunct — see the impl report's
-        // Defect-2 measurement — but the guard keeps the top-level-only invariant
-        // explicit and robust to future §9/§2 changes.)
+        // reconcile→detection→legal_actions→SimulationFilter→reconcile path against
+        // unbounded re-entry. (The priority gate's pass-state reset already makes
+        // those nested probes handoffs that do not re-resolve, so the path is bounded
+        // even without this conjunct, but the guard keeps the top-level-only
+        // invariant explicit.)
         && !in_simulation_probe()
     {
         // PR-7 Phase 3: dispatch the confirmed-loop body by mode. The `On` arm is the
@@ -1940,7 +1998,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             // loop can be detected during a different player's priority window.
             // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
             // comparand read ⇒ the CR 104.4b `.normalized` half.
-            let certificate = build_cert(&prior.normalized, state, &delta, winner);
+            let certificate = build_cert(&prior.normalized, state, &delta, winner, None);
             // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
             // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
@@ -2181,10 +2239,21 @@ fn build_cert(
     state: &GameState,
     delta: &crate::analysis::resource::ResourceVector,
     winner: PlayerId,
+    departure: Option<&crate::analysis::resource::CertifiedInstructedDeparture>,
 ) -> crate::analysis::loop_check::LoopCertificate {
+    // CR 732.2a: the two fields are derived from DIFFERENT deltas, deliberately. `unbounded`
+    // reads the FULL delta, because an instructed non-caster library departure is genuine
+    // unbounded progress and rides the certificate as its own `LibraryDelta` advantage axis.
+    // `win_kind` reads the REDUCED one, because CR 121.4 / CR 104.3c put the loss on a DRAW
+    // from an empty library rather than on the departure, so classifying `Decking` here would
+    // claim a threshold the engine cannot prove — see `without_certified_departure`.
+    let win_kind_delta = match departure {
+        Some(certified) => delta.without_certified_departure(&certified.per_victim),
+        None => delta.clone(),
+    };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
-        win_kind: crate::analysis::loop_check::classify_win_kind(winner, delta),
+        win_kind: crate::analysis::loop_check::classify_win_kind(winner, &win_kind_delta),
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
@@ -2796,7 +2865,7 @@ fn certified_bounded_cycle_offer<'a>(
     // Path A's spelled out at the site rather than mutated after the fact.
     // `cert_current` is the live `state` on both bases, exactly as before: `build_cert`'s only
     // use of the pair is `board_delta`, a comparand read.
-    let base = build_cert(cert_prior, state, &periodic.delta, proposer);
+    let base = build_cert(cert_prior, state, &periodic.delta, proposer, None);
     let certificate = crate::analysis::loop_check::LoopCertificate {
         per_cycle: Some(periodic),
         // CR 732.5: honest, and currently read by nothing in production — a loop nobody can
@@ -3407,7 +3476,7 @@ fn entry_announces(
     // `Err` (no legal target, CR 603.3d) also yields `None` — fail-closed, matching this
     // function's contract that the schema can only ever UNDER-publish. Purity survives:
     // `build_target_slots` never reads `state.waiting_for` (its only hit in
-    // `ability_utils.rs` is a test at `:7722`).
+    // `ability_utils.rs` is a test).
     let source = object_decision_source(state, entry.source_id)?;
     // CR 603.5 + CR 732.2a: `entry.controller == proposer` above bounds who OWNS the entry;
     // it does NOT bound who the resolver ASKS, nor WHETHER it asks, nor HOW MANY TIMES.
@@ -5608,24 +5677,71 @@ fn normalize_recast_frame(
     s
 }
 
-/// CR 111.10: the content class of the reproduced token — the single battlefield object
-/// present in `after` but absent from `before` (the one predefined token the recast
-/// creates). `None` unless EXACTLY one new battlefield object appeared (the target class
-/// creates one Saproling; zero or several ⇒ not this shape ⇒ fail-closed).
-fn derived_fodder_class(
-    before: &GameState,
-    after: &GameState,
-) -> Option<crate::game::game_object::GameObject> {
-    let mut new_ids = after
+/// CR 111.1: the battlefield objects one period MINTED — created with no prior existence in any
+/// zone — as opposed to those that ARRIVED by moving zones. `zones::move_to_zone` carries the
+/// existing `object_id` through a move, so an arrival is keyed in BOTH frames' `objects` maps
+/// while a mint is keyed only in `after`'s.
+///
+/// The test is a CONJUNCTION with the shipped new-to-the-battlefield test, not a replacement of
+/// it, and the conjunction carries the safety argument: the narrowed set is a SUBSET of the
+/// shipped one, so no id the shipped rule excluded can enter a derived class and the published
+/// per-cycle count cannot be inflated in either direction. Replacing the test would leave one
+/// direction open — a `before.battlefield` id with no `before.objects` entry — and in THAT
+/// direction an extra member matching the class does not make the class heterogeneous, so the
+/// count would silently rise.
+///
+/// ONE test, TWO readers: the class derivation and the producer's token-axis feed, which must
+/// publish the count the boundary mint will reproduce.
+fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
+    after
         .battlefield
         .iter()
         .copied()
-        .filter(|id| !before.battlefield.contains(id));
-    let id = new_ids.next()?;
-    if new_ids.next().is_some() {
-        return None;
+        .filter(|id| !before.battlefield.contains(id) && !before.objects.contains_key(id))
+        .collect()
+}
+
+/// CR 111.3 / CR 707.2: the content class of the reproduced fodder, and the per-cycle count `k` of
+/// members the period reproduces — the battlefield objects `after` MINTED. `None`
+/// unless EVERY new battlefield object belongs to ONE class; `Some((class, k))` with `k >= 1`
+/// otherwise, and `None` for zero new objects. CR 111.3 is the authority for a created token's
+/// copiable values, with a Saproling as its own example (CR 111.10 scopes PREDEFINED tokens).
+///
+/// HOMOGENEITY IS A CONJUNCTION, and the second conjunct is not optional:
+/// [`crate::analysis::resource::fodder_content_eq`] routes through `object_content_eq`, whose per-id
+/// justification — "card-intrinsic fields are immutable FOR A GIVEN OBJECT ID" — does not transfer
+/// to this CROSS-id compare, which reads neither `card_types`, `color` nor `keywords`, exactly the
+/// characteristics CR 707.2 says a copy acquires. The mint reproduces the class by copying
+/// `intrinsic_copiable_values`, so a multiset homogeneous only under `fodder_content_eq` could mint
+/// k*N copies of ONE representative while the period produced k DIFFERENT permanents.
+///
+/// THE SET IS THE MINTED MEMBERS, and the criterion is what the collapse can DELIVER rather than
+/// what the frames contain. `PersistentAxisMaterialization::Tokens`' boundary mint reproduces `k`
+/// members of the class per cycle by MINTING them (CR 111.1, with CR 111.3 / CR 707.2 fixing the
+/// values reproduced), so an object that merely MOVED onto the battlefield is not a member of a
+/// class that mint can reproduce, and publishing it as one is a promise the collapse cannot keep
+/// (CR 732.2a). What such an object is instead is the board cover's question, answered by
+/// `analysis::resource::certify_instructed_opponent_library_departure`.
+fn derived_fodder_class(
+    before: &GameState,
+    after: &GameState,
+) -> Option<(crate::game::game_object::GameObject, u32)> {
+    let new_ids = minted_battlefield_ids(before, after);
+    let mut members = new_ids.iter().filter_map(|id| after.objects.get(id));
+    let class = members.next()?.clone();
+    let class_values = crate::game::printed_cards::intrinsic_copiable_values(&class);
+    let mut k: u32 = 1;
+    for other in members {
+        if !crate::analysis::resource::fodder_content_eq(&class, other)
+            || crate::game::printed_cards::intrinsic_copiable_values(other) != class_values
+        {
+            return None;
+        }
+        k += 1;
     }
-    after.objects.get(&id).cloned()
+    // Fail-closed on a partial resolve: an id in `after.battlefield` with no `after.objects` entry
+    // was silently skipped by the `filter_map` above and must not be counted as homogeneous.
+    (k as usize == new_ids.len()).then_some((class, k))
 }
 
 /// The reproduced fodder class of one accepted object-growth period, plus whether that
@@ -5635,6 +5751,10 @@ fn derived_fodder_class(
 /// clone-drive that derives the class.
 struct PeriodFodder {
     class: crate::game::game_object::GameObject,
+    /// CR 111.3: the per-cycle count `k` of class members the period reproduces, measured by
+    /// [`derived_fodder_class`] on the same one-period drive. `>= 1`. The boundary mint multiplies
+    /// by it (`PersistentAxisMaterialization::Tokens`' `per_cycle_delta`).
+    per_cycle_count: u32,
     taps_fodder: bool,
 }
 
@@ -5652,10 +5772,15 @@ struct PeriodFodder {
 /// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
 /// frame exactly as `apply_until_lethal_shortcut` does before its identical drive.
 ///
+/// CR 732.2a: this is the accept-time RE-DERIVATION of the same measurement the offer
+/// published, so it must see what the offer saw — hence the same
+/// `visibility::proposer_hidden_view` base — or the two can disagree for a reason no
+/// player can see.
+///
 /// INV (clone-only): takes `&GameState` (SHARED borrow) ⇒ a live write is TYPE-IMPOSSIBLE.
 /// The `Priority{controller}` seed and the drive both mutate `before`/`after`, which are
-/// THROWAWAY clones (`state.clone()` → `before.clone()`); live `state.waiting_for` is never
-/// touched, so this cannot corrupt the real accept flow (INV-1, mirrors
+/// THROWAWAY clones (the redacted view → `before.clone()`); live `state.waiting_for` is
+/// never touched, so this cannot corrupt the real accept flow (INV-1, mirrors
 /// `try_offer_object_growth_shortcut`).
 fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> {
     let seq = state.last_loop_action_sequence.clone();
@@ -5670,7 +5795,7 @@ fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> 
     let _probe = SimulationProbeGuard::enter();
     // Seed + drive on THROWAWAY clones only (never `state`): `before` is the pre-drive frame,
     // `after` the post-one-period frame; callers diff the two clones.
-    let mut before = state.clone();
+    let mut before = crate::game::visibility::proposer_hidden_view(state, controller);
     priority::reset_priority(&mut before);
     before.waiting_for = WaitingFor::Priority { player: controller };
     let mut after = before.clone();
@@ -5681,9 +5806,11 @@ fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> 
 /// CR 732.2a / CR 111.1: re-derive the reproduced fodder class of the accepted
 /// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
 /// clone (`drive_one_period_frames`), and measure whether that period taps a fodder member.
-/// `None` when the sequence is empty or the period reproduces no single new battlefield
-/// object (a multi-activation mana engine → no fodder pile to display). Same
-/// `derived_fodder_class` single-new-object rule as the detection drive. Called at
+/// `None` when the sequence is empty or the period reproduces no HOMOGENEOUS multiset of new
+/// battlefield objects (a multi-activation mana engine reproduces none → no fodder pile to
+/// display; a heterogeneous multi-entry period is not this shape). Same
+/// `derived_fodder_class` one-class rule as the detection drive, and the same per-cycle count
+/// `k` it measures. Called at
 /// materialize (with the sequence still intact) to snapshot the ∞ pile and its tapped-growth
 /// axis. The post-drive `derived_fodder_class` / `tapped_fodder_members` inspections are pure
 /// (they never read the probe flag), so running them after the shared kernel's guard has
@@ -5691,7 +5818,7 @@ fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> 
 fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
     let controller = state.last_loop_action_sequence.first()?.controller;
     let (before, after) = drive_one_period_frames(state)?;
-    let class = derived_fodder_class(&before, &after)?;
+    let (class, per_cycle_count) = derived_fodder_class(&before, &after)?;
     // CR 702.51a: the period taps a fodder iff the driven tapped-fodder multiset GREW across the
     // one-period drive. `select_convoke_taps` sorts fodder (`is_token`) FIRST, so a convoke/
     // tap-cost period taps a reproduced fodder → this grows; a mana-paid untapped-growth period
@@ -5700,7 +5827,11 @@ fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
     let taps_fodder = crate::analysis::resource::tapped_fodder_members(&after, controller, &class)
         .len()
         > crate::analysis::resource::tapped_fodder_members(&before, controller, &class).len();
-    Some(PeriodFodder { class, taps_fodder })
+    Some(PeriodFodder {
+        class,
+        per_cycle_count,
+        taps_fodder,
+    })
 }
 
 /// CR 122.1 + CR 732.2a: THE SINGLE per-object counter derivation of an accepted period — drive
@@ -5818,7 +5949,7 @@ fn try_offer_object_growth_shortcut(
     // (optional) loop — every driving step must be a player-initiated cast/activation. Replaces
     // the pre-P7 `no_living_player_has_meaningful_priority_action` offer gate (HAZARD A: that
     // predicate + its leaf `is_meaningful_priority_activation` (mana_sources.rs) stay byte-identical
-    // for the MANDATORY `:431`/`:515` lethal/draw paths). A mana engine's activations are voluntary
+    // for the MANDATORY lethal/draw paths). A mana engine's activations are voluntary
     // (CR 605.3a) so it offers; a future mandatory driving variant is forced to return `false`.
     if !seq.iter().all(|c| c.action.is_voluntarily_repeatable()) {
         return None;
@@ -5896,9 +6027,28 @@ fn try_offer_object_growth_shortcut(
     }
 
     // Drive two whole PERIODS (three settle frames) under the re-entrancy guard.
+    //
+    // CR 732.2a: the settle frame and the driven clone share ONE base — the proposer's own
+    // information set — because a proposal may rest only on the current game state and the
+    // PREDICTABLE results of the sequence, and a card the proposer may not look at is not
+    // predictable to them (CR 400.6 puts that reading with the card's owner). Redaction is
+    // applied once, here, and the drive mutates that same clone, so a card the period moves
+    // is blank in every frame the cover compares.
+    //
+    // `seq`, `expected_defs` and the randomness pre-scan above deliberately keep reading the
+    // LIVE `state`: they resolve the recast object and its combined spell ability, which is
+    // the determinism question, not the information one. `pinned_decisions_to_points` below
+    // keeps the live state for the same reason — the declaration is made against the real
+    // board. Three consequences, stated rather than left to be rediscovered: the RNG
+    // word-position check still compares the driven clone against the live `state`, and
+    // redaction draws no randomness, so it stays valid; `derived_fodder_class` now compares
+    // redacted frames, which is sound because the fodder is a battlefield token and public;
+    // and redaction costs one pass over the hidden-zone objects against a hook that already
+    // drives two whole periods through `apply()` — if that measures hot, redact once per
+    // beat rather than once per hook, never narrow the rule.
     let _probe = SimulationProbeGuard::enter();
-    let s_n = state.clone();
-    let mut clone = state.clone();
+    let s_n = crate::game::visibility::proposer_hidden_view(state, caster);
+    let mut clone = s_n.clone();
     drive_loop_sequence_iteration(&mut clone, &seq, 0, &expected_defs).ok()?;
     let s_n1 = clone.clone();
     drive_loop_sequence_iteration(&mut clone, &seq, 1, &expected_defs).ok()?;
@@ -5933,20 +6083,21 @@ fn try_offer_object_growth_shortcut(
         normalize_recast_frame(&s_n2, &seq[0]),
     );
     // CR 732.2a board recurrence on BOTH pairs — two disjoint recurrence shapes:
-    //  - fodder-growth (a token was reproduced each period, `derived_fodder_class` is `Some`):
-    //    cover modulo the inert reproduced fodder class (the P3 object-growth path, unchanged).
+    //  - fodder-growth (one HOMOGENEOUS class of k >= 1 members was reproduced each period,
+    //    `derived_fodder_class` is `Some`): cover modulo the inert reproduced fodder class (the
+    //    P3 object-growth path, unchanged — the cover consumes only the class, never k).
     //  - pure resource growth (NO new battlefield object — the multi-activation mana-engine class):
     //    the board returns EQUAL modulo projected resources (mana grows +N/period, board identical).
     //    PROBE-1 measured `loop_states_equal_modulo_resources` TRUE on real Basalt+Power sequence
     //    boundaries. A PARTIAL period never reaches here board-equal (the drive re-taps a tapped
     //    source and aborts first), so the drive+cover IS the period-boundary check.
     let cover_ok = match derived_fodder_class(&s_n, &s_n1) {
-        Some(mut fodder) => {
+        Some((mut fodder, _k)) => {
             crate::analysis::resource::project_object_for_loop(&mut fodder);
             crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
-                &cs_n, &cs_n1, &fodder,
+                &cs_n, &cs_n1, &fodder, caster,
             ) && crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
-                &cs_n1, &cs_n2, &fodder,
+                &cs_n1, &cs_n2, &fodder, caster,
             )
         }
         None => {
@@ -5976,16 +6127,35 @@ fn try_offer_object_growth_shortcut(
         &crate::analysis::resource::ResourceVector::snapshot(&s_n1),
         &crate::analysis::resource::ResourceVector::snapshot(&s_n2),
     );
-    // CR 111.10: `tokens_created` is an EVENT-fed axis (0 under a snapshot diff), but the
-    // cover above already proved the battlefield grows ONLY by inert reproduced tokens, so
-    // the battlefield growth IS the per-cycle tokens-created count — the unbounded axis. Feed
-    // it so `net_progress_for` sees the progress and the certificate names TokensCreated.
-    let board_growth = s_n2.battlefield.len() as i64 - s_n1.battlefield.len() as i64;
-    if board_growth > 0 {
-        delta.tokens_created += board_growth;
+    // CR 111.1: `tokens_created` is an EVENT-fed axis (0 under a snapshot diff),
+    // so the period's MINTED count is fed in as the per-cycle tokens-created count — the
+    // unbounded axis — and `net_progress_for` then sees the progress the certificate names.
+    // The count is the MINTED one, not the raw `battlefield.len()` delta, because the boundary
+    // mint reproduces minted members and an ARRIVAL grows the battlefield without being one:
+    // publishing the raw delta would promise a per-cycle count the collapse cannot reproduce.
+    // Same `minted_battlefield_ids` test the class derivation uses, so the two cannot drift.
+    let minted_growth = minted_battlefield_ids(&s_n1, &s_n2).len() as i64;
+    if minted_growth > 0 {
+        delta.tokens_created += minted_growth;
     }
+    // CR 701.17b: an instructed, choiceless, non-caster top-of-library departure is an
+    // ADVANTAGE axis, not a loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for
+    // DRAWING from an empty library, never for milling one. `has_no_loss_axis` is therefore
+    // asked about the delta with the certified departure added back, and ONLY it:
+    // `net_progress_for` and `driving_resources_non_decreasing` keep the full delta, and
+    // `has_no_loss_axis` itself is not edited — its other call sites are the CR 732.4
+    // mandatory-draw arms, where relieving this would turn an unbreakable mandatory mill loop
+    // into a draw (CR 104.4b needs the game state to REPEAT, and a shrinking library does not).
+    let certified_departure =
+        crate::analysis::resource::certify_instructed_opponent_library_departure(
+            &s_n1, &s_n2, caster,
+        );
+    let sign_check_delta = match &certified_departure {
+        Some(certified) => delta.without_certified_departure(&certified.per_victim),
+        None => delta.clone(),
+    };
     if !delta.net_progress_for(caster)
-        || !has_no_loss_axis(&delta)
+        || !has_no_loss_axis(&sign_check_delta)
         || !crate::analysis::resource::driving_resources_non_decreasing(&s_n1, &s_n2, caster)
     {
         return None;
@@ -5994,8 +6164,8 @@ fn try_offer_object_growth_shortcut(
     // (The CR 104.4b optionality gate moved ABOVE the drive as STEP D's
     // `seq.iter().all(is_voluntarily_repeatable)` — HAZARD A: it no longer routes through
     // `no_living_player_has_meaningful_priority_action`, which stays scoped to the mandatory
-    // `:431`/`:515` lethal/draw paths.)
-    let certificate = build_cert(&s_n1, &s_n2, &delta, caster);
+    // lethal/draw paths.)
+    let certificate = build_cert(&s_n1, &s_n2, &delta, caster, certified_departure.as_ref());
     // CR 732.2a (CARRY, don't re-derive): the schema's decision list is the SAME
     // `build_recast_template` output the drive uses — `[ConvokeTaps]` when `seq[0]` is a convoke
     // recast, else `[]` (a multi-activation period carries no convoke pin). Legal sets are derived
@@ -6014,9 +6184,14 @@ fn try_offer_object_growth_shortcut(
     //
     // CR 704.5a / CR 704.5c: the `UntilLethal` arm is UNREACHABLE FROM THIS PRODUCER — `delta` is
     // a two-`snapshot` diff, and `ResourceVector::snapshot` writes neither `damage_dealt` nor
-    // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while
-    // `has_no_loss_axis` just above forces `life >= 0`, `library_delta >= 0`, `poison <= 0` on
-    // every seat; together those negate every non-`Advantage` branch of `classify_win_kind`. The
+    // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while the
+    // sign check just above forces `life >= 0` and `poison <= 0` on every seat; together those
+    // negate every non-`Advantage` branch of `classify_win_kind` but `Decking`. The forcing
+    // function for THAT one is no longer the sign check, which now admits a certified departure
+    // carrying a genuinely negative `library_delta`: it is `without_certified_departure`, which
+    // `build_cert` applies to the delta `win_kind` is classified on, so a certified departure
+    // classifies `Advantage` while an UNCERTIFIED negative library delta never reaches here at
+    // all. The
     // arm is kept anyway so `shortcut_iteration_count` stays the SINGLE authority for that
     // classification, and so this wildcard-free match build-breaks on a future third
     // `IterationCount` variant — the guard `handle_declare_shortcut` states for its own cap. The
@@ -6035,6 +6210,26 @@ fn try_offer_object_growth_shortcut(
         MAX_SHORTCUT_CYCLES,
     );
     Some((certificate, schema))
+}
+
+/// CR 732.2a: which materialization strategy an accepted object-growth collapse selected.
+///
+/// A LOCAL name for a decision `materialize_object_growth_shortcut` makes and consumes in
+/// adjacent expressions. The route is never stored, returned, or read at a distance, so the type
+/// buys nothing at a distance either. What it does buy is the wildcard-free `match` below: the
+/// two registration bodies sit under one exhaustive dispatch, so a future third strategy
+/// build-breaks here rather than silently inheriting `Batched`. Never re-derive a route from a
+/// registration — `LoopCollapseAxis::from_materializations` cannot tell the routes apart at all,
+/// since a `DriveSequence { collapsed_axes: [TokensCreated] }` folds to the same
+/// `LoopCollapseAxis::Tokens` the batched `Tokens(_)` item folds to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopCollapseRoute {
+    /// N x delta batched items (`Tokens` / `Counters` / `Life`). O(1) in N; no per-cycle replay.
+    Batched,
+    /// `DriveSequence` — the captured period replayed through real `apply()` N times. Cubic in N,
+    /// so this arm is where a future iteration budget would attach; there is none today, and the
+    /// published ceiling stays the accepted count.
+    Replay,
 }
 
 /// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): "materialize" a confirmed UNBOUNDED object-growth
@@ -6068,7 +6263,11 @@ fn materialize_object_growth_shortcut(
     // DISPLAY (hoisted, unconditional — runs for BOTH the observed and unobserved routes so an
     // observed token+X loop keeps its on-battlefield ∞ pile accept→boundary): seed the pile's
     // anchors and register it, capturing the token copiable profile for the batched Tokens stash.
-    let token_profile: Option<crate::types::ability::CopiableValues> =
+    // PAIRED, not two bindings: the per-cycle count `k` travels WITH the profile so
+    // `per_cycle_delta > 1 ⇒ token_profile.is_some()` is enforced by the type rather than by a
+    // reader remembering it. A `k` bound outside this `if let` (defaulted to 1) would compile and
+    // silently disable the route guard below.
+    let token_growth: Option<(crate::types::ability::CopiableValues, u32)> =
         if let Some(period) = current_period_fodder(state) {
             let class = &period.class;
             // CR 732.2a / CR 707.2: capture the fodder's copiable profile NOW, while the recast
@@ -6116,7 +6315,7 @@ fn materialize_object_growth_shortcut(
             let pile =
                 crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, class);
             state.register_unbounded_loop_pile(proposal.proposer, pile);
-            Some(profile)
+            Some((profile, period.per_cycle_count))
         } else {
             None
         };
@@ -6130,7 +6329,7 @@ fn materialize_object_growth_shortcut(
     // bypasses the counter doubler pipeline). Everything else BATCHES. A pure token/mana loop grows
     // no counter/life axis (`growths`/`life` empty) → its only observer surface is token creation,
     // already vetted by the OFFER-time fodder firewall → it always batches even when the board
-    // carries an unrelated life/counter observer (plan §5 Note; the observedness firewall is
+    // carries an unrelated life/counter observer (the observedness firewall is
     // AXIS-SPECIFIC so an incidental board observer never mis-routes a disjoint-axis loop).
     let growths = current_period_counter_growth(state);
     // CR 732.2a / CR 122.1: the ∞ counter DISPLAY targets are the SAME per-object growth the
@@ -6167,8 +6366,51 @@ fn materialize_object_growth_shortcut(
     // `apply_life_gain` from four resolvers, including CR 702.15b lifelink on an ETB damage
     // trigger (the Terror of the Peaks shape), which no effect-shape test can see.
     let life_etb_sourced = !life.is_empty()
-        && token_profile.is_some()
+        && token_growth.is_some()
         && crate::analysis::resource::board_has_functioning_etb_trigger(state);
+    // CR 601.2i + CR 732.2a: a per-cycle side effect the board re-earns from the loop's own CAST
+    // also belongs on the concrete replay. The conjuncts above are AXIS-shaped because the
+    // batched arm PRODUCES the ETB events it must not double-pay; the cast axis has no such
+    // analogue, since the batched collapse never casts anything, so the cast event belongs to the
+    // ELIDED period and the batched arm re-performs it 0x. `token_profile.is_some()` is therefore
+    // UNSOUND as a cast-side narrowing (a counter loop driven by a buyback recast has a cast
+    // trigger and no token profile), the ACTION-SHAPE period-side alternative is unsound too
+    // (`LoopAction` names the DRIVING action, so excluding `Activate` batches a period whose
+    // activated ability casts during resolution), and the `TapLandForMana`-ONLY form is vacuous.
+    //
+    // HOISTED before the move below (`token_growth` is consumed by the `if let` in `batched`),
+    // exactly as `life_etb_sourced` reads it. `u32` is `Copy`, so this is a read, not a clone. 0
+    // when no `Tokens` item exists — never 1, which would read as "one token per cycle" and
+    // switch the route guard off for a stash that does not exist.
+    let token_per_cycle_delta: u32 = token_growth.as_ref().map_or(0, |(_, k)| *k);
+    // SINGLE AUTHORITY for what the batched arm registers: the exact item list this block hands
+    // to `register_pending_materialization`, built ONCE and consumed as a VALUE by both that arm
+    // and the route's `!batched.is_empty()` conjunct — deliberately NOT a predicate mirroring the
+    // arm's per-axis conditions, which is the drift this shape forecloses. A future fourth
+    // batched axis is a fourth push HERE and feeds the route guard for free.
+    let batched: Vec<crate::types::game_state::PersistentAxisMaterialization> = {
+        use crate::types::game_state::{PersistentAxisMaterialization, TokenGrowth};
+        let mut items = Vec::new();
+        if let Some((profile, per_cycle_delta)) = token_growth {
+            items.push(PersistentAxisMaterialization::Tokens(Box::new(
+                TokenGrowth {
+                    profile: Box::new(profile),
+                    per_cycle_delta,
+                },
+            )));
+        }
+        if !growths.is_empty() {
+            items.push(PersistentAxisMaterialization::Counters(growths));
+        }
+        items.extend(life.into_iter().map(|(player, per_cycle_delta)| {
+            PersistentAxisMaterialization::Life {
+                player,
+                per_cycle_delta,
+            }
+        }));
+        items
+    };
+    let cast_sourced = crate::analysis::resource::board_has_functioning_cast_trigger(state);
     // M5: hoisted out of the branch so an empty period can never register NOTHING — a route
     // flipped to the replay falls back to the batched arm instead of silently dropping the whole
     // materialization. (Unreachable today: `growths`/`life` are derived from the same
@@ -6176,39 +6418,118 @@ fn materialize_object_growth_shortcut(
     // predicate is already false there. Kept explicit so a future route conjunct cannot
     // reintroduce the hole.)
     let sequence = state.last_loop_action_sequence.clone();
-    if (counter_observed || life_observed || life_etb_sourced) && !sequence.is_empty() {
-        // CR 732.2a: OBSERVED batchable growth — one DriveSequence collapses the WHOLE loop (all
-        // axes); replaying the captured sequence recreates every per-cycle effect honoring
-        // observers. Do NOT also register batched items (the routes are exclusive per accept).
-        state.register_pending_materialization(
-            proposal.proposer,
-            crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
-                sequence,
-                collapsed_axes: proposal.unbounded.clone(),
-            },
-        );
+    // CR 614.1a + CR 603.6a: the batched `Tokens` mint collapses k·N real creations into ONE
+    // `ProposedEvent::CreateToken` of size k·N and RE-RUNS the replacement pipeline on it
+    // (`token_copy`'s `replace_event` call, keyed by
+    // `replacement::replacement_event_keys_for_event`), so it is faithful only if nothing
+    // re-derives a count from that event or its entries. At k > 1 the multiplicity came from
+    // SOMEWHERE and the batched arm cannot tell a replacement's factor from the period's own
+    // count, so it refuses to guess and replays — otherwise the mint proposes k·N and the doubler
+    // multiplies it again, elision 2k·N against performance k·N. The gate also keeps every
+    // currently-green LoopShortcut row on its route (all are k == 1) and makes an
+    // OPPONENT-controlled doubler a no-op, since doublers match by `token_owner_scope`. k == 1 is
+    // left EXACTLY as shipped, which is NOT a claim that the old path is exact: a rider-only
+    // `CreateToken` replacement changes no count, so it never produces k >= 2 and this conjunct
+    // switches off, yet it fires once per EVENT — a lump mint fires it 1x where N cycles fire it
+    // Nx. The same hole exists for a NON-TOKEN fodder class; both are PRE-EXISTING.
+    let token_growth_needs_replay =
+        token_per_cycle_delta > 1 && crate::analysis::resource::token_growth_is_observed(state);
+    // CR 732.2c: the shortcut is TAKEN, "with all game choices contained in the shortcut
+    // proposal having been taken". A promise the collapse cannot deliver must not be accepted.
+    // An axis whose ∞ mark this collapse ENDS (`DeferredAccrual`) but for which NO batched item
+    // exists can only be delivered by replaying the period — so it routes to the replay
+    // regardless of what else the period grew. Expressed over the two shipped classifiers
+    // rather than over a hard-coded axis, so a future replay-only deferred axis inherits it.
+    let unbatchable_deferred = proposal.unbounded.iter().any(|axis| {
+        axis.unbounded_mark_kind() == crate::analysis::resource::UnboundedMarkKind::DeferredAccrual
+            && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
+    });
+    // `!batched.is_empty()` is the SYMMETRY guard for the OTHER four disjuncts, a conjunct of
+    // that sub-disjunction rather than a narrowing bolted onto the cast leg: a replay with
+    // nothing deferred to deliver is
+    // pure cost — UNCAPPED and cubic in N — plus a spurious CR 500.5 collapse prompt for a loop
+    // with nothing to collapse, since the prompt gate
+    // `next_apnap_player_with_pending_materialization` tests STASH PRESENCE only. Pinned by
+    // `loop_shortcut_cast_route::mana_engine_with_cast_trigger_registers_nothing`. Hoisting it is
+    // exactly equivalent to narrowing the cast leg alone, because the other three disjuncts
+    // already imply it, and a future fifth inherits it. Do NOT replace it with
+    // `!accountable.is_empty()`: `growths` / `life` come from `current_period_counter_growth` /
+    // `current_period_life_growth` at accept time, a DIFFERENT derivation from the offer-time
+    // `proposal.unbounded`, and the two can disagree in exactly the direction that would route an
+    // OBSERVED counter loop to the batched arm.
+    //
+    // `unbatchable_deferred` sits OUTSIDE that guard: such an axis routes to Replay whatever
+    // `batched` holds. CR 732.2c advances the game "with all game choices contained in the
+    // shortcut proposal having been taken", so no route may DROP AN AXIS the proposal covered —
+    // which is this comment's subject. It says nothing about how many iterations are delivered:
+    // the drive below commits whole-period prefixes under CR 732.2a, and that is not a partial
+    // delivery in 732.2c's sense. Neither population may take the
+    // O(1) mint and drop the deferred axis — not a period whose only growth is that axis (EMPTY
+    // `batched`), nor one that grows a batchable axis alongside it (NON-EMPTY `batched`: tokens,
+    // counters or life plus a library delta, the shipped mill board). Both therefore pay the
+    // uncapped, cubic-in-N replay at N up to `MAX_SHORTCUT_CYCLES`, which the `Replay` arm's own
+    // doc records as where a future iteration budget attaches. The guard's other cost, a spurious
+    // CR 500.5 prompt, does not arise: such a period genuinely has something to collapse. Pinned
+    // by `wba_loop_firewall_interposition`'s Altar / Altar-free route pair.
+    //
+    // RESIDUAL: with `sequence.is_empty()` a deferred axis cannot be delivered by either route.
+    // This producer never publishes one there, because its own drive produced the sequence.
+    let route = if !sequence.is_empty()
+        && (unbatchable_deferred
+            || (!batched.is_empty()
+                && (counter_observed
+                    || life_observed
+                    || life_etb_sourced
+                    || cast_sourced
+                    || token_growth_needs_replay)))
+    {
+        LoopCollapseRoute::Replay
     } else {
-        // UNOBSERVED fast path — register each grown persistent axis for the batched N×δ collapse.
-        if let Some(profile) = token_profile {
+        LoopCollapseRoute::Batched
+    };
+    // Exhaustive, no wildcard: a future third strategy must build-break here rather than
+    // silently inherit one of these two registrations.
+    match route {
+        LoopCollapseRoute::Replay => {
+            // CR 732.2a: OBSERVED batchable growth — one DriveSequence collapses the loop;
+            // replaying the captured sequence recreates every per-cycle effect honoring
+            // observers. Do NOT also register batched items (the routes are exclusive per
+            // accept). `collapsed_axes` is the set this materialization is ACCOUNTABLE for —
+            // computed per axis, NEVER a wholesale copy of `proposal.unbounded`. The copy
+            // asserted that every ∞-marked axis is one this collapse ends, which is false for a
+            // STANDING capability: an ∞-mana mark whose only authority is CR 500.5 + CR 106.4
+            // (`turns::drain_pending_phase_transition_progress`, which deliberately EXCLUDES
+            // `debug_infinite_mana` seats) would be ended by the collapse. See
+            // `ResourceAxis::unbounded_mark_kind` for the criterion and the per-axis table. The
+            // replay drives the WHOLE period, so it delivers every DEFERRED axis whether or not a
+            // batched item for it exists yet — batchability is owned by
+            // `LoopCollapseAxis::from_resource_axis`, and a subset-of-batchable filter here would
+            // refuse a mill board.
             state.register_pending_materialization(
                 proposal.proposer,
-                crate::types::game_state::PersistentAxisMaterialization::Tokens(Box::new(profile)),
-            );
-        }
-        if !growths.is_empty() {
-            state.register_pending_materialization(
-                proposal.proposer,
-                crate::types::game_state::PersistentAxisMaterialization::Counters(growths),
-            );
-        }
-        for (player, per_cycle_delta) in life {
-            state.register_pending_materialization(
-                proposal.proposer,
-                crate::types::game_state::PersistentAxisMaterialization::Life {
-                    player,
-                    per_cycle_delta,
+                crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
+                    sequence,
+                    collapsed_axes: proposal
+                        .unbounded
+                        .iter()
+                        .copied()
+                        .filter(|axis| {
+                            axis.unbounded_mark_kind()
+                                == crate::analysis::resource::UnboundedMarkKind::DeferredAccrual
+                        })
+                        .collect(),
                 },
             );
+        }
+        LoopCollapseRoute::Batched => {
+            // UNOBSERVED fast path — register each grown persistent axis for the batched N×δ
+            // collapse. The payload was built ONCE above, in the same Tokens → Counters → Life
+            // order the per-axis pushes use; this arm carries no per-axis
+            // condition of its own, so what the route's `!batched.is_empty()` guard measured and
+            // what lands here cannot disagree.
+            for item in batched {
+                state.register_pending_materialization(proposal.proposer, item);
+            }
         }
     }
     state.loop_detect_ring.clear();
@@ -6233,6 +6554,40 @@ fn materialize_object_growth_shortcut(
 /// re-introduction of the removed accept-time drive (commit 6d9344af1), bounded to observed loops
 /// at the boundary; the private `drive_loop_sequence_iteration` / `loop_action_expected_def` /
 /// `RecastAbort` cannot be named from `engine_resolution_choices`, so the drive lives here.
+///
+/// **What the abort implements, beyond the machinery departure above.** CR 732.2a bounds a
+/// proposal to choices "that may be legally taken based on the current game state and the
+/// predictable results of the sequence of choices", forbids "conditional actions, where the
+/// outcome of a game event determines the next action a player takes", and requires the ending
+/// point to "be a place where a player has priority". An interposing player's undetermined choice
+/// is exactly such a point, so the accepted sequence was legal only UP TO it — truncating there is
+/// the rule, not a degradation of it. Each iteration commits whole, so what the drive hands back is
+/// a committed whole-period prefix; the CR 732.2a ending point is the caller's exit, not this
+/// function's.
+///
+/// The delivered prefix is a value in `[0, n]`, and the table already consented to every value in
+/// that range — see the L3 prefix-consent statement at `game::turns`' `PayableResource::LoopCollapse`
+/// prompt, which is the licence and is not restated here. That block is cited for prefix consent
+/// ALONE.
+/// An engine-chosen prefix k is therefore observationally identical to the controller naming k at
+/// that same prompt, which the prompt's `min: 0` explicitly permits. That identity is why the
+/// collapse stays `Committed` rather than becoming conditional: nothing was delivered that a
+/// legal answer at the prompt could not have produced.
+///
+/// Two `waiting_for` shapes survive this function: an untouched `PayAmountChoice` when the drive
+/// aborts on iteration zero, and a `Priority` beat otherwise. NEITHER is the terminal beat. The
+/// caller — the `PayableResource::LoopCollapse` submit arm in `game::engine_resolution_choices` —
+/// re-drains and, once that completes the phase entry, hands BOTH shapes to `turns::auto_advance`:
+/// a `Priority` this function wrote is the CR 117.3a grant with the entered phase's own triggers
+/// still owed, so it is no more terminal than the untouched prompt. So the abort is not observable
+/// as a terminal state, and the CR 732.2a ending point is the turn interpreter's.
+/// `the_delivered_prefix_tracks_the_interposers_depth` pins the `depth = 0` arm.
+///
+/// The abort is only one route to zero delivery. An interposer-free board reaches it when the
+/// controller simply answers `0`, the value the prompt's own `min: 0` advertises and the submit
+/// handler accepts, and the batched route reaches it without entering this function at all — every
+/// one of them ends at that same caller exit. Bounded to opt-in boards: no offer exists unless
+/// `loop_detection` was turned on at match creation, and it defaults `Off`.
 pub(crate) fn drive_persistent_axis_collapse(
     state: &mut GameState,
     seq: &[crate::types::game_state::LoopActionContext],
@@ -7084,6 +7439,16 @@ pub(super) fn resume_pending_continuation_if_priority(
                 CostMoveDrainBoundary::PriorityBoundary,
             )?;
         }
+        // CR 117.3a: LAST, once every continuation above has drained back to an ordinary
+        // priority boundary. A phase entry that completed while a paused prompt owned the beat
+        // still owes the entered phase's turn-based actions and its beginning-of-phase
+        // abilities; `turns::resume_deferred_step_triggers` is the single authority that pays
+        // that debt, and it is inert unless one is recorded.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            if let Some(resumed) = turns::resume_deferred_step_triggers(state, events) {
+                state.waiting_for = resumed;
+            }
+        }
     }
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
@@ -7427,7 +7792,7 @@ fn pass_priority_once_with_pipeline(
     state.pending_activations.clear();
 
     let stack_was_empty = state.stack.is_empty();
-    // PR-3 (Option C) Defect-1: capture the pre-pipeline stack frame for the §2
+    // PR-3 (Option C) Defect-1: capture the pre-pipeline stack frame for the
     // loop-shortcut window maintenance below. `stack_top_before` is the resolving
     // entry's id; a real resolution this beat replaces the top with a different id
     // (every refilled trigger gets a fresh monotonic ObjectId), whereas a bare
@@ -7995,17 +8360,17 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
 
                             // PR-3 (Option C): the NET-PROGRESS mandatory-loop WIN
                             // shortcut is NOT duplicated here. `run_auto_pass_loop`
-                            // resolves via `pass_priority_once_with_pipeline` (:1339),
-                            // whose §2 maintenance accumulates the persisted
+                            // resolves via `pass_priority_once_with_pipeline`, whose
+                            // window maintenance accumulates the persisted
                             // `loop_detect_ring` across these internal iterations, but
-                            // `reconcile_terminal_result` (the §3 win site) is NOT called
-                            // inside this loop — only at :200 AFTER it returns. So the §3
+                            // `reconcile_terminal_result` (the win site) is NOT called
+                            // inside this loop, only after it returns. So the win
                             // shortcut does NOT accelerate this auto-pass grind: this loop
                             // runs its own net-progress drive to the natural CR 704.5a
                             // death (or the strict CR 104.4b DRAW block above) on its own.
                             // The accelerated path is the per-beat repeated
                             // `apply(PassPriority)` drive (the production frontend
-                            // default), where §3 runs after every beat. Keeping a second
+                            // default), where it runs after every beat. Keeping a second
                             // win site here would create two divergent detectors.
 
                             // CR 104.4b: a sliding window of the most recent
@@ -13689,8 +14054,8 @@ fn apply_action(
         // ONE CONSEQUENCE OF USING THE SYNCHRONIZER RATHER THAN A RAW CLONE:
         // `normalize_legacy_attach_waiting_for` can now edit `state.waiting_for` on this
         // path, so it may differ from the returned `ActionResult.waiting_for`, where the raw
-        // clone made the two exactly equal. Benign — the boundary re-normalizes at `:1171`
-        // and copies back at `:1189`, and `inject_pinned_answer` fails closed on every prompt
+        // clone made the two exactly equal. Benign — the boundary re-normalizes and copies
+        // back, and `inject_pinned_answer` fails closed on every prompt
         // kind it has no pin producer for.
         sync_waiting_for(state, &wf);
         if answering_forced_window
@@ -14746,13 +15111,11 @@ fn handle_play_land(
         super::replacement::ReplacementResult::Execute(event) => {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } = event
             {
-                // Phase B (PLAN §6.2 / §7): the divergent partial copy of
-                // `deliver_replaced_zone_change` that used to live here is
-                // dissolved — the post-`replace_event` event is a
+                // The post-`replace_event` event is a
                 // `ReplacementResult::Execute` payload, sealed through the third
                 // mint path (`approve_post_replacement`) and delivered by the
                 // shared `zone_pipeline::deliver`. The land entry now gets the
-                // FULL delivery tail the copy skipped (CR 614.1c
+                // FULL delivery tail (CR 614.1c
                 // `EntersWithAdditionalCounters` statics snapshot, the CR 303.4f
                 // `attach_to` host, `entered_via_ability_source` provenance, the
                 // CR 701.24a library-shuffle arm). `drain = CallerEpilogue`: the
@@ -19737,21 +20100,19 @@ mod stage2_injector_tests {
         (producers, readers, in_test)
     }
 
-    /// R23, conjunct 3 — **the PRODUCER census, so a new producer is a COUNTED event.**
-    ///
-    /// What bounds the mint conjunct's reach is how many things PRODUCE
-    /// `WaitingFor::OptionalEffectChoice`: the conjunct is a fail-closed pre-filter on ONE of
-    /// them, and soundness over the others is discharged at the consumption point. Exactly one
-    /// of the five sits inside the CR 603.5 gate that consults the recipient authority. If a
-    /// sixth appears, this row fails and whoever added it must decide where its recipient is
-    /// bound.
+    /// **The PRODUCER census, so a new producer is a COUNTED event.** What bounds the mint
+    /// conjunct's reach is how many things PRODUCE `WaitingFor::OptionalEffectChoice`: the
+    /// conjunct is a fail-closed pre-filter on ONE of them, and soundness over the others is
+    /// discharged at the consumption point. Exactly one of the five sits inside the CR 603.5 gate
+    /// that consults the recipient authority, so if a sixth appears this row fails and whoever
+    /// added it must decide where its recipient is bound.
     ///
     /// A producer is identified by its ENCLOSING FUNCTION and the CONSTRUCTION it mints
     /// (`file::fn {fields}`, whitespace stripped), and the qualifying
     /// `.install_direct_choice_frame(` look-back is bounded by that same function. NO line
     /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
-    /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of
-    /// them still fails here; comment text is never a site (`source_census::code`).
+    /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of them
+    /// still fails here; comment text is never a site (`source_census::code`).
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -20590,7 +20951,7 @@ mod stage2_injector_tests {
     /// binding lives at declare (`handle_declare_shortcut`) and at consumption
     /// (`apply_confirmed_shortcut`), one layer above this one.
     ///
-    /// ⚠ **PLAN DEVIATION, DISCLOSED:** §6 R28(b) predicts the drive seam refuses this pair
+    /// ⚠ **DISCLOSED:** an earlier design predicted the drive seam refuses this pair
     /// (*"must still `RecastAbort`"*). It does not, and cannot — the same cell's own analysis
     /// says so two sentences later (*"under the round-33 design alone it returns `Ok(())`"*).
     /// The arm ships keyed to the measurement, with (b2) supplying the refusal the row is
@@ -20961,7 +21322,7 @@ mod kilo_interruptibility_tests {
         );
     }
 
-    /// Synthetic positive/negative drive-replay reach-guard (plan §7 unit c). The SAME recorded
+    /// Synthetic positive/negative drive-replay reach-guard. The SAME recorded
     /// 2-step period is driven WITH pins (offer) and WITHOUT (abort). The `len()==2` anchor holds
     /// in BOTH variants, so the negative's None is a drive-abort at the unpinned
     /// `PayCost{TapCreatures}`, NOT a vacuous "no sequence to drive" upstream short-circuit
@@ -21431,7 +21792,7 @@ mod bounded_offer_conjunct_tests {
     /// EXEMPTION, EVEN THOUGH ITS WINDOW HAS ONE AVAILABLE.
     ///
     /// CR 732.2a + CR 608.1. Arms (a)/(b)/(a′1) prove the CONSTRUCTOR keys the subtraction to
-    /// the certificate value. This arm proves §3 D2's step 4b actually SELECTS the right
+    /// the certificate value. This arm proves the selection step actually SELECTS the right
     /// value: it is the only arm that fails on the round-39 shape (one `BoardCovered`
     /// certificate for the whole `equality || cover` disjunction), which every other arm in
     /// the row passes unchanged.
@@ -21840,7 +22201,7 @@ mod bounded_offer_conjunct_tests {
     // ───────────────────────────────────────────────────────────────────────────────────
 
     /// Symbol-anchored extent of a column-0 `fn` in THIS file, as `(head, end)` line indices —
-    /// the §6 R8 self-census extractor: signature line to the first column-0 `}`.
+    /// the self-census extractor: signature line to the first column-0 `}`.
     #[cfg(test)]
     fn engine_fn_extent(lines: &[&str], signature: &str) -> (usize, usize) {
         let head = lines
@@ -22615,5 +22976,118 @@ mod cost_move_drain_priority_boundary_tests {
             "the continuation must stay parked for the replacement boundary that owns it"
         );
         assert!(events.is_empty(), "an ineligible drain must emit no events");
+    }
+}
+
+/// CR 111.1 vs CR 400.7: the mint / arrival split that `derived_fodder_class` publishes a class
+/// from. `zones::move_to_zone` carries the existing `ObjectId`, so an ARRIVED object is keyed in
+/// BOTH frames' `objects` while a MINTED one is keyed only in `after`'s — the single fact the
+/// boundary mint's promise rests on, and the one an `after.battlefield − before.battlefield`
+/// difference alone cannot see.
+#[cfg(test)]
+mod minted_battlefield_set_tests {
+    use super::{derived_fodder_class, minted_battlefield_ids};
+    use crate::game::game_object::GameObject;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn put(state: &mut GameState, id: u64, name: &str, zone: Zone) -> ObjectId {
+        let oid = ObjectId(id);
+        state.objects.insert(
+            oid,
+            GameObject::new(oid, CardId(id), PlayerId(0), name.into(), zone),
+        );
+        if zone == Zone::Battlefield {
+            state.battlefield.push_back(oid);
+        }
+        oid
+    }
+
+    /// Move `id` onto the battlefield with its `ObjectId` PRESERVED.
+    fn arrive(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .expect("the arriving object is live")
+            .zone = Zone::Battlefield;
+        state.battlefield.push_back(id);
+    }
+
+    /// **The minted set is `after.battlefield` minus everything `before` KNEW, not minus
+    /// everything `before` had on the battlefield.**
+    ///
+    /// The two halves move the same id onto the same battlefield and differ only in whether
+    /// `before.objects` holds it, so the `!before.objects.contains_key` conjunct is the sole
+    /// discriminator — a row that only added a battlefield id would pass with that conjunct
+    /// deleted.
+    #[test]
+    fn minted_battlefield_ids_excludes_an_id_preserving_arrival() {
+        let mut before = GameState::new_two_player(7);
+        put(&mut before, 1, "Engine", Zone::Battlefield);
+        let arrival = put(&mut before, 3, "Library Card", Zone::Library);
+
+        let mut after = before.clone();
+        put(&mut after, 2, "Saproling", Zone::Battlefield);
+        arrive(&mut after, arrival);
+
+        assert_eq!(
+            minted_battlefield_ids(&before, &after),
+            vec![ObjectId(2)],
+            "only the id `before` never knew is MINTED"
+        );
+
+        // PAIRED CONTROL: the same id arriving on the same battlefield IS minted when `before`
+        // does not know it. Same id, same zone, one field of the fixture flipped.
+        let mut unknown_before = before.clone();
+        unknown_before.objects.remove(&arrival);
+        unknown_before
+            .players
+            .iter_mut()
+            .for_each(|p| p.library.retain(|x| *x != arrival));
+        let mut minted = minted_battlefield_ids(&unknown_before, &after);
+        minted.sort();
+        assert_eq!(
+            minted,
+            vec![ObjectId(2), ObjectId(3)],
+            "the same arrival counts as MINTED once `before` no longer knows the id"
+        );
+    }
+
+    /// **`derived_fodder_class` reports `k` over the MINTED members only.**
+    ///
+    /// CR 732.2a: `PersistentAxisMaterialization::Tokens` reproduces `k` members per cycle by
+    /// MINTING them, so counting an id-preserving arrival into `k` publishes a per-cycle delta the
+    /// collapse cannot deliver. The arrival here is content-identical to the minted member, so an
+    /// implementation counting battlefield-difference would find a homogeneous class of TWO and
+    /// return `k == 2`.
+    #[test]
+    fn derived_fodder_class_counts_minted_members_and_not_arrivals() {
+        let mut before = GameState::new_two_player(7);
+        put(&mut before, 700, "Saproling", Zone::Battlefield);
+        let arrival = put(&mut before, 900, "Saproling", Zone::Library);
+
+        let mut after = before.clone();
+        put(&mut after, 701, "Saproling", Zone::Battlefield);
+        arrive(&mut after, arrival);
+
+        let (class, k) = derived_fodder_class(&before, &after).expect("one minted class");
+        assert_eq!(class.name, "Saproling");
+        assert_eq!(
+            k, 1,
+            "the arrival is not a member of a class the mint reproduces"
+        );
+
+        // PAIRED CONTROL: mint the second member instead of moving it, and `k` rises to 2 — the
+        // same content, the same battlefield, only the provenance changed.
+        let mut minted_both = before.clone();
+        minted_both.objects.remove(&arrival);
+        minted_both
+            .players
+            .iter_mut()
+            .for_each(|p| p.library.retain(|x| *x != arrival));
+        let (_, k2) = derived_fodder_class(&minted_both, &after).expect("one minted class");
+        assert_eq!(k2, 2, "two MINTED members of one class report k = 2");
     }
 }

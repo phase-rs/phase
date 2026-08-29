@@ -602,13 +602,10 @@ pub(super) fn drain_pending_phase_transition_progress(
                     // performing the actions — the offer gate admits only voluntarily-repeatable
                     // periods (L1), so stopping early is always available unelided.
                     // `min: 0` is unchanged from BASE and kept as a deliberate NEVER-OVER-
-                    // DELIVER fail-safe, not as wedge-avoidance — `min == max == N` is already
-                    // a single legal answer, so a narrow range could not wedge the boundary.
-                    // What 0 buys is a floor the engine can always honor: collapsing to
-                    // nothing is strictly less than what the table agreed to, so no batching
-                    // or replay imprecision below it can ever materialize growth nobody
-                    // accepted. Tapped tokens carry no lethal driver, so 0 is also never a
-                    // hidden win-denial.
+                    // DELIVER fail-safe. What 0 buys is a floor the engine can always honor:
+                    // collapsing to nothing is strictly less than what the table agreed to,
+                    // so no batching or replay imprecision below it can ever materialize
+                    // growth nobody accepted.
                     min: 0,
                     // CR 732.2c: the shortcut was TAKEN at the count every player
                     // accepted, so the collapse may not exceed it — re-asking with the
@@ -629,11 +626,12 @@ pub(super) fn drain_pending_phase_transition_progress(
                     pending_mana_ability: None,
                 };
                 // Leave the (now-empty) `pending_phase_transition_progress` INTACT
-                // (do NOT null it): the `SubmitPayAmount` handler re-drains after the
-                // mint, re-enters this queue-empty branch, and calls
-                // `finish_enter_phase`, restoring Priority in the same action. Nulling
-                // here would strand a stale `LoopCollapse` `waiting_for` until the
-                // next boundary. PAUSE — resumed by the `LoopCollapse` submit handler.
+                // (do NOT null it): nulling here would strand a stale `LoopCollapse`
+                // `waiting_for` until the next boundary. The `SubmitPayAmount` handler
+                // re-drains for every axis, re-enters this queue-empty branch and
+                // completes the phase entry through `finish_enter_phase`, which grants
+                // `priority_player` and writes no beat — the beat is then that handler's
+                // own exit. PAUSE — resumed by the `LoopCollapse` submit handler.
                 return;
             }
             // Stash empty AND queue empty → complete the phase entry.
@@ -752,6 +750,33 @@ pub(super) fn drain_pending_phase_transition_progress(
             }
         }
     }
+}
+
+/// CR 117.3a: the active player receives priority at the beginning of a step or phase only
+/// "after any turn-based actions ... have been dealt with and abilities that trigger at the
+/// beginning of that phase or step have been put on the stack". [`finish_enter_phase`] performs
+/// neither: it grants `priority_player` and writes no beat, and [`process_phase_triggers`] runs on
+/// no path but [`auto_advance`]'s phase arms. So a phase entry that completed while an interactive
+/// substitute owned the beat still owes both, and [`auto_advance_once`] records that debt in
+/// `deferred_step_trigger_resume` when it bails on a standing cursor.
+///
+/// This is the SINGLE authority that settles the debt. A resume path that reaches an ordinary
+/// priority boundary calls it and adopts the returned beat; `None` means nothing was owed and the
+/// caller keeps its own. The latch is dropped either way — a cleared cursor ends the debt whether
+/// or not the beat was eligible to go back through the interpreter, and `stack.rs`'s quiescence
+/// predicate requires it clear.
+pub(crate) fn resume_deferred_step_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    // A standing cursor means the entry is still unfinished, so the debt belongs to whoever
+    // finishes it, not to this boundary.
+    if state.pending_phase_transition_progress.is_some() {
+        return None;
+    }
+    let owed = state.deferred_step_trigger_resume.take().is_some();
+    (owed && matches!(state.waiting_for, WaitingFor::Priority { .. }))
+        .then(|| auto_advance(state, events))
 }
 
 /// CR 703.4q + CR 616.1 + CR 611.2b: Scan active step-end mana handlers for

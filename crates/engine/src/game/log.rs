@@ -132,7 +132,11 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
         // The remaining variants are deliberately listed rather than covered by a
         // wildcard. Adding a GameEvent must require an explicit presentation policy.
-        GameEvent::HiddenSearchViewed { .. }
+        // CR 701.17a + CR 400.2: the mill's library departure is hidden
+        // information; grouped with `HiddenSearchViewed` as engine-consumed,
+        // never narrated (`should_exclude_event` drops it).
+        GameEvent::Milled { .. }
+        | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -276,7 +280,11 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. } => LogTone::Informational,
-        GameEvent::LifeChanged { .. }
+        // CR 701.17a + CR 400.2: the mill's library departure is hidden
+        // information; grouped with `HiddenSearchViewed` as engine-consumed,
+        // never narrated (`should_exclude_event` drops it).
+        GameEvent::Milled { .. }
+        | GameEvent::LifeChanged { .. }
         | GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::CreatureExploited { .. }
@@ -396,6 +404,11 @@ fn visibility(event: &GameEvent) -> LogVisibility {
 fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
     match event {
         GameEvent::HiddenSearchViewed { .. } => true,
+        // CR 400.2 + CR 701.17a: the library is a hidden zone, and the paired
+        // library-origin `ZoneChanged` below is already excluded for exactly
+        // that reason. Admitting the mill action event would reopen the
+        // hidden-zone log line that rule closes.
+        GameEvent::Milled { .. } => true,
         // Library-origin moves and mulligan/tuck moves from hand to library
         // expose hidden card identity. Public discard/moves remain loggable.
         GameEvent::ZoneChanged {
@@ -485,7 +498,11 @@ fn num(n: i32) -> LogSegment {
 /// Exhaustive categorization of game events.
 fn categorize(event: &GameEvent) -> LogCategory {
     match event {
-        GameEvent::GameStarted
+        // CR 701.17a + CR 400.2: the mill's library departure is hidden
+        // information; grouped with `HiddenSearchViewed` as engine-consumed,
+        // never narrated (`should_exclude_event` drops it).
+        GameEvent::Milled { .. }
+        | GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::GameOver { .. }
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
@@ -659,6 +676,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
     match event {
         GameEvent::GameStarted => vec![text("Game started")],
         GameEvent::HiddenSearchViewed { .. } => vec![],
+        // CR 701.17a + CR 400.2: never narrated — the library departure it
+        // reports is hidden information (`should_exclude_event` drops it).
+        GameEvent::Milled { .. } => vec![],
 
         GameEvent::TurnStarted {
             player_id,
@@ -1788,6 +1808,31 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
+
+    /// CR 400.2 + CR 701.17a: the mill action event reports a departure from a
+    /// hidden zone, so the log must drop it — the same treatment the paired
+    /// library-origin `ZoneChanged` already gets. `should_exclude_event` ends in
+    /// `_ => false`, so without an explicit arm this reads `false`.
+    #[test]
+    fn milled_is_excluded_from_the_log() {
+        let state = GameState::new_two_player(42);
+        let milled = GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(7),
+            to: crate::types::zones::Zone::Graveyard,
+        };
+        assert!(should_exclude_event(&milled, &state));
+
+        // Live control in the same invocation: a predicate stuck at `true`, or
+        // one that never ran, cannot pass this leg.
+        let cast = GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id: ObjectId(7),
+            cast_mana_value: None,
+        };
+        assert!(!should_exclude_event(&cast, &state));
+    }
 
     #[test]
     fn spell_cast_resolves_card_name() {

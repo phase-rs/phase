@@ -1330,13 +1330,13 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     if let Some((top_id, _src, _freq, _alt)) =
         top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
     {
-        // Only non-land cards reach the cast path; lands flow through the
+        // CR 305.9: only non-land cards reach the cast path; lands flow through the
         // play-land action (`top_of_library_land_playable_by_permission`).
-        if state.objects.get(&top_id).is_some_and(|o| {
-            !o.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        }) {
+        if state
+            .objects
+            .get(&top_id)
+            .is_some_and(object_may_enter_cast_path)
+        {
             objects.push(top_id);
         }
     }
@@ -1441,11 +1441,8 @@ fn graveyard_object_castable_by_permission_sources(
     obj: &crate::game::game_object::GameObject,
     sources: &[GraveyardPermissionSource<'_>],
 ) -> bool {
-    if obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
+    // CR 305.9: a land is played, never cast, whatever the permission says.
+    if !object_may_enter_cast_path(obj) {
         return false;
     }
 
@@ -3133,10 +3130,16 @@ fn normal_cost_grant_supports_cast(
 /// casting or two alternative costs to a single spell"): a permission that is
 /// itself an alternative cost — cast "without paying its mana cost" or for a
 /// substitute cost (`ExileWithAltCost`, ability costs, energy, plot, foretell)
-/// — cannot lend zone authority to the `FaceDown` {3} cast, which is a second
-/// alternative method+cost. Normal-cost routes (Adventure creature face,
-/// Warp's later cast, `PlayFromExile`, battlefield exile-cast statics) are
-/// method-agnostic zone authority and remain available to every variant.
+/// — cannot lend zone authority to a variant that brings its own independent
+/// alternative cost, which would be a second alternative method+cost. That
+/// class is `CastingVariant::is_independent_alternative_cost_rider`: the
+/// `FaceDown` {3} cast (#7948) and its siblings — Evoke, Bestow, Overload,
+/// Dash, Mutate, Warp's hand cast, … Route-coupled variants (madness, suspend,
+/// plot, foretell, the graveyard keywords) are NOT in it: their alternative
+/// cost IS the cost of their own permission, one procedure rather than two.
+/// Normal-cost routes (Adventure creature face, Warp's later cast,
+/// `PlayFromExile`, battlefield exile-cast statics) are method-agnostic zone
+/// authority and remain available to every variant.
 fn has_exile_cast_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -3144,15 +3147,19 @@ fn has_exile_cast_permission(
     turn_number: u32,
     variant: Option<CastingVariant>,
 ) -> bool {
-    // CR 601.2b: the face-down cast may only ride a normal-cost route.
-    let face_down = matches!(variant, Some(CastingVariant::FaceDown));
+    // CR 118.9a + CR 601.2b (#7948, generalized to the rider class): a variant
+    // that brings its own INDEPENDENT alternative cost — the face-down {3}, an
+    // Evoke or Bestow election, … — may only ride a normal-cost route; an
+    // alternative-cost grant underneath it would be a second alternative cost
+    // on the same cast.
+    let alt_rider = variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
     // land/look companion installed alongside an alt-cost grant
     // (`PlayFromExileProvenance::LandLookCompanion`, see `cast_from_zone.rs`) is not cast authority,
-    // so the face-down cast accepts only a genuine impulse-class grant as its
+    // so a rider cast accepts only a genuine impulse-class grant as its
     // normal-cost route. Every other variant keeps the plain scan: where a
     // companion exists, its alt-cost sibling authorizes those casts anyway.
-    let play_from_exile_route = if face_down {
+    let play_from_exile_route = if alt_rider {
         obj.casting_permissions
             .iter()
             .enumerate()
@@ -3179,15 +3186,15 @@ fn has_exile_cast_permission(
         || obj.casting_permissions.iter().any(|p| match p {
             crate::types::ability::CastingPermission::AdventureCreature => obj.owner == player,
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
-                !face_down && obj.owner == player
+                !alt_rider && obj.owner == player
             }
             crate::types::ability::CastingPermission::ExileWithAltCost {
                 cost_provenance, ..
             } => {
                 // CR 702.168b + CR 118.9a: a `NormalCost` grant restates the
                 // card's own printed cost — a normal cast route that admits
-                // the face-down cast; an `Alternative` grant does not.
-                (!face_down
+                // an alternative-cost rider; an `Alternative` grant does not.
+                (!alt_rider
                     || matches!(
                         cost_provenance,
                         crate::types::ability::ExileGrantCostProvenance::NormalCost
@@ -3195,17 +3202,17 @@ fn has_exile_cast_permission(
                     && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
-                !face_down && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+                !alt_rider && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::PlayFromExile { .. } => false,
             crate::types::ability::CastingPermission::WarpExile {
                 castable_after_turn,
             } => obj.owner == player && turn_number > *castable_after_turn,
             crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
-                !face_down && obj.owner == player && turn_number > *turn_plotted
+                !alt_rider && obj.owner == player && turn_number > *turn_plotted
             }
             crate::types::ability::CastingPermission::Foretold { turn_foretold, .. } => {
-                !face_down && obj.owner == player && turn_number > *turn_foretold
+                !alt_rider && obj.owner == player && turn_number > *turn_foretold
             }
         })
         // CR 601.2a + CR 113.6b: A `StaticMode::ExileCastPermission` static on a
@@ -3221,12 +3228,12 @@ fn has_exile_cast_permission(
         // Time class) stays a normal-cost route. The face-down case SEARCHES
         // for an eligible normal-cost source — an earlier free source must
         // not hide a later normal-cost authority (first-match hazard).
-        || if face_down {
+        || if alt_rider {
             exile_cast_permission_source_matching(
                 state,
                 player,
                 obj.id,
-                static_source_eligible_for_face_down,
+                static_source_is_normal_cost_authority,
             )
             .is_some()
         } else {
@@ -3234,7 +3241,22 @@ fn has_exile_cast_permission(
         }
 }
 
-/// CR 305.1 + CR 601.2a: Lands in exile may be played by permissions that say
+/// CR 305.9 + CR 300.2a: an object that is both a land and another card type can be
+/// played only as a land — it can't be cast as a spell. CR 305.1 states the same
+/// conclusion for a land carrying no other card type ("it is never a spell"). This is
+/// the single home for that rule: the zone-scoped predicates below, the admission gate
+/// and the analysis-layer branches all delegate here instead of restating the test.
+///
+/// CR 715.3a bounds the subject — "When casting an adventurer card as an Adventure, only
+/// the alternative characteristics are evaluated to see if it can be cast" — so this asks
+/// about the FACE BEING CAST. A caller holding an unswapped object must not consult it.
+fn object_may_enter_cast_path(obj: &GameObject) -> bool {
+    !obj.card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+}
+
+/// CR 305.9 + CR 601.2a: Lands in exile may be played by permissions that say
 /// "play", but they never enter the spell-cast path.
 ///
 /// EXILE-ONLY BY RULE: this predicate gates the battlefield-static
@@ -3245,32 +3267,26 @@ fn has_exile_cast_permission(
 /// widen this to other zones; the object-tagged `PlayFromExile` path uses
 /// [`play_from_exile_object_in_cast_path`] instead.
 fn exile_object_can_enter_cast_path(obj: &GameObject) -> bool {
-    obj.zone == Zone::Exile
-        && !obj
-            .card_types
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Land)
+    obj.zone == Zone::Exile && object_may_enter_cast_path(obj)
 }
 
-/// CR 701.17d + CR 305.1 + CR 601.2a: A card carrying an object-tagged
+/// CR 701.17d + CR 305.9 + CR 601.2a: A card carrying an object-tagged
 /// [`CastingPermission::PlayFromExile`] may enter the spell-cast path from
 /// exile (impulse draw) OR from the graveyard (a mill effect that grants
 /// permission to play "that card" — CR 701.17d — attaches the permission to the
 /// milled card in the graveyard). Lands are excluded from the cast path in both
-/// zones (CR 305.1: lands are *played*, not cast); a milled land flows through
+/// zones via [`object_may_enter_cast_path`]; a milled land flows through
 /// [`graveyard_lands_playable_by_permission`] / [`exile_lands_playable_by_permission`]
 /// instead.
 ///
 /// This is the single DRY admission predicate for the three object-tagged
-/// `PlayFromExile` consult sites (legal-actions surface, `prepare_spell_cast`).
+/// `PlayFromExile` consult sites: `graveyard_spell_objects_available_to_cast` and
+/// `exile_object_castable_by_permission` at the legal-actions surface, and
+/// `castable_from_current_zone` at the cast-admission gate.
 /// It does NOT touch the battlefield-static path, which stays exile-only via
 /// [`exile_object_can_enter_cast_path`].
 fn play_from_exile_object_in_cast_path(obj: &GameObject) -> bool {
-    matches!(obj.zone, Zone::Exile | Zone::Graveyard)
-        && !obj
-            .card_types
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Land)
+    matches!(obj.zone, Zone::Exile | Zone::Graveyard) && object_may_enter_cast_path(obj)
 }
 
 fn exile_object_castable_by_permission(
@@ -3323,6 +3339,172 @@ fn exile_alt_cost_permission_grants_to_player(
         Some(allowed) => allowed == player,
         None => true,
     }
+}
+
+/// CR 406.3b: the rules state the coupling look -> cast ("A player may cast such a
+/// spell only if they are allowed to look at the face-down card in exile"). A caller
+/// reasoning the CONVERSE — cast -> look — needs the admission to have a SUBJECT, and
+/// that is what this answers. `false` when any permission the object carries grants to
+/// an unnamed audience.
+///
+/// The gate does not call it and its own reading is unchanged. The two shapes the gate
+/// admits through must be separated, because only one of them is an object-carried
+/// grant at all:
+/// * The admission rests on a permission the OBJECT carries.
+///   [`exile_alt_cost_permission_grants_to_player`] reads an absent `granted_to` as
+///   granting to EVERY player — right for a permission, wrong for a disclosure, since
+///   the inference would then name every seat as entitled to see the card. Such a
+///   permission answers `false` here and a disclosure caller refuses.
+/// * The admission rests on a `player`-parameterised static
+///   ([`top_of_library_permission_source`], [`exile_cast_permission_source`]). The
+///   object carries no `CastingPermission` at all, this predicate is vacuously `true`,
+///   and the subject is the `player` the gate was asked about.
+///
+/// [`CastingPermission::PlayFromExile`]'s `granted_to` is a bare `PlayerId` and is
+/// already exact; the two `Option<PlayerId>` grantee fields are on `ExileWithAltCost`
+/// and `ExileWithAltAbilityCost`. Player-independent by construction — it asks whether
+/// a grantee EXISTS, never who it is — so the per-player match stays with the gate.
+pub(crate) fn cast_permissions_name_their_grantee(obj: &GameObject) -> bool {
+    !obj.casting_permissions.iter().any(|permission| {
+        matches!(
+            permission,
+            CastingPermission::ExileWithAltCost {
+                granted_to: None,
+                ..
+            } | CastingPermission::ExileWithAltAbilityCost {
+                granted_to: None,
+                ..
+            }
+        )
+    })
+}
+
+/// CR 601.2a: casting moves THAT CARD from where it is to the stack — this is the
+/// single test for whether that move is legal from the zone the object currently
+/// occupies.
+///
+/// Two production readers: [`prepare_spell_cast_with_variant_override_inner`], which gates
+/// announcement on it, and `game::visibility`, whose viewer projection builds its hiding
+/// exemption on this verdict — NARROWING it through [`cast_permissions_name_their_grantee`]
+/// and a
+/// private-access scope, never restating it. Two implementations of the ADMISSION would
+/// diverge, and a projection that blanked an object this gate still admits would hide a
+/// card from the player entitled to move it to the stack. Every narrowing therefore
+/// rides on the caller's own conjuncts; none of it belongs in here.
+///
+/// `variant_override` is taken because the announcement path consumes it: madness is
+/// announced, never standing, and the face-down {3} cast is admitted only by a
+/// normal-cost authority (CR 118.9a + CR 601.2b). A caller passing `None` is asking
+/// about an ORDINARY announcement.
+///
+/// Admission is TYPE-GATED FIRST: CR 305.9 refuses a land before any zone or permission
+/// disjunct is consulted, via [`object_may_enter_cast_path`]. CR 715.3a bounds what that
+/// gate is asked about — the FACE BEING CAST — and this authority only ever sees that
+/// face, because every alternative-face route (`castable_alternative_spell_face_verdict`,
+/// `prepare_casting_variant`) swaps onto a clone before re-entering here.
+pub(crate) fn castable_from_current_zone(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+    variant_override: Option<CastingVariant>,
+) -> bool {
+    // CR 118.9a ("Only one alternative cost can be applied to any one spell
+    // as it's being cast") + CR 601.2b ("A player can't apply two alternative
+    // methods of casting or two alternative costs to a single spell"): an
+    // alternative-cost authority — exile/graveyard alt-cost grants,
+    // during-resolution free-cast windows, graveyard cast keywords — cannot
+    // admit the {3} face-down cast, which is itself an alternative
+    // method+cost. Normal-cost authorities (hand, command zone, the
+    // object-tagged play/cast permission arm = PlayFromExile/Adventure/Warp,
+    // Lurrus-class graveyard permissions, top-of-library play) admit every
+    // variant: there the face-down {3} is the single alternative applied.
+    let face_down_variant = variant_override == Some(CastingVariant::FaceDown);
+    let normal_cost_route =
+        || !face_down_variant || normal_cost_grant_supports_cast(state, obj, player);
+    object_may_enter_cast_path(obj)
+        && (
+            // CR 601.2a + CR 611.2a: CastFromZone effects grant ExileWithAltCost on
+            // opponent's cards. When the grant carries a `granted_to: Some(p)`
+            // binding, only player `p` may consume it — see
+            // `spell_objects_available_to_cast` for the parallel filter used at the
+            // legal-actions surface.
+            (obj.zone == Zone::Exile
+        && obj.owner != player
+        && has_alt_cost_permission_for(obj, state, player)
+        && normal_cost_route())
+        // CR 715.3d + CR 701.17d: Cards carrying an object-tagged play/cast
+        // permission. Exile sources cover AdventureCreature / ExileWithAltCost /
+        // impulse `PlayFromExile`; the graveyard branch covers a milled card whose
+        // `PlayFromExile` was granted by a "you may play that card" mill effect
+        // (CR 701.17d — the permission lands on the card in the graveyard). The variant
+        // is passed on: this arm does its own per-permission face-down election.
+        || (play_from_exile_object_in_cast_path(obj)
+            && has_exile_cast_permission(
+                state,
+                obj,
+                player,
+                state.turn_number,
+                variant_override,
+            ))
+        // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
+        // during-resolution free-cast (Memory Plunder) may drive a cast on a card
+        // still in its real origin zone — the one disjunct carrying no zone test.
+        || (has_during_resolution_alt_cost_permission(state, obj, player) && normal_cost_route())
+        // CR 109.5: the would-be caster of a hand-origin alternative-cost grant is the player
+        // the permission NAMES, not the card's owner, so the grant cannot ride the owner/hand
+        // route below — an opponent-owned card in hand is refused before cost selection ever
+        // sees it. (CR 601.2a governs the casting PROCEDURE that follows admission, not who is
+        // entitled to it.) `hand_alt_cost_permission_names_caster` resolves the entitlement:
+        // a named grantee must be this player, and an unnamed one falls back to the owner.
+        || (has_hand_alt_cost_permission(state, obj, player) && normal_cost_route())
+        || (obj.owner == player
+            && (obj.zone == Zone::Hand
+                || (state.format_config.command_zone
+                    && obj.zone == Zone::Command
+                    && obj.is_commander)
+                || (state.format_config.command_zone
+                    && obj.zone == Zone::Command
+                    && obj.is_signature_spell()
+                    && oathbreaker_on_battlefield(state, player))
+                || (obj.zone == Zone::Exile
+                    && matches!(variant_override, Some(CastingVariant::Madness))
+                    && obj
+                        .keywords
+                        .iter()
+                        .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_))))
+                // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard
+                // with graveyard-cast keywords.
+                || (((obj.zone == Zone::Graveyard
+                    && has_effective_graveyard_cast_keyword(state, obj.id, obj))
+                    || has_graveyard_timed_alt_cost_permission(state, obj, player))
+                    && normal_cost_route())
+                // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
+                || (obj.zone == Zone::Graveyard
+                    && state.active_player == player
+                    && graveyard_permission_source(state, player, obj.id).is_some())
+                // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
+                // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
+                // must be the current top of `player`'s library AND match the static's
+                // `affected` filter.
+                //
+                // The `library.front()` test reproduces
+                // `top_of_library_permission_source`'s own first two steps, against the
+                // same `player` rather than the object's owner. It is verdict-identical:
+                // that callee binds its returned `top_id` from this same `front()`, so a
+                // non-top object could never satisfy the `top_id == obj.id` comparison
+                // below, and an absent player or an empty library makes callee and test
+                // answer no alike. It skips only a call whose answer that comparison
+                // discards.
+                || (obj.zone == Zone::Library
+                    && state
+                        .players
+                        .iter()
+                        .find(|p| p.id == player)
+                        .and_then(|p| p.library.front())
+                        == Some(&obj.id)
+                    && top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
+                        .is_some_and(|(top_id, _, _, _)| top_id == obj.id))))
+        )
 }
 
 /// CR 601.2a + CR 118.9: Whether an `ExileWithAltCost` permission carries the
@@ -3849,13 +4031,14 @@ fn selected_object_cast_permission_index(
                 exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                     .then_some(CastingPermissionIndex(index))
             }),
-        // CR 702.168b + CR 118.9a: the face-down cast never elects an
-        // `ExileWithAltCost` slot — even a `NormalCost` grant only lends zone
-        // authority (`has_exile_cast_permission`), while the cast's cost is
-        // the face-down {3}; electing the slot would let cost preparation
-        // substitute the grant's restated cost for the {3}. Named limit: a
-        // `single_use` normal-cost grant is therefore not consumed by a
-        // face-down cast through it.
+        // CR 702.168b + CR 118.9a: an alternative-cost-rider cast (face down,
+        // Evoke, Bestow, … — and every other non-Normal variant below) never
+        // elects an `ExileWithAltCost` slot — even a `NormalCost` grant only
+        // lends zone authority (`has_exile_cast_permission`), while the
+        // cast's cost is the rider's own; electing the slot would let cost
+        // preparation substitute the grant's restated cost for it. Named
+        // limit: a `single_use` normal-cost grant is therefore not consumed
+        // by a rider cast through it.
         Some(CastingVariant::FaceDown) => None,
         _ => None,
     };
@@ -4218,12 +4401,19 @@ fn has_alt_cost_permission_for(
 
 /// CR 601.2a: Object-level timed alt-cost grants that allow casting from the
 /// graveyard without exiling first (Emry, Lurker in the Loch).
+///
+/// CR 305.9: the grant's target filter may admit a card that is both a land and another
+/// card type (an artifact land under "target artifact card in your graveyard"), and such
+/// a card can only be played as a land. The type test therefore runs here, at the branch
+/// this predicate feeds in `graveyard_spell_objects_available_to_cast`, so the analysis
+/// layer's report agrees with the admission gate.
 fn has_graveyard_timed_alt_cost_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
 ) -> bool {
-    obj.zone == Zone::Graveyard
+    object_may_enter_cast_path(obj)
+        && obj.zone == Zone::Graveyard
         && obj.casting_permissions.iter().any(|permission| {
             exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
         })
@@ -4231,6 +4421,27 @@ fn has_graveyard_timed_alt_cost_permission(
 
 /// CR 601.2a: Object-level alt-cost grants that allow casting a chosen card
 /// from hand without moving it first (Electrodominance).
+/// CR 109.5: the permission names its would-be caster. `granted_to: Some(p)` binds the cast
+/// to `p`. `None` is the serialized contract's LEGACY OWNER FALLBACK, not "anyone" — the
+/// classes that leave it unset (Discover, Cascade, Suspend, Airbending) exile from the
+/// caster's OWN zones, so owner and grantee coincide there and `has_exile_cast_permission`
+/// reads it as `obj.owner == player`. A hand-origin grant reaches cards the caster does not
+/// own, where that coincidence fails, so `None` must resolve to the owner here as well.
+/// Reading it as "every player" would let any seat cast out of an opponent's hand.
+fn hand_alt_cost_permission_names_caster(
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    permission: &crate::types::ability::CastingPermission,
+) -> bool {
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost { granted_to, .. }
+        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+            granted_to, ..
+        } => granted_to.map_or(obj.owner == player, |grantee| grantee == player),
+        _ => false,
+    }
+}
+
 fn has_hand_alt_cost_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -4238,7 +4449,8 @@ fn has_hand_alt_cost_permission(
 ) -> bool {
     obj.zone == Zone::Hand
         && obj.casting_permissions.iter().any(|permission| {
-            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+            hand_alt_cost_permission_names_caster(obj, player, permission)
+                && exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
         })
 }
 
@@ -4502,14 +4714,17 @@ pub(crate) fn exile_cast_permission_source(
     exile_cast_permission_source_matching(state, player, exiled_id, |_| true)
 }
 
-/// CR 118.9a: THE face-down eligibility predicate for a static exile source
+/// CR 118.9a: THE normal-cost-authority predicate for a static exile source
 /// — `PayNormalCost` base mode AND no `CastCostMode::Alternative` extra-cost
 /// rider (a Valgavoth-class rider replaces the mana payment and makes the
 /// source an alternative-cost authority; an `Additional` rider preserves
-/// ordinary payment). Shared by the admission (`has_exile_cast_permission`)
-/// and every rider/cost read (`elected_exile_permission_source`), so the
-/// admitted authority and the paying authority can never diverge.
-fn static_source_eligible_for_face_down(source: &ExilePermissionSource<'_>) -> bool {
+/// ordinary payment). Only such a source may admit a variant that brings its
+/// own independent alternative cost (`is_independent_alternative_cost_rider`:
+/// the face-down {3}, Evoke, Bestow, …). Shared by the admission
+/// (`has_exile_cast_permission`) and every rider/cost read
+/// (`elected_exile_permission_source`), so the admitted authority and the
+/// paying authority can never diverge.
+fn static_source_is_normal_cost_authority(source: &ExilePermissionSource<'_>) -> bool {
     matches!(source.cost, ExileCastCost::PayNormalCost)
         && !matches!(
             source.extra_cost,
@@ -4684,42 +4899,55 @@ pub(crate) fn exile_static_permission_extra_cost(
 }
 
 /// CR 601.2a: The `ExileCastPermission` source `exiled_id`'s cast commits to.
-/// Prefers the source already recorded on a `CastingVariant::ExilePermission`
-/// (`variant`); otherwise re-derives it from the same first-match scan that
-/// stamps the offered candidate (`build_cast_offers` / candidate generation), so
-/// legality checks running before variant election (`can_cast_prepared_now`,
-/// `effective_spell_cost`) bind to the permission the cast will commit to.
 ///
-/// Returns `None` when no `ExileCastPermission` static authorizes the cast — an
-/// impulse `PlayFromExile` or other on-object exile permission carries no static
-/// extra-cost rider, so the per-source binding is skipped and no rider applies.
+/// Reads the elected authority in the order the cast actually elected it, and
+/// only re-derives when nothing was elected:
+///
+/// 1. the source recorded on a `CastingVariant::ExilePermission` (`variant`) —
+///    this cast IS that static's cast;
+/// 2. `elected_object_permission` — the cast committed to an object-attached
+///    grant instead (impulse `PlayFromExile`, `ExileWithAltCost`, …), so no
+///    static is its authority and none of their riders apply. A battlefield
+///    static that happens to authorize the same card is not the route taken;
+/// 3. otherwise the same first-match scan that stamps the offered candidate
+///    (`build_cast_offers` / candidate generation), so legality checks running
+///    before variant election (`can_cast_prepared_now`, `effective_spell_cost`)
+///    bind to the permission the cast will commit to.
+///
+/// Step 2 is the reason this takes the index rather than deriving it: with
+/// an overlapping object grant and battlefield static, the scan below returns
+/// the static and `exile_static_permission_extra_cost` then imposes an
+/// `Additional` rider the cast never accepted. Casts serialized before
+/// `CastingPermissionIndex` existed pass `None` here and keep the old scan.
 pub(crate) fn elected_exile_permission_source(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
     variant: Option<CastingVariant>,
+    elected_object_permission: Option<CastingPermissionIndex>,
 ) -> Option<ObjectId> {
-    variant
-        .and_then(CastingVariant::exile_permission_source)
-        .or_else(|| {
-            // CR 118.9a + CR 601.2a: the face-down cast reselects with the
-            // SAME eligibility predicate its admission used — the ordinary
-            // first-match scan could elect an earlier ineligible source
-            // (Valgavoth alternative rider) and charge ITS cost treatment,
-            // while admission was granted by a later eligible normal-cost
-            // source.
-            if variant == Some(CastingVariant::FaceDown) {
-                exile_cast_permission_source_matching(
-                    state,
-                    player,
-                    exiled_id,
-                    static_source_eligible_for_face_down,
-                )
-                .map(|(source, _, _)| source)
-            } else {
-                exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
-            }
-        })
+    if let Some(source) = variant.and_then(CastingVariant::exile_permission_source) {
+        return Some(source);
+    }
+    if elected_object_permission.is_some() {
+        return None;
+    }
+    // CR 118.9a + CR 601.2a: an alternative-cost-rider cast (face down, Evoke,
+    // Bestow, …) reselects with the SAME eligibility predicate its admission
+    // used — the ordinary first-match scan could elect an earlier ineligible
+    // source (Valgavoth alternative rider) and charge ITS cost treatment, while
+    // admission was granted by a later eligible normal-cost source.
+    if variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider) {
+        exile_cast_permission_source_matching(
+            state,
+            player,
+            exiled_id,
+            static_source_is_normal_cost_authority,
+        )
+        .map(|(source, _, _)| source)
+    } else {
+        exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
+    }
 }
 
 fn graveyard_permission_sources(
@@ -4875,11 +5103,12 @@ fn graveyard_permission_source(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<GraveyardPermissionSource<'_>> {
-    if state.objects.get(&object_id).is_some_and(|obj| {
-        obj.card_types
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Land)
-    }) {
+    // CR 305.9: a land is played, never cast, whatever the permission says.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| !object_may_enter_cast_path(obj))
+    {
         return None;
     }
     graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
@@ -6409,22 +6638,6 @@ fn prepare_spell_cast_with_variant_override_inner(
     // cost seams must derive fusion from this override. If a future change ever
     // infers Fuse elsewhere, this discriminator must be revisited.
     let is_fuse_variant = variant_override == Some(CastingVariant::Fuse);
-    // CR 715.3d + CR 701.17d: Cards carrying an object-tagged play/cast
-    // permission. Exile sources cover AdventureCreature / ExileWithAltCost /
-    // impulse `PlayFromExile`; the graveyard branch covers a milled card whose
-    // `PlayFromExile` was granted by a "you may play that card" mill effect
-    // (CR 701.17d — the permission lands on the card in the graveyard). Lands
-    // are excluded in both zones (CR 305.1) via
-    // `play_from_exile_object_in_cast_path`.
-    let has_object_tagged_play_permission = play_from_exile_object_in_cast_path(obj)
-        && has_exile_cast_permission(state, obj, player, state.turn_number, variant_override);
-    let has_madness = obj.zone == Zone::Exile
-        && matches!(variant_override, Some(CastingVariant::Madness))
-        && obj.owner == player
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_)));
     // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
     // graveyard-cast keywords.
     let has_escape = obj.zone == Zone::Graveyard
@@ -6433,8 +6646,6 @@ fn prepare_spell_cast_with_variant_override_inner(
             object_id,
             KeywordKind::Escape,
         );
-    let has_graveyard_cast_keyword =
-        obj.zone == Zone::Graveyard && has_effective_graveyard_cast_keyword(state, object_id, obj);
     let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
     // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
     let graveyard_permission_src = if obj.zone == Zone::Graveyard && state.active_player == player {
@@ -6442,7 +6653,6 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
-    let has_graveyard_permission = graveyard_permission_src.is_some();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
@@ -6454,6 +6664,12 @@ fn prepare_spell_cast_with_variant_override_inner(
     // graveyard alt-cost.
     let has_during_resolution_alt_cost =
         has_during_resolution_alt_cost_permission(state, obj, player);
+    // CR 118.9a: does the chosen method bring its own, independent alternative
+    // cost? Read before the permission is elected, because an elected
+    // permission that is ITSELF an alternative cost must reject such a rider —
+    // see the override branch below and `castable_zone` further down.
+    let alt_rider_variant =
+        variant_override.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     // CR 601.2a: A static exile permission is identified by
     // `CastingVariant::ExilePermission.source`; every other cast path that is
     // authorized by an object-attached grant records that exact vector slot.
@@ -6479,6 +6695,19 @@ fn prepare_spell_cast_with_variant_override_inner(
                     .to_string(),
             ));
         }
+        // CR 118.9a + CR 601.2b: this offer is BOUND to that permission, and
+        // the permission is itself an alternative cost ("without paying its
+        // mana cost"). A sibling normal-cost grant is not the route this cast
+        // takes, so it cannot lend authority to a method that brings its own
+        // alternative cost — `castable_zone`'s sibling fallback below would
+        // otherwise admit the rider on the strength of a grant never used.
+        if alt_rider_variant {
+            return Err(EngineError::ActionNotAllowed(
+                "This spell was offered without paying its mana cost, so it can't also be cast \
+                 for an alternative cost of its own"
+                    .to_string(),
+            ));
+        }
         Some(index)
     } else if matches!(
         variant_override,
@@ -6500,46 +6729,20 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
-    let has_top_of_library_permission = top_of_library_permission_src.is_some();
 
-    // CR 601.2a + CR 611.2a: CastFromZone effects grant ExileWithAltCost on
-    // opponent's cards. When the grant carries a `granted_to: Some(p)`
-    // binding, only player `p` may consume it — see
-    // `spell_objects_available_to_cast` for the parallel filter used at the
-    // legal-actions surface.
-    let has_unowned_exile_permission = obj.zone == Zone::Exile
-        && obj.owner != player
-        && has_alt_cost_permission_for(obj, state, player);
-    // CR 118.9a ("Only one alternative cost can be applied to any one spell
-    // as it's being cast") + CR 601.2b ("A player can't apply two alternative
-    // methods of casting or two alternative costs to a single spell"): an
-    // alternative-cost authority — exile/graveyard alt-cost grants,
-    // during-resolution free-cast windows, graveyard cast keywords — cannot
-    // admit the {3} face-down cast, which is itself an alternative
-    // method+cost. Normal-cost authorities (hand, command zone,
-    // `has_object_tagged_play_permission` = PlayFromExile/Adventure/Warp,
-    // Lurrus-class graveyard permissions, top-of-library play) admit every
-    // variant: there the face-down {3} is the single alternative applied.
-    let face_down_variant = variant_override == Some(CastingVariant::FaceDown);
-    let castable_zone = ((has_unowned_exile_permission || has_during_resolution_alt_cost)
-        && (!face_down_variant || normal_cost_grant_supports_cast(state, obj, player)))
-        || has_object_tagged_play_permission
-        || (obj.owner == player
-            && (obj.zone == Zone::Hand
-                || (state.format_config.command_zone
-                    && obj.zone == Zone::Command
-                    && obj.is_commander)
-                || (state.format_config.command_zone
-                    && obj.zone == Zone::Command
-                    && obj.is_signature_spell()
-                    && oathbreaker_on_battlefield(state, player))
-                || has_madness
-                || ((has_graveyard_cast_keyword || has_mayhem || has_graveyard_alt_cost)
-                    && (!face_down_variant
-                        || normal_cost_grant_supports_cast(state, obj, player)))
-                || has_graveyard_permission
-                || has_top_of_library_permission));
-    if !castable_zone {
+    // CR 305.9: refused BEFORE the admission gate, which now type-gates on the same
+    // predicate. Running it here keeps the specific message a land earns from every zone
+    // rather than the gate's generic "not in a castable zone".
+    if !object_may_enter_cast_path(obj) {
+        return Err(EngineError::ActionNotAllowed(
+            "Lands are played, not cast".to_string(),
+        ));
+    }
+
+    // The ADMISSION decision itself lives in `castable_from_current_zone`; the bindings
+    // above are kept because the cost paths below consume them, so those predicates are
+    // evaluated twice and the decision exists once.
+    if !castable_from_current_zone(state, obj, player, variant_override) {
         return Err(EngineError::InvalidAction(
             "Card is not in a castable zone".to_string(),
         ));
@@ -6596,16 +6799,6 @@ fn prepare_spell_cast_with_variant_override_inner(
     if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents playing cards from this zone".to_string(),
-        ));
-    }
-
-    if obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Lands are played, not cast".to_string(),
         ));
     }
 
@@ -6673,8 +6866,13 @@ fn prepare_spell_cast_with_variant_override_inner(
                 // variant. This keeps the zeroing decision keyed to the elected
                 // permission so a second active permission for the same exiled
                 // spell can never substitute its cost treatment.
-                let elected_source =
-                    elected_exile_permission_source(state, player, object_id, variant_override)?;
+                let elected_source = elected_exile_permission_source(
+                    state,
+                    player,
+                    object_id,
+                    variant_override,
+                    casting_permission_index,
+                )?;
                 exile_static_permission_extra_cost(state, player, object_id, elected_source)
                     .and_then(|extra| {
                         matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
@@ -6695,7 +6893,15 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
 
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
-    let energy_cost_from_exile = if obj.zone == Zone::Exile {
+    //
+    // CR 118.9a: this scan reads every attached permission, not the elected
+    // one (an energy permission is never electable — see
+    // `exile_alt_cost_permission_supports_cast`), so it must not answer for a
+    // cast that brings its own independent alternative cost. Such a cast is
+    // authorized by a normal-cost grant (`has_exile_cast_permission` rejects
+    // the energy permission as rider authority) and owes the rider's cost, not
+    // a free one borrowed from a route it never took.
+    let energy_cost_from_exile = if obj.zone == Zone::Exile && !alt_rider_variant {
         obj.casting_permissions.iter().any(|p| {
             matches!(
                 p,
@@ -14940,6 +15146,7 @@ fn can_cast_prepared_now_with_probe(
                 player,
                 prepared.object_id,
                 Some(prepared.casting_variant),
+                prepared.casting_permission_index,
             )
             .and_then(|source| {
                 exile_static_permission_extra_cost(state, player, prepared.object_id, source)
@@ -21800,3 +22007,538 @@ fn is_blocked_by_per_turn_cast_limit_for(
 #[cfg(test)]
 #[path = "casting_tests.rs"]
 mod tests;
+
+/// CR 601.2a + CR 406.3b: the two admission predicates the visibility projection reads.
+///
+/// These rows pin the DISJUNCTION's content, which is what a hoist can silently change:
+/// `prepare_spell_cast` now CALLS `castable_from_current_zone`, so an agreement assertion
+/// between the two is true by construction and proves nothing. Each row therefore names a
+/// concrete verdict and pairs it with the same object under the same zone with the admitting
+/// fact removed.
+#[cfg(test)]
+mod castable_zone_authority_tests {
+    use super::{cast_permissions_name_their_grantee, castable_from_current_zone};
+    use crate::game::game_object::GameObject;
+    use crate::types::ability::{
+        CardPlayMode, CastingPermission, ExileGrantCostProvenance, StaticDefinition,
+    };
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+    use crate::types::statics::{CastFrequency, StaticMode};
+    use crate::types::zones::Zone;
+
+    fn top_of_library_static() -> StaticDefinition {
+        let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: CardPlayMode::Cast,
+            frequency: CastFrequency::Unlimited,
+            alt_cost: None,
+        });
+        def.affected = Some(crate::types::ability::TargetFilter::Any);
+        def
+    }
+
+    fn card(state: &mut GameState, id: u64, owner: PlayerId, zone: Zone) -> ObjectId {
+        let oid = ObjectId(id);
+        state.objects.insert(
+            oid,
+            GameObject::new(oid, CardId(id), owner, "Card".into(), zone),
+        );
+        if zone == Zone::Library {
+            state
+                .players
+                .iter_mut()
+                .find(|p| p.id == owner)
+                .expect("owner exists")
+                .library
+                .push_back(oid);
+        }
+        oid
+    }
+
+    /// **The grantee predicate refuses exactly the permission shape that names no grantee.**
+    ///
+    /// `exile_alt_cost_permission_grants_to_player` reads an absent `granted_to` as granting
+    /// to EVERY player, which as a disclosure rule would name every seat as entitled to look.
+    /// The three arms differ only in that field.
+    #[test]
+    fn cast_permissions_name_their_grantee_refuses_only_an_absent_grantee() {
+        let bare = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Bare".into(),
+            Zone::Exile,
+        );
+        assert!(
+            cast_permissions_name_their_grantee(&bare),
+            "an object carrying no permission is vacuously true — the subject is the player \
+             the gate was asked about"
+        );
+
+        let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            cost: ManaCost::default(),
+            cost_provenance: ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        };
+
+        let mut ungranteed = bare.clone();
+        ungranteed.casting_permissions = vec![permission(None)];
+        assert!(
+            !cast_permissions_name_their_grantee(&ungranteed),
+            "an absent `granted_to` admits every player and has no disclosure subject"
+        );
+
+        let mut granteed = bare.clone();
+        granteed.casting_permissions = vec![permission(Some(PlayerId(1)))];
+        assert!(
+            cast_permissions_name_their_grantee(&granteed),
+            "PAIRED POSITIVE: the same permission naming a grantee passes — the field is the \
+             only difference between this arm and the one above"
+        );
+    }
+
+    /// **The owner-hand disjunct admits an owner and nobody else.** Same card, same zone;
+    /// only the asked player changes.
+    #[test]
+    fn the_owner_hand_disjunct_is_scoped_to_the_owner() {
+        let mut state = GameState::new_two_player(7);
+        let id = card(&mut state, 1, PlayerId(0), Zone::Hand);
+        let obj = state.objects[&id].clone();
+
+        assert!(castable_from_current_zone(&state, &obj, PlayerId(0), None));
+        assert!(
+            !castable_from_current_zone(&state, &obj, PlayerId(1), None),
+            "a hand card carrying no grant is castable by its owner alone"
+        );
+    }
+
+    /// **A hand alt-cost grant admits its GRANTEE.** CR 601.2a: the permission binds to the
+    /// player it names, not to the card's owner, so the owner-hand disjunct above can never
+    /// carry it — an opponent-owned card in hand is refused by that route by construction.
+    ///
+    /// Four arms on one card, each differing from a neighbour in exactly one fact: no grant,
+    /// a grant naming the asked player, a grant naming someone else, and the owner's own
+    /// route left untouched.
+    #[test]
+    fn the_hand_alt_cost_disjunct_admits_its_grantee_and_not_a_bystander() {
+        let mut state = GameState::new_two_player(7);
+        // Owned by P1 and sitting in hand; P0 is the grantee. "You may cast that card" on an
+        // opponent's card is exactly the shape the owner-hand disjunct refuses.
+        let id = card(&mut state, 1, PlayerId(1), Zone::Hand);
+        let bare = state.objects[&id].clone();
+
+        let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            cost: ManaCost::default(),
+            cost_provenance: ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        };
+
+        assert!(
+            !castable_from_current_zone(&state, &bare, PlayerId(0), None),
+            "NEGATIVE: with no permission on the card, an opponent-owned hand card is refused"
+        );
+
+        let mut granted = bare.clone();
+        granted.casting_permissions = vec![permission(Some(PlayerId(0)))];
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "the grantee is admitted — the grant is in hand and names P0 (CR 601.2a). This \
+             arm differs from the one above by the permission alone"
+        );
+
+        let mut granted_elsewhere = bare.clone();
+        granted_elsewhere.casting_permissions = vec![permission(Some(PlayerId(1)))];
+        assert!(
+            !castable_from_current_zone(&state, &granted_elsewhere, PlayerId(0), None),
+            "the same permission naming a DIFFERENT grantee must not admit P0: the disjunct \
+             keys on the grantee binding, not on the mere presence of a grant"
+        );
+
+        let mut ungranteed = bare.clone();
+        ungranteed.casting_permissions = vec![permission(None)];
+        assert!(
+            !castable_from_current_zone(&state, &ungranteed, PlayerId(0), None),
+            "CR 109.5: an unnamed grantee is the serialized contract's legacy OWNER \
+             fallback, not \"anyone\" — P0 does not own this card, so an unnamed grant \
+             must not open an opponent's hand to them"
+        );
+        assert!(
+            castable_from_current_zone(&state, &ungranteed, PlayerId(1), None),
+            "PAIRED POSITIVE: the same unnamed grant resolves to the OWNER, who is \
+             admitted — so the arm above refuses for the grantee reason, not because the \
+             permission was ignored outright"
+        );
+
+        assert!(
+            castable_from_current_zone(&state, &bare, PlayerId(1), None),
+            "CONTROL: the ordinary owner/hand route is untouched by the new disjunct"
+        );
+    }
+
+    /// **The top-of-library disjunct admits the TOP card only, and only under a live static.**
+    ///
+    /// Three arms on one board: the top card under the static, the second card under the same
+    /// static, and the top card with the static removed. The first is the only `true`.
+    #[test]
+    fn the_top_of_library_disjunct_admits_one_card_under_a_live_static() {
+        let mut state = GameState::new_two_player(7);
+        let top = card(&mut state, 1, PlayerId(0), Zone::Library);
+        let next = card(&mut state, 2, PlayerId(0), Zone::Library);
+        let source = ObjectId(3);
+        state.objects.insert(
+            source,
+            GameObject::new(
+                source,
+                CardId(3),
+                PlayerId(0),
+                "Realmwalker".into(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(source);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("just inserted")
+            .static_definitions = vec![top_of_library_static()].into();
+
+        let top_obj = state.objects[&top].clone();
+        let next_obj = state.objects[&next].clone();
+        assert!(castable_from_current_zone(
+            &state,
+            &top_obj,
+            PlayerId(0),
+            None
+        ));
+        assert!(
+            !castable_from_current_zone(&state, &next_obj, PlayerId(0), None),
+            "the permission names the TOP card, so the second one is refused on the same board"
+        );
+
+        // Remove the static: the same top card in the same zone is refused.
+        state.battlefield.retain(|x| *x != source);
+        state.objects.remove(&source);
+        assert!(
+            !castable_from_current_zone(&state, &top_obj, PlayerId(0), None),
+            "PAIRED CONTROL: without the static nothing admits the top card"
+        );
+    }
+
+    /// **A no-permission card in a hidden zone is refused for every seat.** This is the
+    /// control the exemption rows in `game::visibility` rest on: it is the PERMISSION, not
+    /// the zone placement, that moves any verdict.
+    #[test]
+    fn a_bare_hidden_zone_card_is_castable_by_nobody() {
+        let mut state = GameState::new_two_player(7);
+        let lib = card(&mut state, 1, PlayerId(0), Zone::Library);
+        let exiled = card(&mut state, 2, PlayerId(0), Zone::Exile);
+        let lib_obj = state.objects[&lib].clone();
+        let exiled_obj = state.objects[&exiled].clone();
+
+        for player in [PlayerId(0), PlayerId(1)] {
+            assert!(!castable_from_current_zone(&state, &lib_obj, player, None));
+            assert!(!castable_from_current_zone(
+                &state,
+                &exiled_obj,
+                player,
+                None
+            ));
+        }
+
+        // Reach guard in the same row: the instrument DOES say `true` for a card the gate
+        // admits, so the four `false`s above are a decision rather than a dead predicate.
+        let hand = card(&mut state, 3, PlayerId(0), Zone::Hand);
+        let hand_obj = state.objects[&hand].clone();
+        assert!(castable_from_current_zone(
+            &state,
+            &hand_obj,
+            PlayerId(0),
+            None
+        ));
+    }
+
+    /// **The commander disjunct admits an owner's commander in the command zone, and
+    /// needs all three of its conjuncts.** CR 903.8: a player may cast a commander they
+    /// own from the command zone. Four arms on one object: the admitting board, then each
+    /// conjunct removed in turn.
+    #[test]
+    fn the_commander_disjunct_needs_the_format_the_zone_and_the_commander_flag() {
+        let mut state = GameState::new_two_player(7);
+        state.format_config.command_zone = true;
+        let id = card(&mut state, 1, PlayerId(0), Zone::Command);
+        state
+            .objects
+            .get_mut(&id)
+            .expect("just inserted")
+            .is_commander = true;
+        let obj = state.objects[&id].clone();
+
+        assert!(castable_from_current_zone(&state, &obj, PlayerId(0), None));
+        assert!(
+            !castable_from_current_zone(&state, &obj, PlayerId(1), None),
+            "CR 903.8 names the commander's OWNER, so the other seat is refused on the \
+             same board"
+        );
+
+        let mut not_commander = obj.clone();
+        not_commander.is_commander = false;
+        assert!(
+            !castable_from_current_zone(&state, &not_commander, PlayerId(0), None),
+            "a non-commander card in the command zone carries no CR 903.8 permission"
+        );
+
+        state.format_config.command_zone = false;
+        assert!(
+            !castable_from_current_zone(&state, &obj, PlayerId(0), None),
+            "the format gate is a conjunct, not decoration"
+        );
+    }
+
+    /// **A mayhem card is castable from its owner's graveyard exactly while it was
+    /// discarded this turn.** CR 702.187b: "As long as you discarded this card this turn,
+    /// you may cast it from your graveyard by paying [cost] rather than paying its mana
+    /// cost." The two arms differ in `discarded_turn` alone.
+    ///
+    /// `castable_from_current_zone` reaches this through the mayhem clause inside
+    /// `has_effective_graveyard_cast_keyword`, which is its only remaining route to the
+    /// behaviour, so the row reddens if that clause is lost.
+    #[test]
+    fn a_mayhem_card_is_castable_from_its_owners_graveyard_only_when_discarded_this_turn() {
+        let mut state = GameState::new_two_player(7);
+        state.turn_number = 5;
+        let id = card(&mut state, 1, PlayerId(0), Zone::Graveyard);
+        {
+            let obj = state.objects.get_mut(&id).expect("just inserted");
+            obj.base_keywords = vec![crate::types::keywords::Keyword::Mayhem(ManaCost::default())];
+            obj.discarded_turn = Some(5);
+        }
+        let discarded_this_turn = state.objects[&id].clone();
+        assert!(castable_from_current_zone(
+            &state,
+            &discarded_this_turn,
+            PlayerId(0),
+            None
+        ));
+        assert!(
+            !castable_from_current_zone(&state, &discarded_this_turn, PlayerId(1), None),
+            "mayhem names the card's own graveyard, so the other seat is refused"
+        );
+
+        state.objects.get_mut(&id).expect("present").discarded_turn = Some(4);
+        let discarded_earlier = state.objects[&id].clone();
+        assert!(
+            !castable_from_current_zone(&state, &discarded_earlier, PlayerId(0), None),
+            "PAIRED NEGATIVE: the same mayhem card discarded on an EARLIER turn is refused"
+        );
+    }
+
+    /// **A timed alt-cost grant never admits a land, and still admits a non-land.**
+    ///
+    /// CR 305.9: an object that is both a land and another card type can be played only as
+    /// a land — it can't be cast as a spell. CR 118.9 lets an effect apply an alternative
+    /// cost to an object, but the grant cannot make a land a spell, so
+    /// `castable_from_current_zone` refuses it whatever the permission says.
+    ///
+    /// The grantee gate is a SEPARATE conjunct and is tested on a non-land: on a land the
+    /// wrong-grantee arm would pass through the type gate and stop testing grantee at all.
+    #[test]
+    fn the_graveyard_alt_cost_disjunct_refuses_a_land_and_admits_a_non_land() {
+        let mut state = GameState::new_two_player(7);
+        let permission = |granted_to: PlayerId| CastingPermission::ExileWithAltCost {
+            cost: ManaCost::default(),
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(granted_to),
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        };
+
+        let land_id = card(&mut state, 1, PlayerId(0), Zone::Graveyard);
+        {
+            let obj = state.objects.get_mut(&land_id).expect("just inserted");
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.casting_permissions = vec![permission(PlayerId(0))];
+        }
+        let land = state.objects[&land_id].clone();
+        assert!(
+            !castable_from_current_zone(&state, &land, PlayerId(0), None),
+            "CR 305.9: a land in its owner's graveyard carrying the grant is refused"
+        );
+
+        // PAIRED POSITIVE on the same board: the identical grant on a NON-land is admitted,
+        // so the refusal above is the type gate deciding rather than the grant having died.
+        let spell_id = card(&mut state, 2, PlayerId(0), Zone::Graveyard);
+        {
+            let obj = state.objects.get_mut(&spell_id).expect("just inserted");
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Instant);
+            obj.casting_permissions = vec![permission(PlayerId(0))];
+        }
+        let spell = state.objects[&spell_id].clone();
+        assert!(castable_from_current_zone(
+            &state,
+            &spell,
+            PlayerId(0),
+            None
+        ));
+
+        // The grantee conjunct, tested on the NON-land so the type gate cannot satisfy it.
+        let mut granted_elsewhere = spell.clone();
+        granted_elsewhere.casting_permissions = vec![permission(PlayerId(1))];
+        assert!(
+            !castable_from_current_zone(&state, &granted_elsewhere, PlayerId(0), None),
+            "PAIRED NEGATIVE: the permission names a grantee and P0 is not it"
+        );
+    }
+
+    /// **The admission gate refuses a land on every route a land can reach it by.**
+    ///
+    /// CR 305.9: "If an object is both a land and another card type, it can be played only
+    /// as a land. It can't be cast as a spell." One conjunct at the head of
+    /// `castable_from_current_zone` dominates the whole disjunction, so each route is
+    /// exercised as a pair: the non-land IS admitted (proving the fixture reaches that
+    /// route at all) and its `CoreType::Land` twin is refused.
+    #[test]
+    fn the_admission_gate_refuses_a_land_on_every_route() {
+        use crate::types::keywords::{FlashbackCost, Keyword};
+
+        // Each leg returns (state, non-land object, land twin) for one route.
+        #[allow(clippy::type_complexity)]
+        let legs: Vec<(&str, fn() -> (GameState, GameObject, GameObject))> = vec![
+            ("mayhem in own graveyard", || {
+                let mut state = GameState::new_two_player(7);
+                state.turn_number = 5;
+                let id = card(&mut state, 1, PlayerId(0), Zone::Graveyard);
+                {
+                    let obj = state.objects.get_mut(&id).expect("just inserted");
+                    obj.base_keywords = vec![Keyword::Mayhem(ManaCost::default())];
+                    obj.discarded_turn = Some(5);
+                }
+                let non_land = state.objects[&id].clone();
+                let mut land = non_land.clone();
+                land.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Land);
+                (state, non_land, land)
+            }),
+            ("flashback in own graveyard", || {
+                let mut state = GameState::new_two_player(7);
+                let id = card(&mut state, 1, PlayerId(0), Zone::Graveyard);
+                {
+                    let obj = state.objects.get_mut(&id).expect("just inserted");
+                    obj.base_keywords =
+                        vec![Keyword::Flashback(FlashbackCost::Mana(ManaCost::default()))];
+                }
+                let non_land = state.objects[&id].clone();
+                let mut land = non_land.clone();
+                land.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Land);
+                (state, non_land, land)
+            }),
+            ("top of own library under a cast static", || {
+                let mut state = GameState::new_two_player(7);
+                let top = card(&mut state, 1, PlayerId(0), Zone::Library);
+                let source = ObjectId(3);
+                state.objects.insert(
+                    source,
+                    GameObject::new(
+                        source,
+                        CardId(3),
+                        PlayerId(0),
+                        "Realmwalker".into(),
+                        Zone::Battlefield,
+                    ),
+                );
+                state.battlefield.push_back(source);
+                state
+                    .objects
+                    .get_mut(&source)
+                    .expect("just inserted")
+                    .static_definitions = vec![top_of_library_static()].into();
+                let non_land = state.objects[&top].clone();
+                let mut land = non_land.clone();
+                land.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Land);
+                (state, non_land, land)
+            }),
+            ("opponent-owned exile under an alt-cost grant", || {
+                let mut state = GameState::new_two_player(7);
+                let id = card(&mut state, 1, PlayerId(1), Zone::Exile);
+                {
+                    let obj = state.objects.get_mut(&id).expect("just inserted");
+                    obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                        cost: ManaCost::default(),
+                        cost_provenance:
+                            crate::types::ability::ExileGrantCostProvenance::Alternative,
+                        cast_transformed: false,
+                        constraint: None,
+                        granted_to: Some(PlayerId(0)),
+                        resolution_cleanup: None,
+                        duration: None,
+                        graveyard_replacement: None,
+                        enters_with_counter: None,
+                        enters_with_modifications: Vec::new(),
+                        mana_spend_permission: None,
+                    }];
+                }
+                let non_land = state.objects[&id].clone();
+                let mut land = non_land.clone();
+                land.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Land);
+                (state, non_land, land)
+            }),
+        ];
+
+        // Every leg is evaluated before asserting, so one broken route reports as one
+        // route rather than masking the verdicts of the legs behind it.
+        let mut unreached = Vec::new();
+        let mut admitted_lands = Vec::new();
+        for (route, build) in legs {
+            let (state, non_land, land) = build();
+            if !castable_from_current_zone(&state, &non_land, PlayerId(0), None) {
+                unreached.push(route);
+            }
+            if castable_from_current_zone(&state, &land, PlayerId(0), None) {
+                admitted_lands.push(route);
+            }
+        }
+        assert!(
+            unreached.is_empty(),
+            "REACH GUARD: these routes did not admit their non-land twin, so their land \
+             refusal would be satisfied by a fixture that reaches no route: {unreached:?}"
+        );
+        assert!(
+            admitted_lands.is_empty(),
+            "CR 305.9: these routes admitted a CoreType::Land object: {admitted_lands:?}"
+        );
+    }
+}

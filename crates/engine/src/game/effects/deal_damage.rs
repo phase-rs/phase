@@ -7090,7 +7090,7 @@ mod tests {
         assert_eq!(state.objects[&opp_b_pw].loyalty, Some(2));
     }
 
-    /// CR 120.3 + CR 119.3a: Pyrohemia / Pestilence runtime behavior — when
+    /// CR 120.3a + CR 120.3e: Pyrohemia / Pestilence runtime behavior — when
     /// `DamageAll { player_filter: Some(PlayerFilter::All) }` resolves, every
     /// creature on the battlefield (including the controller's own) takes
     /// damage AND every player (including the controller) loses life. This

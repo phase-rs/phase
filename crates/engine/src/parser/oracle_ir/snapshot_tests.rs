@@ -655,6 +655,51 @@ fn questing_beast() {
     insta::assert_json_snapshot!("questing_beast_lowered", &lowered);
 }
 
+#[test]
+fn call_forth_the_tempest() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Cascade, cascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order. Then do it again.)\nCall Forth the Tempest deals damage to each creature your opponents control equal to the total mana value of other spells you've cast this turn.",
+        "Call Forth the Tempest",
+        &["Cascade"],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        lowered
+            .abilities
+            .iter()
+            .all(|ability| !ability_has_unimplemented(ability)),
+        "Call Forth must lower without unsupported leaves: {:?}",
+        lowered.abilities
+    );
+    insta::assert_json_snapshot!("call_forth_the_tempest_ir", &ir);
+    insta::assert_json_snapshot!("call_forth_the_tempest_lowered", &lowered);
+}
+
+#[test]
+fn rootha_mastering_the_moment() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of combat on your turn, if you've cast an instant or sorcery spell this turn, create an X/X blue and red Elemental creature token with flying and haste, where X is the greatest mana value among instant and sorcery spells you've cast this turn.",
+        "Rootha, Mastering the Moment",
+        &["Creature"],
+        &["Orc", "Sorcerer"],
+    );
+    let trigger = lowered
+        .triggers
+        .first()
+        .expect("Rootha must lower its beginning-of-combat trigger");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("Rootha's trigger must retain its token execute tree");
+    assert!(
+        !ability_has_unimplemented(execute),
+        "Rootha's trigger execute tree must lower without unsupported leaves: {execute:?}",
+    );
+    insta::assert_json_snapshot!("rootha_mastering_the_moment_ir", &ir);
+    insta::assert_json_snapshot!("rootha_mastering_the_moment_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // CR 615.1a prevention spells — the instant/sorcery prevention recognizer
 // ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ fn place_on_battlefield(
 }
 
 /// The layer-derived mana-ability index on `source` (`{T}: Add {C}{C}{C}`). Read OFF the object.
-fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
+pub(crate) fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
     state
         .objects
         .get(&source)?
@@ -70,7 +70,7 @@ fn mana_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
 /// The layer-derived NON-mana activated ability index on `source` (`{3}: Untap this artifact`).
 /// The static "doesn't untap during your untap step" ability is `Static`-kind, so the only
 /// non-mana `Activated` ability is the untap.
-fn untap_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
+pub(crate) fn untap_ability_index(state: &GameState, source: ObjectId) -> Option<usize> {
     state
         .objects
         .get(&source)?
@@ -110,14 +110,14 @@ fn colorless(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-struct Rig {
-    runner: GameRunner,
-    basalt: ObjectId,
+pub(crate) struct Rig {
+    pub(crate) runner: GameRunner,
+    pub(crate) basalt: ObjectId,
 }
 
 /// Build the 2-player rig: Basalt Monolith on P0's battlefield, optionally with Power Artifact
 /// attached (the cost-reduction that makes the untap net-positive). `mode` selects the detector.
-fn setup(with_power: bool, mode: LoopDetectionMode, db: &CardDatabase) -> Rig {
+pub(crate) fn setup(with_power: bool, mode: LoopDetectionMode, db: &CardDatabase) -> Rig {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let basalt = scenario.add_real_card(P0, BASALT, Zone::Battlefield, db);
@@ -158,7 +158,7 @@ fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_index:
 
 /// Drive one full loop period: the off-stack mana beat, then the on-stack untap beat, settling
 /// each. Returns with the CR 732.2a offer surfaced (if the loop is detected).
-fn drive_one_period(rig: &mut Rig, mana_idx: usize, untap_idx: usize) {
+pub(crate) fn drive_one_period(rig: &mut Rig, mana_idx: usize, untap_idx: usize) {
     activate_and_settle(&mut rig.runner, rig.basalt, mana_idx);
     activate_and_settle(&mut rig.runner, rig.basalt, untap_idx);
 }
@@ -1012,9 +1012,11 @@ fn mana_engine_accept_records_no_collapse_bound() {
     );
 }
 
-/// R6a FIX-ROUND-3 (CR 500.5), now the MULTI-AXIS row: the
-/// `PersistentAxisMaterialization::DriveSequence` arm of `scheduled_collapse_axes` returns the
-/// loop's WHOLE axis set (`collapsed_axes` == `proposal.unbounded`), so ONE stash here names TWO
+/// CR 500.5, the MULTI-AXIS row: the
+/// `PersistentAxisMaterialization::DriveSequence` arm of `scheduled_collapse_axes` returns
+/// WHATEVER `collapsed_axes` the stash carries. Production stores only the `DeferredAccrual`
+/// subset (`engine::analysis::resource::ResourceAxis::unbounded_mark_kind`); this row's stash is
+/// grafted BROADER on purpose — see (ii) below — so ONE stash here names TWO
 /// axes — an already-materialized `Mana(Colorless)` and a deferred `Life(P0)`. Both keep their ∞
 /// row while the collapse is merely scheduled, and they get there for DIFFERENT reasons, which is
 /// what makes this the strongest rig in the file for the projection's schedule-independence.
@@ -1037,16 +1039,21 @@ fn mana_engine_accept_records_no_collapse_bound() {
 /// HONEST SCOPE. Everything except one write is real: real cards through the real parser, a real
 /// two-beat Basalt+Power period, a real `DeclareShortcut`/`RespondToShortcut` accept that marks
 /// `Mana(Colorless)` and holds the pool at the cap. What is NOT reachable on this rig — and the
-/// R6a reviewer could not reach it on any production board either — is a single loop spanning
+/// no production board reaches either — is a single loop spanning
 /// BOTH a `Mana(_)` axis and an OBSERVED counter/life axis, which is what routes an accept into
 /// the `DriveSequence` arm (`game::engine::materialize_object_growth_shortcut`). So the stash is
 /// grafted through the same single-authority writers the accept path itself calls
 /// (`GameState::mark_unbounded_loop` for the second axis, `register_pending_materialization` for
-/// the item), with `collapsed_axes` set to exactly the store's mark set — byte-for-byte the
-/// `proposal.unbounded.clone()` that production writes. Same graft technique as
+/// the item), with `collapsed_axes` set to exactly the store's mark set — **(ii)** a DELIBERATE
+/// SUPERSET of what production writes, not a mirror of it. Production filters `Mana(_)` out of
+/// `collapsed_axes` (`ResourceAxis::unbounded_mark_kind`), so a real accept could never name the
+/// mana axis here. The graft names it anyway, because this row is about the PROJECTION — "if a
+/// mana axis WERE scheduled, does the badge still render the spendable pool?" — and a graft
+/// narrowed to production's own output would make the mana half of the row UNREACHABLE rather than
+/// merely hostile. Same graft technique as
 /// `combo_infinite_pile::real_4p_observed_drive_sequence_replays_captured_period_n_times`.
 ///
-/// REVERT-PROBE (RP-1d, RUN): restore `if collapse_scheduled(controller, &axis) { continue; }` in
+/// REVERT-PROBE: restore `if collapse_scheduled(controller, &axis) { continue; }` in
 /// `derive_views`' resource-row loop ⇒ (6) FAILS — `Life(P0)` is in the `DriveSequence`'s
 /// `collapsed_axes`, so the restored guard hides its row. (5) is the paired control that keeps
 /// the probe honest: BASE also carried an `axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)))`
@@ -1091,7 +1098,7 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
         .expect("opponent accepts");
 
     // (1) REACH-GUARD: the real accept marked the Mana axis in the STORE. Capture the exact
-    // axes — the graft below reuses them as `collapsed_axes`, mirroring production.
+    // axes — the graft below reuses them as the deliberate `collapsed_axes` superset.
     let mana_axes: Vec<ResourceAxis> = rig
         .runner
         .state()
@@ -1145,6 +1152,9 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     // (4) REACH-GUARD ON THE SEAM: the collapse authority really does name BOTH axes, so a
     // schedule-keyed hide filter would have suppressed both rows below. Without this, (5) and (6)
     // could pass because the stash never reached the `DriveSequence` arm at all.
+    // It names both BECAUSE OF THE GRAFT, not because production would produce it — a later
+    // reader "simplifying" the graft to match production silently vacates the mana half of this
+    // row (`unbounded_mark_kind` filters `Mana(_)` at the registration site).
     let state = rig.runner.state();
     let scheduled = state.scheduled_collapse_axes(
         state
@@ -1155,8 +1165,9 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     assert!(
         scheduled.contains(&ResourceAxis::Mana(ManaType::Colorless))
             && scheduled.contains(&ResourceAxis::Life(P0)),
-        "reach-guard: scheduled_collapse_axes returns BOTH axes unfiltered (the boundary must \
-         still clear the mana one), got {scheduled:?}"
+        "reach-guard: scheduled_collapse_axes returns BOTH axes unfiltered (this graft's stash \
+         names the mana axis, so the clear still removes it here; production no longer names it — \
+         ResourceAxis::unbounded_mark_kind), got {scheduled:?}"
     );
 
     for viewer in [None, Some(P0), Some(P1)] {

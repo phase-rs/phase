@@ -1043,6 +1043,21 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
     },
+    /// CR 701.17a: a card was milled — the milling player put it from the top of
+    /// their library toward their graveyard. Emitted once per card (CR 603.2c),
+    /// and emitted even when a replacement rewrote the destination: CR 614.6 says
+    /// the modified event is what occurred, and CR 701.17c confirms the card is
+    /// still a milled card by letting an effect find it "in the zone it moved to
+    /// from the library". `to` is that post-replacement zone, which CR 701.17c
+    /// scopes on being public (CR 400.2) — the wire visibility filter reads it.
+    Milled {
+        /// CR 701.17a: the player whose library the card left.
+        player_id: PlayerId,
+        /// The milled card.
+        object_id: ObjectId,
+        /// CR 701.17c: the zone the card actually moved to from the library.
+        to: Zone,
+    },
     DamageCleared {
         object_id: ObjectId,
     },

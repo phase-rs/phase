@@ -1951,7 +1951,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         return Some(QuantityExpr::Ref { qty });
     }
 
-    // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}".
+    // CR 608.2k / CR 608.2c: Decompose possessive noun phrases: "{referent}'s {property}".
     // The prefix classifier (`classify_possessive_referent`) picks the
     // ObjectScope per the prefix's grammatical role:
     //   - participle adjective + type ("the sacrificed creature's power",
@@ -2104,7 +2104,7 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
     })
 }
 
-/// CR 603.7c: Classify the prefix of a `"<referent>'s <property>"` possessive
+/// CR 608.2k / CR 608.2c: Classify the prefix of a `"<referent>'s <property>"` possessive
 /// noun phrase and return the appropriate `ObjectScope` for the property's
 /// owning object — or `None` if the prefix is not a recognized referent.
 ///
@@ -2223,7 +2223,7 @@ fn parse_possessive_participle(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 603.7c / CR 205: Recognize the object-type phrase that follows the
+/// CR 205: Recognize the object-type phrase that follows the
 /// determiner (and optional participle) in a possessive prefix.
 ///
 /// Decomposes as `opt(supertype) + type_word`, reusing the shared

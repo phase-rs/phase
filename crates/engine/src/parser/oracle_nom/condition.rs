@@ -3726,7 +3726,7 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
 /// `parse_that_player_has_conditions` so any single-player subject ("that
 /// player", "target player") composes with these life-total tails.
 ///
-/// CR 119 (Life), CR 603.4 (intervening-if), CR 603.7c ("that player" anaphora
+/// CR 119 (Life), CR 603.4 (intervening-if), CR 120.3 ("that player" anaphora
 /// binds to the player event-context for damage triggers).
 fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
     // CR 119: "no life" → LifeTotal EQ 0 (defensive, mirrors hand-size's
@@ -10706,7 +10706,7 @@ mod tests {
         }
     }
 
-    /// CR 119 + CR 603.4 + CR 603.7c: "if that player has N or less life"
+    /// CR 119 + CR 603.4 + CR 120.3: "if that player has N or less life"
     /// intervening-if predicate on a combat-damage trigger. Canonical card:
     /// Ezio Auditore da Firenze. "That player" resolves to the damaged
     /// player (the event-context player), not the source's controller.

@@ -559,6 +559,9 @@ jobs:
     env:
       SHELL_TAG: ${{ needs.resolve-shell-ref.outputs.release_tag }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - name: Download Linux shell artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -631,6 +634,34 @@ jobs:
           test "$(jq -r '.platforms | keys | sort | join(",")' artifacts/update.json)" = 'darwin-aarch64,linux-x86_64,windows-x86_64'
           ! grep -qi 'android' artifacts/update.json
 
+      - name: Download signed Android APKs
+        if: needs.build-android.outputs.apk_available == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shell-tauri-android
+          path: artifacts/shell-tauri-android
+
+      - name: Validate release assets
+        env:
+          ANDROID_APKS_AVAILABLE: ${{ needs.build-android.outputs.apk_available }}
+        run: |
+          set -euo pipefail
+
+          for asset in \
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb \
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage \
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.dmg \
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz \
+            artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe \
+            artifacts/update.json; do
+            test -s "$asset"
+          done
+
+          if [ "$ANDROID_APKS_AVAILABLE" = 'true' ]; then
+            test -s artifacts/shell-tauri-android/Phase-Android-ARM64.apk
+            test -s artifacts/shell-tauri-android/Phase-Android-ARMv7.apk
+          fi
+
       - name: Create shell release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -651,7 +682,9 @@ jobs:
 
             This is the official desktop app for [phase-rs.dev](https://phase-rs.dev).
             `update.json` is used by automatic updates; it is not a manual download.
-          fail_on_unmatched_files: true
+          # Android artifacts are optional, so unmatched APK globs are allowed.
+          # The preceding validation keeps every required desktop asset strict.
+          fail_on_unmatched_files: false
           files: |
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage
@@ -659,21 +692,31 @@ jobs:
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz
             artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
             artifacts/update.json
+            artifacts/shell-tauri-android/Phase-Android-ARM64.apk
+            artifacts/shell-tauri-android/Phase-Android-ARMv7.apk
 
-      - name: Download signed Android APKs
-        if: needs.build-android.outputs.apk_available == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/setup-node@v4
         with:
-          name: shell-tauri-android
-          path: artifacts/shell-tauri-android
+          node-version: 22
 
-      - name: Attach signed Android APKs
-        if: needs.build-android.outputs.apk_available == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Publish and verify updater manifest
         run: |
           set -euo pipefail
-          gh release upload "$SHELL_TAG" \
-            artifacts/shell-tauri-android/Phase-Android-ARM64.apk \
-            artifacts/shell-tauri-android/Phase-Android-ARMv7.apk \
-            --clobber
+
+          npm install --global "wrangler@$WRANGLER_VERSION"
+          wrangler r2 object put "phase-rs-data/desktop/update.json" \
+            --file artifacts/update.json \
+            --remote \
+            --content-type application/json \
+            --cache-control "max-age=60, must-revalidate"
+
+          for _ in {1..6}; do
+            if curl --fail --silent --show-error https://data.phase-rs.dev/desktop/update.json \
+              | jq -e --arg version "$SHELL_VERSION" '.version == $version' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::Published updater manifest did not report shell v${SHELL_VERSION}"
+          exit 1

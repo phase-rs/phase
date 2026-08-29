@@ -1225,17 +1225,16 @@ fn trigger_event_unreachable_by_confined_action(
         //   `Unknown(_)`     — an unclassified Forge mode string, by definition.
         //
         // THREE MEASURED EXCLUSIONS from families that otherwise look relieved.
-        // Each was found by reading the matcher rather than the mode name, and
-        // each reads a GENERIC `GameEvent::ZoneChanged` that an allowlisted
-        // `Effect::ChangeZone` really does emit:
+        // Each was found by reading the matcher rather than the mode name:
         //
-        // * `Milled` / `MilledOnce` / `MilledAll` — CR 701.17a defines milling as
-        //   library-to-graveyard, and `game::trigger_matchers::match_milled` keys
-        //   on `ZoneChanged { from: Some(Library), to: Graveyard }` rather than on
-        //   any mill-specific event. `Effect::ChangeZone { origin: Some(Library),
-        //   destination: Graveyard, target: <actor-owned> }` is confined here
-        //   (graveyard is a confined landing zone, the target proves control) and
-        //   emits exactly that event, so relieving the family would be unsound.
+        // * `Milled` / `MilledOnce` / `MilledAll` — CR 701.17a. Relief IS now
+        //   available and is deliberately not taken: `match_milled` consumes the
+        //   dedicated `GameEvent::Milled`, only `Effect::Mill` emits it, and
+        //   `Effect::Mill` is not in `effect_window_reach`'s allowlist. Taking it
+        //   is an AI behaviour change owing `cargo ai-gate` and a paired-seed
+        //   report, so the family keeps its veto here unchanged.
+        // The remaining two each read a GENERIC `GameEvent::ZoneChanged` that an
+        // allowlisted `Effect::ChangeZone` really does emit:
         // * `EntersOrAttacks` — `match_enters_or_attacks` reads `ZoneChanged`, so
         //   the flagship's own tapped fetch fires it. It is a combat mode by name
         //   only.
@@ -3242,10 +3241,12 @@ mod tests {
         for mode in [
             TriggerMode::StateCondition,
             TriggerMode::Unknown("SomeFutureForgeMode".to_string()),
-            // The three MEASURED exclusions from families that read a GENERIC
+            // Three MEASURED exclusions. `match_milled` now keys on the
+            // dedicated `GameEvent::Milled` (CR 701.17a) that only the
+            // non-allowlisted `Effect::Mill` emits, so relief is available for
+            // the Milled family and deliberately not taken — it is an AI
+            // behaviour change owing its own gate. The other two read a GENERIC
             // `GameEvent::ZoneChanged` an allowlisted `Effect::ChangeZone` emits.
-            // `match_milled` keys on `ZoneChanged { from: Library, to: Graveyard }`
-            // (CR 701.17a), which a confined actor-owned self-mill produces.
             TriggerMode::Milled,
             TriggerMode::MilledAll,
             TriggerMode::EntersOrAttacks,

@@ -364,7 +364,7 @@ pub(crate) struct TriggerModifiers {
     pub(crate) has_up_to: bool,
     /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
     pub(crate) effect_lower: String,
-    /// CR 109.4 + CR 603.7c: The relative-player scope the trigger condition
+    /// CR 109.4: The relative-player scope the trigger condition
     /// established for its effect body (`TargetPlayer` for "deals [combat]
     /// damage to a player" / "attacks a player", `ParentTargetController` for
     /// damage-source-controller triggers, `ScopedPlayer` for scoped-phase

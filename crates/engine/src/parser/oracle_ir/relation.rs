@@ -51,7 +51,7 @@ pub(crate) enum DocumentRelationIr {
         ltb_return: OracleItemId,
         outcome: LinkedReturnOutcome,
     },
-    /// CR 102.1 + CR 603.7c + CR 608.2c: A mass-`MustAttack` coerce clause over
+    /// CR 102.1 + CR 608.2c: A mass-`MustAttack` coerce clause over
     /// the active player (`coerce`, Siren's Call) pairs with a sibling delayed
     /// punisher (`punisher`) whose "that player controls" anaphor defaulted to
     /// `You`. Applying the relation rebinds the punisher's destroyed-set

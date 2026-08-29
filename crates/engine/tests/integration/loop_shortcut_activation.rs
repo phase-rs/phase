@@ -136,7 +136,7 @@ fn activate_and_drive(runner: &mut GameRunner, host: ObjectId, ability_index: us
 /// "untap all creatures" is a `SetTapState{Typed{Creature}}` effect body, and the CR 732.2a
 /// `Typed`-precision relaxation (the `LoopFirewall` census-vs-relax split in `ability_scan.rs`)
 /// passes it through the promoted `LoopFirewall` trigger-effect-body scan (`resource.rs` block-1,
-/// `ability_definition_reads_sibling_mutable_for_loop`), so this exact board OFFERS. This test owns
+/// `ability_definition_reads_growing_class_for_loop`), so this exact board OFFERS. This test owns
 /// the DECLINE→continue→sustain path (the offer is not a dead-end); the twin
 /// `..._offers_shortcut` owns the certificate shape.
 #[test]

@@ -432,7 +432,7 @@ fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 
 /// Parse an event context reference from Oracle text.
 ///
-/// CR 506.2 + CR 603.7c: "that attacking player" — the player who declared
+/// CR 506.2: "that attacking player" — the player who declared
 /// attackers in the triggering `AttackersDeclared` event (Ellie, Brick Master;
 /// Breena, the Demagogue).
 pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -480,7 +480,7 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
         value(TargetFilter::DefendingPlayer, tag("defending player")),
-        // CR 603.7c + CR 109.4: "the attacking player" on a DamageReceived
+        // CR 506.2 + CR 109.4: "the attacking player" on a DamageReceived
         // trigger — the controller of the creature that dealt combat damage
         // (Contested Game Ball). Distinct from "that attacking player" (an
         // attack-declared referent → TriggeringPlayer): the wanted player here
@@ -1171,7 +1171,7 @@ mod tests {
         assert_eq!(rest6, " gains");
         assert_eq!(f6, TargetFilter::DefendingPlayer);
 
-        // CR 506.2 + CR 603.7c: attack-trigger actor anaphor (Ellie, Breena).
+        // CR 506.2: attack-trigger actor anaphor (Ellie, Breena).
         let (rest7, f7) = parse_event_context_ref("that attacking player creates").unwrap();
         assert_eq!(rest7, " creates");
         assert_eq!(f7, TargetFilter::TriggeringPlayer);

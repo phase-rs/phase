@@ -6388,6 +6388,7 @@ fn combined_imposed_additional_cast_cost(
     object_id: ObjectId,
     ability: &ResolvedAbility,
     casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<AbilityCost> {
     let mut imposed_costs =
         super::casting::collect_imposed_additional_cast_costs(state, player, object_id, ability);
@@ -6402,6 +6403,7 @@ fn combined_imposed_additional_cast_cost(
         player,
         object_id,
         casting_variant,
+        casting_permission_index,
     ));
     match imposed_costs.len() {
         0 => None,
@@ -6422,6 +6424,7 @@ fn cast_permission_additional_extra_cost(
     player: PlayerId,
     object_id: ObjectId,
     casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<AbilityCost> {
     let extra = match state.objects.get(&object_id).map(|obj| obj.zone) {
         Some(Zone::Graveyard) => {
@@ -6436,6 +6439,7 @@ fn cast_permission_additional_extra_cost(
             player,
             object_id,
             Some(casting_variant),
+            casting_permission_index,
         )
         .and_then(|source| {
             super::casting::exile_static_permission_extra_cost(state, player, object_id, source)
@@ -6574,8 +6578,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
-    let imposed_required_cost =
-        combined_imposed_additional_cast_cost(state, player, object_id, &ability, casting_variant);
+    let imposed_required_cost = combined_imposed_additional_cast_cost(
+        state,
+        player,
+        object_id,
+        &ability,
+        casting_variant,
+        casting_permission_index,
+    );
 
     // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
     // independently functioning instances are announced through a queue. This
@@ -6971,6 +6981,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         player,
                         object_id,
                         Some(casting_variant),
+                        casting_permission_index,
                     )
                     .and_then(|source| {
                         super::casting::exile_static_permission_extra_cost(

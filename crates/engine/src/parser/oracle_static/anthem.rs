@@ -1,4 +1,4 @@
-// CR 613.3g (Layer 7) — P/T anthem static abilities.
+// CR 613.1g (Layer 7) — P/T anthem static abilities.
 
 #[allow(unused_imports)]
 use super::prelude::*;

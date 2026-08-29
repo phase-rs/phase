@@ -577,12 +577,10 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             if *to == Zone::Exile {
                 push(TriggerEventKey::Exiled);
             }
-            // CR 701.17: `match_milled` consumes `ZoneChanged { from: Library,
-            // to: Graveyard }`. Emit Milled key for that exact shape.
-            if *from == Some(Zone::Library) && *to == Zone::Graveyard {
-                push(TriggerEventKey::Milled);
-            }
         }
+        // CR 701.17a: the mill's own action event is what `match_milled`
+        // consumes; the library→graveyard zone shape above no longer routes here.
+        GameEvent::Milled { .. } => push(TriggerEventKey::Milled),
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
         GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
@@ -1421,8 +1419,9 @@ mod tests {
     #[test]
     fn from_anywhere_to_graveyard_candidate_survives_library_origin_event() {
         // CR 603.6c: "from anywhere" includes library→graveyard moves. The
-        // event side emits only Milled for this shape, so this class must stay
-        // in the unclassified safety bucket until a generic graveyard key exists.
+        // event side emits NO key at all for this shape, so the unclassified
+        // safety bucket — which `candidates_for_event` unions unconditionally —
+        // is what carries this class until a generic graveyard key exists.
         let mut state = GameState::new_two_player(42);
         let watcher = ObjectId(99);
         let def = TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1443,6 +1442,42 @@ mod tests {
 
         let candidates = candidates_for_event(&state, &event);
         assert!(candidates.contains(&watcher));
+    }
+
+    /// CR 701.17a: the mill key's event-side source moved off the zone shape and
+    /// onto the action event. Both legs run in one invocation, so a
+    /// `keys_from_event` that answered nothing at all cannot pass.
+    #[test]
+    fn milled_key_comes_from_the_action_event_not_the_zone_shape() {
+        let state = GameState::new_two_player(42);
+
+        let zone_change = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        };
+        assert!(
+            !keys_from_event(&zone_change, &state).contains(&TriggerEventKey::Milled),
+            "the library→graveyard zone shape must no longer carry the Milled key"
+        );
+
+        for to in [Zone::Graveyard, Zone::Exile] {
+            let milled = GameEvent::Milled {
+                player_id: PlayerId(0),
+                object_id: ObjectId(7),
+                to,
+            };
+            assert!(
+                keys_from_event(&milled, &state).contains(&TriggerEventKey::Milled),
+                "the CR 701.17a action event carries the Milled key whatever zone \
+                 the card reached (CR 701.17c); {to:?} did not"
+            );
+        }
     }
 
     #[test]

@@ -2482,7 +2482,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7c: Dusty Parlor — "Whenever you cast an enchantment spell,
+    /// CR 202.3 + CR 608.2k: Dusty Parlor — "Whenever you cast an enchantment spell,
     /// put a number of +1/+1 counters equal to that spell's mana value on
     /// up to one target creature." The dynamic count binds to the triggering
     /// SpellCast event's source object (the spell itself) via

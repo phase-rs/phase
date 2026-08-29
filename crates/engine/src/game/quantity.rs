@@ -3410,7 +3410,7 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
-            // CR 608.2e (§8): a cross-player `AllPlayers` hand extremum is the
+            // CR 608.2e: a cross-player `AllPlayers` hand extremum is the
             // discard-clause equalization minimum — freeze it against the
             // clause's pre-clause board if a snapshot was captured. Single-
             // player scopes (Controller/ScopedPlayer/Target/...) re-resolve
@@ -3840,7 +3840,7 @@ fn resolve_ref(
         // that were exiled this way"), the live object's `power`/`toughness`
         // are `None` because the at-exile layer values are not maintained off
         // battlefield. Fall back to the LKI snapshot captured by
-        // `change_zone` on leaving the battlefield (`game/zones.rs:65-92`),
+        // `change_zone` on leaving the battlefield (`game::zones`),
         // which holds the post-layer-7 values from the moment of departure —
         // exactly what the "as they last existed on the battlefield" ruling
         // requires. `ManaValue` doesn't need LKI: the printed mana cost is
@@ -3909,7 +3909,7 @@ fn resolve_ref(
             aggregate,
             relation,
         } => {
-            // CR 608.2e (§8): prefer the clause-local snapshot if this clause
+            // CR 608.2e: prefer the clause-local snapshot if this clause
             // captured one — that freezes the extremum against the board as it
             // stood when the clause began, so an earlier APNAP player's
             // sacrifices do not shrink a later player's minimum.
@@ -5761,7 +5761,15 @@ fn object_for_scope<'a>(
     }
 }
 
-fn object_id_for_scope(
+/// Resolve an [`ObjectScope`] to a concrete object id under `ctx`.
+///
+/// `pub(crate)` for ONE reason: the resource loop firewall's
+/// `counters_on_source_provably_excludes_class` arm must ask THE SAME scope
+/// authority the `QuantityRef::CountersOn` resolver asks, rather than
+/// re-implementing "`ObjectScope::Source` means the ability's own source". Do not
+/// read this widened visibility as an invitation to resolve quantities outside
+/// `game::quantity` — every other caller is in this module.
+pub(crate) fn object_id_for_scope(
     state: &GameState,
     scope: ObjectScope,
     ctx: QuantityContext,
@@ -6833,7 +6841,7 @@ fn resolve_object_mana_value(
         // CR 608.2c + CR 701.20b + CR 108.3 + CR 202.3: "the mana value of the
         // card revealed by the OTHER player" in an exactly-two-target symmetric
         // reveal. This fan-out iteration's OWN revealed card is bound as
-        // `effect_context_object` (owner-keyed, §2.4b of the plan). The other
+        // `effect_context_object` (owner-keyed). The other
         // revealer's card is the single `last_revealed_ids` entry that is NOT the
         // own card (by-exclusion). MV is printed/zone-independent (CR 202.3), so
         // the read is stable whether or not the other card has already been put

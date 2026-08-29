@@ -2394,7 +2394,7 @@ pub(super) fn chosen_player_anaphor_filter(scope: Option<&ControllerRef>) -> Opt
 /// player-attached Aura/Curse (`relative_player_scope == EnchantedPlayer`), a
 /// bare `Player` anaphor rebinds to the attack event's defender, while an
 /// `AttackingPlayer` anaphor always names the attacker
-/// (CR 506.2 / CR 603.7c) and must keep its event-context filter. Carrying the
+/// (CR 506.2) and must keep its event-context filter. Carrying the
 /// distinction as a typed discriminant lets the enchanted-player guard branch on
 /// the parsed kind instead of re-matching the subject's text label.
 #[derive(Clone, Copy)]
@@ -2803,7 +2803,7 @@ pub(super) fn parse_subject_application(
             ),
             tag::<_, _, OracleError<'_>>("that attacking player may"),
         ),
-        // CR 603.7c: "the attacking player" on a DamageReceived trigger — the
+        // CR 506.2 + CR 109.4: "the attacking player" on a DamageReceived trigger — the
         // controller of the creature that dealt combat damage (Contested Game
         // Ball). Longest-match before "the player".
         value(
@@ -3284,7 +3284,7 @@ pub(super) fn parse_subject_application(
         let original_rest = &subject[consumed..];
         let (filter, rem) = parse_type_phrase(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            // CR 603.7c + CR 608.2c: Inside a trigger effect, "that [type]" is an
+            // CR 608.2k + CR 608.2c: Inside a trigger effect, "that [type]" is an
             // anaphoric back-reference to the triggering event's subject object (the
             // land that was tapped, the creature that was blocked, etc.) — NOT a
             // broadcast over all matching permanents. Set `target: TriggeringSource`
@@ -3702,7 +3702,7 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     ) {
         return TargetFilter::DefendingPlayer;
     }
-    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
+    // CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
     // "attacks a player" trigger introduces the damaged/attacked player as the
     // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
     // "They" inside such an effect ("they lose half their life") refers to that
@@ -6819,7 +6819,7 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("target ")),
             value((), tag("that ")),
             value((), tag("the chosen ")),
-            // CR 506.2 + CR 603.7c: "the attacking player" as a control-handoff
+            // CR 506.2 + CR 109.4: "the attacking player" as a control-handoff
             // subject on a DamageReceived trigger (Contested Game Ball) — the
             // controller of the creature that dealt combat damage. Longest-match
             // before the bare "the player " arm.
@@ -9204,7 +9204,7 @@ mod tests {
     #[test]
     fn parse_subject_that_attacking_player_trigger_context_is_triggering_player() {
         // Issue #1325: "that attacking player" is synonymous with the attack
-        // event's declaring player (CR 506.2 + CR 603.7c).
+        // event's declaring player (CR 506.2).
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::Player),
             relative_player_scope: Some(ControllerRef::DefendingPlayer),

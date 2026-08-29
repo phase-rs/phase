@@ -323,7 +323,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
-        // CR 603.7c + CR 106.3: "add one mana of any type that <source> produced"
+        // CR 608.2k + CR 106.3: "add one mana of any type that <source> produced"
         // (Vorinclex, Voice of Hunger: "land"; Roxanne, Starfall Savant: "Oasis or
         // artifact token"). The trailing `<source>` is an anaphor to the trigger
         // subject; only meaningful inside a TapsForMana trigger context, where the
@@ -335,7 +335,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
                     alt((
                         value((), tag("land")),
                         value((), tag("permanent")),
-                        // CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the
+                        // CR 608.2k + CR 106.3: Roxanne, Starfall Savant — the
                         // anaphor names the tapped mana source, which is an Oasis
                         // OR an artifact token ("that Oasis or artifact token
                         // produced"). Same resolution: the added mana's type is
@@ -2941,7 +2941,7 @@ fn try_parse_amount_equal_to_with_context(
             value((), tag("equal to ")).parse(i)
         })?;
         let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
-        // CR 601.2h + CR 603.7c: "the amount of mana spent to cast that spell"
+        // CR 601.2h: "the amount of mana spent to cast that spell"
         // resolves via `parse_event_context_quantity` to
         // triggering-spell spent-mana ref; fall back to `parse_cda_quantity` for
         // non-event quantities (e.g. "~'s power").
@@ -3141,7 +3141,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the mana-echo anaphor
+    /// CR 608.2k + CR 106.3: Roxanne, Starfall Savant — the mana-echo anaphor
     /// names the tapped source, which is an Oasis OR an artifact token. The actual
     /// printed text is "add one mana of any type that Oasis or artifact token
     /// produced"; the bare "artifact token produced" and "Oasis produced" forms
@@ -3302,7 +3302,7 @@ mod tests {
         assert_eq!(typed.controller, Some(ControllerRef::Opponent));
     }
 
-    /// CR 106.1 + CR 601.2h + CR 603.7c: "add an amount of {C} equal to the
+    /// CR 106.1 + CR 601.2h: "add an amount of {C} equal to the
     /// amount of mana spent to cast that spell" — Mana Sculpt's sub_ability.
     /// The `{C}` colorless branch routes to `ManaProduction::Colorless`
     /// (since `parse_mana_production` only recognizes W/U/B/R/G and would

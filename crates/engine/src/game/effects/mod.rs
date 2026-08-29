@@ -6028,7 +6028,16 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(ThisWayCause::Destroyed),
         Effect::Sacrifice { .. } => Some(ThisWayCause::Sacrificed),
-        Effect::Mill { .. } => Some(ThisWayCause::Milled),
+        // CR 701.17a: only a graveyard-bound top-of-library move is a mill. The
+        // other destinations are the shared top-of-library move building block
+        // and take the destination zone's own producer verb, exactly as the
+        // `ChangeZone` arm below. Kept in step with the emission conjunct in
+        // `effects::mill::apply_mill_after_replacement`, so the engine has one
+        // answer to "is this a mill".
+        Effect::Mill { destination, .. } => match destination {
+            Zone::Graveyard => Some(ThisWayCause::Milled),
+            other => this_way_cause_for_zone(*other),
+        },
         Effect::Discard { .. } | Effect::DiscardCard { .. } => Some(ThisWayCause::Discarded),
         Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
             this_way_cause_for_zone(*destination)
@@ -15090,6 +15099,103 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// V14 — CR 701.17a: the "this way" producer verb agrees with the mill's
+    /// destination conjunct in `effects::mill`. Only a graveyard-bound
+    /// top-of-library move is a mill; the other destinations are the shared
+    /// move building block and take the zone's own verb.
+    #[test]
+    fn this_way_cause_for_mill_follows_the_declared_destination() {
+        let mill = |destination| Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            destination,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(
+            this_way_cause_for_effect(&mill(Zone::Hand)),
+            Some(ThisWayCause::Bounced),
+            "Scroll Rack's Mill-to-Hand is a top-of-library move, not a mill"
+        );
+        // The positive leg is the live control: the negative above cannot pass
+        // by the function answering `None` for everything.
+        assert_eq!(
+            this_way_cause_for_effect(&mill(Zone::Graveyard)),
+            Some(ThisWayCause::Milled)
+        );
+    }
+
+    /// V6d — CR 701.17c: `TargetFilter::TriggeringSource` on a mill trigger binds
+    /// the milled card through `extract_source_from_event`'s `Milled` arm, which
+    /// no compiler check demands. `resolved_targets` has no fallback tier for
+    /// this filter, so a missing arm leaves the target vector empty and the
+    /// optional return moves nothing.
+    #[test]
+    fn triggering_source_on_a_mill_trigger_binds_the_milled_card() {
+        let mut state = GameState::new_two_player(42);
+        let milled_card = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Milled Card".to_string(),
+            Zone::Exile,
+        );
+        let radroach = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Infesting Radroach".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::TriggeringSource,
+                destination: None,
+                selection: Default::default(),
+            },
+            Vec::new(),
+            radroach,
+            PlayerId(0),
+        );
+
+        // The diverted mill's own action event — `to` is Exile, and the trigger
+        // still binds the card CR 701.17c says it can find there.
+        state.current_trigger_event = Some(GameEvent::Milled {
+            player_id: PlayerId(1),
+            object_id: milled_card,
+            to: Zone::Exile,
+        });
+        assert_eq!(
+            ability_with_event_context_targets(&state, &ability).targets,
+            vec![TargetRef::Object(milled_card)]
+        );
+
+        // Live control: the zone-change event this arm replaces still binds the
+        // same card, so the harness is proven to fire...
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: milled_card,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                milled_card,
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        });
+        assert_eq!(
+            ability_with_event_context_targets(&state, &ability).targets,
+            vec![TargetRef::Object(milled_card)]
+        );
+
+        // ...and an event `extract_source_from_event` has no object arm for
+        // still binds nothing, so a blanket `Some` cannot pass.
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount: -1,
+        });
+        assert!(ability_with_event_context_targets(&state, &ability)
+            .targets
+            .is_empty());
+    }
     use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;
     use crate::types::ability::{

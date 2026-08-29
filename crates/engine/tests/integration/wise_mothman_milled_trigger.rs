@@ -211,6 +211,212 @@ fn glowing_one_active_milled_trigger_gains_life_per_card() {
     );
 }
 
+/// V1/V2/V3's shared board: one event stream, both trigger polarities.
+///
+/// P0's battlefield carries **Glowing One** (action-worded, per-card, life
+/// delta) and **Undead Alchemist** (endpoint-worded — "whenever a creature card
+/// is put into an opponent's graveyard from their library", per-card, token
+/// delta). P0 casts Tome Scour at P1, so both subjects are satisfied by the same
+/// milled cards. `divert` adds Rest in Peace, whose replacement sends every
+/// graveyard-bound card to exile instead.
+fn milled_both_polarity_board(
+    db: &'static CardDatabase,
+    divert: bool,
+) -> (engine::game::scenario::GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+
+    scenario.add_real_card(P0, "Glowing One", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Undead Alchemist", Zone::Battlefield, db);
+    if divert {
+        scenario.add_real_card(P0, "Rest in Peace", Zone::Battlefield, db);
+    }
+
+    let tome_scour = scenario.add_real_card(P0, "Tome Scour", Zone::Hand, db);
+
+    // Nonland CREATURE cards, so one mill satisfies both trigger subjects.
+    for _ in 0..9 {
+        scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_blue_mana(&mut runner);
+    (runner, tome_scour)
+}
+
+/// Zombie tokens P0 controls — Undead Alchemist's observable, and the
+/// graveyard-arrival witness for the milled cards (its trigger exiles each card
+/// it sees, so counting P1's graveyard afterwards would count zero either way).
+fn p0_zombie_tokens(runner: &engine::game::scenario::GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.is_token
+                && obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.name.contains("Zombie")
+        })
+        .count()
+}
+
+/// V1 + V3 — CR 701.17a + CR 701.17c + CR 614.6. Under a graveyard-diverting
+/// replacement the milled cards land in exile, and the two trigger families must
+/// DIVERGE on that same event stream: the action-worded one still fires (the
+/// keyword action happened, and CR 701.17c contemplates finding the card in the
+/// zone it reached), the endpoint-worded one correctly does not (nothing was put
+/// into a graveyard from a library).
+///
+/// Pre-fix the action-worded trigger went silent too, because `match_milled`
+/// required `ZoneChanged { Library -> Graveyard }` and the replacement rewrote
+/// the destination in place.
+#[test]
+fn milled_trigger_fires_under_a_graveyard_diverting_replacement() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour) = milled_both_polarity_board(db, true);
+    let life_before = runner.life(P0);
+    cast_tome_scour(&mut runner, tome_scour, P1);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.life(P0),
+        life_before + 5,
+        "Glowing One's action-worded mill trigger must fire once per milled card \
+         even though Rest in Peace sent them to exile (CR 701.17a + CR 701.17c)"
+    );
+    assert_eq!(
+        p0_zombie_tokens(&runner),
+        0,
+        "Undead Alchemist's endpoint-worded trigger must NOT fire: no card was \
+         put into a graveyard from a library"
+    );
+    assert!(
+        runner.state().players[1].graveyard.is_empty(),
+        "the diverted cards are in exile, not P1's graveyard"
+    );
+}
+
+/// CR 616.1 + CR 603.2c + CR 701.17a: TWO graveyard-diverting replacements apply to every
+/// milled card, so each delivery parks on a CR 616.1 ordering prompt instead of settling
+/// synchronously. The cards still leave the library, so their milled triggers must still
+/// fire. A card that departs on the RESUMED tail and never produces a `Milled` event is a
+/// mill whose trigger silently vanished — the delivery succeeded and the trigger did not.
+///
+/// This is the paused-delivery counterpart of
+/// [`milled_trigger_fires_under_a_graveyard_diverting_replacement`], which has exactly one
+/// applicable replacement and therefore never pauses.
+#[test]
+fn milled_trigger_fires_across_a_replacement_ordering_pause() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.add_real_card(P0, "Glowing One", Zone::Battlefield, db);
+    // Rest in Peace ("a card would be put into a graveyard from anywhere") and Leyline of
+    // the Void ("into an OPPONENT'S graveyard from anywhere") BOTH apply to P1's milled
+    // cards. Two applicable replacements on one event is what forces the CR 616.1 ordering
+    // choice that a single divert never raises.
+    scenario.add_real_card(P0, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Leyline of the Void", Zone::Battlefield, db);
+    let tome_scour = scenario.add_real_card(P0, "Tome Scour", Zone::Hand, db);
+    for _ in 0..9 {
+        scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_blue_mana(&mut runner);
+
+    let life_before = runner.life(P0);
+    let library_before = runner.state().players[1].library.len();
+    cast_tome_scour(&mut runner, tome_scour, P1);
+
+    let mut ordering_prompts = 0usize;
+    for _ in 0..128 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            ordering_prompts += 1;
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("the CR 616.1 ordering prompt must accept a choice");
+            continue;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    // REACH GUARD: with no pause this row degenerates into the synchronous case the sibling
+    // rows already cover, and the life assertion below would pass for the wrong reason.
+    assert!(
+        ordering_prompts > 0,
+        "reach guard: two applicable graveyard diverts must raise at least one CR 616.1 \
+         ordering prompt, else the paused-delivery path is never exercised"
+    );
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        library_before - 5,
+        "five cards really left P1's library"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before + 5,
+        "Glowing One's milled trigger must fire once per milled card even though every \
+         delivery parked on a CR 616.1 ordering choice and finished on the resumed tail"
+    );
+}
+
+/// V2 — the same board with the replacement removed. The action-worded delta is
+/// identical (so a matcher that stopped firing everywhere cannot pass V1), and
+/// the endpoint-worded delta is nonzero (the reach-guard proving Undead
+/// Alchemist is alive on this board and merely correctly silent under the
+/// divert). The two arms differ by exactly one permanent.
+#[test]
+fn milled_trigger_control_arm_without_the_replacement_is_unchanged() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour) = milled_both_polarity_board(db, false);
+    let library_before = runner.state().players[1].library.len();
+    let life_before = runner.life(P0);
+    cast_tome_scour(&mut runner, tome_scour, P1);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.life(P0), life_before + 5);
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        library_before - 5,
+        "five cards really left P1's library"
+    );
+    assert_eq!(
+        p0_zombie_tokens(&runner),
+        5,
+        "with no divert the milled creature cards reach P1's graveyard from their \
+         library, so the endpoint-worded trigger fires once per card"
+    );
+}
+
 /// Drain priority/state-based passes until either an `OptionalEffectChoice`
 /// prompt appears (a fired optional trigger) or the stack settles. Returns
 /// `true` if an `OptionalEffectChoice` was surfaced.
@@ -292,6 +498,115 @@ fn infesting_radroach_opponent_milled_trigger_fires_on_opponent_mill() {
     );
 
     // Decline the optional return — Infesting Radroach stays in P0's graveyard.
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional return-to-hand should be legal");
+    runner.advance_until_stack_empty();
+}
+
+/// Infesting Radroach's board for the ACCEPTING rows. `divert` puts **Leyline
+/// of the Void** under P0: its replacement is scoped `an opponent's graveyard`,
+/// so it covers exactly P1's milled cards and leaves P0's graveyard — the zone
+/// Radroach's `SourceInZone { Graveyard }` intervening-if reads — untouched.
+/// Rest in Peace would divert both graveyards and carries an ETB besides.
+fn infesting_radroach_board(
+    db: &'static CardDatabase,
+    divert: bool,
+) -> (engine::game::scenario::GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_real_card(P0, "Infesting Radroach", Zone::Graveyard, db);
+    if divert {
+        scenario.add_real_card(P0, "Leyline of the Void", Zone::Battlefield, db);
+    }
+    let tome_scour = scenario.add_real_card(P0, "Tome Scour", Zone::Hand, db);
+    for _ in 0..9 {
+        scenario.add_real_card(P1, "Lightning Bolt", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_blue_mana(&mut runner);
+    (runner, tome_scour)
+}
+
+fn total_hand_size(runner: &engine::game::scenario::GameRunner) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .map(|player| player.hand.len())
+        .sum()
+}
+
+/// V6c — CR 701.17c: ACCEPTING an action-worded mill trigger's optional return
+/// actually moves a card. This is the shipped-card path through
+/// `targeting::extract_source_from_event`'s `Milled` arm, which no compiler
+/// check demands: `ability_with_event_context_targets` seeds a
+/// `TriggeringSource` slot only via that accessor, and `resolved_targets` has no
+/// fallback tier for the filter — so a missing arm empties the target vector and
+/// the accepted optional silently moves nothing.
+///
+/// The sibling is the module's declining row above, which takes the same prompt
+/// and asserts nothing moves. This row asserts only THAT a card moved: which
+/// object "it" names is a pre-existing parser binding defect, filed separately.
+#[test]
+fn infesting_radroach_accepted_optional_return_moves_a_card() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour) = infesting_radroach_board(db, false);
+    cast_tome_scour(&mut runner, tome_scour, P1);
+
+    assert!(
+        run_until_optional_choice_or_settled(&mut runner),
+        "the opponent-scoped milled trigger must surface its optional choice; got {:?}",
+        runner.state().waiting_for
+    );
+
+    let hands_before = total_hand_size(&runner);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the optional return-to-hand should be legal");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        total_hand_size(&runner),
+        hands_before + 1,
+        "accepting the return must move exactly one card into a hand"
+    );
+}
+
+/// V6d — CR 701.17a + CR 614.6: under a graveyard-diverting replacement the same
+/// trigger STILL fires and still prompts. Pre-fix it never fired at all, because
+/// the milled cards' `ZoneChanged` carried `to: Exile`.
+///
+/// This row asserts the prompt only. Accepting is a no-op on this board:
+/// `bounce::resolve` admits a source from the battlefield or a graveyard (or the
+/// stack when the destination is hand), so an exile-resident milled card is
+/// skipped. That dead end is filed as a deferral, not asserted away here.
+#[test]
+fn infesting_radroach_milled_trigger_fires_under_a_graveyard_divert() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour) = infesting_radroach_board(db, true);
+    cast_tome_scour(&mut runner, tome_scour, P1);
+
+    assert!(
+        run_until_optional_choice_or_settled(&mut runner),
+        "the milled trigger must fire even though Leyline of the Void sent the \
+         milled cards to exile; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().players[1].graveyard.is_empty(),
+        "the divert really applied — P1's milled cards went to exile"
+    );
+
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
         .expect("declining the optional return-to-hand should be legal");

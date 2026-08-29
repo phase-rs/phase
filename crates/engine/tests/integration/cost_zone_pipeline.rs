@@ -7839,7 +7839,7 @@ fn duration_bearing_delayed_whenever_event_stays_installed_and_fires_again() {
     let life_before = resolve_delayed_installer(&mut runner, installer);
     assert!(
         !runner.state().delayed_triggers[0].one_shot,
-        "CR 603.7c: a duration-bearing WheneverEvent is not a one-shot"
+        "CR 603.7b: a duration-bearing WheneverEvent is not a one-shot"
     );
 
     let acted = runner
