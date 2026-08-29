@@ -1,5 +1,6 @@
 //! Regression for Jace, Vryn's Prodigy: an interactive discard must finish
 //! before the following five-cards-in-graveyard condition is checked.
+//! CR 608.2c: The controller follows instructions in the order written.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
