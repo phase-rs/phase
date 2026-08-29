@@ -2899,7 +2899,14 @@ function GameOverScreen({
     params.delete("roomName");
     if (mode) params.set("mode", mode);
     params.set("difficulty", difficulty);
-    navigate(`/game/${newId}?${params.toString()}`);
+    // `format` names the format but carries none of its edited knobs, and the
+    // saved active-game record is keyed to the game id we are leaving — so a
+    // custom starting life would revert to the format default here. Hand over
+    // the config the engine actually played with, on the same router-state
+    // channel `GameSetupPage` uses to start a game.
+    navigate(`/game/${newId}?${params.toString()}`, {
+      state: { formatConfig: gameState?.format_config },
+    });
   };
 
   const handleBackToDraft = () => {

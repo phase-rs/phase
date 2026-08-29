@@ -14,6 +14,7 @@ import { cleanup, render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
+import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
 import type { FormatConfig } from "../../adapter/types";
@@ -23,7 +24,10 @@ import { P2PHostAdapter } from "../../adapter/p2p-adapter";
 import { WebSocketAdapter } from "../../adapter/ws-adapter";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { gameObjectFactory } from "../../test/factories/gameObjectFactory";
-import { gameStateFactory } from "../../test/factories/gameStateFactory";
+import {
+  buildCommanderFormatConfig,
+  gameStateFactory,
+} from "../../test/factories/gameStateFactory";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
@@ -1005,5 +1009,46 @@ describe("GamePage — bound whole-match concession", () => {
     expect(matchAction?.onConfirm).toBeTypeOf("function");
     act(() => matchAction?.onConfirm());
     expect(sendMatchConcede).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * A rematch starts a NEW game id from the game-over screen. The URL it carries
+ * over names the format but holds none of its edited knobs, and the saved
+ * active-game record is keyed to the id being left — so the config has to be
+ * handed over explicitly or a custom starting life silently reverts to the
+ * format default.
+ */
+describe("GamePage — rematch preserves the format the game was played with", () => {
+  // The rematch button is gated on `onAnimationComplete` of the game-over
+  // title's spring, which never settles under happy-dom's rAF. `skipAnimations`
+  // is framer-motion's own switch for exactly this — animations jump to their
+  // end state and fire their completion callbacks — so the gate is satisfied
+  // the way the library intends rather than by mocking `motion` away. Scoped
+  // to this block so the suite's other renders keep real motion behaviour.
+  beforeEach(() => {
+    MotionGlobalConfig.skipAnimations = true;
+  });
+  afterEach(() => {
+    MotionGlobalConfig.skipAnimations = false;
+  });
+
+  it("hands the engine's own format config to the new game", async () => {
+    const user = userEvent.setup();
+    // A Commander game played at 25 life rather than the format's 40.
+    storeOverrides.gameState = gameStateFactory.withPlayers(0, 1).build({
+      format_config: buildCommanderFormatConfig({ starting_life: 25 }),
+    });
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+
+    renderGamePage("/game/old-game-id?mode=ai&format=Commander");
+
+    await user.click(await screen.findByRole("button", { name: "Rematch" }));
+
+    // Asserted at the engine boundary: this is the config GameProvider would
+    // build the rematch with, not merely what was stashed on the navigation.
+    // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
+    // as `undefined` here rather than as the real 40.
+    expect(capturedFormatConfig?.starting_life).toBe(25);
   });
 });

@@ -16,6 +16,12 @@ import { useState } from "react";
  * the engine's in-game amount prompts. An empty or half-typed box leaves the
  * last committed value standing, and blurring re-syncs the display to it, so
  * `value` is always a number the user really entered.
+ *
+ * Rejecting is also why the reading comes from `valueAsNumber` rather than
+ * `parseInt`: `type="number"` accepts decimal and exponent text, and `parseInt`
+ * commits only the leading numeric run of it, so a typed "20.5" would commit 20
+ * while the box still showed 20.5 — the same silent disagreement between the
+ * entered and the committed value that this component exists to end.
  */
 export function IntegerField({
   id,
@@ -29,7 +35,7 @@ export function IntegerField({
   /** The committed value. Shown whenever the box is not being edited. */
   value: number;
   min: number;
-  /** Called only for a reading that parses to an integer at or above `min`. */
+  /** Called only for a reading that is a whole number at or above `min`. */
   onCommit: (next: number) => void;
   className?: string;
   ariaLabel?: string;
@@ -46,11 +52,12 @@ export function IntegerField({
       aria-label={ariaLabel}
       value={draft ?? String(value)}
       onChange={(e) => {
-        const raw = e.target.value;
-        setDraft(raw);
-        const parsed = Number.parseInt(raw, 10);
-        if (Number.isFinite(parsed) && parsed >= min) {
-          onCommit(parsed);
+        setDraft(e.currentTarget.value);
+        // `valueAsNumber` is NaN for an empty or unparseable box, which
+        // `isSafeInteger` rejects along with every non-whole reading.
+        const reading = e.currentTarget.valueAsNumber;
+        if (Number.isSafeInteger(reading) && reading >= min) {
+          onCommit(reading);
         }
       }}
       onBlur={() => setDraft(null)}
