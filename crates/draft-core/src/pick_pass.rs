@@ -1132,6 +1132,11 @@ mod tests {
             crate::view::filter_for_player(&session, 0).required_pick_count,
             1
         );
+        assert_eq!(
+            crate::view::filter_for_player(&session, 0).pick_selection_mode,
+            crate::types::PickSelectionMode::Ordered,
+            "Commander Draft retains ordered selection on its one-card final step"
+        );
         assert_published_count_is_enforced(&mut session, 0);
 
         // 3. Premier (CR 905.1a): one.

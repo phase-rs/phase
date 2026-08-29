@@ -189,6 +189,8 @@ export interface DraftProcedure {
   min_pod_size: number;
   packs_per_player: number;
   cards_per_pick: number;
+  /** Engine-owned interaction policy for selecting cards in one pick step. */
+  pick_selection_mode: "Direct" | "Ordered";
   min_deck_size: number;
   /**
    * CR 903.3: how many commanders a deck built from this kind's pool must
@@ -326,6 +328,8 @@ export interface DraftPlayerView {
    * 0 when there is no pending pack. Read it; never re-derive it from `kind`.
    */
   required_pick_count: number;
+  /** Engine-owned selection interaction, independent of the current count. */
+  pick_selection_mode: "Direct" | "Ordered";
   pool: DraftCardInstance[];
   draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */

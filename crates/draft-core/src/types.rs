@@ -102,6 +102,18 @@ pub enum PostDraftPlay {
     TournamentPairings,
 }
 
+/// How a player chooses cards for one draft pick step.
+///
+/// This describes selection interaction, not the number of cards currently
+/// required. Commander Draft remains ordered on its one-card final step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickSelectionMode {
+    /// Selecting a card replaces the current selection immediately.
+    Direct,
+    /// Selecting cards preserves their order and rolls the oldest selection out.
+    Ordered,
+}
+
 /// The per-kind draft procedure: the single authority for every axis that
 /// previously leaked to call sites as a literal.
 ///
@@ -129,6 +141,8 @@ pub struct DraftProcedure {
     /// [`MAX_CARDS_PER_PICK`] is derived from this axis by
     /// `max_cards_per_pick_matches_procedure_table`.
     pub cards_per_pick: u8,
+    /// How the client selects cards for this procedure's pick steps.
+    pub pick_selection_mode: PickSelectionMode,
     /// How packs reach the seats.
     pub distribution: PackDistribution,
     /// CR 100.2b: limited decks have a 40-card minimum deck size.
@@ -218,6 +232,7 @@ impl DraftKind {
                 min_pod_size: 1,
                 packs_per_player: 3,
                 cards_per_pick: 1,
+                pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
                 commanders_required: 0,
@@ -236,6 +251,7 @@ impl DraftKind {
                 min_pod_size: 2,
                 packs_per_player: 3,
                 cards_per_pick: 1,
+                pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
                 commanders_required: 0,
@@ -251,6 +267,7 @@ impl DraftKind {
                 min_pod_size: 2,
                 packs_per_player: 3,
                 cards_per_pick: 1,
+                pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
                 commanders_required: 0,
@@ -266,6 +283,7 @@ impl DraftKind {
                 min_pod_size: 2,
                 packs_per_player: 6,
                 cards_per_pick: 1,
+                pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::AllAtOnce,
                 min_deck_size: 40,
                 commanders_required: 0,
@@ -296,6 +314,7 @@ impl DraftKind {
                 packs_per_player: 3,
                 // CR 903.13b: "drafts two cards".
                 cards_per_pick: 2,
+                pick_selection_mode: PickSelectionMode::Ordered,
                 // CR 903.13b: "passes the remaining cards".
                 distribution: PackDistribution::PickAndPass,
                 // CR 903.13f(1): "at least 60 cards" — the limited-pool floor
@@ -1193,6 +1212,27 @@ mod tests {
         assert_eq!(DraftKind::Sealed.procedure().cards_per_pick, 1);
         assert_eq!(DraftKind::CommanderDraft.procedure().cards_per_pick, 2);
 
+        assert_eq!(
+            DraftKind::Quick.procedure().pick_selection_mode,
+            PickSelectionMode::Direct
+        );
+        assert_eq!(
+            DraftKind::Premier.procedure().pick_selection_mode,
+            PickSelectionMode::Direct
+        );
+        assert_eq!(
+            DraftKind::Traditional.procedure().pick_selection_mode,
+            PickSelectionMode::Direct
+        );
+        assert_eq!(
+            DraftKind::Sealed.procedure().pick_selection_mode,
+            PickSelectionMode::Direct
+        );
+        assert_eq!(
+            DraftKind::CommanderDraft.procedure().pick_selection_mode,
+            PickSelectionMode::Ordered
+        );
+
         // The values the deleted `pack_count` ternaries produced.
         assert_eq!(DraftKind::Quick.procedure().packs_per_player, 3);
         assert_eq!(DraftKind::Premier.procedure().packs_per_player, 3);
@@ -1247,6 +1287,7 @@ mod tests {
         // CR 903.13b.
         assert_eq!(procedure.packs_per_player, 3);
         assert_eq!(procedure.cards_per_pick, 2);
+        assert_eq!(procedure.pick_selection_mode, PickSelectionMode::Ordered);
         assert_eq!(procedure.distribution, PackDistribution::PickAndPass);
 
         // CR 903.13f(1): the limited-pool floor, not format legality.

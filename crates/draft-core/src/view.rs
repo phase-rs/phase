@@ -330,6 +330,10 @@ pub struct DraftPlayerView {
     /// the four CR 905.1a kinds, 2 for `CommanderDraft`, and drops to 1 on an
     /// odd pack's final step — a distinction no per-kind lookup can make.
     pub required_pick_count: usize,
+    /// Engine-owned selection interaction for this draft procedure. This stays
+    /// ordered for Commander Draft's one-card final step, unlike
+    /// `required_pick_count`.
+    pub pick_selection_mode: PickSelectionMode,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
     /// Drafted cards whose effects can be activated during a later pick.
@@ -710,6 +714,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pass_direction: session.pass_direction,
         current_pack,
         required_pick_count: required_pick_count(session, seat_index),
+        pick_selection_mode: session.kind.procedure().pick_selection_mode,
         pool,
         draft_effects,
         pool_groups,

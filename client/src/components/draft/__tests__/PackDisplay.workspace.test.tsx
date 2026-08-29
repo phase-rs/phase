@@ -57,7 +57,7 @@ const view = {
     color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
     workspace_capabilities: { rarity_group_order: ["common", "rarity_other"] },
     workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
-  }, seats: [], cards_per_pack: 14, required_pick_count: 1, pick_steps_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [], timer_remaining_ms: null,
+  }, seats: [], cards_per_pack: 14, required_pick_count: 1, pick_selection_mode: "Direct", pick_steps_per_pack: 14, pack_count: 3, min_deck_size: 40, addable_cards: [], timer_remaining_ms: null,
   standings: [], current_round: 0, next_pairing_round: 1, tournament_format: "Swiss", pod_policy: "Competitive", pairings: [], match_config: { match_type: "Bo1" },
 } satisfies DraftPlayerView;
 const dragController = {
@@ -90,6 +90,7 @@ const commanderPickTwoView = {
   ...view,
   kind: "CommanderDraft" as const,
   required_pick_count: 2,
+  pick_selection_mode: "Ordered" as const,
   current_pack: commanderPickTwoCards,
 };
 
@@ -98,6 +99,7 @@ function CommanderPickTwoPack({
   pickCardStep = async () => ({ status: "ignored" as const, reason: "busy" as const }),
   confirmPick = async () => ({ status: "ignored" as const, reason: "busy" as const }),
   doubleClickPick = true,
+  requiredPickCount = 2,
   dragController: localDrag = dragController,
   responsiveLayout = "desktop",
 }: {
@@ -105,6 +107,7 @@ function CommanderPickTwoPack({
   pickCardStep?: PickCardStep;
   confirmPick?: ConfirmPick;
   doubleClickPick?: boolean;
+  requiredPickCount?: number;
   dragController?: typeof dragController;
   responsiveLayout?: "desktop" | "phone-portrait" | "tablet-portrait";
 }) {
@@ -112,7 +115,7 @@ function CommanderPickTwoPack({
   return (
     <PackDisplay
       controller={controller({
-        view: commanderPickTwoView,
+        view: { ...commanderPickTwoView, required_pick_count: requiredPickCount },
         selectedCard,
         selectCard: setSelectedCard,
         pickCard,
@@ -719,6 +722,18 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.pointerUp(first, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 83, pointerType: "touch" });
 
     expect(pickCardStep).not.toHaveBeenCalled();
+    expect(pickCard).not.toHaveBeenCalled();
+    expect(confirmPick).not.toHaveBeenCalled();
+  });
+
+  it("keeps_the_engine_ordered_selection_policy_on_a_one_card_commander_remainder", () => {
+    const pickCard = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<CommanderPickTwoPack requiredPickCount={1} pickCard={pickCard} confirmPick={confirmPick} />);
+    const activation = within(rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!).getByRole("button", { name: "Same" });
+
+    fireEvent.doubleClick(activation);
+
     expect(pickCard).not.toHaveBeenCalled();
     expect(confirmPick).not.toHaveBeenCalled();
   });

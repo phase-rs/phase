@@ -393,7 +393,7 @@ export function PackDisplay({
   const pack = view?.current_pack ?? [];
   const draftEffects = view?.draft_effects ?? [];
   const local = controller.kind === "local-workspace" ? controller : null;
-  const isExactPickTwo = view?.kind === "CommanderDraft" && view.required_pick_count === 2;
+  const isOrderedSelection = view?.pick_selection_mode === "Ordered";
 
   useEffect(() => {
     const live = new Set(controller.view?.current_pack?.map((card) => card.instance_id) ?? []);
@@ -552,7 +552,7 @@ export function PackDisplay({
       delete next[id];
       return next;
     });
-    if (isExactPickTwo) {
+    if (isOrderedSelection) {
       if (selectedCard === null) {
         controller.selectCard(id);
         setAdditionalCards([]);
@@ -719,8 +719,8 @@ export function PackDisplay({
               width={width}
               locked={locked}
               local={local}
-              doubleTapPickEnabled={!isExactPickTwo && (local?.doubleClickPick ?? false)}
-              doubleClickPickEnabled={!isExactPickTwo && (local?.doubleClickPick ?? false)}
+              doubleTapPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
+              doubleClickPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
               allowTouchPackDrag={responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape"}
               onSelect={() => select(card.instance_id)}
               onDestination={(destination) => void request(chosenCards(card), destination)}
