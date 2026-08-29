@@ -129,10 +129,13 @@ fn captured_residue(gz: &[u8]) -> (usize, bool) {
     (frames, carrier)
 }
 
-/// CR 117.3b + CR 608.2c: a completed spell's instructions are finished, so the
-/// active player must receive priority with no resolution carrier still owned.
-/// CR 500.1: only from such a settled window may the engine begin the next turn
-/// — which is precisely the conjunction `game::turns::start_next_turn` asserts.
+/// CR 608.2n / CR 608.3: resolution genuinely completes — an instant, sorcery,
+/// or ability leaves the stack as the final part of its own resolution
+/// (turn-10), and a permanent spell finishes through the CR 608.3 steps
+/// (turn-26). CR 117.3b: the active player then receives priority. CR 500.2: a
+/// phase or step ends only once the stack is empty and all players pass in
+/// succession — so no resolution carrier may still be owned. That conjunction
+/// is precisely what `game::turns::start_next_turn` asserts.
 ///
 /// Non-vacuity: `captured_residue` pins that each fixture really does carry the
 /// wedged shape before restore (turn-26: one frame + a carrier; turn-10: two
