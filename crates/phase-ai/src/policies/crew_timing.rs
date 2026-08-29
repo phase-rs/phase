@@ -79,22 +79,37 @@ impl TacticalPolicy for CrewTimingPolicy {
         // CR 702.122a: Crew N's only effect is "This permanent becomes an artifact
         // creature until end of turn." If that payoff is ALREADY in force — a
         // `KeywordAction::Crew` for this Vehicle pending on the stack, or the
-        // resolved crew's transient UEOT `AddType(Creature)` effect currently live
-        // on the Vehicle — then re-activating Crew is pure waste: the payoff is
-        // already owed (pending) or already applied (live), and the only remaining
-        // consequence is tapping a fresh untapped body for nothing.
+        // resolved-crew marker recorded when the pending entry RESOLVED and
+        // installed its UEOT `AddType(Creature)` effect — then re-activating
+        // Crew is pure waste: the payoff is already owed (pending) or already
+        // applied (resolved), and the only remaining consequence is tapping a
+        // fresh untapped body for nothing.
         //
-        // The engine authorities (`crew_pending_on_stack` / `crew_payoff_live`)
-        // are consulted at PAYOFF-IN-FORCE, deliberately NOT at the
-        // announcement-cadence set (`crew_activated_this_turn`): that set is
-        // recorded at crew announcement and cleared only at turn start, so it
-        // persists even when the crew is countered (CR 701.6a — Stifle/Tale's
-        // End-class effects counter the pending keyword action before it
-        // resolves). The countered case has neither a pending entry nor a live
-        // effect, so keying the veto on the cadence set would wrongly forfeit an
-        // engine-legal re-crew for the rest of the turn and leave the Vehicle
-        // uncrewed — yet the unrestrained Vehicles this guard targets are NOT
-        // blocked by the engine's CR 602.5b once-each-turn gate.
+        // The engine authorities (`crew_pending_on_stack` /
+        // `crew_resolved_this_turn_contains`) are consulted at PAYOFF-IN-FORCE,
+        // deliberately NOT at the announcement-cadence set
+        // (`crew_activated_this_turn`): that set is recorded at crew
+        // announcement and cleared only at turn start, so it persists even when
+        // the crew is countered (CR 701.6a — Stifle/Tale's End-class effects
+        // counter the pending keyword action before it resolves). The countered
+        // case has neither a pending entry nor a resolution marker, so keying
+        // the veto on the cadence set would wrongly forfeit an engine-legal
+        // re-crew for the rest of the turn and leave the Vehicle uncrewed — yet
+        // the unrestrained Vehicles this guard targets are NOT blocked by the
+        // engine's CR 602.5b once-each-turn gate.
+        //
+        // The resolution marker is the 'live-payoff' authority — recorded
+        // (stack.rs, `record_crew_resolution`) exactly when the
+        // `KeywordAction::Crew` entry resolves and installs the UEOT animation —
+        // deliberately NOT a transient-effect shape match: a generic SelfRef
+        // self-animation (Kylox, Voltstrider-class) installs the SAME transient
+        // shape (source==Vehicle, UEOT, SpecificObject{Vehicle},
+        // AddType(Creature)) with no Crew resolution behind it, and a shape
+        // match would misreport it as a Crew payoff and suppress the still-legal
+        // re-crew (and any real VehicleCrewed triggers). The marker is never set
+        // by it, so the legal re-crew is preserved. Keyed by incarnation: a
+        // Vehicle that leaves and returns is a new object (CR 400.7) and is
+        // re-crewable.
         //
         // The redundant-crew veto MUST come before the combat-use gate: after a
         // successful crew the Vehicle is a legal attacker, so
@@ -102,15 +117,16 @@ impl TacticalPolicy for CrewTimingPolicy {
         // re-crew — letting the AI tap every body it controls (the crew-repeat
         // pathology).
         //
-        // Advisory scope boundary: non-crew animation (Ensoul Artifact,
+        // Advisory scope boundary: EXTERNAL non-crew animation (Ensoul Artifact,
         // Tezzeret-class "becomes an artifact creature") can produce the same
         // tap-every-body pathology — the Vehicle is already a creature, so the
-        // combat-use gate shields re-crews — yet its transient effect is sourced
-        // from a DIFFERENT object, so `crew_payoff_live` (keyed to Vehicle-as-its-
-        // own-source) cannot see it, and neither can the round-1 cadence set.
-        // Covering that sibling is a deliberate scope limit of this fix.
+        // combat-use gate shields re-crews — yet no Crew resolution ever happens
+        // for it, so the marker cannot see it either. Covering that sibling is a
+        // deliberate scope limit of this fix (the Kylox-class OWN-source
+        // animation, by contrast, demonstrably preserves the re-crew — see
+        // `generic_selfref_self_animation_is_not_treated_as_a_resolved_crew`).
         if engine::game::engine::crew_pending_on_stack(ctx.state, *vehicle_id)
-            || engine::game::engine::crew_payoff_live(ctx.state, *vehicle_id)
+            || engine::game::engine::crew_resolved_this_turn_contains(ctx.state, *vehicle_id)
         {
             return PolicyVerdict::reject(PolicyReason::new(
                 "crew_timing_redundant_already_creature",
@@ -204,7 +220,10 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::effects::counter;
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, ResolvedAbility,
+        StaticDefinition, TargetFilter,
+    };
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
     use engine::types::identifiers::ObjectId;
@@ -415,8 +434,8 @@ mod tests {
             "reach-guard: the crew entry is pending on the stack"
         );
         assert!(
-            !engine::game::engine::crew_payoff_live(&state, vehicle),
-            "reach-guard: the Vehicle is not yet a creature (the payoff applies at resolution)"
+            !engine::game::engine::crew_resolved_this_turn_contains(&state, vehicle),
+            "reach-guard: the pending crew has not resolved, so the resolution marker is absent"
         );
         let result = verdict(
             &state,
@@ -429,13 +448,14 @@ mod tests {
         );
 
         // ── live-payoff: resolve the pending crew through the engine's fast
-        // forward — the transient UEOT AddType(Creature) effect is now live. ──
+        // forward — the resolved-crew marker is now recorded (alongside the
+        // transient UEOT AddType(Creature) effect). ──
         resolve_all_fast_forward(&mut state, AI, 1, |_, _| {
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
         });
         assert!(
-            engine::game::engine::crew_payoff_live(&state, vehicle),
-            "reach-guard: resolving the crew installed the live UEOT animation effect"
+            engine::game::engine::crew_resolved_this_turn_contains(&state, vehicle),
+            "reach-guard: resolving the crew recorded the resolved-crew marker"
         );
         assert!(
             get_valid_attacker_ids(&state).contains(&vehicle),
@@ -525,8 +545,8 @@ mod tests {
             "reach-guard: the counter removed the pending crew entry"
         );
         assert!(
-            !engine::game::engine::crew_payoff_live(&state, vehicle),
-            "reach-guard: the countered crew never installed its animation effect"
+            !engine::game::engine::crew_resolved_this_turn_contains(&state, vehicle),
+            "reach-guard: the countered crew never resolved — the marker is never recorded"
         );
 
         let activation = GameAction::CrewVehicle {
@@ -565,6 +585,108 @@ mod tests {
         assert!(
             matches!(&result, PolicyVerdict::Score { delta: 0.0, reason } if reason.kind == "crew_timing_combat_use"),
             "re-crewing after a countered crew reaches the combat-use gate and is judged on its merits, not vetoed; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn generic_selfref_self_animation_is_not_treated_as_a_resolved_crew() {
+        // MED discriminator (round-3): the round-2 crew-repeat guard shape-matched
+        // the resolved Crew payoff off `transient_continuous_effects`
+        // (source==Vehicle, UEOT, SpecificObject{Vehicle}, AddType(Creature)).
+        // The ENGINE's production generic-effect SelfRef path
+        // (`effect.rs::register_transient_effect`'s SelfRef branch →
+        // `install_transient`) installs EXACTLY that transient shape for a
+        // generic self-animation — Kylox, Voltstrider-class: a Vehicle whose own
+        // activated ability makes it an artifact creature until end of turn —
+        // with NO `KeywordAction::Crew` resolution behind it. The shape-matcher
+        // misreported that animation as a Crew payoff and vetoed the still-legal
+        // Crew action. The fix keys the veto on an explicit resolved-Crew marker
+        // (`crew_resolved_this_turn`), which ONLY the `KeywordAction::Crew`
+        // stack-resolution arm records — so this animation must NOT be rejected,
+        // and an actual re-crew (tapping a fresh body into an exact attack use)
+        // reaches the combat-use gate.
+        //
+        // REVERT-PROBE: restore the round-2 shape-match veto (`crew_payoff_live`)
+        // and assertion (c) flips — the generic animation is vetoed as a
+        // "redundant crew". Assertions (a)/(b) pin WHY: the shape exists (a) yet
+        // no Crew resolution ever happened (b).
+        let (mut state, vehicle, _) = crew_fixture();
+        // Mirror the fixture's own activation gates (the engine's
+        // `ActivateAbility` arm checks `priority_player`; the CrewVehicle arm
+        // does not).
+        state.priority_player = AI;
+
+        // Drive the REAL generic-effect install path: a genuine activated
+        // ability whose effect is a SelfRef GenericEffect self-animate (the
+        // Kylox shape), announced through `apply_as_current_for_simulation` and
+        // resolved through the engine's fast forward. No Crew keyword action is
+        // ever announced.
+        let animate = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&vehicle).unwrap().abilities).push(animate);
+        let ability_index = state.objects[&vehicle].abilities.len() - 1;
+
+        apply_as_current_for_simulation(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: vehicle,
+                ability_index,
+            },
+        )
+        .expect("the self-animate activated ability must be announced and pushed to the stack");
+        resolve_all_fast_forward(&mut state, AI, 1, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        });
+
+        // (a) reach-guard: the generic install produced EXACTLY the transient
+        // shape the round-2 shape-matcher keyed on — had `crew_payoff_live`
+        // still existed it would have returned true here (the old veto fires).
+        assert!(
+            state.transient_continuous_effects.iter().any(|tce| {
+                tce.source_id == vehicle
+                    && tce.duration == Duration::UntilEndOfTurn
+                    && matches!(
+                        &tce.affected,
+                        TargetFilter::SpecificObject { id } if *id == vehicle
+                    )
+                    && tce.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Creature,
+                            }
+                        )
+                    })
+            }),
+            "reach-guard: the GenericEffect SelfRef install produced the old crew_payoff_live shape"
+        );
+        // (b) the marker is NOT set: no `KeywordAction::Crew` ever resolved.
+        assert!(
+            !engine::game::engine::crew_resolved_this_turn_contains(&state, vehicle),
+            "discriminator: no Crew resolution occurred, so the resolved-crew marker must be absent"
+        );
+        // (c) the crew candidate is NOT vetoed — it reaches the combat-use gate,
+        // which judges the re-crew neutrally as an exact attack use.
+        let activation = GameAction::CrewVehicle {
+            vehicle_id: vehicle,
+            creature_ids: Vec::new(),
+        };
+        let result = verdict(&state, WaitingFor::Priority { player: AI }, activation);
+        assert!(
+            matches!(&result, PolicyVerdict::Score { delta: 0.0, reason } if reason.kind == "crew_timing_combat_use"),
+            "a Kylox-class generic self-animation must NOT be vetoed as a Crew payoff; \
+             the re-crew must reach the combat-use gate, got {result:?}"
         );
     }
 

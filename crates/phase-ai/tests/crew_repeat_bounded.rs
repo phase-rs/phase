@@ -1,7 +1,7 @@
 //! AI crew-repeat pathology (CR 702.122a) regression guards.
 //!
-//! Both Vehicles are Final Fantasy (FIN) 2/3 Artifact Vehicles with Flying and
-//! Vigilance; they differ only in Crew requirement:
+//! Both Vehicles are Final Fantasy (FIN) 2/3 Artifact Vehicles that differ in
+//! Crew requirement:
 //! - Cargo Ship (#47): **Crew 1**.
 //! - Adventurer's Airship: **Crew 2**.
 //!

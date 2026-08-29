@@ -15611,7 +15611,7 @@ fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: Player
 /// pending crew entry before it resolves, leaving the cadence record stale all
 /// turn while the Vehicle never became a creature. Consumers that must reject
 /// a redundant re-crew should test PAYOFF-IN-FORCE instead — see
-/// [`crew_pending_on_stack`] / [`crew_payoff_live`].
+/// [`crew_pending_on_stack`] / [`crew_resolved_this_turn_contains`].
 pub(crate) fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
     state
         .objects
@@ -15620,13 +15620,32 @@ pub(crate) fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: O
         .is_some_and(|r| state.crew_activated_this_turn.contains(&r))
 }
 
-/// CR 702.122a + CR 113.3b: Is a Crew activation for this Vehicle currently
-/// pending on the stack? Crew's payoff — the transient UEOT
+/// CR 702.122a: Has a `KeywordAction::Crew` for this Vehicle RESOLVED this
+/// turn (the resolved-crew marker)? This is the crew-repeat guard's
+/// PAYOFF-IN-FORCE authority: the marker is written only when the Crew stack
+/// entry actually resolves and installs the transient UEOT `AddType(Creature)`
+/// effect, so a countered crew (CR 701.6a) never sets it — and neither does a
+/// generic SelfRef self-animation (Kylox-class), which installs the same
+/// transient shape with no Crew resolution behind it. Only an explicit
+/// successful Crew sets the marker. Incarnation-keyed: a Vehicle that leaves
+/// and returns is a new object (CR 400.7) and is re-crewable.
+pub fn crew_resolved_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&vehicle_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        .is_some_and(|r| state.crew_resolved_this_turn.contains(&r))
+}
+
+/// CR 702.122a + CR 113.3b + CR 117.3c: Is a Crew activation for this Vehicle
+/// currently pending on the stack? Crew's payoff — the transient UEOT
 /// `AddType(Creature)` effect — is applied at stack RESOLUTION, not at
 /// announcement (CR 113.3b opens a priority window for counterspell-class
-/// effects between the two). Between announcement and resolution the pending
-/// `KeywordAction::Crew` entry is the proof that the payoff is owed; the
-/// cadence set alone is not (see [`crew_activated_this_turn_contains`]).
+/// effects between the two; CR 117.3c hands that same player priority again
+/// after the activation — the very re-crew window this guard exists to close).
+/// Between announcement and resolution the pending `KeywordAction::Crew` entry
+/// is the proof that the payoff is owed; the cadence set alone is not (see
+/// [`crew_activated_this_turn_contains`]).
 pub fn crew_pending_on_stack(state: &GameState, vehicle_id: ObjectId) -> bool {
     state.stack.iter().any(|entry| {
         matches!(
@@ -15641,38 +15660,6 @@ pub fn crew_pending_on_stack(state: &GameState, vehicle_id: ObjectId) -> bool {
     })
 }
 
-/// CR 702.122a + CR 611.2a: Is the resolved Crew payoff currently live on this
-/// Vehicle — the transient UEOT `AddType(Creature)` continuous effect the
-/// engine installs when the `KeywordAction::Crew` entry resolves? The layer
-/// system folds it into `core_types` lazily, so this predicate (not the raw
-/// type field) is the layer-independent "the crew payoff is in force" test.
-///
-/// Keyed to the crew payoff's exact shape — source is the Vehicle itself,
-/// self-targeting, `Duration::UntilEndOfTurn`, `AddType(Creature)` — so an
-/// external animator (Ensoul Artifact, Tezzeret-class "becomes an artifact
-/// creature") is deliberately NOT matched: its transient effect is sourced
-/// from a different object. That sibling pathology is out of scope for the
-/// crew-repeat guard.
-pub fn crew_payoff_live(state: &GameState, vehicle_id: ObjectId) -> bool {
-    state.transient_continuous_effects.iter().any(|tce| {
-        tce.source_id == vehicle_id
-            && tce.duration == crate::types::ability::Duration::UntilEndOfTurn
-            && matches!(
-                &tce.affected,
-                crate::types::ability::TargetFilter::SpecificObject { id }
-                    if *id == vehicle_id
-            )
-            && tce.modifications.iter().any(|m| {
-                matches!(
-                    m,
-                    crate::types::ability::ContinuousModification::AddType {
-                        core_type: crate::types::card_type::CoreType::Creature,
-                    }
-                )
-            })
-    })
-}
-
 /// CR 602.5b + CR 702.122a: record a crew activation against the Vehicle's current
 /// incarnation. Single authority for writing the crew-cadence set.
 pub(crate) fn record_crew_activation(state: &mut GameState, vehicle_id: ObjectId) {
@@ -15682,6 +15669,23 @@ pub(crate) fn record_crew_activation(state: &mut GameState, vehicle_id: ObjectId
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
     {
         state.crew_activated_this_turn.insert(r);
+    }
+}
+
+/// CR 702.122a: record a RESOLVED crew against the Vehicle's current
+/// incarnation. Single authority for writing the resolved-crew marker set —
+/// called from the `KeywordAction::Crew` stack-resolution arm (stack.rs) in
+/// the exact block that installs the UEOT `AddType(Creature)` transient, so
+/// the marker and the payoff are written together and cannot drift.
+/// Deliberately NOT written at crew announcement: a countered crew (CR 701.6a)
+/// installs no payoff, and the Vehicle must stay re-crewable.
+pub(crate) fn record_crew_resolution(state: &mut GameState, vehicle_id: ObjectId) {
+    if let Some(r) = state
+        .objects
+        .get(&vehicle_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+    {
+        state.crew_resolved_this_turn.insert(r);
     }
 }
 
