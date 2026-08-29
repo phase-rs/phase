@@ -18439,7 +18439,7 @@ mod idempotency_tests {
         }
     }
 
-    /// CR 608.2b + CR 111.7 (#8147): one mobilized token trades in combat before
+    /// CR 609.3 + CR 111.7 (#8147): one mobilized token trades in combat before
     /// the end step, so it has ceased to exist by the time the delayed
     /// "sacrifice them" fires. The delayed trigger snapshots BOTH token ids at
     /// creation and carries no incarnation pins, so `live_object_targets` still
