@@ -947,6 +947,7 @@ mod orzhov_advokist;
 mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
 mod ozolith_leaves_battlefield_counters;
+mod padeem_consul_of_innovation;
 mod pain_magnification_single_source_damage;
 mod painters_servant_multi_zone_additive_color;
 mod palace_jailer;
