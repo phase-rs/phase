@@ -1345,6 +1345,26 @@ const FULL_SOCKET_AUTHORITY_REJECTION: &str =
 const FULL_SOCKET_FRESH_REJECTION: &str = "This socket is already attached to a game session";
 const DRAFT_SOCKET_AUTHORITY_REJECTION: &str =
     "This socket's draft session identity is no longer current";
+const DRAFT_SOCKET_FRESH_REJECTION: &str = "This socket is already attached to a draft session";
+
+/// Draft creation and joining install a new seat identity. They therefore need
+/// the same fresh-socket rule as full-game creation and joining: an attached
+/// socket, including one whose sender has since been replaced, must not be
+/// allowed to overwrite the identity its close handler will later clean up.
+///
+/// Reconnecting is deliberately excluded. A new websocket has no draft seat
+/// identity and may reconnect, while an attached websocket is governed by the
+/// exact-seat checks in [`reconnect_draft_seat`].
+fn draft_socket_admission_rejection(
+    message: &ClientMessage,
+    identity: &SocketIdentity,
+) -> Option<&'static str> {
+    (matches!(
+        message,
+        ClientMessage::CreateDraftWithSettings { .. } | ClientMessage::JoinDraftWithPassword { .. }
+    ) && identity.draft_seat().is_some())
+    .then_some(DRAFT_SOCKET_FRESH_REJECTION)
+}
 
 /// Verifies a Full seat while the caller already owns the session-state lock.
 ///
@@ -5639,6 +5659,16 @@ async fn handle_client_message(
         {
             let msg = operation_failed_message(&client_msg, reason.to_string())
                 .unwrap_or_else(|| ServerMessage::error(reason.to_string()));
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+
+        if let Some(reason) = draft_socket_admission_rejection(&client_msg, identity) {
+            let msg = ServerMessage::DraftActionRejected {
+                reason: reason.to_string(),
+            };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -10205,6 +10235,147 @@ mod draft_socket_authority_tests {
             draft_code,
             player_token,
         )
+    }
+
+    fn draft_admission_messages(draft_code: &str) -> [ClientMessage; 2] {
+        [
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "Alice".to_string(),
+                set_codes: vec!["TST".to_string()],
+                kind: DraftKind::Premier,
+                public: false,
+                password: None,
+                timer_seconds: Some(75),
+                tournament_format: TournamentFormat::Swiss,
+                pod_policy: PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::JoinDraftWithPassword {
+                draft_code: draft_code.to_string(),
+                display_name: "Bob".to_string(),
+                password: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn fresh_socket_keeps_draft_admission_and_reconnect_paths() {
+        let fresh = empty_identity();
+        for message in draft_admission_messages("DRAFT01") {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &fresh),
+                None,
+                "a fresh socket must reach {message:?}'s handler"
+            );
+        }
+        assert_eq!(
+            draft_socket_admission_rejection(
+                &ClientMessage::ReconnectDraft {
+                    draft_code: "DRAFT01".to_string(),
+                    player_token: "player-token".to_string(),
+                },
+                &fresh,
+            ),
+            None,
+            "a fresh socket must retain draft reconnect eligibility"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_draft_socket_cannot_create_or_join_without_replacing_its_seat() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity,
+            draft_code.clone(),
+            player_token,
+            &tx,
+        )
+        .await
+        .expect("attach draft seat");
+        let original_identity = (
+            identity.draft_code.clone(),
+            identity.draft_seat,
+            identity.draft_token.clone(),
+        );
+
+        for message in draft_admission_messages(&draft_code) {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &identity),
+                Some(DRAFT_SOCKET_FRESH_REJECTION),
+                "the gate must reject {message:?} before its handler mutates draft state"
+            );
+        }
+
+        assert_eq!(
+            (
+                identity.draft_code.clone(),
+                identity.draft_seat,
+                identity.draft_token.clone(),
+            ),
+            original_identity,
+            "the gate must not overwrite the socket's existing draft identity"
+        );
+        assert_eq!(draft_state.lock().await.sessions.len(), 1);
+        assert!(
+            connections
+                .lock()
+                .await
+                .get(&draft_code)
+                .and_then(|players| players.get(&PlayerId(0)))
+                .is_some_and(|sender| sender.same_channel(&tx)),
+            "the rejected admission must leave the original sender installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_draft_socket_cannot_create_or_join_another_pod() {
+        let (draft_state, connections, draft_code, player_token) = test_draft();
+        let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
+        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let mut stale_identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut stale_identity,
+            draft_code.clone(),
+            player_token.clone(),
+            &stale_tx,
+        )
+        .await
+        .expect("attach original socket");
+        let mut current_identity = empty_identity();
+        reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut current_identity,
+            draft_code.clone(),
+            player_token,
+            &current_tx,
+        )
+        .await
+        .expect("replace original socket");
+
+        for message in draft_admission_messages("OTHER01") {
+            assert_eq!(
+                draft_socket_admission_rejection(&message, &stale_identity),
+                Some(DRAFT_SOCKET_FRESH_REJECTION),
+                "a stale seat must be rejected before {message:?} can overwrite its identity"
+            );
+        }
+        assert!(
+            connections
+                .lock()
+                .await
+                .get(&draft_code)
+                .and_then(|players| players.get(&PlayerId(0)))
+                .is_some_and(|sender| sender.same_channel(&current_tx)),
+            "the stale socket must not displace the current sender"
+        );
+        assert_eq!(draft_state.lock().await.sessions.len(), 1);
     }
 
     #[tokio::test]
