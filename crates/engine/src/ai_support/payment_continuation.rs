@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use crate::ai_support::legal_actions;
+use crate::ai_support::candidate_actions;
 use crate::game::engine::apply_as_current_for_simulation;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -407,7 +407,14 @@ struct WitnessNode {
 impl WitnessNode {
     fn next_action(&mut self) -> Option<GameAction> {
         if self.remaining_actions.is_none() {
-            let mut actions = legal_actions(&self.state);
+            // The reducer below remains the legality authority. Reusing the
+            // raw engine candidate domain avoids first simulating every broad
+            // priority candidate in `legal_actions`, only to simulate it again
+            // for the payment-finalization proof.
+            let mut actions: Vec<_> = candidate_actions(&self.state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect();
             actions.sort_by(|left, right| left.cmp_stable(right));
             self.remaining_actions = Some((actions, 0));
         }
