@@ -484,6 +484,40 @@ describe("P2P draft guest handshake attempts", () => {
     await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
   });
 
+  it.each([
+    ["draft_kicked", { type: "draft_kicked", reason: "Removed from draft" }, { type: "kicked", reason: "Removed from draft" }],
+    ["draft_host_left", { type: "draft_host_left", reason: "Host left" }, { type: "hostLeft", reason: "Host left" }],
+  ])("settles a pending leave when the host sends %s", async (_messageType, message, terminalEvent) => {
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+
+    const leave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[0]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    sessionState.sessions[0]!.handler!(message);
+
+    await expect(leave).resolves.toBeUndefined();
+    expect(events).toContainEqual(terminalEvent);
+  });
+
   it("finishes terminal host handling when recovery cleanup fails", async () => {
     const events: unknown[] = [];
     const guest = new P2PDraftGuest(

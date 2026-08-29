@@ -548,14 +548,7 @@ export class P2PDraftGuest {
       }
 
       case "draft_leave_ack": {
-        const pending = this.leaveAcknowledgement;
-        if (
-          pending
-          && pending.session === session
-          && pending.draftToken === msg.draftToken
-        ) {
-          pending.resolve();
-        }
+        this.resolveLeaveAcknowledgement(session, msg.draftToken);
         break;
       }
 
@@ -596,6 +589,7 @@ export class P2PDraftGuest {
 
       case "draft_kicked": {
         this.terminated = true;
+        this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "kicked", reason: msg.reason });
@@ -668,6 +662,7 @@ export class P2PDraftGuest {
 
       case "draft_host_left": {
         this.terminated = true;
+        this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "hostLeft", reason: msg.reason });
@@ -816,6 +811,18 @@ export class P2PDraftGuest {
     try {
       this.guestPeer.destroy();
     } catch { /* best-effort */ }
+  }
+
+  private resolveLeaveAcknowledgement(session: DraftPeerSession, draftToken?: string): void {
+    const pending = this.leaveAcknowledgement;
+    if (
+      pending
+      && pending.session === session
+      && (!draftToken || pending.draftToken === draftToken)
+    ) {
+      this.leaveAcknowledgement = null;
+      pending.resolve();
+    }
   }
 
   // ── Accessors ──────────────────────────────────────────────────────
