@@ -2307,6 +2307,7 @@ mod tests {
             pass_direction: PassDirection::Left,
             current_pack: None,
             required_pick_count: 0,
+            pick_selection_mode: PickSelectionMode::Direct,
             pool,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
@@ -2341,6 +2342,7 @@ mod tests {
             ServerMessage::DraftStateUpdate { view: v } => {
                 assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
+                assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
                 assert_eq!(
