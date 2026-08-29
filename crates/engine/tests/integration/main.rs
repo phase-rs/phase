@@ -778,6 +778,7 @@ mod issue_7539_debug_turn_face_up;
 mod issue_787_once_upon_a_time;
 mod issue_788_unexpectedly_absent;
 mod issue_7945_free_grant_face_down;
+mod issue_8024_terminal_rest_captures;
 mod issue_822_erode_path_to_exile_search_controller;
 mod issue_828_full_throttle;
 mod issue_841_selvala_explorer_returned;
