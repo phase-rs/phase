@@ -585,6 +585,10 @@ pub fn resolve(
             .as_ref()
             .and_then(|event| match event {
                 GameEvent::ZoneChanged { to, .. } => Some(*to),
+                // CR 701.17c: the milled card is in "the zone it moved to from
+                // the library", which is where a "…, then exile it" clause on a
+                // mill trigger must move it from.
+                GameEvent::Milled { to, .. } => Some(*to),
                 _ => None,
             });
     }
@@ -2286,6 +2290,62 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// V15 — CR 701.17c + CR 400.7 + CR 603.7c: `resolve` fills an absent
+    /// `origin` for a `TriggeringSource` subject from the trigger event's
+    /// destination zone — for a mill, "the zone it moved to from the library".
+    /// The match ends in `_ => None`, so the compiler never asks for this arm;
+    /// without it `origin` stays `None` and the stale-object guard never fires.
+    #[test]
+    fn triggering_source_origin_fallback_reads_the_milled_destination() {
+        let build = |resident: Zone| {
+            let mut state = GameState::new_two_player(42);
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(1),
+                "Milled Card".to_string(),
+                resident,
+            );
+            state.current_trigger_event = Some(GameEvent::Milled {
+                player_id: PlayerId(1),
+                object_id: card,
+                to: Zone::Exile,
+            });
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::TriggeringSource,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("change zone resolves");
+            state.objects[&card].zone
+        };
+
+        // Reach guard: the milled card really is in the zone the event names, so
+        // the "…, then return it to its owner's hand" clause moves it.
+        assert_eq!(build(Zone::Exile), Zone::Hand);
+
+        // Revert-failing leg: the card has since left that zone, so the CR 400.7
+        // guard must refuse the move. With the arm removed `origin` is `None`,
+        // the guard is skipped, and this card is bounced out of the graveyard.
+        assert_eq!(build(Zone::Graveyard), Zone::Graveyard);
     }
 
     #[test]

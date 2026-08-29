@@ -1850,6 +1850,7 @@ mod tests {
                 &prior,
                 &current,
                 &saproling_class,
+                pid(0),
             ),
             "the frames must be a valid fodder cover (so the None in (1) is non-vacuous)"
         );

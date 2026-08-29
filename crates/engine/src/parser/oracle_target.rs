@@ -1272,7 +1272,7 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    // CR 608.2k / CR 603.7c: "the spell you cast" / bare "the spell" is an
+    // CR 608.2k: "the spell you cast" / bare "the spell" is an
     // untargeted anaphor to the triggering spell object on a cast trigger
     // (Taigam, Master Opportunist: "exile the spell you cast"). It maps to
     // TriggeringSource, mirroring the bare-"that spell" arm above. Disambiguate

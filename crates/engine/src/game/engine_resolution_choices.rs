@@ -1872,9 +1872,9 @@ pub(super) fn handle_resolution_choice(
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             emit_reveal_until_resolved: None,
-                            // #7467 review round 2: the entry paused, so the
-                            // publish below never runs — the completion drain
-                            // publishes instead, once the entry completed.
+                            // The entry paused, so the publish below never
+                            // runs — the completion drain publishes instead,
+                            // once the entry has completed.
                             manifested_for_continuation: Some(manifest_id),
                             kept_delivery: Default::default(),
                             continuation_targets: Vec::new(),
@@ -1887,7 +1887,7 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
-            // CR 608.2c + CR 701.62a (#7467): the manifested creature enters
+            // CR 608.2c + CR 701.62a: the manifested creature enters
             // from THIS continuation, so its `ZoneChanged` never reaches the
             // resolver-side harvest — the chain's tracked set was published
             // EMPTY when the head parked. Re-publish it here so a chained
@@ -2699,28 +2699,26 @@ pub(super) fn handle_resolution_choice(
                             continue;
                         }
                         match item {
-                            PersistentAxisMaterialization::Tokens(profile) => {
-                                // CR 707.2 (+ CR 111.10): mint N tapped copy-tokens of the
-                                // fodder profile — a source-less mint, so route through
-                                // `drive_copy_token_batches` (`ObjectId(0)` sentinel source).
+                            PersistentAxisMaterialization::Tokens(growth) => {
+                                // CR 707.2 + CR 111.3: mint `per_cycle_delta × N` tapped
+                                // copy-tokens of the fodder profile — a source-less mint, so route
+                                // through `drive_copy_token_batches` (`ObjectId(0)` sentinel).
                                 //
-                                // CR 732.2a k≡1 INVARIANT: this mints `count: amount` == k·amount
-                                // with the per-cycle fodder count k STRUCTURALLY ≡ 1. A `Tokens`
-                                // stash is only registered under `if let Some(profile)` in
-                                // `materialize_object_growth_shortcut` (engine.rs), whose
-                                // `current_period_fodder` derives the profile from
-                                // `derived_fodder_class` (`game/engine.rs`), which returns `None`
-                                // unless EXACTLY one new battlefield object appeared per period
-                                // (`let id = new_ids.next()?; if new_ids.next().is_some() { None }`).
-                                // A k>1 period (two+ new objects/cycle) fails that gate ⇒ no `Tokens`
-                                // stash ⇒ this arm is never reached for k≠1. So `count: amount` is
-                                // EXACT, not a k·N undercount. (Counters/Life instead carry a measured
-                                // `per_cycle_delta`, so those axes handle k>1 by construction.)
+                                // CR 732.2a k-MULTISET INVARIANT: k is the per-cycle count from
+                                // `game::engine::derived_fodder_class`, which is `None` unless
+                                // EVERY new battlefield object of the period is equal under BOTH
+                                // `analysis::resource::fodder_content_eq` and
+                                // `game::printed_cards::intrinsic_copiable_values` — so one
+                                // profile faithfully represents all k. A period whose k already
+                                // absorbed a `CreateToken` replacement's factor is routed to
+                                // `DriveSequence` instead (`token_growth_is_observed`, gated on
+                                // k > 1), so this mint's own `replace_event` below cannot apply it
+                                // twice. Counters/Life carry the same `per_cycle_delta` field.
                                 let batch = crate::types::game_state::PendingCopyTokenBatch {
                                     owner: player,
-                                    count: amount,
+                                    count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
-                                        values: profile.clone(),
+                                        values: growth.profile.clone(),
                                         display_source:
                                             crate::game::game_object::DisplaySource::Token,
                                         printed_ref: None,
@@ -2842,7 +2840,7 @@ pub(super) fn handle_resolution_choice(
                     // CR 732.2a: cash out ONLY the axes actually collapsed (axis-scoped) —
                     // end their ∞ status + stash + pile, PRESERVING any coexisting axis (a
                     // debug infinite-mana capability, or a finding-#4-declined axis). The ∞
-                    // display collapses to an ordinary ×N for the collapsed axes (§9).
+                    // display collapses to an ordinary ×N for the collapsed axes.
                     //
                     // FINDING #4 DECLINED-AXIS ∞ LIFECYCLE (CR 732.1b — the shortcut system
                     // determines how the loop is broken; see BoundaryHold::ObservedGrowth): a declined `Counters`/`Life`
@@ -2878,12 +2876,65 @@ pub(super) fn handle_resolution_choice(
                     // whole backing gone: the growth still lands here, and a row that vanished
                     // before it landed would be the display lying about an agreed result.
                     state.clear_collapsed_materializations(player, &collapsed);
-                    // Continue the boundary fixpoint (§7): re-draining either prompts the
-                    // next APNAP player with a stash or restores Priority now.
+                    // Re-drain the boundary: it either raises a prompt of its own — the
+                    // next APNAP controller's collapse count, or a CR 616.1 ordering
+                    // choice — or completes the phase entry.
                     crate::game::turns::drain_pending_phase_transition_progress(state, events);
-                    return Ok(ResolutionChoiceOutcome::WaitingFor(
-                        state.waiting_for.clone(),
-                    ));
+                    // The phase cursor says which of those two the re-drain did, and it is
+                    // this arm's own result rather than an invariant of the call below.
+                    // Still standing ⇒ the drain paused with the entry unfinished, so the
+                    // beat belongs to whoever finishes it and the deferred-trigger latch
+                    // stays set for them.
+                    let waiting_for = if state.pending_phase_transition_progress.is_some() {
+                        state.waiting_for.clone()
+                    } else {
+                        // Entry complete. `turns::finish_enter_phase` granted
+                        // `priority_player` but wrote no beat and put none of the phase's
+                        // beginning-of-phase abilities on the stack, and CR 117.3a places
+                        // the grant after BOTH the phase's turn-based actions and those
+                        // abilities. `turns::process_phase_triggers` is what stacks them
+                        // and it runs on no path but `turns::auto_advance`'s phase arms.
+                        //
+                        // So the latch is cleared on the ONE branch below that goes back
+                        // through the interpreter in this action, and only there: an exit
+                        // that deferred to a live prompt has not paid CR 117.3a yet, and
+                        // clearing the latch would retire the debt with nothing having
+                        // stacked. `turns::resume_deferred_step_triggers` collects it at the
+                        // priority boundary the deferred-to prompt returns through.
+                        // CR 732.2a: the taken shortcut's ending point is the first
+                        // priority the turn interpreter grants — the beat below, or the one
+                        // behind the entered phase's CR 703.1 turn-based action (CR 508.1's
+                        // declare-attackers is the reachable instance). CR 732.2c: the
+                        // shortcut is taken with the proposal's game choices having been
+                        // taken; its shortened-proposal sentence binds only IF the proposal
+                        // was shortened, and then the player who now has priority MUST make
+                        // a different game choice than the one originally proposed.
+                        //
+                        // Read before the call, because `auto_advance` overwrites
+                        // `state.waiting_for`. Both shapes below go back through the
+                        // interpreter: the stale collapse prompt this arm answered, and a
+                        // `Priority` an applier wrote on its way through — that one still
+                        // owes the phase's triggers, so it is not the grant CR 117.3a
+                        // describes. Anything else standing here is an applier's LIVE
+                        // prompt — a mint's CR 303.4f host choice is the reachable one,
+                        // because `token_copy`'s pause parks its continuation BELOW the
+                        // child boundary and the `active_copy_token()` guard above reads
+                        // only the top frame. Overwriting it would destroy the choice, so
+                        // this exit defers to it and leaves the latch owed instead.
+                        if matches!(
+                            state.waiting_for,
+                            WaitingFor::PayAmountChoice {
+                                resource: PayableResource::LoopCollapse { .. },
+                                ..
+                            } | WaitingFor::Priority { .. }
+                        ) {
+                            state.deferred_step_trigger_resume = None;
+                            crate::game::turns::auto_advance(state, events)
+                        } else {
+                            state.waiting_for.clone()
+                        }
+                    };
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
                 }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
@@ -7697,6 +7748,9 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
+            effects::mill::complete_mill_delivery(state, player_id, cards, events)
+        }
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }
@@ -8171,7 +8225,7 @@ pub(crate) fn run_batch_completion(
                     subject: None,
                 });
             }
-            // CR 608.2c + CR 701.62a (#7467): the paused manifest entry has
+            // CR 608.2c + CR 701.62a: the paused manifest entry has
             // completed by now — publish its object for the parked consumer,
             // the deferred mirror of the synchronous `ManifestDreadChoice`
             // publish (same gate, same battlefield filter).
@@ -10802,7 +10856,12 @@ mod tests {
         use crate::game::derived_views::CollapseCertainty;
 
         let kinds = [
-            PersistentAxisMaterialization::Tokens(boundary_census_token_profile()),
+            PersistentAxisMaterialization::Tokens(Box::new(
+                crate::types::game_state::TokenGrowth {
+                    profile: boundary_census_token_profile(),
+                    per_cycle_delta: 1,
+                },
+            )),
             PersistentAxisMaterialization::Counters(vec![]),
             PersistentAxisMaterialization::Life {
                 player: PlayerId(0),

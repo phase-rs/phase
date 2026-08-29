@@ -9320,7 +9320,9 @@ pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
         return TargetFilter::TriggeringPlayer;
     }
-    // CR 603.7c: DamageDone triggers use TriggeringPlayer for "that player"
+    // "that player" binds to the player named by the trigger condition. No CR covers this:
+    // CR 608.2k is the anaphora rule but its subject is a specific untargeted OBJECT, and
+    // CR 109.1 excludes players from "object". Engine convention, stated rather than mis-cited.
     if matches!(
         ctx.relative_player_scope,
         Some(ControllerRef::TriggeringPlayer)

@@ -361,7 +361,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7c + CR 502.3 + CR 702.26c: The Pandorica's full re-entry
+    /// CR 603.7b + CR 502.3 + CR 702.26c: The Pandorica's full re-entry
     /// lifecycle through the production runtime path — registration, end-of-turn
     /// cleanup, later-turn untap firing, and phase-in resolution.
     ///

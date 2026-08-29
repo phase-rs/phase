@@ -19581,6 +19581,121 @@ fn graveyard_timed_alt_cost_grant_is_castable_in_place() {
         .expect("bauble must be castable from graveyard");
 }
 
+/// CR 305.9: an object that is both a land and another card type "can be played only as a
+/// land. It can't be cast as a spell." An Emry-class grant ("target artifact card in your
+/// graveyard — you may cast that card this turn") admits artifact lands through its target
+/// filter, so the type gate has to run at the analysis layer too: the enumeration must not
+/// report a cast the admission gate refuses.
+///
+/// This asserts the PREDICATE'S REPORT, not the downstream cast outcome — `prepare_spell_cast`
+/// already refused the land before this change and would pass unfixed.
+#[test]
+fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play_route() {
+    use crate::game::effects::cast_from_zone;
+    use crate::types::ability::{CardPlayMode, Effect, ResolvedAbility, TargetRef};
+    use crate::types::statics::CastFrequency;
+
+    let mut state = setup_game_at_main_phase();
+
+    // Same fixture as `graveyard_timed_alt_cost_grant_is_castable_in_place`, with the
+    // graveyard object given CR 300.2a's artifact-land type line.
+    let citadel = create_object(
+        &mut state,
+        CardId(2028),
+        PlayerId(0),
+        "Darksteel Citadel".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&citadel).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.mana_cost = ManaCost::zero();
+        // CR 701.17d: the land keeps its OWN play route, granted independently of the
+        // cast grant. Without this the land-play assertion below would compare two empty
+        // vectors and could not fail in the direction it guards.
+        obj.casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::Permanent,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            });
+    }
+
+    // Paired positive: the same grant on a NON-land artifact must stay listed.
+    let bauble = create_object(
+        &mut state,
+        CardId(2029),
+        PlayerId(0),
+        "Mishra's Bauble".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&bauble).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = ManaCost::zero();
+    }
+
+    let grant = |target: ObjectId, source: ObjectId| {
+        ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                mana_spend_permission: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        )
+    };
+    cast_from_zone::resolve(&mut state, &grant(citadel, ObjectId(9001)), &mut Vec::new()).unwrap();
+    cast_from_zone::resolve(&mut state, &grant(bauble, ObjectId(9002)), &mut Vec::new()).unwrap();
+
+    // REACH GUARD: the real `cast_from_zone::resolve` driver actually attached the grant,
+    // so "not listed" below cannot be satisfied by a grant that never landed.
+    assert!(
+        state.objects[&citadel]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. })),
+        "the LingeringPermission driver must have stamped the alt-cost grant on the land"
+    );
+
+    let castable = spell_objects_available_to_cast(&state, PlayerId(0));
+    assert!(
+        !castable.contains(&citadel),
+        "CR 305.9: an artifact land carrying the grant must not be reported as castable"
+    );
+    assert!(
+        castable.contains(&bauble),
+        "PAIRED POSITIVE: the non-land artifact with the same grant is still reported"
+    );
+
+    // The gate must not steal the land's own route (CR 305.9 sends it there, not away).
+    assert!(
+        graveyard_lands_playable_by_permission(&state, PlayerId(0))
+            .iter()
+            .any(|(id, _)| *id == citadel),
+        "the land-play route for the same object must be unmoved"
+    );
+}
+
 /// Regression (Sunforger infinite recast): a `CastFromZone` "cast it
 /// without paying its mana cost" grant attached *in place* to a card the
 /// effect routed through the hand (Sunforger: search → to hand → cast from
@@ -37488,6 +37603,40 @@ mod prototype_cast_flow {
         obj_id
     }
 
+    /// CR 718.2 + CR 718.3b: the prototype cost is an alternative
+    /// CHARACTERISTIC, not an alternative cost (CR 118.9) — the one-shot
+    /// free-cast rider is the single alternative cost applied, so it zeroes
+    /// a prototyped cast exactly as it zeroes a normal cast. Mirror image of
+    /// `next_spell_without_paying_does_not_replace_overload_cost` (Overload
+    /// IS an alternative cost, so there the rider must NOT apply).
+    #[test]
+    fn next_spell_without_paying_zeroes_a_prototyped_cast() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::WithoutPayingManaCost,
+                spell_filter: None,
+                source_id: None,
+            },
+        );
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            obj,
+            Some(CastingVariant::Prototype),
+        )
+        .expect("prototype prepare succeeds");
+        assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
+        assert!(
+            matches!(prepared.mana_cost, ManaCost::NoCost),
+            "the free-cast rider must zero the prototyped cast (CR 718.2), got {:?}",
+            prepared.mana_cost
+        );
+    }
+
     #[test]
     fn offer_prototype_when_both_costs_affordable() {
         let mut state = setup_game_at_main_phase();
@@ -45389,6 +45538,433 @@ fn legacy_play_from_exile_form_round_trips_without_the_companion_marker() {
     let back: crate::types::ability::CastingPermission =
         serde_json::from_str(&json).expect("deserialize legacy form");
     assert_eq!(back, grant);
+}
+
+/// CR 702.74a: an exiled creature with printed Evoke — printed cost {4},
+/// evoke cost {1}. Off-zone keyword reads flow through `base_keywords`
+/// (`off_zone_characteristics`); stamp both views.
+fn exiled_evoker(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let exiled = add_exiled_card(state, player, "Exiled Evoker");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.mana_cost = ManaCost::generic(4);
+    obj.base_mana_cost = obj.mana_cost.clone();
+    obj.keywords.push(crate::types::keywords::Keyword::Evoke(
+        crate::types::keywords::EvokeCost::Mana(ManaCost::generic(1)),
+    ));
+    obj.base_keywords = obj.keywords.clone();
+    exiled
+}
+
+/// CR 118.9a + CR 601.2b (#7948 follow-up): an Alternative-provenance grant
+/// is itself an alternative cost — it lends NO zone authority to an Evoke
+/// election, which would be a second alternative cost on the same cast.
+/// The face-down cast got this gate in #7948; Evoke is the same class.
+#[test]
+fn an_alternative_grant_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_cast_grant(player));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        result.is_err(),
+        "an alternative-cost grant must not authorize the evoke election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b + CR 702.103a (#7948 follow-up): the same denial
+/// for a Bestow election riding a free grant's zone authority.
+#[test]
+fn an_alternative_grant_lends_no_zone_authority_to_a_bestow_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // A legal creature target for the would-be Aura.
+    add_creature_with_mv(&mut state, CardId(45_901), PlayerId(1), "Bear", 2);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.keywords.push(crate::types::keywords::Keyword::Bestow(
+            crate::types::keywords::BestowCost::Mana(ManaCost::generic(2)),
+        ));
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions.push(free_cast_grant(player));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Bestow),
+    );
+    assert!(
+        result.is_err(),
+        "an alternative-cost grant must not authorize the bestow election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b: a `NormalCost` grant restates the card's own
+/// printed cost — a normal cast route. Electing Evoke against it applies
+/// exactly ONE alternative cost, so the election keeps its zone authority.
+#[test]
+fn a_normal_cost_grant_keeps_the_evoke_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(normal_cost_grant(player, ManaCost::generic(4)));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    )
+    .expect("a normal-cost grant must keep the evoke election");
+    assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+}
+
+/// CR 118.9: the free grant itself stays a legal (single) alternative cost —
+/// the plain cast of the evoker through it must keep working. The denial
+/// above gates the ELECTION, never the card.
+#[test]
+fn a_free_grant_still_casts_the_evoker_without_the_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_cast_grant(player));
+
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Evoke);
+}
+
+/// CR 718.2 + CR 718.3b: prototyped casting swaps alternative
+/// CHARACTERISTICS — the prototype mana cost IS the spell's mana cost, not
+/// an alternative cost per CR 118.9. A free grant plus the Prototype
+/// election is therefore legal and must stay admitted.
+#[test]
+fn a_free_grant_keeps_the_prototype_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Prototype");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.mana_cost = ManaCost::generic(7);
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.keywords
+            .push(crate::types::keywords::Keyword::Prototype {
+                cost: ManaCost::generic(2),
+                power: Some(1),
+                toughness: Some(1),
+            });
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions.push(free_cast_grant(player));
+    }
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Prototype),
+    )
+    .expect("a free grant plus the prototype election is one alternative cost (CR 718.2)");
+    assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
+}
+
+/// A cast offered during the resolution of the spell that exiled the card: the
+/// offer's own permission carries `resolution_cleanup`, which is what binds a
+/// `casting_permission_index_override` to it.
+fn resolution_offer_grant(
+    player: PlayerId,
+    source_id: ObjectId,
+) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::ExileWithAltCost {
+        cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+        cost: ManaCost::zero(),
+        cast_transformed: false,
+        constraint: None,
+        granted_to: Some(player),
+        resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+            source_id,
+            exiled_misses: vec![],
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        }),
+        duration: None,
+        graveyard_replacement: None,
+        enters_with_counter: None,
+        enters_with_modifications: vec![],
+        mana_spend_permission: None,
+    }
+}
+
+/// CR 118.9a + CR 601.2b (#7981 review, finding 1): a cast OFFERED during
+/// resolution is bound to that offer's permission, and that permission is an
+/// alternative cost. A sibling normal-cost grant is not the route this cast
+/// takes, so it must not lend zone authority to an evoke election riding the
+/// offer — the offer would otherwise carry two alternative costs.
+#[test]
+fn a_resolution_offer_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    let offered = {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        let index = CastingPermissionIndex(obj.casting_permissions.len());
+        obj.casting_permissions
+            .push(resolution_offer_grant(player, exiled));
+        obj.casting_permissions
+            .push(normal_cost_grant(player, ManaCost::generic(4)));
+        index
+    };
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+        None,
+        Some(offered),
+        CastingMode::Actual,
+    );
+    assert!(
+        result.is_err(),
+        "a resolution offer must not admit the evoke election through a sibling \
+         normal-cost grant (CR 118.9a), got {:?}",
+        result.map(|p| p.casting_variant),
+    );
+
+    // Positive direction: the offer itself still authorizes its own free cast,
+    // so the denial above is about the rider and not a broken fixture.
+    let free = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        player,
+        exiled,
+        None,
+        None,
+        Some(offered),
+        CastingMode::Actual,
+    )
+    .expect("the resolution offer must still authorize the plain free cast it was made for");
+    assert_ne!(free.casting_variant, CastingVariant::Evoke);
+    assert!(matches!(free.mana_cost, ManaCost::NoCost));
+}
+
+/// CR 118.9a + CR 107.14 (#7981 review, finding 2): an energy permission is
+/// never the elected authority (it is not electable at all), so it must not
+/// zero the cost of an evoke election that a sibling normal-cost grant
+/// authorized. The evoke cost is the one alternative cost on that cast.
+#[test]
+fn an_unelected_energy_permission_does_not_zero_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.casting_permissions
+            .push(crate::types::ability::CastingPermission::ExileWithEnergyCost);
+        obj.casting_permissions
+            .push(normal_cost_grant(player, ManaCost::generic(4)));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    )
+    .expect("the normal-cost grant authorizes the evoke election from exile");
+    assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+    assert_eq!(
+        prepared.mana_cost,
+        ManaCost::generic(1),
+        "the evoke cost must be paid, not zeroed by an energy permission this cast never used",
+    );
+}
+
+/// CR 601.3 + CR 601.2f (#7981 review round 2): an exiled card can be
+/// authorized by an object-attached `PlayFromExile` grant while a battlefield
+/// static ALSO authorizes it. The engine preserves the elected permission as
+/// casting provenance, so the unelected static's `Additional` extra cost must
+/// not be imposed.
+///
+/// The legality flip is the discriminator: the player is at 0 life, so the
+/// static's pay-life rider is unpayable. With the elected grant carried through
+/// the cost path the cast is legal; re-deriving the authority by scanning finds
+/// the static and makes it illegal.
+#[test]
+fn an_elected_object_grant_does_not_inherit_an_overlapping_static_extra_cost() {
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // 1 life, a 2-life rider: unpayable, and unlike `life = 0` it is a state a
+    // player can actually hold priority in (CR 704.5a).
+    state.players[0].life = 1;
+
+    // A battlefield static that would also authorize the cast, carrying an
+    // ADDITIONAL pay-life rider the player cannot afford.
+    let static_source = {
+        use crate::types::ability::StaticDefinition;
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            card_id,
+            player,
+            "Overlapping Static".to_string(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: Some(CastExtraCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                mode: CastCostMode::Additional,
+            }),
+            enters_with_counter: None,
+        })
+        .affected(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        source
+    };
+
+    // The card's OWN impulse grant — the authority this cast elects.
+    let exiled = add_exiled_card(&mut state, player, "Impulsed Bear");
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_raise(player, None));
+    // The static's `ThisTurn` pool must actually contain the card, or it would
+    // not authorize it and the test would measure nothing.
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(static_source, vec![exiled]);
+    // Enough mana for the printed {1}: only the unelected rider can block it.
+    add_mana(&mut state, player, ManaType::Colorless, 1);
+
+    // Reach guard: the overlapping static really does authorize this card, so
+    // the assertion below is about which authority was elected, not about a
+    // static that never applied.
+    assert!(
+        exile_static_permission_extra_cost(&state, player, exiled, static_source).is_some(),
+        "fixture must have an overlapping static that carries an extra-cost rider",
+    );
+
+    assert!(
+        can_cast_object_now(&state, player, exiled),
+        "a cast elected through the card's own PlayFromExile grant must not owe the \
+         unelected static's additional pay-life cost (CR 601.2f)",
+    );
+
+    // Negative control: strip the elected object grant and the SAME fixture must
+    // become illegal, because then the static IS the authority and its rider is
+    // owed. Without this the assertion above could pass on a fixture where the
+    // rider was never consulted at all.
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .clear();
+    assert!(
+        !can_cast_object_now(&state, player, exiled),
+        "with no object grant the static is the elected authority and its unpayable \
+         rider must block the cast — otherwise the fixture proves nothing",
+    );
+}
+
+/// CR 601.2f + CR 118.9 (#7981 review round 2): the same provenance rule on the
+/// COST path, with the only printed member of the class.
+///
+/// Measured over `client/public/card-data.json`: 13 cards carry an
+/// `ExileCastPermission` static and exactly one of them carries an `extra_cost`
+/// — Valgavoth, Terror Eater, in `Alternative` mode. `Alternative` is the shape
+/// the legality projection above cannot see (`alt_cost_from_exile` reads only
+/// that mode), so this test is what covers the seam the review named.
+///
+/// With the card's own `PlayFromExile` grant elected, Valgavoth's alternative
+/// pay-life cost is not this cast's route: the printed {2} stays due and an
+/// empty pool cannot pay it. Reverting the provenance makes the scan find
+/// Valgavoth, zero the mana cost, and the cast becomes free.
+#[test]
+fn an_elected_object_grant_does_not_inherit_valgavoths_alternative_cost() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    state.players[0].life = 20;
+    let source = add_valgavoth_exile_cast_source(&mut state, player);
+    let spell = add_linked_two_generic_sorcery(&mut state, player, source, "Exiled Big Spell");
+
+    // Reach guard: without an object grant this fixture is the established
+    // Valgavoth case — the static authorizes and zeroes the {2}.
+    assert!(
+        effective_spell_cost(&state, player, spell)
+            .expect("the linked spell must have an effective cost")
+            .is_without_paying_mana(),
+        "fixture must be the working Valgavoth case before the object grant is added",
+    );
+
+    // Now the card also carries its own impulse grant, which is what the cast
+    // elects by default.
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_raise(player, None));
+
+    let effective = effective_spell_cost(&state, player, spell)
+        .expect("the elected object grant must still authorize the cast");
+    assert!(
+        !effective.is_without_paying_mana(),
+        "an elected object grant owes the printed cost, not Valgavoth's alternative \
+         pay-life cost from a static this cast never took (CR 601.2f), got {effective:?}",
+    );
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, player, spell, &effective),
+        "the printed {{2}} must remain unpayable from an empty pool",
+    );
 }
 
 /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static

@@ -3722,7 +3722,7 @@ fn rewrite_change_zone_cleanup_to_last_created(
     origin.get_or_insert(Zone::Battlefield);
 }
 
-/// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
+/// CR 603.7a: Sentence splitting can leave a WheneverEvent delayed trigger's
 /// token-creating inner effect and its end-step cleanup delayed trigger as
 /// sibling `sub_ability` links on the activated ability. Rewire the cleanup
 /// under the token creator so it registers when the WheneverEvent fires, not
@@ -3889,7 +3889,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             }
         }
 
-        // CR 705.2 + CR 603.7c: Consolidate FlipCoinUntilLose with its per-win
+        // CR 705.2 + CR 608.2c: Consolidate FlipCoinUntilLose with its per-win
         // clause chain. Absorb the win head (e.g. the token-creating copy clause)
         // PLUS any trailing rider clauses that reference the just-created tokens
         // (`LastCreated`) — "Those tokens gain haste", "Exile them …", already

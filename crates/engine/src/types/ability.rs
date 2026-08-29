@@ -4196,20 +4196,20 @@ pub enum DelayedTriggerCondition {
     WhenLeavesPlay {
         object_id: super::identifiers::ObjectId,
     },
-    /// CR 603.7c: "when [object] dies" — fires on zone change to graveyard.
+    /// CR 603.7: "when [object] dies" — fires on zone change to graveyard.
     /// Filter-based variant resolved at trigger check time (unlike WhenLeavesPlay
     /// which uses a specific object_id).
     WhenDies { filter: TargetFilter },
-    /// CR 603.7c: "when [object] leaves the battlefield" — filter-based variant
+    /// CR 603.7: "when [object] leaves the battlefield" — filter-based variant
     /// that fires on any zone change from battlefield.
     WhenLeavesPlayFiltered { filter: TargetFilter },
-    /// CR 603.7c: "when [object] enters the battlefield" — fires on zone change
+    /// CR 603.7: "when [object] enters the battlefield" — fires on zone change
     /// to battlefield.
     WhenEntersBattlefield { filter: TargetFilter },
     /// "when [object] dies or is exiled" — fires on zone change to graveyard OR exile.
     /// Filter-based variant resolved at trigger check time.
     WhenDiesOrExiled { filter: TargetFilter },
-    /// CR 603.7c: "Whenever [event] this turn" — fires each time the event occurs
+    /// CR 603.7b: "Whenever [event] this turn" — fires each time the event occurs
     /// until end of turn. Reuses existing trigger matching infrastructure via embedded
     /// TriggerDefinition. The embedded trigger's `execute` field should be `None` —
     /// the actual effect lives in `DelayedTrigger.ability`.
@@ -4483,10 +4483,10 @@ pub struct DamageAmountThreshold {
 ///
 /// This is not a speculative shim — three live consumers read the legacy shape:
 /// browser IndexedDB saved games (`client/src/services/gamePersistence.ts`,
-/// `saveGame` :147 / `loadGame` :181), the phase-server session store
-/// (`crates/phase-server/src/persistence.rs:488` deserializing a
-/// `PersistedSession` whose `state` is a `PersistedGameState`,
-/// `crates/server-core/src/persist.rs:23`), and the in-repo shared card fixture
+/// `saveGame` / `loadGame`), the phase-server session store
+/// (`crates/phase-server/src/persistence.rs` deserializing a
+/// `PersistedSession` whose `state` is a `PersistedGameState`, and
+/// `crates/server-core/src/persist.rs`), and the in-repo shared card fixture
 /// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
 /// carries legacy `["GE",5]` / `["EQ",1]` arrays.
 /// Write-side counterpart to [`deserialize_damage_amount_compat`]: `PerSource`
@@ -5902,45 +5902,20 @@ pub enum TargetFilter {
     PlayerWhoChoseLabel {
         label: String,
     },
-    /// CR 102.1 + CR 102.2 / CR 102.3 + CR 109.5: the player(s) satisfying an
-    /// arbitrary [`PlayerFilter`] predicate. CR 102.1 supplies the population
-    /// (the people in the game) this selects from, CR 102.2 / CR 102.3 the
-    /// `relation` axis's opponent semantics, and CR 109.5 the controller-relative
-    /// "you" every relation is measured against. (Deliberately NOT CR 109.4:
-    /// that rule governs an OBJECT's controller, which is the object-axis
-    /// mirror's business, not this variant's.)
+    /// CR 102.1 + CR 102.2 / CR 102.3 + CR 109.5: the player(s) satisfying an arbitrary
+    /// [`PlayerFilter`] predicate — CR 102.1 supplies the population, CR 102.2 / CR 102.3 the
+    /// `relation` axis's opponent semantics, CR 109.5 the controller-relative "you" it is measured
+    /// against. (Not CR 109.4, which governs an OBJECT's controller — that is the object-axis
+    /// mirror [`FilterProp::ControllerMatches`], whose pair this variant completes.) Evaluated by
+    /// the single-authority `game::effects::matches_player_scope`, so every predicate
+    /// `PlayerFilter` already expresses becomes usable wherever a `TargetFilter` names a player.
     ///
-    /// The PLAYER-axis mirror of [`FilterProp::ControllerMatches`], which is
-    /// itself documented as the object-axis mirror of `PlayerFilter`; this
-    /// variant completes the pair.
-    ///
-    /// Evaluated by the single-authority `game::effects::matches_player_scope`,
-    /// so every predicate `PlayerFilter` already expresses — life total
-    /// (CR 119.1), hand size (CR 402.1), controlled-permanent counts (CR 109.4),
-    /// counters (CR 122.1), attack history (CR 508.6) — becomes usable anywhere
-    /// a `TargetFilter` names a player, with no further variants.
-    ///
-    /// First consumer: `TriggerDefinition::valid_target` on a CR 508.1a attack
-    /// trigger whose attacked player carries a relative-clause predicate
-    /// ("attacks a player who has more life than you"). Per CR 603.2 that clause
-    /// is part of the TRIGGER EVENT and is checked once at declaration — which
-    /// is exactly `valid_target`'s contract
-    /// (`trigger_matchers::attack_target_matches`) and exactly why it is NOT
-    /// modelled as a `TriggerCondition`, which CR 603.4 re-checks at resolution.
-    ///
-    /// The `PlayerFilter`'s `relation` is evaluated against the TRIGGER SOURCE's
-    /// CONTROLLER, which is not always the attacking player — a player-subject
-    /// attack trigger routes the attacker into `valid_source` instead. Producers
-    /// must not assume the two coincide.
-    ///
-    /// `Box` breaks the `TargetFilter -> PlayerFilter -> ControlsCount { filter:
-    /// TargetFilter }` size cycle (same rationale as
-    /// `FilterProp::ControllerMatches` and `PlayerFilter::AllExcept`).
-    ///
-    /// FOLLOW-UP (not this change): [`TargetFilter::PlayerWhoChoseLabel`] is the
-    /// hard-coded single-predicate sibling this variant supersedes. Retiring it
-    /// needs a `PlayerFilter::ChoseLabel { label }` backed by the existing single
-    /// authority `game::players::player_last_chose_label`.
+    /// On a CR 508.1a attack trigger's `valid_target` the relative clause is part of the TRIGGER
+    /// EVENT, checked once at declaration (CR 603.2) — which is why it is not a `TriggerCondition`,
+    /// re-checked at resolution under CR 603.4. `relation` is measured against the trigger SOURCE's
+    /// controller, which need not be the attacker. `Box` breaks the `TargetFilter -> PlayerFilter
+    /// -> ControlsCount { filter: TargetFilter }` size cycle. [`TargetFilter::PlayerWhoChoseLabel`]
+    /// is the hard-coded sibling this supersedes, retirable via `PlayerFilter::ChoseLabel`.
     PlayerMatching {
         player: Box<PlayerFilter>,
     },
@@ -6172,7 +6147,7 @@ pub enum TargetFilter {
     /// ability's target slot) and `TriggeringSpellController` (which resolves
     /// via `state.current_trigger_event`, which is `None` during post-replacement
     /// resolution). Architectural twin of the quantity-side `last_effect_count`
-    /// fallback at `replacement.rs:317` — both stash event context that lives
+    /// fallback in `replacement.rs` — both stash event context that lives
     /// outside the trigger window. The parser never emits this variant directly;
     /// the prevention follow-up call site rewrites `ParentTargetController`
     /// → `PostReplacementSourceController` via `each_target_filter_mut` after
@@ -11723,9 +11698,8 @@ impl LegacyUnlessCost {
 /// falls back to the legacy `PaymentCost` wrapper shape so saved-game JSON /
 /// persisted continuations keep loading after `PaymentCost` was deleted.
 ///
-/// Legacy `PaymentCost` → modern `AbilityCost` mapping (§4 of the unification
-/// plan; field types already align — the fold is lossless except `ScaledMana`,
-/// see below):
+/// Legacy `PaymentCost` → modern `AbilityCost` mapping (field types already
+/// align — the fold is lossless except `ScaledMana`, see below):
 /// - `Mana { cost }` → `Mana { cost }`
 /// - `Life { amount }` → `PayLife { amount }`
 /// - `Speed { amount }` → `PaySpeed { amount }`
@@ -11963,7 +11937,7 @@ pub enum EachDamageRecipient {
         /// selected object list alone cannot prove type/controller legality.
         source_filters: [Box<TargetFilter>; 2],
     },
-    // DEFERRED (§9, set-audit backlog): AttachedPermanent — each Aura source deals
+    // NOT YET SUPPORTED: AttachedPermanent — each Aura source deals
     // to the permanent it's attached to (CR 303.4). Needs a new attachment
     // `FilterProp` (`AttachedToObjectOfType`) for the source filter; until then
     // the parser fails the "...to the creature it's attached to" recipient closed
@@ -21551,11 +21525,14 @@ impl SubAbilityLink {
 /// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
 /// `SequentialSibling` continuation with its OWN gating condition must still be
 /// checked when a PRECEDING sibling's condition was
-/// false. `Dependent` (default) is today's behavior — the continuation's own
+/// false. `Dependent` (default) suppresses the continuation because its own
 /// condition/effect may presuppose the preceding sibling's effect actually ran
 /// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
 /// `GainControl` produced a target), so it is skipped alongside a failed
-/// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// predecessor. The sole narrow exception is a direct dependent
+/// `SequentialSibling` whose condition is `NthResolutionThisTurn`: ordinal
+/// clauses are evaluated in their written order under CR 608.2c even after an
+/// earlier ordinal is false. `ReplicatedOrBranch` marks a sibling produced by per-item
 /// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
 /// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.
@@ -22387,22 +22364,19 @@ pub enum AbilityCondition {
     /// turn (Y'shtola Rhul's additional-end-step loop guard). End-step sibling of
     /// `FirstCombatPhaseOfTurn`; both read a per-turn phase-occurrence counter.
     FirstEndStepOfTurn,
-    /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if
-    /// the parent effect produced a zone change involving an object matching the filter.
-    /// Evaluated by checking `state.last_zone_changed_ids` against the filter.
-    /// Handles both optional-targeting parents (empty targets → empty IDs → false)
-    /// and mandatory parents (type filter check on moved objects).
+    /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if the parent
+    /// effect produced a zone change involving an object matching the filter, checked against
+    /// `state.last_zone_changed_ids`. Handles optional-targeting parents (empty targets → empty
+    /// IDs → false) and mandatory ones (type filter check on moved objects).
     ///
-    /// `destination`: destination-bound wordings ("is put into a graveyard this
-    /// way"; "dies this way", CR 700.4) additionally require the moved object to
-    /// have ARRIVED in this zone — a replacement that redirects the arrival
-    /// (CR 122.1h finality counters: exile instead of the graveyard) defeats the
-    /// clause, because the replaced event never happened (CR 614.6).
-    /// Cause-bound wordings ("destroyed/sacrificed/exiled … this way") keep
-    /// `None`: the cause survives a redirect, the destination does not. The
-    /// check reads the object's CURRENT zone — the condition is evaluated in
-    /// the same resolution step as the parent instruction (CR 608.2c), before
-    /// any state-based action or trigger could move the object again, so the
+    /// `destination`: destination-bound wordings ("is put into a graveyard this way"; "dies this
+    /// way", CR 700.4) additionally require the moved object to have ARRIVED in this zone — a
+    /// replacement that redirects the arrival (CR 122.1h finality counters: exile instead of the
+    /// graveyard) defeats the clause, because the replaced event never happened (CR 614.6).
+    /// Cause-bound wordings ("destroyed/sacrificed/exiled … this way") keep `None`: the cause
+    /// survives a redirect, the destination does not. The check reads the object's CURRENT zone —
+    /// the condition is evaluated in the same resolution step as the parent instruction
+    /// (CR 608.2c), before any state-based action or trigger could move the object again, so the
     /// current zone IS the arrival zone.
     ZoneChangedThisWay {
         filter: TargetFilter,
@@ -22459,7 +22433,8 @@ pub enum AbilityCondition {
     DayNightIs {
         state: crate::types::game_state::DayNight,
     },
-    /// CR 603.4: Intervening-if gate for "if this is the [Nth] time this ability has
+    /// CR 608.2c: Ordinary resolution-time condition (not an intervening-if
+    /// condition under CR 603.4) for "if this is the [Nth] time this ability has
     /// resolved this turn". Counter is keyed by `(source_id, ability_index)` and
     /// incremented at the top of `resolve_ability_chain` (depth 0). The condition is
     /// satisfied when, after the increment, the per-turn resolution count equals `n`.
@@ -27354,9 +27329,10 @@ pub struct ResolvedAbility {
     /// accidentally bind to an amass-specific referent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amassed_army_object: Option<CostPaidObjectSnapshot>,
-    /// CR 603.4: Index of the printed ability this resolution came from on the
+    /// CR 608.2c: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
-    /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
+    /// ordinary-resolution-condition tracking (`AbilityCondition::NthResolutionThisTurn`),
+    /// not an intervening-if condition under CR 603.4. `None` for
     /// synthesized/runtime-only abilities (prowess, firebending) and activated
     /// abilities for which nth-resolution gating is not yet wired through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27414,7 +27390,9 @@ pub struct ResolvedAbility {
     /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
     /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
     /// preceding sibling's failed gate. `Dependent` (default) preserves the
-    /// prior skip-with-failed-predecessor behavior. See [`SiblingCondition`].
+    /// prior skip-with-failed-predecessor behavior, except the narrow direct
+    /// `NthResolutionThisTurn` ordinal-sibling case described by
+    /// [`SiblingCondition`]. See [`SiblingCondition`].
     #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
     pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes

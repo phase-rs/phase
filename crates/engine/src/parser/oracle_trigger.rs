@@ -108,7 +108,7 @@ fn strip_spell_not_owned_qualifier(payload: &str) -> (&str, bool) {
         .unwrap_or((payload, false))
 }
 
-/// CR 603.7c: "Whenever a player casts a spell they don't own" — the casting
+/// CR 108.3 + CR 603.2: "Whenever a player casts a spell they don't own" — the casting
 /// player is the trigger event's player; the spell must not be owned by them.
 fn strip_spell_they_dont_own_qualifier(payload: &str) -> (&str, bool) {
     let mut parser = alt((
@@ -1288,7 +1288,7 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     )
 }
 
-/// CR 109.4 + CR 115.1 + CR 506.2 + CR 603.7c: Derive the relative-player scope
+/// CR 109.4 + CR 115.1 + CR 506.2: Derive the relative-player scope
 /// that a trigger condition introduces for `"that player"`/`"they"`-style
 /// anaphors in the trigger's effect body.
 ///
@@ -1508,7 +1508,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         ..Default::default()
     };
 
-    // CR 109.4 + CR 115.1 + CR 506.2 + CR 603.7c: Set relative-player scope for
+    // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // `"that player"` resolution inside the trigger effect body. Delegated to the
     // single-authority `relative_player_scope_for_condition` so the delayed-trigger
     // split path derives the identical scope from the same condition.
@@ -1646,7 +1646,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // through the modal parser so each mode body is independently
                 // parsed with the trigger's established relative_player_scope (e.g.
                 // TriggeringPlayer for DamageDone triggers) so "that player" in mode
-                // bodies resolves to the damaged player (CR 603.7c).
+                // bodies resolves to the damaged player (CR 120.3).
                 if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
                     return Some(TriggerBody::Modal(Box::new(modal)));
                 }
@@ -1900,7 +1900,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         None => None,
     };
 
-    // CR 603.7c + CR 120.3 + CR 506.2: For triggers that introduce an
+    // CR 120.3 + CR 506.2: For triggers that introduce an
     // event-bound player ("deals combat damage to a player, they lose half
     // their life"), rebind the body's `PlayerScope::Target` possessive
     // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
@@ -2116,7 +2116,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
-    // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
+    // CR 109.4 + CR 115.1d: Surface TargetFilter::Player when execute
     // references ControllerRef::TargetPlayer, when the effect text names a
     // target opponent/player (Sméagol, Helpful Guide RingTemptsYou), or when a
     // RevealUntil names an opponent library without TargetPlayer binding.
@@ -2301,7 +2301,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     def
 }
 
-/// CR 603.7c: Trigger modes whose firing event carries a specific source
+/// CR 608.2k + CR 400.7e: Trigger modes whose firing event carries a specific source
 /// object id retrievable via `extract_source_from_event`. The "that card /
 /// that creature / that permanent" anaphor in these triggers' effect bodies
 /// refers to *that* object.
@@ -9996,7 +9996,7 @@ pub(crate) fn parse_trigger_condition(
     (mode, def)
 }
 
-/// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
+/// CR 109.4 + CR 115.1d: Returns `true` when any filter inside the execute
 /// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
 /// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
 /// Destroy targeting "that player controls") trigger the companion
@@ -16416,7 +16416,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // Anchored (NOT a substring scan): an optional "whenever "/"when " prefix
     // followed by "you attack". The bare "you attack" form is the prefix-stripped
     // delayed-trigger condition emitted by `try_parse_whenever_this_turn`
-    // (CR 603.7c) for cards like Dalkovan Encampment.
+    // (CR 603.7b) for cards like Dalkovan Encampment.
     //
     // The trailing `peek` is a word-boundary guard: "you attack" must be followed
     // by end-of-input, a space, or a comma so that "you attacked this turn" (a

@@ -30,6 +30,10 @@ const NON_VISUAL_EVENTS = new Set([
   "PermanentUntapped",
   "StackPushed",
   "StackResolved",
+  // CR 701.17a: the paired ZoneChanged already animates the card leaving the
+  // library — same reason CombatDamageDealtToPlayer is non-visual beside
+  // DamageDealt. Without this a Mill 5 queues five extra empty steps.
+  "Milled",
   // CR 714.2: same class as StackResolved — the chapter ability's own effects
   // are what the player sees; this event exists for meta-triggers.
   "SagaChapterAbilityResolved",

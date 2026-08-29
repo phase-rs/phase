@@ -3372,7 +3372,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
     // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
-    // CR 102.1 + CR 603.7c + CR 608.2c: active-player punisher rebinding (Siren's
+    // CR 102.1 + CR 608.2c: active-player punisher rebinding (Siren's
     // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
     // the swallow audit, to preserve the pre-relocation order in which the two
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
@@ -3388,7 +3388,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     result
 }
 
-// --- CR 102.1 + CR 603.7c + CR 608.2c: active-player coerce → delayed punisher --
+// --- CR 102.1 + CR 608.2c: active-player coerce → delayed punisher --
 
 /// Whether an ability is the mass-`MustAttack` coerce clause over an
 /// `ActivePlayer` subject (Siren's Call, first line).
@@ -3421,7 +3421,7 @@ fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
         && target_filter_controller_ref(target) == Some(ControllerRef::You)
 }
 
-/// CR 102.1 + CR 603.7c + CR 608.2c: Pair the mass-attack coerce clause
+/// CR 102.1 + CR 608.2c: Pair the mass-attack coerce clause
 /// (`coerce`) with each sibling delayed punisher (`punisher`) on the same card.
 fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let Some(coerce) = items

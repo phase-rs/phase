@@ -142,6 +142,11 @@ function errorKind(error: unknown): VisualPackErrorKind {
   return "storage";
 }
 
+function backendError(error: unknown): VisualPackBackendError {
+  if (error instanceof VisualPackBackendError) return error;
+  return new VisualPackBackendError(errorKind(error), error instanceof Error ? error.message : undefined);
+}
+
 function selectorPack(selector: InstallSelector): PackId {
   switch (selector.kind) {
     case "core": return packId("core");
@@ -449,7 +454,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const current = await state(this.database);
       return current.catalog ? { status: "ready", summary: await this.catalogSummary() } : { status: "empty" };
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -462,7 +467,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       await transaction.done;
       return this.catalogSummary();
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -486,7 +491,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const catalog = current.catalog ?? await loadScryfallBulkSource();
       return this.estimate(catalog, selector, current.revision);
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -541,7 +546,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       this.run(selectedOperation);
       return { status: "started", operationId: selectedOperation, catalogRoot: catalog.root };
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -557,7 +562,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       if (result.state === "cancelled") this.emit({ phase: "cancelled", operation: result, error: null });
       return result;
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -600,7 +605,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       this.publish({ cause: "remove", operationId: null, catalogRoot: null, revision: installedRevision(revision) });
       return { removed: removed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })), revision: installedRevision(revision), cleanupIssues: [] };
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -623,7 +628,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       }
       return { revision: installedRevision(current.revision), issues };
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 
@@ -646,7 +651,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       }
       return { revision: installedRevision(current.revision), entries };
     } catch (error) {
-      throw new VisualPackBackendError(errorKind(error));
+      throw backendError(error);
     }
   }
 

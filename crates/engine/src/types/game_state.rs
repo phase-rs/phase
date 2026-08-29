@@ -69,7 +69,9 @@ use super::resolved_commands::{
 use super::zones::{ChainReferentIntent, EtbTapState};
 use super::zones::{ExileCostSourceZone, Zone};
 
-use crate::analysis::resource::{object_class, CounterClass, ObjectClass, ResourceAxis};
+use crate::analysis::resource::{
+    object_class, CounterClass, ObjectClass, ResourceAxis, UnboundedMarkKind,
+};
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -3866,15 +3868,16 @@ pub struct PendingCopyTokenBatch {
 /// every seam honest — a new variant will not compile until classified).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PersistentAxisMaterialization {
-    /// CR 707.2 + CR 111.1: mint N tapped copy-tokens of this fodder profile
-    /// (the `TokensCreated` axis). Carries NO per-cycle count because the per-cycle
-    /// fodder count k is STRUCTURALLY ≡ 1: this stash is only registered when
-    /// `materialize_object_growth_shortcut`'s `derived_fodder_class`
-    /// found EXACTLY one new battlefield object per period
-    /// (a two+-object period returns `None` ⇒ no `Tokens` stash), so the boundary
-    /// mint of `count: amount` == k·amount is EXACT. (Contrast `Counters`/`Life`,
-    /// which carry a measured `per_cycle_delta` to handle k>1.)
-    Tokens(Box<CopiableValues>),
+    /// CR 707.2 + CR 111.1: mint `per_cycle_delta × N` tapped copy-tokens of this fodder profile
+    /// (the `TokensCreated` axis). `per_cycle_delta` is the per-cycle fodder count k, which
+    /// `materialize_object_growth_shortcut`'s `derived_fodder_class` proves is a HOMOGENEOUS
+    /// multiset — every member equal under `analysis::resource::fodder_content_eq` AND under
+    /// `game::printed_cards::intrinsic_copiable_values`, so one profile faithfully represents all
+    /// k. A count contributed by a live `CreateToken` replacement is NOT in k: that period routes
+    /// to `DriveSequence` instead (`analysis::resource::token_growth_is_observed`), because this
+    /// arm re-runs the replacement pipeline and would otherwise apply it twice.
+    /// (Mirrors `Counters`/`Life`, which carry the same field.)
+    Tokens(Box<TokenGrowth>),
     /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
     /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).
     Counters(Vec<CounterGrowth>),
@@ -3890,8 +3893,12 @@ pub enum PersistentAxisMaterialization {
     /// The `sequence` is CLONED into the stash (it serializes; round-trip verified) so the
     /// boundary read survives save/reload and does NOT rely on the serde-skipped live
     /// `last_loop_action_sequence` (sidesteps the Kilo FIX-3 drop-on-load scar).
-    /// `collapsed_axes` is the exact ∞-mark set this loop set (== `proposal.unbounded`),
-    /// captured at accept for a scoped clear.
+    /// `collapsed_axes` is the subset of the loop's ∞-mark set that THIS materialization is
+    /// accountable for ending — the `DeferredAccrual` axes, per
+    /// `analysis::resource::ResourceAxis::unbounded_mark_kind`, captured at accept for a scoped
+    /// clear. It is deliberately NOT `proposal.unbounded`: a `StandingCapability` axis (today,
+    /// `Mana(_)`) is already materialized in the pool and its `∞` ends under CR 500.5 + CR 106.4,
+    /// not with this collapse.
     DriveSequence {
         sequence: Vec<LoopActionContext>,
         collapsed_axes: Vec<ResourceAxis>,
@@ -3962,6 +3969,26 @@ pub(crate) fn collapsed_counter_axis(
         .map(|o| object_class(o.card_types.core_types.as_slice()))
         .unwrap_or(ObjectClass::Other);
     ResourceAxis::Counter(CounterClass::from_counter_type(ct), oc)
+}
+
+/// CR 111.3 + CR 707.2: the fodder profile the boundary mint copies, plus the per-cycle count
+/// `k` the certified period reproduces. Mirrors [`CounterGrowth`]'s `per_cycle_delta`; the mint
+/// applies `per_cycle_delta * N` exactly as the `Counters`/`Life` arms do.
+///
+/// CR 111.3, not CR 111.10: a created token's characteristics are the ones the creating spell or
+/// ability defines, and those ARE its copiable values. CR 111.10's scope is predefined tokens
+/// (Treasure, Food, ...) and does not cover this profile.
+///
+/// `per_cycle_delta` is the count the period's OWN effects create. A count contributed by a live
+/// `CreateToken` REPLACEMENT is deliberately NOT in it: the boundary mint re-runs that pipeline
+/// (`game::effects::token_copy::drive_copy_token_batches` -> `ProposedEvent::CreateToken` ->
+/// `replacement::replace_event`), so folding the replacement's multiplication in here would apply
+/// it twice. Such a period never reaches this struct — it routes to `DriveSequence`; see
+/// `analysis::resource::token_growth_is_observed`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenGrowth {
+    pub profile: Box<CopiableValues>,
+    pub per_cycle_delta: u32,
 }
 
 /// CR 122.1: one object's per-cycle beneficial counter growth captured at accept, for
@@ -5728,7 +5755,7 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
-        /// CR 608.2c + CR 701.62a (#7467): a paused manifest-dread entry's
+        /// CR 608.2c + CR 701.62a: a paused manifest-dread entry's
         /// chosen object. The completion drain publishes it as the chain's
         /// fresh tracked set — only once the entry has actually finished
         /// (battlefield gate) and right before the parked consumer drains —
@@ -5873,6 +5900,19 @@ pub enum BatchCompletion {
     /// second physical card has completed its independently replaceable move,
     /// carrying the originating event's applied-set through every pause.
     MeldRedirect { source_id: ObjectId },
+    /// CR 701.17a + CR 603.2c + CR 616.1: a mill batch settled. One `Milled`
+    /// event is emitted per card that actually left the library, after the whole
+    /// batch has been delivered. A CR 616.1 per-card ordering choice parks the
+    /// undelivered tail and the resume path drains it with a fresh event vector,
+    /// so no single synchronous event window spans the pause — the milling
+    /// context has to ride the batch instead.
+    MilledDeliveryComplete {
+        player_id: PlayerId,
+        /// The cards this instruction asked to mill. Each is emitted only if it
+        /// actually departed the library, so the set is a candidate list rather
+        /// than a result.
+        cards: Vec<ObjectId>,
+    },
 }
 
 /// CR 603.3b + CR 608.2g: terminal settlement that must wait until the
@@ -6270,8 +6310,7 @@ pub enum ZoneDeliveryExileTracking {
 }
 
 /// CR 614.12a + CR 616.1: Which layer drains `post_replacement_continuation`
-/// after a post-replacement zone delivery (Phase-B divergence reconciliation,
-/// PLAN §7). The replacement-choice resume path historically drained the
+/// after a post-replacement zone delivery. The replacement-choice resume path drained the
 /// continuation in its own epilogue — WITH the spell-resolution ctx and with
 /// `post_replacement_source` cleared for zone changes — while the shared
 /// delivery tail drains it ctx-less without the clear. Parameterizing the tail
@@ -6362,7 +6401,7 @@ pub struct DelayedTrigger {
     /// Source permanent that created this delayed trigger.
     pub source_id: ObjectId,
     /// Whether this trigger fires once and is removed (most delayed triggers).
-    /// CR 603.7c.
+    /// CR 603.7b.
     pub one_shot: bool,
     /// Private command-backed installation identity. Legacy delayed triggers
     /// continue through the normal rules lifecycle without receipt or
@@ -10911,28 +10950,20 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
     Ok(())
 }
 
-/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried
-/// `options: Vec<DungeonId>` and `WaitingFor::ChooseDungeonRoom` carried
-/// `options: Vec<u8>` plus `option_names: Vec<String>` before each option grew
-/// the room's printed name and room-ability text (CR 309.4b-c).
+/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried `options: Vec<DungeonId>` and
+/// `WaitingFor::ChooseDungeonRoom` carried `options: Vec<u8>` plus `option_names: Vec<String>`
+/// before each option grew the room's printed name and room-ability text (CR 309.4b-c), so a save
+/// paused at either prompt cannot deserialize into the current shape.
 ///
-/// A save paused at either prompt therefore cannot deserialize into the current
-/// shape. This migrates rather than rejects because the migration is TOTAL: the
-/// legacy payload's scalars are exactly the keys into the static dungeon table.
-/// A `DungeonId` resolves its own topmost room (CR 309.4a), and a room index
-/// resolves that room's name and text, so the rebuilt preview is identical to
-/// what the current engine would emit at that position — no saved game is lost
-/// and no field is guessed. `option_names` is dropped because `RoomPreview::name`
-/// now carries it from the same authority.
-///
-/// Rebuilt through `dungeon::dungeon_preview` / `dungeon::room_preview` rather
-/// than hand-written JSON, so this migration cannot drift from the shape the
-/// prompts actually emit.
-///
-/// Idempotent: legacy options are scalars (string / number) and current ones are
-/// objects, so a re-run over already-current state matches nothing. A `DungeonId`
-/// this engine does not know is a hard error — that is corrupt state, not a
-/// migratable shape.
+/// This migrates rather than rejects because the migration is TOTAL: the legacy scalars are
+/// exactly the keys into the static dungeon table. A `DungeonId` resolves its own topmost room
+/// (CR 309.4a) and a room index resolves that room's name and text, so the rebuilt preview equals
+/// what the engine emits at that position; `option_names` is dropped because `RoomPreview::name`
+/// carries it from the same authority. Rebuilt through `dungeon::dungeon_preview` /
+/// `dungeon::room_preview` rather than hand-written JSON, so it cannot drift from the shape the
+/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, so a re-run
+/// matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a migratable
+/// shape.
 fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
     use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
     use std::str::FromStr;
@@ -13765,28 +13796,19 @@ pub struct PendingLifelinkGain {
     pub amount: u32,
 }
 
-/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous
-/// combat-damage batch, parked because a lifelink life-gain event met two or
-/// more co-applicable replacement effects and the gaining player must choose
-/// which applies first.
+/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
+/// parked because a lifelink life-gain event met two or more co-applicable replacement effects
+/// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
+/// activating abilities* between combat damage being assigned and dealt — a priority window — but
+/// not a CR 616.1 choice made while the event is being applied, which opens no priority window
+/// and puts nothing on the stack. What it *does* forbid is replaying the batch: it is one event,
+/// so the damage is never re-dealt and only the unstarted tail is parked.
 ///
-/// CR 510.2 forbids *casting spells and activating abilities* between combat
-/// damage being assigned and dealt — a priority window. It does NOT forbid a
-/// CR 616.1 choice made while the event is being applied, which opens no
-/// priority window and puts nothing on the stack. The belief that it did is
-/// what dropped the gain: the choice cannot be answered inside the turn-based
-/// action, so 100% of that source's gain — and every later lifelink source in
-/// the same batch — was discarded.
-///
-/// What CR 510.2 *does* forbid is replaying the batch: it is one event. So the
-/// damage is never re-dealt; only the unstarted tail is parked.
-///
-/// The tail is parked whole, in emission order, so the completing batch's event
-/// stream is byte-identical to the un-paused one: per-source gains, then the
-/// per-player `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention
-/// riders. Deferring Phase D rather than hoisting it is what makes it
-/// impossible for a rider's own continuation (CR 615.5) to run while the
-/// CR 616.1 prompt is open.
+/// The tail is parked whole, in emission order, so the completing batch's event stream is
+/// byte-identical to the un-paused one: per-source gains, then the per-player
+/// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
+/// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
+/// while the CR 616.1 prompt is open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
@@ -13813,25 +13835,18 @@ pub struct PendingCombatLifelink {
     /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
     /// is not a JSON map key, and the record is serialized.
     pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
-    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on.
+    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on. Carried here rather
+    /// than re-snapshotted at resume time, which is what buys the PAUSE-path guard call: the
+    /// pause is reached under `PassPriority`, which `apply()` exempts from its blanket ring
+    /// clear, so a pre-batch snapshot lets that call observe the CR 120.3a damage this batch
+    /// already dealt. Re-snapshotting at drain entry makes the comparison vacuous there —
+    /// `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot` fails when it is.
     ///
-    /// Carried here rather than re-snapshotted at resume time. What that buys is
-    /// the PAUSE-path guard call: the pause is reached under `PassPriority`, which
-    /// `apply()` exempts from its blanket ring clear, so a pre-batch snapshot is
-    /// what lets that call observe the CR 120.3a damage this batch has already
-    /// dealt. Re-snapshotting at drain entry would make the comparison vacuous
-    /// there — `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot`
-    /// is the fixture that fails when it is.
-    ///
-    /// It buys NOTHING on the resume, and this is MEASURED, not assumed:
-    /// `apply()` clears `loop_detect_ring` for every action that is neither in its
-    /// exemption list nor an answer to a `WaitingFor::is_forced_cascade_window`,
-    /// and `GameAction::ChooseReplacement` / `WaitingFor::ReplacementChoice` are in
-    /// neither set. The ring is therefore already empty before the drain is
-    /// re-entered, so the completion-path call cannot be observed to clear
-    /// anything on that path. Do not write, or rely on, a claim that this window
-    /// "observes the paused source's own gain" — arithmetically it spans it, but
-    /// no observer survives to see it.
+    /// It buys NOTHING on the resume: `apply()` clears `loop_detect_ring` for every action
+    /// neither in its exemption list nor answering a `WaitingFor::is_forced_cascade_window`, and
+    /// `ChooseReplacement` / `ReplacementChoice` are in neither set, so the ring is already empty
+    /// before the drain is re-entered. Do not claim this window "observes the paused source's own
+    /// gain" — arithmetically it spans it, but no observer survives to see it.
     pub lives_before: Vec<i32>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
@@ -13983,7 +13998,7 @@ impl LoopCollapseAxis {
     /// only the three materializable axes carry a label; every non-materializable axis
     /// maps to `None` explicitly, so a future materializable axis build-breaks here and
     /// forces a conscious classification.
-    fn from_resource_axis(axis: ResourceAxis) -> Option<LoopCollapseAxis> {
+    pub(crate) fn from_resource_axis(axis: ResourceAxis) -> Option<LoopCollapseAxis> {
         match axis {
             ResourceAxis::TokensCreated => Some(LoopCollapseAxis::Tokens),
             // Real value on the observed-growth path is `Counter(Other, Other)`; both
@@ -14017,29 +14032,20 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
-/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state.
+/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state. THE single authority
+/// behind [`WaitingFor::acting_player`] and [`WaitingFor::acting_players`], which are adapters
+/// over [`WaitingFor::acting_authority`], whose exhaustive per-variant match lives there and
+/// nowhere else.
 ///
-/// THE single authority behind [`WaitingFor::acting_player`] and
-/// [`WaitingFor::acting_players`]; both are adapters over
-/// [`WaitingFor::acting_authority`], and the exhaustive per-variant match lives
-/// there and nowhere else.
-///
-/// The type exists so that "nobody acts" cannot be written as a bare `None`.
-/// A state with no acting player is advanced by something OUTSIDE the action
-/// pipeline, and if that something is never called the game hangs with no
-/// player able to move it and no client rendering a prompt. Naming the
-/// advancer in the type is what makes the obligation reviewable; the census in
-/// `tests/integration/waiting_for_actor_authority_census.rs` is what makes it
-/// unskippable.
-///
-/// INVARIANT THE CENSUS ENFORCES: every arm of `acting_authority` is a bare,
-/// UNGUARDED pattern whose body is exactly one constructor call on this enum —
-/// possibly wrapped by `rustfmt` in a block whose single tail expression is
-/// that call — and the census PINS the constructor set it accepts, so a new
-/// one cannot route its arms past the adjudications while the census still
-/// reports healthy (see that file's `A4c` and `A4d`). A match guard would let
-/// an arm decide the answer somewhere the census cannot read, so guards are
-/// rejected outright — see that file's `A8`.
+/// The type exists so that "nobody acts" cannot be written as a bare `None`. A state with no
+/// acting player is advanced by something OUTSIDE the action pipeline, and if that something is
+/// never called the game hangs with no player able to move it and no client rendering a prompt.
+/// Naming the advancer in the type makes the obligation reviewable; the census in
+/// `tests/integration/waiting_for_actor_authority_census.rs` makes it unskippable. That census
+/// requires every arm of `acting_authority` to be a bare, UNGUARDED pattern whose body is exactly
+/// one constructor call on this enum, PINS the constructor set it accepts (its `A4c` / `A4d`) so a
+/// new one cannot route arms past the adjudications, and rejects guards outright (its `A8`) — a
+/// guard would let an arm decide the answer where the census cannot read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActingAuthority {
     /// Exactly one player is authorized to submit the next action.
@@ -14230,21 +14236,17 @@ impl WaitingFor {
         }
     }
 
-    /// THE single authority on who — if anyone — may act in this state.
+    /// THE single authority on who — if anyone — may act in this state. [`Self::acting_player`]
+    /// and [`Self::acting_players`] are adapters over this function; the per-variant match lives
+    /// here and nowhere else.
     ///
-    /// [`Self::acting_player`] and [`Self::acting_players`] are adapters over
-    /// this function; the per-variant match lives here and nowhere else.
-    ///
-    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one
-    /// [`ActingAuthority`] constructor call, from the set that type's census
-    /// pins. No `let`, no early return, no preprocessing before the `match`,
-    /// and no match guard: a guard would let an arm decide the answer
-    /// somewhere that census cannot read it. [`ActingAuthority`]'s doc names
-    /// the census by path; `source_census.rs`'s `EXEMPT` table records that
-    /// path too. If a per-arm condition seems necessary, it belongs either in
-    /// a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
-    /// (when it merely narrows an authority this arm already declares,
-    /// exactly as the CR 103.5 `pending.len() == 1` test does).
+    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one [`ActingAuthority`]
+    /// constructor call, from the set that type's census pins. No `let`, no early return, no
+    /// preprocessing before the `match`, and no match guard: a guard would let an arm decide the
+    /// answer somewhere that census cannot read it. If a per-arm condition seems necessary it
+    /// belongs either in a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
+    /// (when it merely narrows an authority this arm already declares, exactly as the CR 103.5
+    /// `pending.len() == 1` test does).
     pub fn acting_authority(&self) -> ActingAuthority {
         match self {
             WaitingFor::MulliganDecision { pending, .. } => {
@@ -15619,7 +15621,6 @@ impl CastingVariant {
             | CastingVariant::MoreThanMeetsTheEye
             | CastingVariant::Disturb
             | CastingVariant::Impending
-            | CastingVariant::Prototype
             // CR 702.140a: Mutate replaces the spell's mana cost with the mutate
             // cost — an alternative cost, so only one may apply (CR 118.9a).
             | CastingVariant::Mutate
@@ -15637,6 +15638,12 @@ impl CastingVariant {
             | CastingVariant::Omen
             | CastingVariant::Retrace
             | CastingVariant::Aftermath
+            // CR 718.2 + CR 718.3b: Prototype swaps in an alternative SET OF
+            // CHARACTERISTICS — the prototyped mana cost IS the spell's mana
+            // cost, not an alternative cost (CR 118.9). A prototyped cast can
+            // therefore still combine with one alternative cost (a free-cast
+            // grant or rider).
+            | CastingVariant::Prototype
             // CR 702.133a: Jump-start discards a card as an *additional* cost on
             // top of the normal mana cost — not an alternative cost (CR 118.9a).
             | CastingVariant::JumpStart
@@ -15644,6 +15651,75 @@ impl CastingVariant {
             // cost of both halves — not an alternative cost.
             | CastingVariant::Fuse
             | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::ExilePermission { .. } => false,
+        }
+    }
+
+    /// CR 118.9a + CR 601.2b: does this variant elect an alternative cost of
+    /// the CARD's own — a keyword rider (Evoke, Bestow, Overload, …) or the
+    /// fixed face-down {3} — INDEPENDENT of whatever zone authority admits
+    /// the cast? Such a rider may only ride a normal-cost route: an
+    /// alternative-cost grant underneath it would be a second alternative
+    /// cost on the same cast.
+    ///
+    /// Distinct from [`CastingVariant::uses_alternative_cost`]: a variant
+    /// whose alternative cost IS its admitting permission's cost (Madness,
+    /// Suspend, Plot, Foretell, the permission elections, the graveyard
+    /// keyword routes) forms ONE casting method with its route — it applies
+    /// one alternative cost total, never a second — so it is `false` here
+    /// while `true` there.
+    pub fn is_independent_alternative_cost_rider(self) -> bool {
+        match self {
+            CastingVariant::Miracle
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Dash
+            | CastingVariant::Blitz
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Bestow
+            | CastingVariant::Awaken
+            | CastingVariant::Cleave
+            | CastingVariant::MoreThanMeetsTheEye
+            | CastingVariant::Impending
+            | CastingVariant::Mutate
+            | CastingVariant::Freerunning
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            // CR 702.185a: the warp cost is the HAND-side alternative cost;
+            // the exile return cast is its own `WarpExile` route and never
+            // elects this variant.
+            | CastingVariant::Warp
+            | CastingVariant::Sneak { .. }
+            | CastingVariant::WebSlinging { .. }
+            // CR 601.2b + CR 702.37c / CR 702.168b: the fixed face-down {3}.
+            | CastingVariant::FaceDown => true,
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            // CR 718.2 + CR 718.3b: alternative CHARACTERISTICS, not an
+            // alternative cost — a free grant stacks with the prototype
+            // election (see `uses_alternative_cost`).
+            | CastingVariant::Prototype
+            // CR 702.81a / CR 702.133a / CR 702.102c: additional or combined
+            // printed costs, no alternative cost anywhere.
+            | CastingVariant::Retrace
+            | CastingVariant::JumpStart
+            | CastingVariant::Fuse
+            | CastingVariant::Aftermath
+            // Route-coupled: the variant's alternative cost IS its admitting
+            // permission's or keyword-route's cost — one method (CR 118.9a).
+            | CastingVariant::Madness
+            | CastingVariant::Suspend
+            | CastingVariant::Plot
+            | CastingVariant::Foretell
+            | CastingVariant::Escape
+            | CastingVariant::Flashback
+            | CastingVariant::Harmonize
+            | CastingVariant::Mayhem
+            | CastingVariant::Disturb
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
             | CastingVariant::ExilePermission { .. } => false,
         }
     }
@@ -16783,7 +16859,7 @@ declare_game_state! {
     /// existing CR 704.5a SBA (which already ends every realistic-life drain), so
     /// losing it across a save/load/MP-snapshot boundary only defers the shortcut by a
     /// few resolutions — never changes a winner. Snapshots are `Arc`-shared so the
-    /// frequent `GameState::clone` (AI search, §9 probes) pays O(ring.len()) refcount
+    /// frequent `GameState::clone` (AI search probes) pays O(ring.len()) refcount
     /// bumps, not deep copies. INTENTIONALLY omitted from `impl PartialEq for GameState`
     /// (derived state, like `static_source_index`/`static_gate_truth` — both
     /// `#[serde(skip)]` AND eq-excluded; NOT `public_state_dirty`/`state_revision`/
@@ -17596,7 +17672,8 @@ declare_game_state! {
     /// Empty except mid-declaration; drained by `finish_declare_attackers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_attack_trigger_events: Vec<crate::types::events::GameEvent>,
-    /// CR 603.4: Per-ability per-turn resolution counter.
+    /// CR 608.2c: Per-ability per-turn resolution counter for ordinary
+    /// resolution-time conditions, not intervening-if conditions under CR 603.4.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
     /// `resolve_ability_chain` (depth 0) when the resolving ability has a
@@ -24203,7 +24280,7 @@ impl GameState {
 
     /// CR 732.2a: take (remove and return) the whole deferred materialization list for
     /// `controller`, if any. Removing on take is load-bearing for the boundary collapse
-    /// fixpoint (§7): the `LoopCollapse` submit handler must clear the stash — even on
+    /// fixpoint: the `LoopCollapse` submit handler must clear the stash — even on
     /// its error path — so the phase-transition re-drain terminates rather than
     /// re-prompting forever.
     pub fn take_pending_materialization(
@@ -24329,8 +24406,11 @@ impl GameState {
     /// projecting, because the marks and their enablers are still live. This set says nothing
     /// about them — it names what the boundary will REMOVE, not what the display may show.
     ///
-    /// Returns the axes UNFILTERED, including any `Mana(_)` a `DriveSequence` names, because the
-    /// caller MUST remove that axis at the boundary. Note the two axis classes end their `∞` by
+    /// Returns the axes UNFILTERED because filtering is the REGISTRATION site's job, not this
+    /// reader's — `game::engine::materialize_object_growth_shortcut` stores only `DeferredAccrual`
+    /// axes (`analysis::resource::ResourceAxis::unbounded_mark_kind`), so a stored `Mana(_)` can
+    /// now arrive only from a pre-fix save or a deliberate test graft, and this function reports
+    /// faithfully what is stored rather than hiding it. Note the two axis classes end their `∞` by
     /// different routes: `Tokens` / `Counters` / `Life` are DEFERRED and end here, when the
     /// boundary applies the growth; a `Mana(_)` is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
@@ -24345,6 +24425,9 @@ impl GameState {
     /// FAIL-CLOSED: only an axis some REGISTERED item actually collapses is returned, so an
     /// ∞ axis with no registration (a mana engine registers nothing) is never removed here —
     /// it keeps its badge until CR 500.5 ends it.
+    /// The `DriveSequence` arm's verbatim `extend` is correct *because* the stored set is now
+    /// computed at REGISTRATION rather than copied from the loop's whole ∞-mark set — see
+    /// `analysis::resource::ResourceAxis::unbounded_mark_kind`.
     /// EXHAUSTIVE over `PersistentAxisMaterialization` (no wildcard) — a future variant
     /// build-breaks here instead of silently leaking a stale `∞`.
     pub fn scheduled_collapse_axes(
@@ -24397,13 +24480,20 @@ impl GameState {
     ///   its axis + pill).
     /// - `Life { player, .. }` ⇒ remove `ResourceAxis::Life(player)`.
     /// - `DriveSequence { collapsed_axes, .. }` ⇒ remove exactly `collapsed_axes` and the
-    ///   display targets those axes back (the driven loop collapses whole).
+    ///   display targets those axes back (the driven loop collapses its `DeferredAccrual` axes;
+    ///   a `StandingCapability` axis it never named is not collapsed here — see
+    ///   `analysis::resource::ResourceAxis::unbounded_mark_kind`).
     ///
     /// PRESERVES any coexisting NON-collapsed axis (a debug `SetInfiniteMana` `Mana(_)`
     /// axis, or a second uncollapsed loop). The batched `Tokens` / `Counters` / `Life` items
-    /// never name a `Mana(_)` axis, so a batched collapse preserves mana by construction; a
-    /// `DriveSequence` CAN name one (its `collapsed_axes` is the loop's whole `proposal.unbounded`
-    /// set) and then removing it here is correct — that loop's mana really did end with it.
+    /// never name a `Mana(_)` axis, so a batched collapse preserves mana by construction; and NO
+    /// PRODUCTION PATH constructs a `DriveSequence` naming one either —
+    /// `game::engine::materialize_object_growth_shortcut` is the only production registration
+    /// site and it filters `collapsed_axes` to `DeferredAccrual`. So both routes now preserve a
+    /// standing `Mana(_)` capability by the SAME rule, and the preservation promise in
+    /// `game::engine_resolution_choices` holds on both. (Deliberately "no production path", not
+    /// "cannot exist": shipped fixtures graft `Mana(_)`-naming `DriveSequence`s by hand to
+    /// exercise the projection, and this function reports whatever is stored.)
     /// Drops `unbounded_resources[controller]`
     /// (and its `unbounded_loop_enablers` entry in engine-state lockstep, mirroring
     /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
@@ -24418,6 +24508,22 @@ impl GameState {
         // The axis set comes from `scheduled_collapse_axes`, so "what a stash schedules" and
         // "what is removed once applied" are one match, never two copies of it.
         let mut axes_to_remove = self.scheduled_collapse_axes(collapsed);
+        // CR 500.5 + CR 106.4: DEFENSE IN DEPTH at the consuming authority.
+        // `game::engine::materialize_object_growth_shortcut` already stores only
+        // `DeferredAccrual` axes, so on a stash from THIS build this retain removes nothing. It
+        // is kept because `ResourceAxis`'s exhaustive `match` build-breaks on a new AXIS, never
+        // on a new REGISTRATION SITE: a future second producer inherits the guarantee only if it
+        // is enforced where the value is USED. Reachability, not an obligation:
+        // `pending_unbounded_materialization` is `#[serde]`-persisted, so a `Mana(_)`-bearing
+        // stash can be grafted by a test or written by an older build (cross-version save
+        // compatibility is EXPRESSLY NOT a goal here), and either route lands ONLY on a
+        // `debug_infinite_mana` seat — `turns::drain_pending_phase_transition_progress`' CR 500.5
+        // loop-mana clear runs before this prompt and excludes exactly those seats. Mirrors the
+        // POSTURE of `derived_views::scheduled_display_axes`, NOT its question, so the predicates
+        // are deliberately NOT unified. Not applied inside `scheduled_collapse_axes`, which must
+        // keep reporting faithfully what a stash stores.
+        axes_to_remove
+            .retain(|axis| axis.unbounded_mark_kind() == UnboundedMarkKind::DeferredAccrual);
         // The token pile drops exactly when the token axis collapses — true for a batched
         // `Tokens` item and for a `DriveSequence` that names `TokensCreated`.
         let drop_token_pile = axes_to_remove.contains(&ResourceAxis::TokensCreated);
@@ -24490,7 +24596,7 @@ impl GameState {
     /// set, drop the player key AND its `unbounded_loop_enablers` entry IN LOCKSTEP (an engine-state
     /// invariant, not a rules requirement):
     /// enablers track the PRESENCE of any unbounded axis, and the `zones.rs` defuse hook
-    /// (`apply_zone_exit_cleanup`, `:534`–`:544`) whole-clears a controller's capability when ANY
+    /// (`apply_zone_exit_cleanup`) whole-clears a controller's capability when ANY
     /// enabler leaves. Leaving enablers orphaned (no backing axis) is a landmine — a later
     /// `SetInfiniteMana` re-marks that controller, then the stale enabler leaving mis-fires
     /// `clear_unbounded_loop`, silently killing the debug toggle. If a coexisting NON-Mana axis
@@ -24545,14 +24651,14 @@ pub(crate) fn objects_content_eq(
 /// comparator for [`objects_content_eq`] and the PR-7 Phase 4a object-growth
 /// cover gate (`analysis::resource::board_covers`, the non-grown complement).
 ///
-/// The compared set is the bucket-(i) partition of §5.2c (see
-/// `_gameobject_partition_is_total`): every per-object field a MANDATORY action can
+/// The compared set is the partition `_gameobject_partition_is_total` names: every per-object
+/// field a MANDATORY action can
 /// change on a stable (same-zone) object between two loop frames. Fields omitted
 /// here are justified by write site, not doc-string — volatile layer identity
 /// (`timestamp`/`incarnation`/`transformation_count`), projected P/T, cast-fact
 /// latches co-variate of a
 /// compared field, monotone-saturating latches (`foretold`/`monstrous`/…), and
-/// layer-derived characteristics (firewall-scanned statics) — see §5.2c.
+/// layer-derived characteristics (firewall-scanned statics).
 ///
 /// Strictness here is FAIL-SAFE for the shared 2p CR 104.4b path: a stricter
 /// equality can only SUPPRESS a wrongful draw, and every compared field represents
@@ -24584,7 +24690,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.loyalty == y.loyalty
         && x.defense == y.defense
         && x.name == y.name
-        // §5.2c ADD set (v4): firewall-blind numeric/growable accumulators and
+        // Firewall-blind numeric/growable accumulators and
         // oscillating designations that a loop body can drift on a stable object.
         && x.intensity == y.intensity // Alchemy Intensify accumulator
         && x.perpetual_mods == y.perpetual_mods // perpetual-edit accumulator
@@ -24595,7 +24701,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.prepared == y.prepared // SOS prepare/unprepare toggle
         && x.prepared_copy_source == y.prepared_copy_source // CR 722.3c linked exile copy
         && x.room_unlocks == y.room_unlocks // CR 709.5c door lock/unlock
-        // §5.2c ADD set (v5, S6): firewall-blind per-iteration accumulators on
+        // Firewall-blind per-iteration accumulators on
         // live battlefield/exile objects.
         && x.chosen_attributes == y.chosen_attributes // CR 205.2 remember/choose accumulator
         && x.goaded_by == y.goaded_by // CR 701.15c goad set
@@ -24613,7 +24719,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
 /// no-`..` destructure breaks the build the instant a GameState field is added,
 /// forcing a reviewer to decide whether `PartialEq` compares it — so no future
 /// field can become a hidden per-cycle accumulator that rides a covering pair to a
-/// false CR 732.2a win. Mirror of `_gameobject_partition_is_total` (§5.2b).
+/// false CR 732.2a win. Mirror of `_gameobject_partition_is_total`.
 #[cfg(test)]
 fn _gamestate_partition_is_total(s: &GameState) {
     let GameState {
@@ -24945,7 +25051,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     COMPARED — upstream's PartialEq excludes it, but excluding a COUNT from the cover gate
         //     is the fail-DANGEROUS direction, so `eq_except_growable` (resource.rs) compares it
         //     explicitly. It is `None` at every sample beat (cleared whenever `waiting_for ==
-        //     Priority`, effects/mod.rs:759) or a constant direct-assigned count across a real
+        //     Priority`, in `effects/mod.rs`) or a constant direct-assigned count across a real
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         //   - `pending_discard_batch`: COMPARED (hand-written `impl PartialEq` conjunct) — a
         //     paused discard-batch interaction state, the direct sibling of
@@ -29679,7 +29785,7 @@ mod tests {
         ));
     }
 
-    /// T-loop (§4 Condition 2): the all-zone incarnation bump advances a source's
+    /// T-loop: the all-zone incarnation bump advances a source's
     /// epoch every time it changes zones, so a mandatory loop that cycles its
     /// source's zones would carry a growing `TriggerSourceContext` into loop equality
     /// and never confirm a CR 104.4b draw. `normalize_for_loop` canonicalizes source
@@ -30079,7 +30185,10 @@ mod tests {
         let mut b = a.clone();
         b.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         // Sanity: the populated field really does differ between the two states.
         assert_ne!(
@@ -30325,7 +30434,10 @@ mod tests {
         );
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
 
@@ -30366,7 +30478,10 @@ mod tests {
         state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
 
         let collapsed = state
@@ -30720,7 +30835,10 @@ mod tests {
         );
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         // Non-vacuity: the pre-state really holds both axes + pile + stash.
@@ -35080,5 +35198,100 @@ mod tests {
         let legacy: ResolveAllConsentRun =
             serde_json::from_value(legacy_wire).expect("legacy run without the new field loads");
         assert_eq!(legacy.auto_pass_baseline, None);
+    }
+
+    /// **The BATCHABILITY split is load-bearing, not decorative:** every axis a batched `Tokens`
+    /// / `Counters` / `Life` item can produce through [`GameState::scheduled_collapse_axes`] is
+    /// `DeferredAccrual`, and `LoopCollapseAxis::from_resource_axis` returns `Some` for exactly
+    /// those.
+    ///
+    /// REVERT PROBE: flip `TokensCreated` to `StandingCapability` in
+    /// `ResourceAxis::unbounded_mark_kind` ⇒ RED. VACUOUS-UNIVERSAL GUARD: the claim is a `∀`
+    /// over the produced set, which an EMPTY set satisfies trivially — the non-empty assertion
+    /// below forbids that, and also reds this row when a FOURTH batched variant produces an axis
+    /// no materialization is accountable for.
+    #[test]
+    fn every_batched_item_axis_is_deferred_accrual_and_batchable() {
+        use crate::analysis::resource::UnboundedMarkKind;
+        use crate::game::printed_cards::intrinsic_copiable_values;
+
+        let mut state = GameState::new_two_player(7);
+        let bearer = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Counter Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        let profile_host = create_object(
+            &mut state,
+            CardId(9002),
+            PlayerId(0),
+            "Fodder Profile".to_string(),
+            Zone::Battlefield,
+        );
+        let profile = intrinsic_copiable_values(
+            state
+                .objects
+                .get(&profile_host)
+                .expect("the just-created profile host is in `objects`"),
+        );
+
+        // One item of EACH batched kind — the three arms `scheduled_collapse_axes` can take that
+        // are not `DriveSequence`.
+        let batched = [
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: Box::new(profile),
+                per_cycle_delta: 1,
+            })),
+            PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+                object: bearer,
+                counter: CounterType::Plus1Plus1,
+                per_cycle_delta: 1,
+            }]),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 1,
+            },
+        ];
+
+        let produced = state.scheduled_collapse_axes(&batched);
+        assert_eq!(
+            produced.len(),
+            3,
+            "reach-guard (vacuous-universal): the three batched kinds must produce three distinct \
+             axes, or the ∀ below is satisfied by an empty set. Got {produced:?}"
+        );
+
+        for axis in &produced {
+            assert_eq!(
+                axis.unbounded_mark_kind(),
+                UnboundedMarkKind::DeferredAccrual,
+                "CR 732.2c: an axis a BATCHED item delivers is by definition growth the collapse \
+                 performs, so it must be DeferredAccrual — otherwise the batched route would \
+                 deliver growth for a mark no materialization is accountable for. Got {axis:?}"
+            );
+            assert!(
+                LoopCollapseAxis::from_resource_axis(*axis).is_some(),
+                "the batchability ledger must carry a prompt label for every axis a batched item \
+                 produces; a `None` here means `from_materializations` would silently fold it into \
+                 `Mixed`. Got {axis:?}"
+            );
+        }
+
+        // The CONVERSE, so this is a partition rather than a one-way implication: the standing
+        // axis is the one the batched items never produce, and it is exactly the one
+        // `from_resource_axis` has no label for.
+        assert_eq!(
+            ResourceAxis::Mana(ManaType::Colorless).unbounded_mark_kind(),
+            UnboundedMarkKind::StandingCapability,
+            "the two classifiers answer DIFFERENT questions, and this is the axis where they \
+             visibly diverge from 'batchable'"
+        );
+        assert!(
+            !produced.contains(&ResourceAxis::Mana(ManaType::Colorless)),
+            "no batched item can schedule a mana axis — which is why a batched collapse preserved \
+             mana by construction long before the DriveSequence route did"
+        );
     }
 }

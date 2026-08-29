@@ -951,6 +951,10 @@ fn count_matching_trigger_event_subjects(
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
+        // CR 701.17a + CR 603.2c: one milled card per event, so a batched
+        // "X is the number of nonland cards milled this way" (The Wise Mothman)
+        // folds one matching subject per `Milled`.
+        | GameEvent::Milled { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
         | GameEvent::TokenCreated { object_id, .. }
         | GameEvent::CreatureDestroyed { object_id }
@@ -3009,27 +3013,20 @@ pub(super) fn match_attacker_unblocked(
     }
 }
 
-/// Milled: fires when a card moves from Library to Graveyard.
+/// Milled: fires on the CR 701.17a mill action itself, whatever zone the card
+/// reached. CR 701.17c lets an effect find a milled card "in the zone it moved
+/// to from the library", so a graveyard-diverting replacement (Rest in Peace,
+/// Leyline of the Void) does not disqualify the trigger — the keyword action
+/// still occurred. `GameEvent::Milled` carries that decision; the only gate left
+/// here is the trigger's own `valid_card`.
 pub(super) fn match_milled(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        ..
-    } = event
-    {
-        if *from != Some(Zone::Library) || *to != Zone::Graveyard {
-            return false;
-        }
-        if !valid_card_matches(trigger, state, *object_id, source_context) {
-            return false;
-        }
-        true
+    if let GameEvent::Milled { object_id, .. } = event {
+        valid_card_matches(trigger, state, *object_id, source_context)
     } else {
         false
     }
@@ -11257,42 +11254,51 @@ mod tests {
         ));
     }
 
+    /// CR 701.17a + CR 701.17c: the matcher keys on the mill ACTION, so it fires
+    /// for a diverted destination too — and no longer reads the zone shape it
+    /// used to require.
     #[test]
-    fn milled_matches_library_to_graveyard() {
+    fn milled_matches_the_mill_action_whatever_zone_the_card_reached() {
         let state = setup();
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Library,
-            Zone::Graveyard,
-            Vec::new(),
-            Vec::new(),
-        );
         let trigger = make_trigger(TriggerMode::Milled);
-        assert!(match_milled(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+        for to in [Zone::Graveyard, Zone::Exile] {
+            let event = GameEvent::Milled {
+                player_id: PlayerId(0),
+                object_id: ObjectId(5),
+                to,
+            };
+            assert!(
+                match_milled(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "a mill that landed in {to:?} is still a mill (CR 701.17c)"
+            );
+        }
     }
 
+    /// The library→graveyard zone shape is no longer the mill's trigger event —
+    /// `keys_from_event` stopped routing it here and the matcher stopped reading
+    /// it. A `ZoneChanged` must not match on either origin.
     #[test]
-    fn milled_does_not_match_hand_to_graveyard() {
+    fn milled_does_not_match_a_zone_change() {
         let state = setup();
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Hand,
-            Zone::Graveyard,
-            Vec::new(),
-            Vec::new(),
-        );
         let trigger = make_trigger(TriggerMode::Milled);
-        assert!(!match_milled(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+        for from in [Zone::Library, Zone::Hand] {
+            let event =
+                zone_changed_event(ObjectId(5), from, Zone::Graveyard, Vec::new(), Vec::new());
+            assert!(
+                !match_milled(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "a {from:?}→graveyard ZoneChanged is not the mill action event"
+            );
+        }
     }
 
     #[test]

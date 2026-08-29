@@ -1,0 +1,183 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Token",
+          "name": "Elemental",
+          "power": {
+            "type": "Quantity",
+            "value": {
+              "type": "Ref",
+              "qty": {
+                "type": "PropertyAggregate",
+                "function": "Max",
+                "property": "ManaValue",
+                "source": {
+                  "type": "TurnJournal",
+                  "journal": {
+                    "type": "SpellsCast"
+                  },
+                  "scope": "Controller",
+                  "filter": {
+                    "type": "Or",
+                    "filters": [
+                      {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Instant"
+                        ],
+                        "controller": null,
+                        "properties": []
+                      },
+                      {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Sorcery"
+                        ],
+                        "controller": null,
+                        "properties": []
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "toughness": {
+            "type": "Quantity",
+            "value": {
+              "type": "Ref",
+              "qty": {
+                "type": "PropertyAggregate",
+                "function": "Max",
+                "property": "ManaValue",
+                "source": {
+                  "type": "TurnJournal",
+                  "journal": {
+                    "type": "SpellsCast"
+                  },
+                  "scope": "Controller",
+                  "filter": {
+                    "type": "Or",
+                    "filters": [
+                      {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Instant"
+                        ],
+                        "controller": null,
+                        "properties": []
+                      },
+                      {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Sorcery"
+                        ],
+                        "controller": null,
+                        "properties": []
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "types": [
+            "Creature",
+            "Elemental"
+          ],
+          "colors": [
+            "Blue",
+            "Red"
+          ],
+          "keywords": [
+            "Flying",
+            "Haste"
+          ],
+          "tapped": false,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "owner": {
+            "type": "Controller"
+          },
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "BeginCombat",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of combat on your turn, if you've cast an instant or sorcery spell this turn, create an X/X blue and red Elemental creature token with flying and haste, where X is the greatest mana value among instant and sorcery spells you've cast this turn.",
+      "constraint": {
+        "type": "OnlyDuringYourTurn"
+      },
+      "condition": {
+        "type": "QuantityComparison",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "SpellsCastThisTurn",
+            "scope": "Controller",
+            "filter": {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Instant"
+                  ],
+                  "controller": null,
+                  "properties": []
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Sorcery"
+                  ],
+                  "controller": null,
+                  "properties": []
+                }
+              ]
+            }
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 1
+        }
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

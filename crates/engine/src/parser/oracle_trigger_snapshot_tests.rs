@@ -293,7 +293,7 @@ fn trigger_unless_pay() {
     insta::assert_json_snapshot!(def);
 }
 
-/// CR 608.2k + CR 603.7c + CR 701.9: Tergrid, God of Fright's discard
+/// CR 608.2k + CR 701.9: Tergrid, God of Fright's discard
 /// branch. The compound trigger splitter produces a `Discarded` trigger
 /// (controller-scoped to `Opponent`), and the top-level
 /// `ChangeZone { target: ParentTarget }` produced by the effect parser
@@ -324,7 +324,7 @@ fn trigger_discarded_lifts_that_card_to_triggering_source() {
     }
 }
 
-/// CR 608.2k + CR 603.7c: The `ParentTarget` → `TriggeringSource` lift
+/// CR 608.2k: The `ParentTarget` → `TriggeringSource` lift
 /// must descend through chained `sub_ability`s, not just the top-level
 /// effect. A Tergrid-shape trigger like "...exile that card, then
 /// create a token" carries the "that card" anaphor on the FIRST

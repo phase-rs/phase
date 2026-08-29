@@ -1,0 +1,65 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DamageAll",
+        "amount": {
+          "type": "Ref",
+          "qty": {
+            "type": "PropertyAggregate",
+            "function": "Sum",
+            "property": "ManaValue",
+            "source": {
+              "type": "TurnJournal",
+              "journal": {
+                "type": "SpellsCast"
+              },
+              "scope": "Controller",
+              "filter": {
+                "type": "Typed",
+                "type_filters": [
+                  "Card"
+                ],
+                "controller": null,
+                "properties": [
+                  {
+                    "type": "OtherThanTriggerObject"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "Opponent",
+          "properties": []
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "~ deals damage to each creature your opponents control equal to the total mana value of other spells you've cast this turn.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [
+    "Cascade",
+    "Cascade"
+  ]
+}

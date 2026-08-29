@@ -210,7 +210,7 @@ pub fn resolve(
     // the creation-time fallback because their later phase event has no object
     // subject.
     //
-    // CR 603.7c: Computed ONCE here and reused for the creation-snapshot gate, the
+    // CR 603.7b: Computed ONCE here and reused for the creation-snapshot gate, the
     // `DelayedTrigger.one_shot` field. `condition`'s variant is not reassigned
     // between them.
     let one_shot = !matches!(
@@ -369,7 +369,7 @@ pub fn resolve(
     // incarnation; a later re-entry must not be restamped when the trigger fires.
     delayed_ability.set_source_incarnation_recursive(source.map(|object| object.incarnation));
 
-    // CR 603.7c: Most delayed triggers fire once and are removed.
+    // CR 603.7b: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
     // `one_shot` was computed once above (single source of truth) and is reused here.
     crate::game::triggers::install_delayed_trigger(
@@ -491,6 +491,9 @@ fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
 fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
     match state.current_trigger_event.as_ref()? {
         GameEvent::ZoneChanged { to, .. } => Some(*to),
+        // CR 701.17c: the milled card is in "the zone it moved to from the
+        // library" — the destination this snapshot asks for.
+        GameEvent::Milled { to, .. } => Some(*to),
         _ => None,
     }
 }
@@ -1298,6 +1301,48 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
+
+    /// V15 — CR 701.17c: a delayed trigger snapshotting a mill's
+    /// `TriggeringSource` asks where the card is, and the answer is "the zone it
+    /// moved to from the library". The match ends in `_ => None`, so the compiler
+    /// never asks for this arm and a mill would abstain.
+    #[test]
+    fn triggering_source_destination_zone_answers_for_a_milled_event() {
+        let mut state = GameState::new_two_player(42);
+
+        state.current_trigger_event = Some(GameEvent::Milled {
+            player_id: PlayerId(1),
+            object_id: ObjectId(7),
+            to: Zone::Exile,
+        });
+        assert_eq!(
+            triggering_source_destination_zone(&state),
+            Some(Zone::Exile)
+        );
+
+        // Live control: the zone-change event this arm sits beside still answers,
+        // and an event with no zone still abstains — so a blanket `Some` fails.
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        });
+        assert_eq!(
+            triggering_source_destination_zone(&state),
+            Some(Zone::Graveyard)
+        );
+
+        state.current_trigger_event = Some(GameEvent::PermanentTapped {
+            object_id: ObjectId(7),
+            caused_by: None,
+        });
+        assert_eq!(triggering_source_destination_zone(&state), None);
+    }
 
     /// T5 (s25 site 1) — CR 603.7c + CR 608.2c: `concrete_parent_target_filter`
     /// binds a `ParentTargetSlot { index }` delayed-condition filter to the

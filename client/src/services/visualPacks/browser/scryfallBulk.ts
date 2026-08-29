@@ -1,12 +1,16 @@
+import { Gunzip } from "fflate";
+
 import { cardBackCandidate, cardCandidateGroups, setIconCandidate } from "../candidateKeys.ts";
 import { assetKey, catalogRoot, packId, type AssetKey, type CandidateKey, type CatalogRoot, type InstallSelector, type PackId, type VisualPackMedia } from "../types.ts";
 import { CARD_BACK_URL } from "../../scryfall.ts";
 
 const BULK_INDEX_URL = "https://api.scryfall.com/bulk-data";
+const GZIP_INPUT_CHUNK_BYTES = 1024 * 1024;
+const JSONL_INPUT_CHUNK_BYTES = 1024 * 1024;
 
 export class ScryfallBulkError extends Error {
-  constructor(readonly kind: "network" | "storage" | "unsupported") {
-    super(`Scryfall bulk source failed: ${kind}`);
+  constructor(readonly kind: "network" | "storage" | "unsupported", detail?: string) {
+    super(detail ? `Scryfall bulk source failed: ${kind}: ${detail}` : `Scryfall bulk source failed: ${kind}`);
     this.name = "ScryfallBulkError";
   }
 }
@@ -62,10 +66,25 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function errorDetail(error: unknown): string | undefined {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  if (typeof error === "string" && error) return error;
+  return undefined;
+}
+
+function completeUtf8Length(bytes: Uint8Array): number {
+  let start = bytes.byteLength - 1;
+  while (start >= 0 && (bytes[start] & 0xc0) === 0x80) start -= 1;
+  if (start < 0) return 0;
+  const first = bytes[start];
+  const expectedLength = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : first < 0xf8 ? 4 : 1;
+  return bytes.byteLength - start < expectedLength ? start : bytes.byteLength;
+}
+
 function sourceError(error: unknown): ScryfallBulkError {
   if (error instanceof ScryfallBulkError) return error;
   if (error instanceof DOMException && error.name === "QuotaExceededError") return new ScryfallBulkError("storage");
-  return new ScryfallBulkError("network");
+  return new ScryfallBulkError("network", errorDetail(error));
 }
 
 async function sha256(value: string): Promise<CatalogRoot> {
@@ -220,26 +239,62 @@ async function bulkResponse(source: ScryfallBulkSource, signal: AbortSignal, fet
 }
 
 async function* jsonLines(response: Response, signal: AbortSignal): AsyncGenerator<unknown> {
-  if (typeof DecompressionStream === "undefined") throw new ScryfallBulkError("unsupported");
   if (!response.body) throw new ScryfallBulkError("network");
-  const reader = response.body.pipeThrough(new DecompressionStream("gzip")).pipeThrough(new TextDecoderStream()).getReader();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const gunzip = new Gunzip((chunk) => chunks.push(chunk));
   let trailing = "";
+  let trailingUtf8 = new Uint8Array();
+  let lineNumber = 0;
+  let stage = "reading the bulk response";
   try {
     while (true) {
       if (signal.aborted) return;
       const next = await reader.read();
+      const input = next.done ? new Uint8Array() : next.value;
+      for (let offset = 0; offset < input.byteLength || (next.done && offset === 0); offset += GZIP_INPUT_CHUNK_BYTES) {
+        const end = Math.min(offset + GZIP_INPUT_CHUNK_BYTES, input.byteLength);
+        chunks.length = 0;
+        stage = `decompressing bytes ${offset}-${end}`;
+        gunzip.push(input.slice(offset, end), next.done && end === input.byteLength);
+        for (const chunk of chunks) {
+          for (let outputOffset = 0; outputOffset < chunk.byteLength; outputOffset += JSONL_INPUT_CHUNK_BYTES) {
+            stage = `decoding JSONL after byte ${end}`;
+            const outputEnd = Math.min(outputOffset + JSONL_INPUT_CHUNK_BYTES, chunk.byteLength);
+            const inputBytes = chunk.subarray(outputOffset, outputEnd);
+            let bytes = inputBytes;
+            if (trailingUtf8.byteLength > 0) {
+              bytes = new Uint8Array(trailingUtf8.byteLength + inputBytes.byteLength);
+              bytes.set(trailingUtf8);
+              bytes.set(inputBytes, trailingUtf8.byteLength);
+            }
+            const completeLength = completeUtf8Length(bytes);
+            trailingUtf8 = bytes.slice(completeLength);
+            const lines = `${trailing}${new TextDecoder().decode(bytes.subarray(0, completeLength))}`.split("\n");
+            trailing = lines.pop() ?? "";
+            for (const line of lines) {
+              lineNumber += 1;
+              if (signal.aborted) return;
+              if (!line) continue;
+              try { yield JSON.parse(line); } catch (error) {
+                throw new ScryfallBulkError("network", `JSONL record ${lineNumber}: ${errorDetail(error) ?? "invalid JSON"}`);
+              }
+            }
+          }
+        }
+      }
       if (next.done) break;
-      const lines = `${trailing}${next.value}`.split("\n");
-      trailing = lines.pop() ?? "";
-      for (const line of lines) {
-        if (signal.aborted) return;
-        if (!line) continue;
-        try { yield JSON.parse(line); } catch { throw new ScryfallBulkError("network"); }
+    }
+    stage = "finishing JSONL decoding";
+    trailing += new TextDecoder().decode(trailingUtf8);
+    if (trailing) {
+      lineNumber += 1;
+      try { yield JSON.parse(trailing); } catch (error) {
+        throw new ScryfallBulkError("network", `JSONL record ${lineNumber}: ${errorDetail(error) ?? "invalid JSON"}`);
       }
     }
-    if (trailing) {
-      try { yield JSON.parse(trailing); } catch { throw new ScryfallBulkError("network"); }
-    }
+  } catch (error) {
+    throw new ScryfallBulkError("network", `${stage}: ${errorDetail(error) ?? "unknown error"}`);
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();

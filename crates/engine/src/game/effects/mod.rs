@@ -6028,7 +6028,16 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(ThisWayCause::Destroyed),
         Effect::Sacrifice { .. } => Some(ThisWayCause::Sacrificed),
-        Effect::Mill { .. } => Some(ThisWayCause::Milled),
+        // CR 701.17a: only a graveyard-bound top-of-library move is a mill. The
+        // other destinations are the shared top-of-library move building block
+        // and take the destination zone's own producer verb, exactly as the
+        // `ChangeZone` arm below. Kept in step with the emission conjunct in
+        // `effects::mill::apply_mill_after_replacement`, so the engine has one
+        // answer to "is this a mill".
+        Effect::Mill { destination, .. } => match destination {
+            Zone::Graveyard => Some(ThisWayCause::Milled),
+            other => this_way_cause_for_zone(*other),
+        },
         Effect::Discard { .. } | Effect::DiscardCard { .. } => Some(ThisWayCause::Discarded),
         Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
             this_way_cause_for_zone(*destination)
@@ -10185,12 +10194,14 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 603.4: Bump the per-ability per-turn resolution counter at the start of
-    // top-level resolution so that `AbilityCondition::NthResolutionThisTurn`
-    // gates can see the current resolution included in the count. Sub-abilities
-    // (depth > 0) share the parent's count — they belong to the same printed
-    // ability instance. Synthesized/runtime-only abilities (prowess, firebending)
-    // and activated abilities lack an `ability_index` stamp and skip this hook.
+    // CR 608.2c: Bump the per-ability per-turn resolution counter at the start of
+    // top-level resolution so that the ordinary resolution-time
+    // `AbilityCondition::NthResolutionThisTurn` condition can see the current
+    // resolution included in the count. This is not an intervening-if condition
+    // governed by CR 603.4. Sub-abilities (depth > 0) share the parent's count —
+    // they belong to the same printed ability instance. Synthesized/runtime-only
+    // abilities (prowess, firebending) and activated abilities lack an
+    // `ability_index` stamp and skip this hook.
     if depth == 0 {
         if let Some(idx) = ability.ability_index {
             let count = state
@@ -11151,6 +11162,13 @@ fn resolve_chain_body(
                 // when that rider's condition is false. Mirrors the gated-sub
                 // sibling escape hatch (the `next.sub_link == SequentialSibling`
                 // branch below).
+                // CR 608.2c: A dependent `SequentialSibling` whose direct condition
+                // is `NthResolutionThisTurn` is the next ordinal instruction of the
+                // same resolving ability (Belladonna Took / Omnath class). It must
+                // reach and evaluate its OWN ordinal condition when the preceding
+                // ordinal is false. Keep this exact escape local: other dependent
+                // conditional siblings remain suppressed with their false parent.
+                //
                 // CR 615.5 + CR 120.1: A sub whose gate is an INDEPENDENT per-event
                 // predicate — `PostReplacementDamageSourceMatchesFilter`
                 // (Comeuppance's two mutually-exclusive creature/noncreature
@@ -11174,17 +11192,23 @@ fn resolve_chain_body(
                 // variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
                 // / `QuantityCheck` that would otherwise look dependent).
                 //
-                // All THREE of the above independent-sub classes are the single
-                // authority `sub_outlives_false_parent_gate`, which
+                // All THREE independent-sub classes above are the single authority
+                // `sub_outlives_false_parent_gate`, which
                 // `triggers::delayed_body_outlives_a_false_gate` also consults so
-                // the CR 603.4 fire-time hoist declines on EXACTLY the sub shapes
-                // this resolution path still runs. Only the unconditional
-                // `SequentialSibling` escape below is local to this call site —
-                // CR 603.4 says that clause must NOT survive a false gate on a
-                // delayed body, so the hoist deliberately does not mirror it.
+                // the CR 603.4 fire-time hoist declines on exactly those sub
+                // shapes. The unconditional and ordinal `SequentialSibling` escapes
+                // below are local to this call site: neither is an independent
+                // intervening-if path that the delayed-body hoist may preserve.
+                let is_ordinal_sequential_sibling = sub.sub_link
+                    == SubAbilityLink::SequentialSibling
+                    && sub.sibling_condition == SiblingCondition::Dependent
+                    && matches!(
+                        sub.condition.as_ref(),
+                        Some(AbilityCondition::NthResolutionThisTurn { .. })
+                    );
                 if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && sub.condition.is_none())
+                        && (sub.condition.is_none() || is_ordinal_sequential_sibling))
                 {
                     let mut sub_resolved = sub.as_ref().clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
@@ -11200,6 +11224,14 @@ fn resolve_chain_body(
                         sub_resolved.targets = ability.targets.clone();
                     }
                     sub_resolved.context = ability.context.clone();
+                    // CR 608.2c: The false-parent ordinal escape bypasses the
+                    // ordinary post-effect chain handoff, so it must explicitly
+                    // carry this printed ability's index to the next ordinal
+                    // instruction. Otherwise `NthResolutionThisTurn` reads no
+                    // `(source, ability_index)` ledger entry and can never match.
+                    if is_ordinal_sequential_sibling {
+                        apply_parent_chain_context(&mut sub_resolved, ability, None, state);
+                    }
                     resolve_ability_chain(state, &sub_resolved, events, depth + 1)?;
                 }
             }
@@ -14564,13 +14596,14 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::DayNightIs {
             state: DayNight::Night,
         } => state.day_night == Some(DayNight::Night),
-        // CR 603.4: "if this is the [Nth] time this ability has resolved this turn".
-        // The counter is bumped at the top of `resolve_ability_chain` (depth 0)
-        // before this evaluator runs, so a freshly-incremented count of `n`
-        // satisfies the condition for the Nth resolution. Abilities without an
-        // `ability_index` stamp (synthesized triggers, activated abilities) never
-        // increment the counter and therefore evaluate as `count == 0`, which
-        // matches no `n >= 1` print.
+        // CR 608.2c: "if this is the [Nth] time this ability has resolved this
+        // turn" is an ordinary resolution-time condition, not an intervening-if
+        // condition under CR 603.4. The counter is bumped at the top of
+        // `resolve_ability_chain` (depth 0) before this evaluator runs, so a
+        // freshly-incremented count of `n` satisfies the condition for the Nth
+        // resolution. Abilities without an `ability_index` stamp (synthesized
+        // triggers, activated abilities) never increment the counter and therefore
+        // evaluate as `count == 0`, which matches no `n >= 1` print.
         AbilityCondition::NthResolutionThisTurn { n } => {
             if let Some(idx) = ability.ability_index {
                 let count = state
@@ -15090,6 +15123,103 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// V14 — CR 701.17a: the "this way" producer verb agrees with the mill's
+    /// destination conjunct in `effects::mill`. Only a graveyard-bound
+    /// top-of-library move is a mill; the other destinations are the shared
+    /// move building block and take the zone's own verb.
+    #[test]
+    fn this_way_cause_for_mill_follows_the_declared_destination() {
+        let mill = |destination| Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            destination,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(
+            this_way_cause_for_effect(&mill(Zone::Hand)),
+            Some(ThisWayCause::Bounced),
+            "Scroll Rack's Mill-to-Hand is a top-of-library move, not a mill"
+        );
+        // The positive leg is the live control: the negative above cannot pass
+        // by the function answering `None` for everything.
+        assert_eq!(
+            this_way_cause_for_effect(&mill(Zone::Graveyard)),
+            Some(ThisWayCause::Milled)
+        );
+    }
+
+    /// V6d — CR 701.17c: `TargetFilter::TriggeringSource` on a mill trigger binds
+    /// the milled card through `extract_source_from_event`'s `Milled` arm, which
+    /// no compiler check demands. `resolved_targets` has no fallback tier for
+    /// this filter, so a missing arm leaves the target vector empty and the
+    /// optional return moves nothing.
+    #[test]
+    fn triggering_source_on_a_mill_trigger_binds_the_milled_card() {
+        let mut state = GameState::new_two_player(42);
+        let milled_card = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Milled Card".to_string(),
+            Zone::Exile,
+        );
+        let radroach = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Infesting Radroach".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::TriggeringSource,
+                destination: None,
+                selection: Default::default(),
+            },
+            Vec::new(),
+            radroach,
+            PlayerId(0),
+        );
+
+        // The diverted mill's own action event — `to` is Exile, and the trigger
+        // still binds the card CR 701.17c says it can find there.
+        state.current_trigger_event = Some(GameEvent::Milled {
+            player_id: PlayerId(1),
+            object_id: milled_card,
+            to: Zone::Exile,
+        });
+        assert_eq!(
+            ability_with_event_context_targets(&state, &ability).targets,
+            vec![TargetRef::Object(milled_card)]
+        );
+
+        // Live control: the zone-change event this arm replaces still binds the
+        // same card, so the harness is proven to fire...
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: milled_card,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                milled_card,
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        });
+        assert_eq!(
+            ability_with_event_context_targets(&state, &ability).targets,
+            vec![TargetRef::Object(milled_card)]
+        );
+
+        // ...and an event `extract_source_from_event` has no object arm for
+        // still binds nothing, so a blanket `Some` cannot pass.
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount: -1,
+        });
+        assert!(ability_with_event_context_targets(&state, &ability)
+            .targets
+            .is_empty());
+    }
     use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -28758,7 +28888,9 @@ mod tests {
         }
     }
 
-    // CR 603.4: Runtime tests for `AbilityCondition::NthResolutionThisTurn`.
+    // CR 608.2c: Runtime tests for the ordinary resolution-time
+    // `AbilityCondition::NthResolutionThisTurn` condition (not CR 603.4
+    // intervening-if).
 
     /// Build a minimal `ResolvedAbility` with a stamped `ability_index` for
     /// nth-resolution tracking tests.
@@ -28845,18 +28977,28 @@ mod tests {
         );
     }
 
-    /// Test Omnath-style chain: three SequentialSibling sub-abilities gated on
-    /// n=1, n=2, n=3. Each resolution should fire exactly one branch.
+    /// An ordinal chain must advance through false dependent siblings so the
+    /// matching later ordinal can evaluate under CR 608.2c's written order.
     #[test]
-    fn nth_resolution_omnath_three_branch_chain() {
+    fn nth_resolution_ordinal_siblings_resolve_exclusively_in_written_order() {
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(1);
+        let recipient = reflexive_test_creature(&mut state, PlayerId(0), "Counter recipient");
+        let drawable_card = CardId(state.next_object_id);
+        create_object(
+            &mut state,
+            drawable_card,
+            PlayerId(0),
+            "Drawable card".to_string(),
+            Zone::Library,
+        );
 
-        // Branch 3: lose 4 life (as damage proxy), gated on n=3 (SequentialSibling).
+        // N3: put one +1/+1 counter on each creature you control.
         let mut branch3 = ResolvedAbility::new(
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 4 },
-                target: Some(TargetFilter::Controller),
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             },
             vec![],
             source_id,
@@ -28866,11 +29008,11 @@ mod tests {
         branch3.sub_link = SubAbilityLink::SequentialSibling;
         assert!(branch3.ability_index.is_none());
 
-        // Branch 2: lose 2 life (as mana proxy), gated on n=2 (SequentialSibling).
+        // N2: draw one card.
         let mut branch2 = ResolvedAbility::new(
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 },
-                target: Some(TargetFilter::Controller),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -28881,8 +29023,9 @@ mod tests {
         branch2.sub_ability = Some(Box::new(branch3));
         assert!(branch2.ability_index.is_none());
 
-        // Branch 1: gain 4 life, gated on n=1 (SequentialSibling).
-        let mut branch1 = ResolvedAbility::new(
+        // The printed ability's first clause is the N1 branch itself; the next
+        // two clauses are dependent sequential siblings with their own ordinals.
+        let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
                 player: TargetFilter::Controller,
@@ -28890,14 +29033,119 @@ mod tests {
             vec![],
             source_id,
             PlayerId(0),
-        );
-        branch1.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 1 });
-        branch1.sub_link = SubAbilityLink::SequentialSibling;
-        branch1.sub_ability = Some(Box::new(branch2));
-        assert!(branch1.ability_index.is_none());
+        )
+        .condition(AbilityCondition::NthResolutionThisTurn { n: 1 })
+        .sub_ability(branch2);
+        ability.ability_index = Some(0);
 
-        // Top-level: gain 1 life (no-op proxy), chains to the three branches.
-        let mut ability = ResolvedAbility::new(
+        let start_life = state.players[0].life;
+        let mut events = Vec::new();
+
+        // Resolution 1: only N1 gains life.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "first ordinal must gain life"
+        );
+        assert_eq!(state.players[0].hand.len(), 0, "N2 must not draw on N1");
+        assert_eq!(state.players[0].library.len(), 1, "N2 must not draw on N1");
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "N3 must not place counters on N1"
+        );
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 0)], 1);
+
+        // Resolution 2: N1 is false, so N2 must be reached and draw exactly once.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "N1 must not gain life on N2"
+        );
+        assert_eq!(state.players[0].hand.len(), 1, "N2 must draw one card");
+        assert!(
+            state.players[0].library.is_empty(),
+            "N2 must consume the drawable card"
+        );
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "N3 must not place counters on N2"
+        );
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 0)], 2);
+
+        // Resolution 3: N1 and N2 are false, so N3 must be reached and counter.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "N1 must not gain life on N3"
+        );
+        assert_eq!(state.players[0].hand.len(), 1, "N2 must not draw on N3");
+        assert!(
+            state.players[0].library.is_empty(),
+            "N2 must not redraw on N3"
+        );
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "N3 must place exactly one counter"
+        );
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 0)], 3);
+
+        // Resolution 4: no ordinal matches; all observables stay as they were.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.ability_resolutions_this_turn[&(source_id, 0)],
+            4,
+            "counter must be bumped exactly once per top-level resolution"
+        );
+        assert_eq!(state.players[0].life, start_life + 4);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert!(state.players[0].library.is_empty());
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "N4 must leave the N3 counter result unchanged"
+        );
+    }
+
+    #[test]
+    fn false_ordinal_parent_suppresses_true_non_ordinal_dependent_sibling() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let mut child = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 100 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        child.condition = Some(AbilityCondition::IsYourTurn);
+        child.sub_link = SubAbilityLink::SequentialSibling;
+        child.sibling_condition = SiblingCondition::Dependent;
+
+        let mut parent = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
                 player: TargetFilter::Controller,
@@ -28906,41 +29154,26 @@ mod tests {
             source_id,
             PlayerId(0),
         )
-        .sub_ability(branch1);
-        ability.ability_index = Some(0);
+        .condition(AbilityCondition::NthResolutionThisTurn { n: 2 })
+        .sub_ability(child);
+        parent.ability_index = Some(0);
 
+        assert!(
+            evaluate_condition(&AbilityCondition::IsYourTurn, &state, &parent),
+            "reach guard: the child's non-ordinal condition is true"
+        );
         let start_life = state.players[0].life;
         let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &parent, &mut events, 0).unwrap();
 
-        // Resolution 1: only n=1 branch should fire (+4 life).
-        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-        assert_eq!(
-            state.players[0].life,
-            start_life + 1 + 4,
-            "1st resolution: top-level (+1) and n=1 branch (+4) should fire"
-        );
-
-        // Resolution 2: only n=2 branch should fire (lose 2 life).
-        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-        assert_eq!(
-            state.players[0].life,
-            start_life + 1 + 4 + 1 - 2,
-            "2nd resolution: top-level (+1) and n=2 branch (-2) should fire"
-        );
-
-        // Resolution 3: only n=3 branch should fire (lose 4 life).
-        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-        assert_eq!(
-            state.players[0].life,
-            start_life + 1 + 4 + 1 - 2 + 1 - 4,
-            "3rd resolution: top-level (+1) and n=3 branch (-4) should fire"
-        );
-
-        // Counter must be exactly 3.
         assert_eq!(
             state.ability_resolutions_this_turn[&(source_id, 0)],
-            3,
-            "counter must be bumped exactly once per top-level resolution"
+            1,
+            "reach guard: the parent evaluated as the first resolution, not N2"
+        );
+        assert_eq!(
+            state.players[0].life, start_life,
+            "a true non-ordinal dependent sibling must remain suppressed below a false ordinal parent"
         );
     }
 

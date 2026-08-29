@@ -150304,6 +150304,11 @@ scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
 scryfall_id = "38d09b91-d4da-4e8f-a6ef-09482e09842d"
 
 [[token.source_card_refs]]
+card_name = "An Offer You Can't Refuse"
+scryfall_oracle_id = "234a734b-ba28-4f1b-9d01-3c3e7d516590"
+scryfall_id = "c3d1624a-a031-4871-b9d7-7efbe507d979"
+
+[[token.source_card_refs]]
 card_name = "Xorn"
 scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
 scryfall_id = "09b82084-87c9-4131-b604-d595d38d045a"
@@ -151239,6 +151244,11 @@ keywords = []
 card_name = "Kazuul, Tyrant of the Cliffs"
 scryfall_oracle_id = "f8bf3d91-cb50-48ce-88c6-cdcb37b64b57"
 scryfall_id = "721df547-d777-4247-b130-a4e247445b04"
+
+[[token.source_card_refs]]
+card_name = "Kazuul, Tyrant of the Cliffs"
+scryfall_oracle_id = "f8bf3d91-cb50-48ce-88c6-cdcb37b64b57"
+scryfall_id = "bfa000bd-f3cf-4e95-949d-a3f083b42624"
 
 [token.token_image_ref]
 scryfall_id = "4959b8ed-391c-4b77-bbc1-e32c2b27aa22"
@@ -189502,6 +189512,11 @@ scryfall_id = "227276da-caa5-4b24-a534-48a7ca650c2b"
 [[token.source_card_refs]]
 card_name = "Endrek Sahr, Master Breeder"
 scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
+scryfall_id = "a6436a6b-82ce-4609-bb1e-acedc7594bcc"
+
+[[token.source_card_refs]]
+card_name = "Endrek Sahr, Master Breeder"
+scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
 scryfall_id = "123490fb-5908-45f2-b376-7959ccdf9c3e"
 
 [token.token_image_ref]
@@ -208241,6 +208256,11 @@ subtypes = ["Shark"]
 supertypes = []
 colors = ["Blue"]
 keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Shark Typhoon"
+scryfall_oracle_id = "8c0520fa-276b-4d21-b4a9-dce1fce59f6b"
+scryfall_id = "04e52df3-6674-4ee4-b5e0-e113e1b32e68"
 
 [[token.source_card_refs]]
 card_name = "Shark Typhoon"
