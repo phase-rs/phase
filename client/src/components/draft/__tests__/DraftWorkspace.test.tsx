@@ -340,6 +340,9 @@ describe("draft workspace shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Layout" }));
     const increase = screen.getByRole("button", { name: "Increase max columns per row" });
+    const decrease = screen.getByRole("button", { name: "Decrease max columns per row" });
+    expect(increase).toHaveClass("h-11", "w-11");
+    expect(decrease).toHaveClass("h-11", "w-11");
     fireEvent.click(increase);
     expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
@@ -1289,7 +1292,7 @@ describe("draft workspace shell", () => {
       <DraftWorkspace {...props} preferences={preferences({ explicitView: null })} />,
     );
 
-    expect(screen.getByRole("button", { name: "Visual builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
     const phonePrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
     expect(within(phonePrimary).getAllByRole("button").map((button) => button.textContent))
       .toEqual(["Group", "Add Lands", "Visual builder"]);
@@ -1302,7 +1305,7 @@ describe("draft workspace shell", () => {
     expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "board" }));
 
     rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "board" })} />);
-    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("ml-auto");
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("ml-auto", "min-h-11");
     expect(screen.getByRole("region", { name: "Compact sideboard" })).toBeInTheDocument();
     expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-y-auto", "overscroll-contain");
     fireEvent.click(screen.getByRole("button", { name: "Text builder" }));
@@ -1313,7 +1316,7 @@ describe("draft workspace shell", () => {
       responsiveLayout="desktop"
       preferences={preferences({ explicitView: "compact" })}
     />);
-    expect(screen.getByRole("button", { name: "Visual builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-8");
     fireEvent.click(screen.getByRole("button", { name: "Visual builder" }));
     expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "board" }));
 
@@ -1341,6 +1344,7 @@ describe("draft workspace shell", () => {
     const tabletPrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
     expect(within(tabletPrimary).getAllByRole("button").map((button) => button.textContent))
       .toEqual(["Group", "Add Lands", "Visual builder"]);
+    expect(within(tabletPrimary).getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
     expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-hidden");
     expect(container.querySelector("[data-workspace-composition='collapsed']"))
@@ -1356,7 +1360,7 @@ describe("draft workspace shell", () => {
       responsiveLayout="tablet-portrait"
       preferences={preferences({ explicitView: "board" })}
     />);
-    expect(screen.getByRole("button", { name: "Text builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("min-h-11");
     expect(screen.getByRole("toolbar", { name: "Board layout" })).toHaveClass("px-4");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
 
@@ -1365,7 +1369,7 @@ describe("draft workspace shell", () => {
       responsiveLayout="tablet-landscape"
       preferences={preferences({ explicitView: "board" })}
     />);
-    expect(screen.getByRole("button", { name: "Text builder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("min-h-11");
   });
 
   it.each(["tablet-portrait", "tablet-landscape"] as const)(

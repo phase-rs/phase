@@ -293,7 +293,7 @@ export function DraftWorkspace({
     <button
       type="button"
       onClick={() => onPreferencesChange({ ...preferences, explicitView: "board" })}
-      className="min-h-8 shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade"
+      className={`${builderPhoneOrTabletLayout ? "min-h-11" : "min-h-8"} shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade`}
     >
       {t("limitedDeck.visualBuilder")}
     </button>
@@ -302,7 +302,7 @@ export function DraftWorkspace({
     <button
       type="button"
       onClick={() => onPreferencesChange({ ...preferences, explicitView: "compact" })}
-      className="ml-auto min-h-8 shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade"
+      className="ml-auto min-h-11 shrink-0 whitespace-nowrap px-2 text-xs font-medium text-jade"
     >
       {t("limitedDeck.textBuilder")}
     </button>

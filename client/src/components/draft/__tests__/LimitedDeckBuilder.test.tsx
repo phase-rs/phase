@@ -308,9 +308,11 @@ describe("LimitedDeckBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Lands" }));
+    const addLands = screen.getByRole("button", { name: "Add Lands" });
+    fireEvent.click(addLands);
+    expect(addLands).toHaveClass("min-h-11");
     const picker = screen.getByRole("dialog", { name: "Add Lands" });
-    expect(within(picker).getByRole("button", { name: "Auto Lands" })).toBeInTheDocument();
+    expect(within(picker).getByRole("button", { name: "Auto Lands" })).toHaveClass("min-h-11");
     expect(screen.queryAllByRole("button", { name: "Auto Lands" })).toHaveLength(1);
     fireEvent.click(within(picker).getByRole("button", { name: "Auto Lands" }));
     expect(onAutoSuggestLands).toHaveBeenCalledOnce();
@@ -322,6 +324,7 @@ describe("LimitedDeckBuilder", () => {
   it.each(["tablet-portrait", "tablet-landscape"] as const)(
     "uses Add lands in %s compact builder",
     (responsiveLayout) => {
+      const onAutoSuggestLands = vi.fn();
       render(
         <LimitedDeckBuilder
           local={{
@@ -338,13 +341,21 @@ describe("LimitedDeckBuilder", () => {
             onSubmitDeck: () => {},
             onAddBasicLand: () => {},
             onRemoveBasicLand: () => {},
+            onAutoSuggestLands,
           }}
           responsiveLayout={responsiveLayout}
         />,
       );
 
-      expect(screen.getByRole("button", { name: "Add Lands" })).toBeInTheDocument();
+      const addLands = screen.getByRole("button", { name: "Add Lands" });
+      expect(addLands).toHaveClass("min-h-11");
       expect(screen.queryByRole("button", { name: "Lands" })).not.toBeInTheDocument();
+      fireEvent.click(addLands);
+      const picker = screen.getByRole("dialog", { name: "Add Lands" });
+      const autoLands = within(picker).getByRole("button", { name: "Auto Lands" });
+      expect(autoLands).toHaveClass("min-h-11");
+      fireEvent.click(autoLands);
+      expect(onAutoSuggestLands).toHaveBeenCalledOnce();
     },
   );
 

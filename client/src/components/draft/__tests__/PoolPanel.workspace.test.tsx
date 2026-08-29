@@ -190,6 +190,7 @@ describe("controlled workspace pool panel", () => {
     expect(primary).toHaveClass("flex-wrap");
     expect(within(primary).getAllByRole("button").map((button) => button.textContent))
       .toEqual(["Mana value", "Color", "Rarity", "Type", "Lands", "Visual builder"]);
+    expect(within(primary).getByRole("button", { name: "Color" })).toHaveClass("min-h-8");
   });
 
   it("uses_a_capability_aware_group_menu_only_for_builder_phone_compact", () => {
@@ -208,7 +209,7 @@ describe("controlled workspace pool panel", () => {
       .toEqual(["Group", "Add Lands", "Counts", "Visual builder"]);
     expect(primary).toHaveClass("flex-nowrap", "w-full");
     expect(container.querySelector("[data-compact-pool-trailing-controls]")).toHaveClass("ml-auto");
-    expect(within(primary).getByRole("button", { name: "Group" })).toHaveClass("min-h-8", "bg-slate-950/80");
+    expect(within(primary).getByRole("button", { name: "Group" })).toHaveClass("min-h-11", "bg-slate-950/80");
     expect(screen.getByRole("region", { name: "Card pool" })).toHaveClass("min-h-0", "overflow-hidden");
     expect(container.querySelector<HTMLElement>("[data-instance-id]")?.parentElement?.parentElement)
       .toHaveClass("min-h-0", "overflow-y-auto");
@@ -216,6 +217,9 @@ describe("controlled workspace pool panel", () => {
 
     fireEvent.click(within(primary).getByRole("button", { name: "Group" }));
     const menu = screen.getByRole("menu", { name: "Group" });
+    for (const sort of ["Mana value", "Color", "Type"]) {
+      expect(within(menu).getByRole("menuitemradio", { name: sort })).toHaveClass("min-h-11");
+    }
     expect(within(menu).getByRole("menuitemradio", { name: "Mana value" })).toHaveAttribute("aria-pressed", "true");
     expect(within(menu).queryByRole("menuitemradio", { name: "Rarity" })).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Color" }));

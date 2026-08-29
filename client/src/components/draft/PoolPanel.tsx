@@ -163,8 +163,8 @@ function ControlledPoolPanel({
   const sorts: DraftBoardSort[] = value.poolGroups.workspace_capabilities.rarity_group_order === null
     ? ["cmc", "color", "type"]
     : ["cmc", "color", "rarity", "type"];
-  const sortButtonClass = (sort: DraftBoardSort) => (
-    `min-h-8 px-2 text-xs ${effectiveSort === sort ? "bg-white/15 text-white" : "text-white/50"}`
+  const sortButtonClass = (sort: DraftBoardSort, compactTouchTarget = false) => (
+    `${compactTouchTarget ? "min-h-11" : "min-h-8"} px-2 text-xs ${effectiveSort === sort ? "bg-white/15 text-white" : "text-white/50"}`
   );
 
   const activate = (instanceId: string) => {
@@ -251,7 +251,7 @@ function ControlledPoolPanel({
                   aria-expanded={open}
                   aria-haspopup="menu"
                   onClick={toggle}
-                  className={menuButtonClass({ tone: "neutral", size: "xs", className: "shrink-0 whitespace-nowrap" })}
+                  className={menuButtonClass({ tone: "neutral", size: "xs", className: "min-h-11 shrink-0 whitespace-nowrap" })}
                 >
                   {t("workspace.sort.group")}
                 </button>
@@ -268,7 +268,7 @@ function ControlledPoolPanel({
                     value.onSortChange(sort);
                     close();
                   }}
-                  className={sortButtonClass(sort)}
+                  className={sortButtonClass(sort, true)}
                 >
                   {t(`workspace.sort.${sort}`)}
                 </button>

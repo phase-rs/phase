@@ -1066,7 +1066,7 @@ function WorkspaceDeckBuilder({
     close();
   };
 
-  const landPicker = (label: string) => poolChangesEnabled ? (
+  const landPicker = (label: string, compactTouchTarget = false) => poolChangesEnabled ? (
     <PopoverMenu
       ariaLabel={t("limitedDeck.addLands")}
       variant="dialog"
@@ -1078,7 +1078,11 @@ function WorkspaceDeckBuilder({
           aria-expanded={open}
           aria-haspopup="dialog"
           onClick={toggle}
-          className={menuButtonClass({ tone: "neutral", size: "xs" })}
+          className={menuButtonClass({
+            tone: "neutral",
+            size: "xs",
+            className: compactTouchTarget ? "min-h-11" : undefined,
+          })}
         >
           {label}
         </button>
@@ -1118,7 +1122,11 @@ function WorkspaceDeckBuilder({
               <button
                 type="button"
                 onClick={() => void editableController.onAutoSuggestLands?.()}
-                className={menuButtonClass({ tone: "neutral", size: "xs" })}
+                className={menuButtonClass({
+                  tone: "neutral",
+                  size: "xs",
+                  className: compactTouchTarget ? "min-h-11" : undefined,
+                })}
               >
                 {t("limitedDeck.autoLands")}
               </button>
@@ -1148,6 +1156,7 @@ function WorkspaceDeckBuilder({
 
   const compactLandControls = landPicker(
     (phoneLayout || tabletLayout) ? t("limitedDeck.addLands") : t("limitedDeck.lands"),
+    phoneLayout || tabletLayout,
   );
   const suggestDeckAvailable = suggestionsEnabled
     && editableController?.onAutoSuggestDeck !== undefined

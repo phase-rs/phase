@@ -153,7 +153,7 @@ export function DraftWorkspaceToolbar({
           disabled={interactionLocked || visualColumnCapValue <= 1}
           onClick={() => onVisualColumnCapChange(visualColumnCapValue - 1)}
           aria-label={t("workspace.layout.decreaseMaxPerRow")}
-          className="h-8 w-8 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
+          className="h-11 w-11 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
         >
           −
         </button>
@@ -165,7 +165,7 @@ export function DraftWorkspaceToolbar({
           disabled={interactionLocked || visualColumnCapValue >= visualColumnCapMax}
           onClick={() => onVisualColumnCapChange(visualColumnCapValue + 1)}
           aria-label={t("workspace.layout.increaseMaxPerRow")}
-          className="h-8 w-8 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
+          className="h-11 w-11 rounded-[6px] border border-hairline text-lg text-fg-muted disabled:cursor-not-allowed disabled:opacity-35"
         >
           +
         </button>
