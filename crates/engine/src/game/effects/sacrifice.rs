@@ -389,10 +389,17 @@ pub fn resolve(
 
     let mut selections = Vec::new();
     for obj_id in targeted_objects {
-        let obj = state
-            .objects
-            .get(&obj_id)
-            .ok_or(EffectError::ObjectNotFound(obj_id))?;
+        // CR 608.2b + CR 111.7: a snapshotted member that no longer exists is a
+        // normal outcome, not an error — a token that left the battlefield
+        // ceases to exist, so a delayed "sacrifice them" whose set lost a member
+        // in the meantime must still sacrifice the survivors ("does as much as
+        // it can"). Erroring here aborted the WHOLE effect on the first missing
+        // id, which is how a Mobilize pair that traded one Warrior in combat
+        // left the other on the battlefield forever (#8147). Skipping matches
+        // the emblem / wrong-zone / wrong-controller guards immediately below.
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
 
         // CR 114.5: Emblems cannot be sacrificed
         if obj.is_emblem {
