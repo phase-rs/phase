@@ -76,6 +76,7 @@ describe("DraftPodPage pod error banner", () => {
     draftState.guestRecoveryFailure = null;
     draftState.clearError.mockClear();
     draftState.resumeDraft.mockClear();
+    draftState.leave.mockClear();
   });
 
   it("surfaces the store error in the pairing phase", () => {
@@ -166,6 +167,17 @@ describe("DraftPodPage pod error banner", () => {
 
     expect(screen.getByText("Refresh both windows")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+  });
+
+  it("revokes recovery when the participant explicitly returns to the menu", async () => {
+    const user = userEvent.setup();
+    draftState.phase = "error";
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Return to Menu" }));
+
+    expect(draftState.leave).toHaveBeenCalledOnce();
+    expect(draftState.leave).toHaveBeenCalledWith(false);
   });
 
   it("aborts the retry attempt when its page unmounts", async () => {
