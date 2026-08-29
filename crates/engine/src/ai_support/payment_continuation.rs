@@ -30,6 +30,7 @@ pub const PAYMENT_CONTINUATION_MAX_ROOTS: usize = 64;
 /// a full 64-root wave must never consume the whole budget before any root can
 /// reach its next payment carrier or finalization step.
 pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = PAYMENT_CONTINUATION_MAX_ROOTS * 4;
+const PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS: usize = 16;
 
 /// Mode-free identity of the announced spell or activated ability being paid.
 ///
@@ -246,6 +247,9 @@ fn witness_payment_continuations_inner(
             successors: empty(),
         };
     }
+    let attempt_budget = (noncancel_roots * 4)
+        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
+        .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
     let Some(baseline) = WitnessBaseline::capture(state, &root) else {
         return PaymentContinuationBatch {
             status: PaymentContinuationBatchStatus::Indeterminate(
@@ -269,10 +273,10 @@ fn witness_payment_continuations_inner(
     let mut successors = empty();
     let mut queue = VecDeque::new();
     for (index, action) in order {
-        if attempts == PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
+        if attempts == attempt_budget {
             return indeterminate_batch(
                 PaymentContinuationIndeterminate::AttemptBudgetExhausted,
-                actions.len(),
+                empty(),
                 attempts,
                 counters,
             );
@@ -314,10 +318,10 @@ fn witness_payment_continuations_inner(
         let Some(next_action) = node.next_action() else {
             continue;
         };
-        if attempts == PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
+        if attempts == attempt_budget {
             return indeterminate_batch(
                 PaymentContinuationIndeterminate::AttemptBudgetExhausted,
-                actions.len(),
+                successors,
                 attempts,
                 counters,
             );
@@ -378,7 +382,7 @@ fn witness_payment_continuations_inner(
 
 fn indeterminate_batch(
     reason: PaymentContinuationIndeterminate,
-    action_count: usize,
+    successors: Vec<Option<AcceptedPaymentSuccessor>>,
     _attempts: usize,
     #[allow(unused_mut, unused_variables)] mut counters: Option<
         &mut PaymentContinuationWitnessCounters,
@@ -390,7 +394,7 @@ fn indeterminate_batch(
     }
     PaymentContinuationBatch {
         status: PaymentContinuationBatchStatus::Indeterminate(reason),
-        successors: vec![None; action_count],
+        successors,
     }
 }
 

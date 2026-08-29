@@ -133,19 +133,36 @@ pub(crate) fn prepare_payment_candidates(
                         })
                     })
                     .collect(),
-                PaymentContinuationBatchStatus::Indeterminate(_) => candidates
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(source_index, candidate)| {
-                        matches!(candidate.action, GameAction::CancelCast).then_some(
-                            PreparedCandidate {
-                                source_index,
-                                candidate,
-                                payment_successor: None,
-                            },
-                        )
-                    })
-                    .collect(),
+                PaymentContinuationBatchStatus::Indeterminate(_) => {
+                    if batch.successors.iter().any(Option::is_some) {
+                        candidates
+                            .into_iter()
+                            .enumerate()
+                            .zip(batch.successors)
+                            .filter_map(|((source_index, candidate), accepted)| {
+                                accepted.map(|accepted| PreparedCandidate {
+                                    source_index,
+                                    candidate,
+                                    payment_successor: Some(accepted.state),
+                                })
+                            })
+                            .collect()
+                    } else {
+                        candidates
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(source_index, candidate)| {
+                                matches!(candidate.action, GameAction::CancelCast).then_some(
+                                    PreparedCandidate {
+                                        source_index,
+                                        candidate,
+                                        payment_successor: None,
+                                    },
+                                )
+                            })
+                            .collect()
+                    }
+                }
                 PaymentContinuationBatchStatus::NotAffiliated
                 | PaymentContinuationBatchStatus::UnsupportedAffiliated(_) => Vec::new(),
             }

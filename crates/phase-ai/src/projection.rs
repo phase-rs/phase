@@ -407,17 +407,24 @@ fn resolve_choice(
             let mut actions = actions;
             actions.sort_by(|left, right| left.cmp_stable(right));
             let batch = witness_payment_continuations(state, &actions);
-            let accepted = match batch.status {
-                PaymentContinuationBatchStatus::Complete => actions
-                    .into_iter()
-                    .zip(batch.successors)
-                    .find_map(|(action, successor)| successor.map(|successor| (action, successor)))
-                    .ok_or(BailReason::NoLegalManaPayment)?,
-                PaymentContinuationBatchStatus::Indeterminate(_) => {
+            let status = batch.status;
+            let accepted = actions
+                .into_iter()
+                .zip(batch.successors)
+                .find_map(|(action, successor)| successor.map(|successor| (action, successor)));
+            let accepted = match (status, accepted) {
+                (_, Some(accepted)) => accepted,
+                (PaymentContinuationBatchStatus::Complete, None) => {
+                    return Err(BailReason::NoLegalManaPayment);
+                }
+                (PaymentContinuationBatchStatus::Indeterminate(_), None) => {
                     return Err(BailReason::IncompleteManaPaymentWitness);
                 }
-                PaymentContinuationBatchStatus::NotAffiliated
-                | PaymentContinuationBatchStatus::UnsupportedAffiliated(_) => {
+                (
+                    PaymentContinuationBatchStatus::NotAffiliated
+                    | PaymentContinuationBatchStatus::UnsupportedAffiliated(_),
+                    None,
+                ) => {
                     return Err(BailReason::NoLegalManaPayment);
                 }
             };
