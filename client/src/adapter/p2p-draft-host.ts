@@ -1754,7 +1754,7 @@ export class P2PDraftHost {
     }
   }
 
-  private matchBindingFor(pairing: PairingView): DraftMatchBinding {
+  private matchBindingFor(pairing: PairingView, matchAuthoritySeat: number): DraftMatchBinding {
     const existing = this.matchBindings.get(pairing.match_id);
     if (existing && existing.round === pairing.round) return existing;
 
@@ -1766,7 +1766,7 @@ export class P2PDraftHost {
       lease: crypto.randomUUID(),
       nonce: crypto.randomUUID(),
       revision: 0,
-      matchAuthoritySeat: Math.min(pairing.seat_a, pairing.seat_b),
+      matchAuthoritySeat,
     };
     this.matchBindings.set(pairing.match_id, binding);
     return binding;
@@ -1899,16 +1899,16 @@ export class P2PDraftHost {
     const seatB = pairing.seat_b;
     const seatAIsBot = this.isBotSeatFromView(view, seatA);
     const seatBIsBot = this.isBotSeatFromView(view, seatB);
-    const session = await this.exportDraftSession();
-    const binding = this.matchBindingFor(pairing);
-
     if (seatAIsBot && seatBIsBot) {
       await this.reportMatchResult(pairing.match_id, Math.min(seatA, seatB));
       return;
     }
 
+    const session = await this.exportDraftSession();
+
     if (seatAIsBot || seatBIsBot) {
       const humanSeat = seatAIsBot ? seatB : seatA;
+      const binding = this.matchBindingFor(pairing, humanSeat);
       const botSeat = seatAIsBot ? seatA : seatB;
       const botName = seatAIsBot ? pairing.name_a : pairing.name_b;
       const humanDeck = this.submittedDeckForSeat(session, humanSeat);
@@ -1934,6 +1934,7 @@ export class P2PDraftHost {
     }
 
     const matchHostSeat = Math.min(seatA, seatB);
+    const binding = this.matchBindingFor(pairing, matchHostSeat);
     const guestSeat = matchHostSeat === seatA ? seatB : seatA;
     const matchRoomCode = `${this.draftCode ?? "draft"}-${pairing.match_id}`;
     const hostDeck = this.submittedDeckForSeat(session, matchHostSeat);
@@ -2810,6 +2811,9 @@ export class P2PDraftHost {
       }
       if (this.reconcileRetainedWorkspace(0, view.pool).changed) this.persistSession();
       await this.recoverSettlementOutbox(view);
+      if (this.rotateLegacyBotMatchAuthorities(view)) {
+        await this.persistSessionStrict();
+      }
 
       this.reconcileEffectivePause();
 
@@ -2881,6 +2885,35 @@ export class P2PDraftHost {
 
       this.scheduleReconnectGrace(seat, deadlineAt);
       if (reconnectDeadlines[seat] === undefined) changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * Old snapshots selected the lowest numbered seat as the settlement
+   * authority, including bot seats. A bot cannot return a participant
+   * settlement, so repair only the active human-versus-bot binding after the
+   * restored engine view identifies its human participant. Completed and
+   * future-round bindings intentionally retain their historical capability.
+   */
+  private rotateLegacyBotMatchAuthorities(view: DraftPlayerView): boolean {
+    let changed = false;
+    for (const pairing of view.pairings) {
+      if (pairing.round !== view.current_round || pairing.status !== "InProgress") continue;
+
+      const seatAIsBot = this.isBotSeatFromView(view, pairing.seat_a);
+      const seatBIsBot = this.isBotSeatFromView(view, pairing.seat_b);
+      if (seatAIsBot === seatBIsBot) continue;
+
+      const binding = this.matchBindings.get(pairing.match_id);
+      if (!binding || binding.round !== pairing.round) continue;
+
+      const humanSeat = seatAIsBot ? pairing.seat_b : pairing.seat_a;
+      const botSeat = seatAIsBot ? pairing.seat_a : pairing.seat_b;
+      if (binding.matchAuthoritySeat !== botSeat) continue;
+
+      this.matchBindings.set(pairing.match_id, { ...binding, matchAuthoritySeat: humanSeat });
+      changed = true;
     }
     return changed;
   }
