@@ -295,7 +295,15 @@
     "back": "Zurück",
     "settings": "Einstellungen",
     "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
-    "languageTitle": "Sprache: {{lang}}"
+    "languageTitle": "Sprache: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Diese Meldung schließen",
+      "severity": {
+        "info": "Hinweis",
+        "warning": "Achtung",
+        "critical": "Wichtig"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Etwas ist schiefgelaufen",

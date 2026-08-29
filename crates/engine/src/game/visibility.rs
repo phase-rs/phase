@@ -437,6 +437,27 @@ pub(crate) fn identity_projection_for_viewer(
         HashSet::new()
     };
 
+    // CR 701.25a: "To 'surveil N' means to look at the top N cards of your
+    // library, then put any number of them into your graveyard and the rest on
+    // top of your library in any order." Those cards are still in the library
+    // while the choice is pending, so the blanket library redaction below hides
+    // them from the very player instructed to look at them — the surveil prompt
+    // renders "Hidden Card". Mirrors `scry_visible` (CR 701.22a), the identical
+    // look-at-the-top-N prompt.
+    let surveil_visible: HashSet<ObjectId> =
+        if let WaitingFor::SurveilChoice {
+            player, ref cards, ..
+        } = state.waiting_for
+        {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
     let search_visible: HashSet<ObjectId> =
         if let WaitingFor::SearchChoice {
             player, ref cards, ..
@@ -536,6 +557,7 @@ pub(crate) fn identity_projection_for_viewer(
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
             || scry_visible.contains(&obj_id)
+            || surveil_visible.contains(&obj_id)
             || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
             || effect_zone_library_visible.contains(&obj_id)
@@ -1305,6 +1327,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ScryChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
+    // CR 701.25a: the surveilled cards are shown only to the surveilling
+    // player. Redact the id array for every other viewer, mirroring the
+    // `ScryChoice` block above — otherwise an opponent learns exactly which
+    // object ids sit on top of that library.
+    if let WaitingFor::SurveilChoice {
+        player, ref cards, ..
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::SurveilChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
             };
@@ -4230,6 +4268,54 @@ mod tests {
         assert!(matches!(
             opponent_view.waiting_for,
             WaitingFor::ScryChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
+    }
+
+    /// CR 701.25a: surveil is "look at the top N cards of your library" — the
+    /// surveilling player must see those identities while the prompt is open,
+    /// and no one else may. Regression guard for the surveil prompt rendering
+    /// "Hidden Card" to its own player: `visibility.rs` redacts every library
+    /// object and un-redacts through a named allowlist, and `SurveilChoice` was
+    /// missing from it (`scry_visible` had the identical exemption).
+    #[test]
+    fn surveil_choice_is_visible_to_its_player_but_not_an_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Surveiled Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::SurveilChoice {
+            player: PlayerId(0),
+            cards: vec![card],
+        };
+
+        let surveiler_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            surveiler_view
+                .objects
+                .get(&card)
+                .map(|obj| obj.name.as_str()),
+            Some("Surveiled Card")
+        );
+        assert!(
+            surveiler_view.objects[&card].display_visible_to_viewer,
+            "the client renders the surveil prompt from display_visible_to_viewer"
+        );
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(
+            opponent_view
+                .objects
+                .get(&card)
+                .map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
+        );
+        assert!(matches!(
+            opponent_view.waiting_for,
+            WaitingFor::SurveilChoice { cards, .. } if cards == vec![ObjectId(0)]
         ));
     }
 

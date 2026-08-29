@@ -177,6 +177,14 @@ function dataFileDefines(mode: string): Record<string, string> {
     // compiles to a permanent no-op and nothing is ever sent anywhere.
     __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    // Operator status message. Deliberately NOT manifest-driven: the deploy
+    // workflow's upload loop reads data-files.json and (a) hard-errors when a
+    // listed file was not generated into client/public/, and (b) re-uploads
+    // whatever it finds on EVERY deploy — which would clobber a live status
+    // message the maintainer published out of band. It is published and cleared
+    // by scripts/publish-status.sh alone; no CI job ever touches the object.
+    // Same explicit, non-manifest shape as __CARD_DATA_URL__ above.
+    __STATUS_URL__: JSON.stringify(base ? `${base}/status.json` : "/status.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
     // to `${DATA_BASE_URL}/card-data.<lng>.json` and stripped from the Pages

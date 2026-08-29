@@ -295,7 +295,15 @@
     "back": "Voltar",
     "settings": "Configurações",
     "languageSettings": "Idioma ({{lang}}) — abrir configurações",
-    "languageTitle": "Idioma: {{lang}}"
+    "languageTitle": "Idioma: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Dispensar esta mensagem",
+      "severity": {
+        "info": "Aviso",
+        "warning": "Atenção",
+        "critical": "Importante"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Algo deu errado",

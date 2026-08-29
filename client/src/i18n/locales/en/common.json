@@ -295,7 +295,15 @@
     "back": "Back",
     "settings": "Settings",
     "languageSettings": "Language ({{lang}}) — open settings",
-    "languageTitle": "Language: {{lang}}"
+    "languageTitle": "Language: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Dismiss this message",
+      "severity": {
+        "info": "Notice",
+        "warning": "Heads up",
+        "critical": "Important"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Something went wrong",
