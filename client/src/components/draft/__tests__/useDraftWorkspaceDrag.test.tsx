@@ -20,6 +20,14 @@ function rect(left: number, top: number, right: number, bottom: number): DOMRect
   return { left, top, right, bottom, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) } as DOMRect;
 }
 
+function firePointerActivation(
+  element: Element,
+  type: "click" | "dblclick",
+  { detail, pointerId, pointerType }: { detail: number; pointerId: number; pointerType: string },
+) {
+  fireEvent(element, new PointerEvent(type, { bubbles: true, detail, pointerId, pointerType }));
+}
+
 function createInteraction() {
   let snapshot: DraftPickInteractionSnapshot = { interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null };
   const listeners = new Set<() => void>();
@@ -31,7 +39,7 @@ function createInteraction() {
   };
 }
 
-function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expanded = false, enabled = true, targetVersion = 0, sourceOverride, workspaceSourceOverride, workspaceTouchEnabled = false }: {
+function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expanded = false, enabled = true, targetVersion = 0, sourceOverride, workspaceSourceOverride, workspaceTouchEnabled = false, secondaryActivation }: {
   interaction: ReturnType<typeof createInteraction>;
   onDrop(request: DraftDropRequest): DraftDropDispatch;
   onAdmission?: (admission: PackDropAdmission) => void;
@@ -42,6 +50,7 @@ function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expand
   sourceOverride?: PackDropSource;
   workspaceSourceOverride?: WorkspaceDragSource;
   workspaceTouchEnabled?: boolean;
+  secondaryActivation?: { readonly surface: "pack" | "workspace"; readonly sourceInstanceId: string };
 }) {
   const [clicks, setClicks] = useState(0);
   const [doubleClicks, setDoubleClicks] = useState(0);
@@ -55,6 +64,7 @@ function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expand
   const source: PackDropSource = sourceOverride ?? {
     kind: "pick" as const,
     authorityId: "card-1",
+    sourceInstanceId: "card-1",
     instanceIds: ["card-1"] as const,
     cards: [card],
     sourceIndices: [0],
@@ -75,9 +85,36 @@ function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expand
         onPointerUp={drag.handlePointerUp}
         onPointerCancel={drag.handlePointerCancel}
         onLostPointerCapture={drag.handleLostPointerCapture}
-        onClick={(event) => { if (!drag.consumeCompatibilityActivation({ kind: "click", detail: event.detail, pointerType: (event.nativeEvent as PointerEvent).pointerType })) setClicks((count) => count + 1); }}
-        onDoubleClick={(event) => { if (!drag.consumeCompatibilityActivation({ kind: "double-click", detail: event.detail, pointerType: (event.nativeEvent as PointerEvent).pointerType })) setDoubleClicks((count) => count + 1); }}
+        onClick={(event) => {
+          const pointerEvent = event.nativeEvent as PointerEvent;
+          if (!drag.consumeCompatibilityActivation({
+            kind: "click", detail: event.detail, pointerId: pointerEvent.pointerId ?? null,
+            pointerType: pointerEvent.pointerType, surface: workspaceSourceOverride ? "workspace" : "pack",
+            sourceInstanceId: workspaceSourceOverride?.instanceIds[0] ?? source.sourceInstanceId,
+          })) setClicks((count) => count + 1);
+        }}
+        onDoubleClick={(event) => {
+          const pointerEvent = event.nativeEvent as PointerEvent;
+          if (!drag.consumeCompatibilityActivation({
+            kind: "double-click", detail: event.detail, pointerId: pointerEvent.pointerId ?? null,
+            pointerType: pointerEvent.pointerType, surface: workspaceSourceOverride ? "workspace" : "pack",
+            sourceInstanceId: workspaceSourceOverride?.instanceIds[0] ?? source.sourceInstanceId,
+          })) setDoubleClicks((count) => count + 1);
+        }}
       />
+      {secondaryActivation !== undefined && (
+        <button
+          type="button"
+          data-testid="secondary-activation"
+          onClick={(event) => {
+            const pointerEvent = event.nativeEvent as PointerEvent;
+            if (!drag.consumeCompatibilityActivation({
+              kind: "click", detail: event.detail, pointerId: pointerEvent.pointerId ?? null,
+              pointerType: pointerEvent.pointerType, ...secondaryActivation,
+            })) setClicks((count) => count + 1);
+          }}
+        />
+      )}
       {expanded ? (
         <>
           <div data-testid="deck-board" ref={drag.registerBoard("deck")} />
@@ -179,7 +216,7 @@ describe("useDraftWorkspaceDrag", () => {
     expect(source.setPointerCapture).toHaveBeenCalledWith(91);
     fireEvent.pointerMove(source, { clientX: 270, clientY: 80, pointerId: 91, pointerType: "touch" });
     fireEvent.pointerUp(source, { clientX: 270, clientY: 80, pointerId: 91, pointerType: "touch" });
-    fireEvent.click(source, { detail: 1, pointerType: "touch" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 91, pointerType: "touch" });
 
     expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "sideboard", column: 0 });
     expect(onDrop).not.toHaveBeenCalled();
@@ -292,6 +329,7 @@ describe("useDraftWorkspaceDrag", () => {
     const sourceOverride: PackDropSource = {
       kind: "draft-effect",
       authorityId: "effect",
+      sourceInstanceId: "card-1",
       instanceIds: ["card-1", "card-2"],
       cards: [card, secondCard],
       sourceIndices: [0, 1],
@@ -508,9 +546,9 @@ describe("useDraftWorkspaceDrag", () => {
     fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType: "mouse" });
     fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType: "mouse" });
     await act(async () => Promise.resolve());
-    fireEvent.click(source, { detail: 1, pointerType: "mouse" });
-    fireEvent.click(source, { detail: 2, pointerType: "mouse" });
-    fireEvent.doubleClick(source, { detail: 2, pointerType: "mouse" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 20, pointerType: "mouse" });
+    firePointerActivation(source, "click", { detail: 2, pointerId: 20, pointerType: "mouse" });
+    firePointerActivation(source, "dblclick", { detail: 2, pointerId: 20, pointerType: "mouse" });
     expect(screen.getByTestId("clicks")).toHaveTextContent("0:0");
 
     fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 21, pointerType: "mouse" });
@@ -554,12 +592,76 @@ describe("useDraftWorkspaceDrag", () => {
     fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 22, pointerType });
     fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 22, pointerType });
     await act(async () => Promise.resolve());
-    fireEvent.click(source, { detail: 1, pointerType });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 22, pointerType });
     expect(screen.getByTestId("clicks")).toHaveTextContent("0:0");
 
     fireEvent.click(source, { detail: 0 });
     expect(screen.getByTestId("clicks")).toHaveTextContent("1:0");
     fireEvent.click(source, { detail: 1, pointerType });
+    expect(screen.getByTestId("clicks")).toHaveTextContent("2:0");
+  });
+
+  it("retires_compatibility_tokens_for_keyboard_missing_and_mismatched_pointer_identity", async () => {
+    const interaction = createInteraction();
+    const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => ({
+      requestToken: request.requestToken,
+      interactionGeneration: 1,
+      outcome: Promise.resolve({ status: "ignored", reason: "busy" }),
+    }));
+    render(<Harness interaction={interaction} onDrop={onDrop} onSettled={vi.fn()} />);
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 200, 200);
+
+    const drag = async (pointerId: number) => {
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId, pointerType: "mouse" });
+      fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId, pointerType: "mouse" });
+      fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId, pointerType: "mouse" });
+      await act(async () => Promise.resolve());
+    };
+
+    await drag(40);
+    firePointerActivation(source, "click", { detail: 0, pointerId: 40, pointerType: "mouse" });
+    await drag(41);
+    fireEvent.click(source, { detail: 1, pointerType: "mouse" });
+    await drag(42);
+    firePointerActivation(source, "click", { detail: 1, pointerId: 43, pointerType: "mouse" });
+    await drag(44);
+    firePointerActivation(source, "click", { detail: 1, pointerId: 44, pointerType: "pen" });
+
+    expect(screen.getByTestId("clicks")).toHaveTextContent("4:0");
+  });
+
+  it.each([
+    { surface: "workspace" as const, sourceInstanceId: "card-2", name: "workspace B" },
+    { surface: "pack" as const, sourceInstanceId: "card-1", name: "pack" },
+  ])("allows_a_stale_workspace_A_token_on_$name_and_retires_it", async (secondaryActivation) => {
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={{
+          kind: "workspace", instanceIds: ["card-1"], cards: [card], previewWidth: 146, previewHeight: 204, onDrop: () => true,
+        }}
+        secondaryActivation={secondaryActivation}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 200, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 50, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 50, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 50, pointerType: "mouse" });
+    firePointerActivation(screen.getByTestId("secondary-activation"), "click", { detail: 1, pointerId: 50, pointerType: "mouse" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 50, pointerType: "mouse" });
+
     expect(screen.getByTestId("clicks")).toHaveTextContent("2:0");
   });
 

@@ -5,7 +5,7 @@ import { useRef, useState } from "react";
 
 import type { DraftPlayerView } from "../../../adapter/draft-adapter";
 import type { PackDisplayController, PackDropSource } from "../PackDisplay";
-import type { DraftDropDispatch, DraftDropRequest, DraftPickInteractionSnapshot } from "../workspace/useDraftWorkspaceDrag";
+import type { DraftDropDispatch, DraftDropRequest, DraftPickInteractionSnapshot, WorkspaceDragSource } from "../workspace/useDraftWorkspaceDrag";
 import { useDraftWorkspaceDrag } from "../workspace/useDraftWorkspaceDrag";
 import { DRAFT_WORKSPACE_PACK_SCALE_DEFAULT } from "../workspace/workspacePreferences";
 
@@ -126,6 +126,58 @@ function CommanderPickTwoPack({
       responsiveLayout={responsiveLayout}
     />
   );
+}
+
+function WorkspaceDragCommanderPickTwoHarness({ pickCardStep }: { pickCardStep: PickCardStep }) {
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  const drag = useDraftWorkspaceDrag({
+    enabled: true,
+    readPickInteraction: () => ({ interactionGeneration: 4, pickInteractionLocked: false, pendingPickIntent: null }),
+    subscribePickInteraction: () => () => undefined,
+    onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
+    resolveCollapsedSideboardColumn: () => 0,
+  });
+  const workspaceSource: WorkspaceDragSource = {
+    kind: "workspace",
+    instanceIds: ["workspace-a"],
+    cards: [cards[0]],
+    previewWidth: 146,
+    previewHeight: 204,
+    onDrop: () => true,
+  };
+  return (
+    <>
+      <div
+        data-testid="workspace-drag-source"
+        onPointerDown={(event) => drag.handleWorkspacePointerDown(event, workspaceSource)}
+        onPointerMove={drag.handlePointerMove}
+        onPointerUp={drag.handlePointerUp}
+        onPointerCancel={drag.handlePointerCancel}
+        onLostPointerCapture={drag.handleLostPointerCapture}
+      />
+      <PackDisplay
+        controller={controller({
+          view: commanderPickTwoView,
+          selectedCard,
+          selectCard: setSelectedCard,
+          pickCardStep,
+          dragController: drag,
+        })}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout="desktop"
+      />
+      <div data-testid="workspace-drag-target" ref={drag.registerCollapsedSideboard} />
+    </>
+  );
+}
+
+function firePointerActivation(
+  element: Element,
+  type: "click" | "dblclick",
+  { detail, pointerId, pointerType }: { detail: number; pointerId: number; pointerType: string },
+) {
+  fireEvent(element, new PointerEvent(type, { bubbles: true, detail, pointerId, pointerType }));
 }
 
 function RealDragPackHarness({
@@ -526,6 +578,30 @@ describe("PackDisplay local workspace controller", () => {
     expect(pickCardStep).toHaveBeenCalledWith(["common", "third"], "deck");
   });
 
+  it("lets_a_real_desktop_workspace_drag_retire_before_commander_pick_two_A_B_selection", () => {
+    const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<WorkspaceDragCommanderPickTwoHarness pickCardStep={pickCardStep} />);
+    const workspaceSource = screen.getByTestId("workspace-drag-source");
+    const workspaceTarget = screen.getByTestId("workspace-drag-target");
+    workspaceSource.setPointerCapture = vi.fn();
+    workspaceSource.releasePointerCapture = vi.fn();
+    workspaceTarget.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    fireEvent.pointerDown(workspaceSource, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 70, pointerType: "mouse" });
+    fireEvent.pointerMove(workspaceSource, { clientX: 30, clientY: 30, pointerId: 70, pointerType: "mouse" });
+    fireEvent.pointerUp(workspaceSource, { clientX: 30, clientY: 30, pointerId: 70, pointerType: "mouse" });
+
+    const card = (instanceId: string) => rendered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
+    firePointerActivation(within(card("unknown")).getByRole("button", { name: "Same" }), "click", { detail: 1, pointerId: 70, pointerType: "mouse" });
+    fireEvent.click(within(card("common")).getByRole("button", { name: "Same" }));
+
+    expect(card("unknown")).toHaveAttribute("data-visual-state", "selected");
+    expect(card("common")).toHaveAttribute("data-visual-state", "selected");
+    expect(pickCardStep).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
+    expect(pickCardStep).toHaveBeenCalledWith(["unknown", "common"], "deck");
+  });
+
   it("replaces_the_oldest_completed_commander_pick_two_selection_on_desktop_and_submits_the_new_pair_manually", () => {
     const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const rendered = render(<CommanderPickTwoPack pickCardStep={pickCardStep} />);
@@ -755,7 +831,11 @@ describe("PackDisplay local workspace controller", () => {
     const effectView = { ...view, draft_effects: [effectCard] };
     const pickCard = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const pickEffect = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
-    const localDrag = { ...dragController, handlePointerDown: vi.fn() };
+    const localDrag = {
+      ...dragController,
+      handlePointerDown: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+    };
     const presentation = { packScale: 1, setPackScale: vi.fn() };
 
     const incomplete = render(<PackDisplay controller={controller({ view: effectView, pickCard, pickCardWithDraftEffect: pickEffect, doubleClickPick: true, dragController: localDrag })} presentation={presentation} onCardHover={vi.fn()} enableDraftEffects />);
@@ -790,6 +870,12 @@ describe("PackDisplay local workspace controller", () => {
     const first = complete.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const second = complete.container.querySelector<HTMLElement>('[data-instance-id="common"]')!;
     fireEvent.click(within(second).getByRole("button", { name: "Same" }));
+    expect(localDrag.consumeCompatibilityActivation).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "click",
+      pointerId: null,
+      surface: "pack",
+      sourceInstanceId: "common",
+    }));
     fireEvent.click(within(first).getByRole("button", { name: "Pick Same to Sideboard" }));
     fireEvent.doubleClick(within(second).getByRole("button", { name: "Same" }));
     fireEvent.pointerDown(first, { button: 0, isPrimary: true, pointerId: 2, pointerType: "mouse" });
@@ -799,6 +885,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(localDrag.handlePointerDown).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       kind: "draft-effect",
       authorityId: "effect",
+      sourceInstanceId: "unknown",
       instanceIds: ["unknown", "common"],
     }));
     expect(pickCard).not.toHaveBeenCalled();

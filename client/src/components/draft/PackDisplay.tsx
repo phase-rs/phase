@@ -37,6 +37,8 @@ export interface PackDropAdmission {
 
 interface PackDropSourceCommon {
   readonly authorityId: string;
+  /** The rendered pack card which originated this drag, distinct from effect authority. */
+  readonly sourceInstanceId: string;
   readonly cards: readonly DraftCardInstance[];
   readonly sourceIndices: readonly number[];
   readonly interactionGeneration: number;
@@ -54,7 +56,10 @@ export type PackDropSource = PackDropSourceCommon & (
 export interface PackCompatibilityActivation {
   readonly kind: "click" | "double-click";
   readonly detail: number;
+  readonly pointerId: number | null;
   readonly pointerType?: string;
+  readonly surface: "pack" | "workspace";
+  readonly sourceInstanceId: string;
 }
 
 export interface PackDragController {
@@ -70,9 +75,20 @@ export interface PackDragController {
   consumeCompatibilityActivation(activation: PackCompatibilityActivation): boolean;
 }
 
-function compatibilityActivation(event: ReactMouseEvent<HTMLElement>, kind: PackCompatibilityActivation["kind"]): PackCompatibilityActivation {
-  const pointerType = (event.nativeEvent as MouseEvent & { readonly pointerType?: string }).pointerType;
-  return { kind, detail: event.detail, ...(pointerType === undefined ? {} : { pointerType }) };
+function compatibilityActivation(
+  event: ReactMouseEvent<HTMLElement>,
+  kind: PackCompatibilityActivation["kind"],
+  sourceInstanceId: string,
+): PackCompatibilityActivation {
+  const pointerEvent = event.nativeEvent as MouseEvent & { readonly pointerId?: number; readonly pointerType?: string };
+  return {
+    kind,
+    detail: event.detail,
+    pointerId: pointerEvent.pointerId ?? null,
+    ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+    surface: "pack",
+    sourceInstanceId,
+  };
 }
 
 export interface WorkspacePackController {
@@ -261,7 +277,7 @@ function PackCard({
       onDoubleClick={(event) => {
         const target = event.target as HTMLElement;
         if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;
-        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click")) && doubleClickPickEnabled) onDoubleClickPick();
+        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click", card.instance_id)) && doubleClickPickEnabled) onDoubleClickPick();
       }}
     >
       <button
@@ -270,7 +286,7 @@ function PackCard({
         disabled={locked}
         onClick={(event) => {
           if (Date.now() < ignoreCompatibilityClickUntil.current) return;
-          if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click"))) onSelect();
+          if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
         }}
         className="block h-full w-full overflow-hidden rounded-md disabled:cursor-not-allowed"
       >
@@ -725,6 +741,7 @@ export function PackDisplay({
                 return {
                   kind: cards.length === 2 ? "draft-effect" : "pick",
                   authorityId: cards.length === 2 ? activeEffect! : ids[0],
+                  sourceInstanceId: card.instance_id,
                   instanceIds: cards.length === 2 ? [ids[0], ids[1]] : [ids[0]],
                   cards,
                   sourceIndices: indices,

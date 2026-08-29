@@ -709,6 +709,7 @@ describe("draft workspace shell", () => {
     const source = {
       kind: "draft-effect" as const,
       authorityId: "effect",
+      sourceInstanceId: "effect-a",
       instanceIds: ["effect-a", "effect-b"] as const,
       cards,
       sourceIndices: [0, 1],
@@ -761,6 +762,7 @@ describe("draft workspace shell", () => {
     const source = {
       kind: "draft-effect" as const,
       authorityId: "effect",
+      sourceInstanceId: "effect-a",
       instanceIds: ["effect-a", "effect-b"] as const,
       cards,
       sourceIndices: [0, 1],
@@ -816,6 +818,7 @@ describe("draft workspace shell", () => {
     const source = {
       kind: "pick" as const,
       authorityId: "single",
+      sourceInstanceId: "single",
       instanceIds: ["single"] as const,
       cards,
       sourceIndices: [0],
@@ -872,6 +875,7 @@ describe("draft workspace shell", () => {
     const source = {
       kind: "draft-effect" as const,
       authorityId: "effect",
+      sourceInstanceId: "effect-a",
       instanceIds: ["effect-a", "effect-b"] as const,
       cards,
       sourceIndices: [0, 1],
@@ -1666,6 +1670,15 @@ describe("draft workspace shell", () => {
     );
     fireEvent.click(cardButton);
     expect(lastWorkspaceChange(workspaceChanges).placements.side.zone).toBe("deck");
+    controller.consumeCompatibilityActivation.mockReturnValue(true);
+    fireEvent.doubleClick(screen.getByRole("button", { name: "Inspect side" }), { detail: 2 });
+    expect(controller.consumeCompatibilityActivation).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "double-click",
+      detail: 2,
+      pointerId: null,
+      surface: "workspace",
+      sourceInstanceId: "side",
+    }));
   });
 
   it("returns_collapsed_sideboard_cards_to_the_sorted_deck_column", () => {
