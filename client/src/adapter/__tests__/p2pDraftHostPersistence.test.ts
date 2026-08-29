@@ -474,6 +474,124 @@ describe("P2PDraftHost persistence disposal", () => {
     expect(session.close).not.toHaveBeenCalled();
   });
 
+  it("does not replay a rolled-back leave snapshot on the next save", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: { setSeatConnected: ReturnType<typeof vi.fn>; exportSession: ReturnType<typeof vi.fn> };
+      draftStarted: boolean;
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      expiredDisconnectedSeats: Set<number>;
+      persistQueue: Promise<void>;
+      persistSession: () => void;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    privateHost.draftStarted = true;
+    privateHost.adapter.setSeatConnected = vi.fn(async () => {});
+    privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+    saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
+
+    await expect(privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session)).rejects.toThrow("IDB unavailable");
+
+    expect(saveDraftHostSession).toHaveBeenCalledWith("shared-recovery", expect.objectContaining({
+      seatTokens: {},
+      kickedTokens: ["leave-token"],
+      expiredDisconnectedSeats: [1],
+    }));
+
+    privateHost.persistSession();
+    await privateHost.persistQueue;
+
+    // The failed leave was compensated, so the next durable snapshot must be
+    // the recovered pre-leave state, not a retry of the revoked capability.
+    expect(saveDraftHostSession).toHaveBeenCalledTimes(2);
+    expect(saveDraftHostSession).toHaveBeenLastCalledWith("shared-recovery", expect.objectContaining({
+      seatTokens: { 1: "leave-token" },
+      seatNames: { 1: "Guest" },
+      kickedTokens: [],
+      expiredDisconnectedSeats: [],
+    }));
+  });
+
+  it("compensates an engine disconnect rejection without revoking recovery", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: { setSeatConnected: ReturnType<typeof vi.fn> };
+      draftStarted: boolean;
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      expiredDisconnectedSeats: Set<number>;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    privateHost.draftStarted = true;
+    privateHost.adapter.setSeatConnected = vi.fn()
+      .mockRejectedValueOnce(new Error("disconnect rejected"))
+      .mockResolvedValueOnce(undefined);
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+
+    await expect(privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session)).rejects.toThrow("disconnect rejected");
+
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(1, 1, false);
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(2, 1, true);
+    expect(privateHost.guestSessions.get(1)).toBe(session);
+    expect(privateHost.seatTokens.get(1)).toBe("leave-token");
+    expect(privateHost.seatNames.get(1)).toBe("Guest");
+    expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(false);
+  });
+
+  it("retains recovery state and reports a rejected engine rollback", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: { setSeatConnected: ReturnType<typeof vi.fn>; exportSession: ReturnType<typeof vi.fn> };
+      draftStarted: boolean;
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      expiredDisconnectedSeats: Set<number>;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    const events = vi.fn();
+    host.onEvent(events);
+    privateHost.draftStarted = true;
+    privateHost.adapter.setSeatConnected = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("reconnect rejected"));
+    privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+    saveDraftHostSession.mockRejectedValueOnce(new Error("IDB unavailable"));
+
+    await expect(privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session)).rejects.toThrow("IDB unavailable");
+
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(1, 1, false);
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenNthCalledWith(2, 1, true);
+    expect(privateHost.guestSessions.get(1)).toBe(session);
+    expect(privateHost.seatTokens.get(1)).toBe("leave-token");
+    expect(privateHost.seatNames.get(1)).toBe("Guest");
+    expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(false);
+    expect(events).toHaveBeenCalledWith({
+      type: "error",
+      message: "leave rollback connectivity failed: reconnect rejected",
+    });
+  });
+
   it("does not extend a reconnect deadline across repeated reconnect drops", async () => {
     vi.useFakeTimers();
     try {

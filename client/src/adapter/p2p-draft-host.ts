@@ -1368,27 +1368,35 @@ export class P2PDraftHost {
     const wasKicked = this.kickedTokens.has(draftToken);
     const wasExpired = this.expiredDisconnectedSeats.has(seat);
 
-    this.guestSessions.delete(seat);
-    this.clearReconnectGrace(seat);
-    this.reconnectDeadlines.delete(seat);
-    this.perSeatWorkspaceSnapshots.delete(seat);
-
-    if (!this.draftStarted) {
-      this.seatTokens.delete(seat);
-      this.seatNames.delete(seat);
-    } else {
-      this.kickedTokens.add(draftToken);
-      this.seatTokens.delete(seat);
-      this.expiredDisconnectedSeats.add(seat);
-      await this.adapter.setSeatConnected(seat, false);
-    }
-
+    let attemptedDisconnect = false;
     try {
-      await this.persistSessionStrict();
+      this.guestSessions.delete(seat);
+      this.clearReconnectGrace(seat);
+      this.reconnectDeadlines.delete(seat);
+      this.perSeatWorkspaceSnapshots.delete(seat);
+
+      if (!this.draftStarted) {
+        this.seatTokens.delete(seat);
+        this.seatNames.delete(seat);
+      } else {
+        this.kickedTokens.add(draftToken);
+        this.seatTokens.delete(seat);
+        this.expiredDisconnectedSeats.add(seat);
+        // A rejected adapter call can still have changed the engine. Treat the
+        // attempted transition as needing compensation either way.
+        attemptedDisconnect = true;
+        await this.adapter.setSeatConnected(seat, false);
+      }
+
+      // Leave is a compensating transaction: unlike a reducer command, its
+      // failed snapshot must never be retained and replayed after this branch
+      // restores the participant's recovery capability.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
     } catch (error) {
-      // A failed strict write leaves the prior durable session authoritative.
-      // Restore its complete in-memory counterpart before returning without an
-      // acknowledgement, so the existing recovery capability stays usable.
+      // A failed leave transition leaves the prior durable session
+      // authoritative. Restore its complete in-memory counterpart before
+      // returning without an acknowledgement, so the existing recovery
+      // capability stays usable.
       this.guestSessions.set(seat, session);
       if (priorGraceDeadline !== undefined) this.scheduleReconnectGrace(seat, priorGraceDeadline);
       else if (priorReconnectDeadline !== undefined) this.reconnectDeadlines.set(seat, priorReconnectDeadline);
@@ -1399,7 +1407,18 @@ export class P2PDraftHost {
       else this.kickedTokens.delete(draftToken);
       if (wasExpired) this.expiredDisconnectedSeats.add(seat);
       else this.expiredDisconnectedSeats.delete(seat);
-      if (this.draftStarted) await this.adapter.setSeatConnected(seat, true);
+      if (this.draftStarted && attemptedDisconnect) {
+        try {
+          await this.adapter.setSeatConnected(seat, true);
+        } catch (rollbackError) {
+          // The durable state and every local recovery record have already
+          // been restored. Surface the adapter failure without sacrificing the
+          // participant's capability by letting rollback abort halfway through.
+          const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          console.error("[P2PDraftHost] leave rollback connectivity failed:", rollbackError);
+          this.emit({ type: "error", message: `leave rollback connectivity failed: ${message}` });
+        }
+      }
       throw error;
     }
     await session.send({
@@ -2567,20 +2586,30 @@ export class P2PDraftHost {
     void this.enqueuePersistSession(snapshot).catch(() => {});
   }
 
-  /** Admission callers await this fence before issuing a recoverable token. */
-  private persistSessionStrict(): Promise<void> {
+  /**
+   * Callers await this fence before making a recovery capability externally
+   * visible. A caller that fully compensates its mutation can opt out of
+   * retaining its failed engine snapshot for replay.
+   */
+  private persistSessionStrict(
+    options: { retainFailedDraftSnapshot?: boolean } = {},
+  ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     return this.enqueuePersistSession(
       this.draftStarted ? undefined : this.buildPersistedSnapshot(null),
+      options.retainFailedDraftSnapshot,
     );
   }
 
   /**
    * Serializes snapshots while retaining a live queue after a failed write.
-   * Fire-and-forget mutations report errors through `persistSession`; admission
-   * awaits the returned task and rolls its mutation back on failure.
+   * Fire-and-forget mutations report errors through `persistSession`; callers
+   * that await the returned task may roll their mutation back on failure.
    */
-  private enqueuePersistSession(snapshotAtMutation?: PersistedDraftHostSession): Promise<void> {
+  private enqueuePersistSession(
+    snapshotAtMutation?: PersistedDraftHostSession,
+    retainFailedDraftSnapshot = true,
+  ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     const persist = this.persistQueue.then(async () => {
       if (this.persistenceClosed) return;
@@ -2601,7 +2630,7 @@ export class P2PDraftHost {
       } catch (error) {
         // Admission has its own transactional rollback.  Only an engine-backed
         // snapshot represents a reducer result that must be replayed exactly.
-        if (this.draftStarted) this.pendingDraftSnapshot = snapshot;
+        if (this.draftStarted && retainFailedDraftSnapshot) this.pendingDraftSnapshot = snapshot;
         throw error;
       }
 
