@@ -618,6 +618,17 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     const suppression = suppressionRef.current;
     if (suppression.kind === "none") return false;
     if (
+      suppression.phase === "awaiting-double-click"
+      && activation.kind === "double-click"
+      && activation.detail !== 0
+      && activation.pointerId === null
+      && activation.surface === suppression.surface
+      && activation.sourceInstanceId === suppression.sourceInstanceId
+    ) {
+      suppressionRef.current = { kind: "none" };
+      return true;
+    }
+    if (
       activation.detail === 0
       || activation.pointerId === null
       || activation.pointerId !== suppression.pointerId

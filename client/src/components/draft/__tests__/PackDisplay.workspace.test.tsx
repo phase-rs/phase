@@ -128,7 +128,13 @@ function CommanderPickTwoPack({
   );
 }
 
-function WorkspaceDragCommanderPickTwoHarness({ pickCardStep }: { pickCardStep: PickCardStep }) {
+function WorkspaceDragCommanderPickTwoHarness({
+  pickCardStep,
+  onCompatibilityDoubleClick = vi.fn(),
+}: {
+  pickCardStep: PickCardStep;
+  onCompatibilityDoubleClick?: () => void;
+}) {
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const drag = useDraftWorkspaceDrag({
     enabled: true,
@@ -154,6 +160,28 @@ function WorkspaceDragCommanderPickTwoHarness({ pickCardStep }: { pickCardStep: 
         onPointerUp={drag.handlePointerUp}
         onPointerCancel={drag.handlePointerCancel}
         onLostPointerCapture={drag.handleLostPointerCapture}
+        onClick={(event) => {
+          const pointerEvent = event.nativeEvent as MouseEvent & { readonly pointerId?: number; readonly pointerType?: string };
+          drag.consumeCompatibilityActivation({
+            kind: "click",
+            detail: event.detail,
+            pointerId: pointerEvent.pointerId ?? null,
+            ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+            surface: "workspace",
+            sourceInstanceId: workspaceSource.instanceIds[0],
+          });
+        }}
+        onDoubleClick={(event) => {
+          const pointerEvent = event.nativeEvent as MouseEvent & { readonly pointerId?: number; readonly pointerType?: string };
+          if (!drag.consumeCompatibilityActivation({
+            kind: "double-click",
+            detail: event.detail,
+            pointerId: pointerEvent.pointerId ?? null,
+            ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+            surface: "workspace",
+            sourceInstanceId: workspaceSource.instanceIds[0],
+          })) onCompatibilityDoubleClick();
+        }}
       />
       <PackDisplay
         controller={controller({
@@ -578,9 +606,10 @@ describe("PackDisplay local workspace controller", () => {
     expect(pickCardStep).toHaveBeenCalledWith(["common", "third"], "deck");
   });
 
-  it("lets_a_real_desktop_workspace_drag_retire_before_commander_pick_two_A_B_selection", () => {
+  it("consumes_a_native_workspace_drag_double_click_before_commander_pick_two_pack_selection", () => {
     const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
-    const rendered = render(<WorkspaceDragCommanderPickTwoHarness pickCardStep={pickCardStep} />);
+    const onCompatibilityDoubleClick = vi.fn();
+    const rendered = render(<WorkspaceDragCommanderPickTwoHarness pickCardStep={pickCardStep} onCompatibilityDoubleClick={onCompatibilityDoubleClick} />);
     const workspaceSource = screen.getByTestId("workspace-drag-source");
     const workspaceTarget = screen.getByTestId("workspace-drag-target");
     workspaceSource.setPointerCapture = vi.fn();
@@ -591,13 +620,18 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.pointerMove(workspaceSource, { clientX: 30, clientY: 30, pointerId: 70, pointerType: "mouse" });
     fireEvent.pointerUp(workspaceSource, { clientX: 30, clientY: 30, pointerId: 70, pointerType: "mouse" });
 
+    firePointerActivation(workspaceSource, "click", { detail: 1, pointerId: 70, pointerType: "mouse" });
+    fireEvent(workspaceSource, new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+
+    expect(onCompatibilityDoubleClick).not.toHaveBeenCalled();
+    expect(pickCardStep).not.toHaveBeenCalled();
+
     const card = (instanceId: string) => rendered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
-    firePointerActivation(within(card("unknown")).getByRole("button", { name: "Same" }), "click", { detail: 1, pointerId: 70, pointerType: "mouse" });
+    fireEvent.click(within(card("unknown")).getByRole("button", { name: "Same" }));
     fireEvent.click(within(card("common")).getByRole("button", { name: "Same" }));
 
     expect(card("unknown")).toHaveAttribute("data-visual-state", "selected");
     expect(card("common")).toHaveAttribute("data-visual-state", "selected");
-    expect(pickCardStep).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
     expect(pickCardStep).toHaveBeenCalledWith(["unknown", "common"], "deck");
   });

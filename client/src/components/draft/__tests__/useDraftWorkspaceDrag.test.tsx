@@ -548,7 +548,7 @@ describe("useDraftWorkspaceDrag", () => {
     await act(async () => Promise.resolve());
     firePointerActivation(source, "click", { detail: 1, pointerId: 20, pointerType: "mouse" });
     firePointerActivation(source, "click", { detail: 2, pointerId: 20, pointerType: "mouse" });
-    firePointerActivation(source, "dblclick", { detail: 2, pointerId: 20, pointerType: "mouse" });
+    fireEvent(source, new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
     expect(screen.getByTestId("clicks")).toHaveTextContent("0:0");
 
     fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 21, pointerType: "mouse" });
