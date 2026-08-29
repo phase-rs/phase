@@ -178,6 +178,21 @@ fn cancellation_is_never_a_payment_witness() {
 }
 
 #[test]
+fn missing_payment_finalization_baseline_is_indeterminate_not_no_payment() {
+    let mut state = manual_spell_payment_state();
+    state.stack.clear();
+
+    let batch = witness_payment_continuations(&state, &[GameAction::CancelCast]);
+    assert_eq!(
+        batch.status,
+        PaymentContinuationBatchStatus::Indeterminate(
+            PaymentContinuationIndeterminate::MissingFinalizationBaseline
+        )
+    );
+    assert_eq!(batch.successors, vec![None]);
+}
+
+#[test]
 fn flexible_mana_witness_keeps_every_completing_product() {
     let state = flexible_mana_payment_state();
     let mut actions = legal_actions(&state);

@@ -104,6 +104,7 @@ pub enum PaymentContinuationBatchStatus {
 pub enum PaymentContinuationIndeterminate {
     OverRootCapacity,
     AttemptBudgetExhausted,
+    MissingFinalizationBaseline,
 }
 
 /// Index-aligned result for exactly the input action slice.
@@ -247,7 +248,9 @@ fn witness_payment_continuations_inner(
     }
     let Some(baseline) = WitnessBaseline::capture(state, &root) else {
         return PaymentContinuationBatch {
-            status: PaymentContinuationBatchStatus::Complete,
+            status: PaymentContinuationBatchStatus::Indeterminate(
+                PaymentContinuationIndeterminate::MissingFinalizationBaseline,
+            ),
             successors: empty(),
         };
     };
@@ -376,14 +379,14 @@ fn witness_payment_continuations_inner(
 fn indeterminate_batch(
     reason: PaymentContinuationIndeterminate,
     action_count: usize,
-    attempts: usize,
+    _attempts: usize,
     #[allow(unused_mut, unused_variables)] mut counters: Option<
         &mut PaymentContinuationWitnessCounters,
     >,
 ) -> PaymentContinuationBatch {
     #[cfg(feature = "test-support")]
     if let Some(counters) = &mut counters {
-        counters.total_attempts = attempts;
+        counters.total_attempts = _attempts;
     }
     PaymentContinuationBatch {
         status: PaymentContinuationBatchStatus::Indeterminate(reason),
