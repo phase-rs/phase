@@ -36,8 +36,9 @@ export interface MoveListProps {
   /** Forwarded to each row. See `CardEntryRowProps.onSetAsCommander`. */
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
-  /** Forwarded to each row. Defaults to "compact" so the BO3 sideboard modal
-   *  (which renders MoveList directly) is unchanged. See `CardEntryRowProps`. */
+  /** Forwarded to each row. Defaults to "compact", but every current call site
+   *  passes "comfortable" — hover-revealed controls are unreachable on touch.
+   *  See `CardEntryRowProps`. */
   density?: "comfortable" | "compact";
   /** Forwarded to each row's alternate-art badge. See `CardEntryRowProps`. */
   onOpenArtPicker?: (name: string) => void;

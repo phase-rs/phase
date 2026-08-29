@@ -87,6 +87,10 @@ function moveOne(
  * prompt as `min_main_deck_size` / `max_sideboard_size` — the partition is
  * free to be uneven (CR 100.5: no maximum deck size), so this must never
  * require the main deck to match its registered size.
+ *
+ * Both lists pin `density="comfortable"`: the move button is this modal's only
+ * card-moving affordance, and the default `compact` density hides it behind
+ * `group-hover`, which does not exist on touch — do not drop the prop.
  */
 export function BetweenGamesSideboardModal({
   pool,
@@ -178,6 +182,7 @@ export function BetweenGamesSideboardModal({
               entries={drafts.main}
               onMove={moveCard}
               alwaysShow
+              density="comfortable"
               emptyHint={t("sideboardModal.moveFromSideboard")}
             />
             <MoveList
@@ -193,6 +198,7 @@ export function BetweenGamesSideboardModal({
               entries={drafts.side}
               onMove={moveCard}
               alwaysShow
+              density="comfortable"
               emptyHint={t("sideboardModal.moveFromMain")}
             />
           </div>
