@@ -182,6 +182,30 @@ impl<'a> TextPair<'a> {
         })
     }
 
+    /// CR 604.1: split around `sep` only when the split point sits OUTSIDE a
+    /// quoted granted ability. An ability written in quotation marks is a
+    /// separate static whose own gate belongs to IT, not to the clause granting
+    /// it (Ancestral Katana: `gets +2/+2 and has "This creature has first strike
+    /// as long as it's attacking."` — the `as long as` gates the granted first
+    /// strike, not the +2/+2). A body with an EVEN number of double quotes ends
+    /// outside any "…", so the split point is safe; an odd count means the
+    /// separator was found inside a quoted region and the split must be refused.
+    ///
+    /// INHERITS [`Self::split_around`]'s FIRST-OCCURRENCE semantics: an
+    /// odd-quote body refuses the split outright rather than scanning on to a
+    /// later separator that may lie outside the quotes
+    /// (`has "X as long as Y" as long as Z`). No corpus line has that shape
+    /// today (3 odd-quote static lines total), and both incumbent guards already
+    /// behave this way, so this is a documented property rather than a
+    /// deviation.
+    ///
+    /// SINGLE AUTHORITY for that rule. Callers must not re-derive the quote
+    /// count.
+    pub(crate) fn split_around_outside_quotes(&self, sep: &str) -> Option<(Self, Self)> {
+        self.split_around(sep)
+            .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
+    }
+
     /// Find last `needle` in lowered text, return `(before, after)` excluding needle.
     pub fn rsplit_around(&self, needle: &str) -> Option<(Self, Self)> {
         self.lower.rfind(needle).map(|pos| {

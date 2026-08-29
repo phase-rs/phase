@@ -890,17 +890,34 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    attached-subject statics (an Aura/Equipment whose "it" refers to the
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
-///    typed condition are rewritten — the tapped/untapped pair plus their
-///    combat-state siblings "attacking"/"blocking"/"blocked" and the compound
-///    "attacking or blocking" (which `~ is …` lowers to
-///    `Or([SourceIsAttacking, SourceIsBlocking])`)
-///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
+///    typed condition are rewritten. The list below is the WHOLE list and must
+///    stay in lockstep with the `matches!` arms in the body:
+///    "tapped" / "untapped", their combat-state siblings "attacking" /
+///    "blocking" / "blocked" and the compound "attacking or blocking" (which
+///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
+///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
+///    (CR 301.5a) and "enchanted" (CR 303.4) — nine phrases — plus the two
+///    non-contraction "it entered …" forms handled below, "it entered this turn"
+///    and "it entered the battlefield this turn" (CR 400.7).
+///    "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
 ///    parse paths. Rewriting those would break or mis-bind them, so they are
 ///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
 ///    trailing word and falls through to `SourceAttackingAlone` rather than
 ///    collapsing to `SourceIsAttacking`.
+///
+/// STANDING CONSTRAINT on guard #1. Its premise ("the caller only applies this
+/// when the affected subject is SelfRef, therefore `it` names the source") has
+/// exactly one corpus counterexample today: Hobble ("Enchanted creature can't
+/// block if it's black.") reaches the `CantBlock` dispatch arm, which hardcodes
+/// `affected: SelfRef` even though the printed subject is the enchanted
+/// creature. Its `it` therefore names the RECIPIENT, not the source, and the
+/// only thing holding it inert is that "black" is a CHARACTERISTIC and so is
+/// absent from the exact list above. No characteristic predicate (a color, a
+/// card type, a supertype) may join that list without first re-running the
+/// census of SelfRef-affected statics whose description begins
+/// "Enchanted|Equipped creature".
 ///
 /// Returns the condition unchanged when neither guard matches.
 pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
@@ -956,7 +973,11 @@ pub(crate) fn parse_continuous_gets_has(
 
     // CR 611.3a: Split "as long as [condition]" BEFORE "for each" — the condition applies
     // to the entire static, not to a quantity count. Mirrors parse_enchanted_equipped_predicate.
-    if let Some((before_cond, after_cond)) = tp.split_around(" as long as ") {
+    // Only peel when the split point sits OUTSIDE a quoted granted ability —
+    // `split_around_outside_quotes` is the single authority for that rule
+    // (Ancestral Katana / Giant's Amulet: the inner "as long as" gates the GRANTED
+    // ability, not the +N/+M).
+    if let Some((before_cond, after_cond)) = tp.split_around_outside_quotes(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         // Recursively parse the continuous part without the condition
@@ -965,12 +986,10 @@ pub(crate) fn parse_continuous_gets_has(
         {
             // CR 611.3a: only resolve the self-pronoun "it" to the source when the
             // static modifies itself; attached-subject statics keep "it" bound to
-            // the enchanted/equipped creature and stay an honest gap.
-            let typed = if matches!(affected, TargetFilter::SelfRef) {
-                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            } else {
-                parse_static_condition(condition_text)
-            };
+            // the enchanted/equipped creature and stay an honest gap. That binding
+            // decision has ONE authority — `parse_affected_scoped_static_condition`
+            // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
+            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
             let condition = typed.unwrap_or(StaticCondition::Unrecognized {
                 text: condition_text.to_string(),
             });
@@ -986,25 +1005,18 @@ pub(crate) fn parse_continuous_gets_has(
     // gated on Not(SourceIsAttacking)). Only peel when the split sits OUTSIDE a
     // quoted granted ability — a granted ability's own inner "unless" (e.g. "gains
     // 'counter target spell unless its controller pays {1}'") must stay with the
-    // quoted text; balanced double quotes in the body signal the split is outside
-    // any "...". As with the " as long as " form, the self-pronoun condition
+    // quoted text. `split_around_outside_quotes` is the single authority for that
+    // rule. As with the " as long as " form, the self-pronoun condition
     // subject ("it's attacking"/"it's tapped") is resolved to the source only for
     // SelfRef grants — an attached-subject "it" keeps its enchanted/equipped
     // binding and stays an honest gap.
-    if let Some((before_cond, after_cond)) = tp
-        .split_around(" unless ")
-        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
-    {
+    if let Some((before_cond, after_cond)) = tp.split_around_outside_quotes(" unless ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
             parse_continuous_gets_has(continuous_text, affected.clone(), description)
         {
-            let typed = if matches!(affected, TargetFilter::SelfRef) {
-                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            } else {
-                parse_static_condition(condition_text)
-            };
+            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
             let condition = match typed {
                 Some(inner) => StaticCondition::Not {
                     condition: Box::new(inner),

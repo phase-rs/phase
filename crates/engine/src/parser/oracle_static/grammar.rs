@@ -862,17 +862,17 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // "gets +3/+3 unless it shares a color…") when the split point sits OUTSIDE a
     // quoted/granted ability. A granted ability's own inner "unless" (e.g. Sunken
     // Field's "Counter target spell unless its controller pays {1}") must stay
-    // with the quoted text — the body has balanced double quotes iff the split is
-    // outside any "...".
-    let unless_split = pred_tp
-        .split_around(" unless ")
-        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0);
+    // with the quoted text. `split_around_outside_quotes` is the single authority
+    // for that rule.
+    let unless_split = pred_tp.split_around_outside_quotes(" unless ");
     let (body_tp, suffix_condition) = if let Some((body_tp, _)) = unless_split {
         (
             body_tp,
-            super::shared::parse_unless_static_condition(&pred_tp),
+            super::shared::parse_unless_static_condition(&pred_tp, Some(&affected)),
         )
-    } else if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
+    } else if let Some((body_tp, condition_tp)) =
+        pred_tp.split_around_outside_quotes(" as long as ")
+    {
         let condition_text = condition_tp.original.trim().trim_end_matches('.');
         (
             body_tp,
@@ -949,7 +949,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
 
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
-    if let Some((before_cond, after_cond)) = pred_tp.split_around(" as long as ") {
+    if let Some((before_cond, after_cond)) = pred_tp.split_around_outside_quotes(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =

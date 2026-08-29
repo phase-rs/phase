@@ -2448,7 +2448,7 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     }
     if let Some(unless_cond) = {
         let tp = TextPair::new(text, &lower);
-        super::shared::parse_unless_static_condition(&tp)
+        super::shared::parse_unless_static_condition(&tp, def.affected.as_ref())
     } {
         def.condition = Some(unless_cond);
         return Some(def);
@@ -2547,7 +2547,7 @@ fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefiniti
     // not parse as if the rider were absent.
     tag::<_, _, OracleError<'_>>("unless ").parse(rest).ok()?;
     let tp = TextPair::new(text, &lower);
-    let condition = super::shared::parse_unless_static_condition(&tp)?;
+    let condition = super::shared::parse_unless_static_condition(&tp, def.affected.as_ref())?;
     // Coverage-honesty gate (CR 604.1): only emit the forced-attack static when the
     // `unless` gate is a FULLY-MODELED condition. `parse_unless_static_condition`
     // wraps an unrecognized inner clause as `Not(Unrecognized)` — which (a) would

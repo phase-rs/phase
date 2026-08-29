@@ -1499,7 +1499,8 @@ fn as_long_as_peel_rejects_for_as_long_as_duration() {
     let dur_l = dur.to_lowercase();
     assert!(
         super::shared::parse_as_long_as_static_condition(
-            &crate::parser::oracle_util::TextPair::new(dur, &dur_l)
+            &crate::parser::oracle_util::TextPair::new(dur, &dur_l),
+            Some(&TargetFilter::SelfRef)
         )
         .is_none(),
         "\"for as long as\" is duration text and must not attach as a static gate"
@@ -1510,7 +1511,8 @@ fn as_long_as_peel_rejects_for_as_long_as_duration() {
     let gate_l = gate.to_lowercase();
     assert!(
         super::shared::parse_as_long_as_static_condition(
-            &crate::parser::oracle_util::TextPair::new(gate, &gate_l)
+            &crate::parser::oracle_util::TextPair::new(gate, &gate_l),
+            Some(&TargetFilter::SelfRef)
         )
         .is_some(),
         "bare \"as long as\" must still attach as a static gate (no over-rejection)"

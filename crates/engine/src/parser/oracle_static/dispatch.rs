@@ -2217,19 +2217,53 @@ pub(crate) fn parse_static_line_inner(
                 }
             }
 
-            let condition = if after_blocked.is_empty() {
-                None
-            } else {
-                // CR 509.1h: parse_condition handles "as long as " prefix via nom combinator
-                nom_condition::parse_condition(after_blocked)
-                    .ok()
-                    .and_then(|(r, c)| r.trim().is_empty().then_some(c))
-                    .or_else(|| {
-                        Some(StaticCondition::Unrecognized {
-                            text: after_blocked.to_string(),
-                        })
+            // CR 509.1b + CR 604.1 + CR 611.3a: an evasion restriction's trailing
+            // gate is the SAME grammar as the attack/block restrictions' ("can't
+            // attack" / "can't block", below) — "unless <cond>" / "as long as
+            // <cond>" / "if <cond>". CR 509.1b is the rule that governs it: it
+            // names evasion abilities explicitly ("A restriction may be created by
+            // an evasion ability (a static ability an attacking creature has that
+            // restricts what can block it)") and is re-checked each time blockers
+            // are declared.
+            //
+            // This branch is the FALLBACK in a two-authority series:
+            // `parse_subject_rule_static` (dispatch.rs, above → evasion.rs's
+            // `cant_be_blocked_mode`) classifies the same grammar first, and
+            // control only arrives here when that declines — either because the
+            // subject did not parse (a flavor-word prefix) or because the gate did
+            // not type under `nom_condition::parse_condition`. Route the fallback
+            // through the shared trio rather than calling `parse_condition` a
+            // second time, so the branch that catches what the cheap authority
+            // drops inherits (a) every arm `parse_static_condition` adds over
+            // `parse_inner_condition`, (b) the affected-scoped source-anaphor
+            // binding, and (c) the ONE `unless` polarity rule
+            // (`nom_condition::parse_unless_condition`). Calling `parse_condition`
+            // here previously dropped the `unless` negation on failure, leaving a
+            // bare `Unrecognized` that evaluates TRUE — making the restriction
+            // unconditional (CR 604.1: a static is "simply true", and an `unless`
+            // static is simply true precisely when its condition is FALSE).
+            // Graxiplon was permanently unblockable.
+            let self_ref = TargetFilter::SelfRef;
+            let gate_affected = Some(&self_ref);
+            let condition = parse_unless_static_condition(&tp, gate_affected)
+                .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
+                .or_else(|| parse_if_static_condition(&tp, gate_affected))
+                .or_else(|| {
+                    // The trio all declined. A non-empty tail is an honest gap and
+                    // must keep its `Unrecognized` marker; an EMPTY tail means the
+                    // line is a bare "<subject> can't be blocked." that reached
+                    // this fallback only because its subject did not parse upstream
+                    // (a flavor-word prefix: Canoptek Wraith's "Wraith Form — ",
+                    // Ghost, Spectral Saboteur's "Intangibility — ", Wraith,
+                    // Vicious Vigilante's "Fear Gas — "). Those rows have NO gate,
+                    // so emitting `Unrecognized{""}` would invent a condition — and
+                    // under the layer system's fail-open arm it would read as an
+                    // always-true gate on a restriction that is unconditional by
+                    // print. Keep `None`.
+                    (!after_blocked.is_empty()).then(|| StaticCondition::Unrecognized {
+                        text: after_blocked.to_string(),
                     })
-            };
+                });
             let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string());
@@ -2332,10 +2366,11 @@ pub(crate) fn parse_static_line_inner(
         // `split_trailing_gate_condition`'s precedence. (CR 509.1b is the block
         // *restriction* rule — "a creature can't block" — not 509.1c, which is
         // block *requirements*.)
-        if let Some(condition) = parse_unless_static_condition(&tp)
-            .or_else(|| parse_as_long_as_static_condition(&tp))
-            .or_else(|| parse_if_static_condition(&tp))
-        {
+        let gate_affected = def.affected.as_ref();
+        let gate = parse_unless_static_condition(&tp, gate_affected)
+            .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
+            .or_else(|| parse_if_static_condition(&tp, gate_affected));
+        if let Some(condition) = gate {
             def.condition = Some(condition);
         }
         return Some(def);
@@ -2380,10 +2415,11 @@ pub(crate) fn parse_static_line_inner(
         // attach whichever is present. "as long as" is tried before "if" to match
         // `split_trailing_gate_condition`'s precedence (Seer of the Bright Side:
         // "... can't attack or block as long as it has a stun counter on it.").
-        if let Some(condition) = parse_unless_static_condition(&tp)
-            .or_else(|| parse_as_long_as_static_condition(&tp))
-            .or_else(|| parse_if_static_condition(&tp))
-        {
+        let gate_affected = def.affected.as_ref();
+        let gate = parse_unless_static_condition(&tp, gate_affected)
+            .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
+            .or_else(|| parse_if_static_condition(&tp, gate_affected));
+        if let Some(condition) = gate {
             def.condition = Some(condition);
         }
         return Some(def);
@@ -2470,7 +2506,7 @@ pub(crate) fn parse_static_line_inner(
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
-        if let Some(condition) = parse_unless_static_condition(&tp) {
+        if let Some(condition) = parse_unless_static_condition(&tp, def.affected.as_ref()) {
             def.condition = Some(condition);
         }
         return Some(def);
