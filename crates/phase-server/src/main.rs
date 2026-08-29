@@ -1597,6 +1597,15 @@ async fn reconnect_draft_seat(
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let mut manager = draft_state.lock().await;
+    if let Some((attached_code, _attached_seat, attached_token)) = identity.draft_seat() {
+        if attached_code != draft_code
+            || attached_token != player_token
+            || !draft_socket_is_current_while_state_locked(&manager, connections, identity, tx)
+                .await
+        {
+            return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
+        }
+    }
     let seat = manager
         .sessions
         .get(&draft_code)
@@ -10220,7 +10229,7 @@ mod draft_socket_authority_tests {
             &connections,
             &mut identity_b,
             draft_code.clone(),
-            player_token,
+            player_token.clone(),
             &b_tx,
         )
         .await
@@ -10234,6 +10243,17 @@ mod draft_socket_authority_tests {
         assert!(
             draft_socket_is_current_preflight(&draft_state, &connections, &identity_b, &b_tx).await
         );
+        let err = reconnect_draft_seat(
+            &draft_state,
+            &connections,
+            &mut identity_a,
+            draft_code.clone(),
+            player_token,
+            &a_tx,
+        )
+        .await
+        .expect_err("superseded A must not replace B after a stale reconnect");
+        assert_eq!(err, DRAFT_SOCKET_AUTHORITY_REJECTION);
         assert!(
             connections
                 .lock()
