@@ -20,8 +20,8 @@ import type {
 } from "./types.ts";
 
 export class VisualPackBackendError extends Error {
-  constructor(public readonly kind: VisualPackErrorKind) {
-    super(`visual-pack backend ${kind}`);
+  constructor(public readonly kind: VisualPackErrorKind, detail?: string) {
+    super(detail || `visual-pack backend ${kind}`);
     this.name = "VisualPackBackendError";
   }
 }
