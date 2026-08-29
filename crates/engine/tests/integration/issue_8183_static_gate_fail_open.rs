@@ -92,7 +92,11 @@ fn has_kw(runner: &mut GameRunner, id: ObjectId, keyword: &Keyword) -> bool {
 /// actually arrived — so a harness change surfaces as a clear failure rather
 /// than silently making every legality assertion below vacuous.
 fn advance_to_declare_attackers(runner: &mut GameRunner) {
-    runner.pass_both_players();
+    // CR 508.1: use the scenario harness's purpose-built combat advance rather
+    // than a single priority round-trip. A lone `pass_both_players()` lands on
+    // the next `Priority` in the same phase, never on the declare-attackers
+    // turn-based action.
+    runner.advance_to_combat();
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -209,6 +213,14 @@ fn training_drone_cannot_attack_while_unequipped() {
     let drone = scenario
         .add_creature_from_oracle(P0, "Training Drone", 1, 1, TRAINING_DRONE)
         .id();
+    // CR 508.1: a second, unrestricted attacker is REQUIRED, not decorative.
+    // With the Drone as the only creature its restriction leaves zero legal
+    // attackers, the engine never surfaces the declare-attackers turn-based
+    // action, and the harness advances turns until a player decks — the test
+    // then fails in the reach-guard on `GameOver` rather than exercising its
+    // claim. The bear guarantees the step is reached so the assertion below
+    // isolates the DRONE's legality specifically.
+    let _bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = scenario.build();
 
     advance_to_declare_attackers(&mut runner);
