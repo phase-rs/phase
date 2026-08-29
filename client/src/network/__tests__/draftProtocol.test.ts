@@ -40,8 +40,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 21", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(21);
+    it("is version 22", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(22);
     });
   });
 
@@ -261,6 +261,24 @@ describe("draftProtocol", () => {
   });
 
   describe("validateDraftMessage", () => {
+    it("accepts only versioned, token-bound draft leave messages", () => {
+      expect(validateDraftMessage({
+        type: "draft_leave",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken: "seat-token",
+      })).toMatchObject({ type: "draft_leave", draftToken: "seat-token" });
+      expect(validateDraftMessage({
+        type: "draft_leave_ack",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken: "seat-token",
+      })).toMatchObject({ type: "draft_leave_ack", draftToken: "seat-token" });
+      expect(() => validateDraftMessage({
+        type: "draft_leave",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION - 1,
+        draftToken: "seat-token",
+      })).toThrow("Invalid draft leave message");
+    });
+
     it("accepts valid draft_join message", () => {
       const msg = validateDraftMessage({
         type: "draft_join",

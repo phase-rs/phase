@@ -305,8 +305,9 @@ interface MultiplayerDraftActions {
   requestPause: () => void;
   /** Host: resume the draft. */
   requestResume: () => void;
-  /** Both: tear down the connection and reset state. */
-  leave: (preserveSession?: boolean) => Promise<void>;
+  /** Both: tear down the connection and reset state. Lifecycle callers retain
+   * recovery; an explicit leave revokes it only after host acknowledgement. */
+  leave: (preserveRecovery?: boolean) => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
   /** Both: start the match for the current pairing. */
@@ -1897,20 +1898,20 @@ export const useMultiplayerDraftStore = create<
     });
   },
 
-  leave: async (preserveSession = false) => {
+  leave: async (preserveRecovery = false) => {
     beginDraftLifecycle();
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
 
     if (activeHostAdapter) {
-      await activeHostAdapter.dispose({ preserveSession });
+      await activeHostAdapter.dispose({ preserveSession: preserveRecovery });
       activeHostAdapter = null;
-      if (!preserveSession) {
+      if (!preserveRecovery) {
         clearActiveDraftPod();
       }
     }
     if (activeGuestAdapter) {
-      await activeGuestAdapter.dispose();
+      await activeGuestAdapter.dispose({ preserveRecovery });
       activeGuestAdapter = null;
     }
     set({ ...initialState, interactionGeneration: lifecycleGeneration });

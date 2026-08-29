@@ -373,6 +373,66 @@ describe("P2P draft guest handshake attempts", () => {
     });
   });
 
+  it("clears recovery and the deck outbox only after the host acknowledges leave", async () => {
+    const guest = new P2PDraftGuest(
+      { destroy: vi.fn() } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+
+    const leave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[0]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    expect(persistenceState.clearDraftDeckSubmission).not.toHaveBeenCalled();
+
+    sessionState.sessions[0]!.handler!({
+      type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    });
+    await leave;
+    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+  });
+
+  it("clears recovery and the deck outbox when the host ends the draft", async () => {
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+    persistenceState.clearDraftGuestRecovery.mockClear();
+    persistenceState.clearDraftDeckSubmission.mockClear();
+
+    sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
+    await vi.waitFor(() => expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE"));
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+  });
+
   it("waits for token persistence before completing a reconnect acknowledgement", async () => {
     sessionState.sessions.length = 0;
     persistenceState.saveActiveDraftGuest.mockClear();

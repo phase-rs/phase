@@ -103,6 +103,7 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
 const FIRST_CONTACT_TIMEOUT_MS = 10_000;
+const LEAVE_ACK_TIMEOUT_MS = 10_000;
 
 function reconnectFailureForRejection(
   kind: DraftReconnectRejectionKind,
@@ -145,6 +146,13 @@ export class P2PDraftGuest {
   >();
   /** Set synchronously so two UI clicks share one outbox command. */
   private pendingDeckSubmission: Promise<void> | null = null;
+  private pendingLeave: Promise<void> | null = null;
+  private leaveAcknowledgement: {
+    session: DraftPeerSession;
+    draftToken: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | null = null;
 
   constructor(
     private readonly guestPeer: Peer,
@@ -282,6 +290,11 @@ export class P2PDraftGuest {
     if (this.handshake?.session === session) {
       this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"));
     } else {
+      if (this.leaveAcknowledgement?.session === session) {
+        this.leaveAcknowledgement.reject(new Error("Draft host disconnected before acknowledging leave"));
+        this.leaveAcknowledgement = null;
+        return;
+      }
       this.handleHostDisconnect();
     }
   }
@@ -529,6 +542,18 @@ export class P2PDraftGuest {
         break;
       }
 
+      case "draft_leave_ack": {
+        const pending = this.leaveAcknowledgement;
+        if (
+          pending
+          && pending.session === session
+          && pending.draftToken === msg.draftToken
+        ) {
+          pending.resolve();
+        }
+        break;
+      }
+
       case "draft_state_update": {
         this.currentView = msg.view;
         this.emit({ type: "viewUpdated", view: msg.view });
@@ -639,6 +664,8 @@ export class P2PDraftGuest {
 
       case "draft_host_left": {
         this.terminated = true;
+        await clearDraftGuestRecovery(this.hostPeerId);
+        await clearDraftDeckSubmission(this.hostPeerId);
         this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "hostLeft", reason: msg.reason });
         break;
@@ -704,7 +731,7 @@ export class P2PDraftGuest {
   // ── Disconnect / Reconnect ─────────────────────────────────────────
 
   private handleHostDisconnect(): void {
-    if (this.terminated || this.reconnecting || !this.draftToken) return;
+    if (this.terminated || this.reconnecting || this.leaveAcknowledgement || !this.draftToken) return;
     this.reconnecting = true;
     void this.attemptReconnect(0);
   }
@@ -743,7 +770,43 @@ export class P2PDraftGuest {
     this.listeners = [];
   }
 
-  async leave(): Promise<void> {
+  leave(): Promise<void> {
+    if (this.pendingLeave) return this.pendingLeave;
+    const leave = this.leaveInner();
+    this.pendingLeave = leave;
+    void leave.finally(() => {
+      if (this.pendingLeave === leave) this.pendingLeave = null;
+    }).catch(() => undefined);
+    return leave;
+  }
+
+  private async leaveInner(): Promise<void> {
+    const session = this.session;
+    const draftToken = this.draftToken;
+    if (!session || !draftToken) throw new Error("Draft leave requires an active session");
+
+    const acknowledgement = new Promise<void>((resolve, reject) => {
+      this.leaveAcknowledgement = { session, draftToken, resolve, reject };
+    });
+    const timeout = setTimeout(() => {
+      if (this.leaveAcknowledgement?.session === session) {
+        this.leaveAcknowledgement.reject(new Error("Draft host did not acknowledge leave"));
+        this.leaveAcknowledgement = null;
+      }
+    }, LEAVE_ACK_TIMEOUT_MS);
+
+    try {
+      await session.send({
+        type: "draft_leave",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken,
+      });
+      await acknowledgement;
+    } finally {
+      clearTimeout(timeout);
+      if (this.leaveAcknowledgement?.session === session) this.leaveAcknowledgement = null;
+    }
+
     this.terminated = true;
     await clearDraftGuestRecovery(this.hostPeerId);
     await clearDraftDeckSubmission(this.hostPeerId);

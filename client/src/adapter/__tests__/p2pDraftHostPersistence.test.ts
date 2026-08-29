@@ -21,6 +21,7 @@ vi.mock("../../services/draftPersistence", () => ({
 }));
 
 import { P2PDraftHost } from "../p2p-draft-host";
+import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
 
 type PersistenceHost = {
   adapter: { exportSession: () => Promise<string> };
@@ -364,7 +365,7 @@ describe("P2PDraftHost persistence disposal", () => {
         adapter: { setSeatConnected: ReturnType<typeof vi.fn>; exportSession: ReturnType<typeof vi.fn> };
         draftStarted: boolean;
         seatTokens: Map<number, string>;
-        armRecoveredGuestGrace: () => void;
+        armRecoveredGuestGrace: (deadlines: Record<number, number>) => boolean;
         expiredDisconnectedSeats: Set<number>;
         disconnectedSeats: Map<number, unknown>;
       };
@@ -372,7 +373,7 @@ describe("P2PDraftHost persistence disposal", () => {
       privateHost.seatTokens.set(1, "guest-token");
       privateHost.adapter.setSeatConnected = vi.fn(async () => {});
       privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
-      privateHost.armRecoveredGuestGrace();
+      privateHost.armRecoveredGuestGrace({ 1: Date.now() + 5 * 60_000 });
 
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(true);
@@ -408,6 +409,89 @@ describe("P2PDraftHost persistence disposal", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("durably revokes a lobby seat before acknowledging its explicit leave", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session);
+
+    expect(saveDraftHostSession).toHaveBeenCalledBefore(session.send);
+    expect(session.send).toHaveBeenCalledWith({
+      type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    });
+    expect(privateHost.seatTokens.has(1)).toBe(false);
+    expect(privateHost.seatNames.has(1)).toBe(false);
+  });
+
+  it("makes a stale prior session inert after the seat reconnects", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+    };
+    const current = { send: vi.fn(async () => {}), close: vi.fn() };
+    const stale = { send: vi.fn(async () => {}), close: vi.fn() };
+    privateHost.guestSessions.set(1, current);
+    privateHost.seatTokens.set(1, "leave-token");
+
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, stale);
+
+    expect(privateHost.seatTokens.get(1)).toBe("leave-token");
+    expect(current.send).not.toHaveBeenCalled();
+  });
+
+  it("turns a post-start leave into a terminal paused human seat without a bot", async () => {
+    const host = recoveredHost("Host");
+    const privateHost = host as unknown as {
+      adapter: {
+        setSeatConnected: ReturnType<typeof vi.fn>;
+        exportSession: ReturnType<typeof vi.fn>;
+        getViewForSeat: ReturnType<typeof vi.fn>;
+      };
+      draftStarted: boolean;
+      guestSessions: Map<number, unknown>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      expiredDisconnectedSeats: Set<number>;
+      paused: boolean;
+      handleGuestMessage: (seat: number, message: unknown, session: unknown) => Promise<void>;
+      isBotSeat: (seat: number) => boolean;
+    };
+    const session = { send: vi.fn(async () => {}), close: vi.fn() };
+    privateHost.draftStarted = true;
+    privateHost.adapter.setSeatConnected = vi.fn(async () => {});
+    privateHost.adapter.exportSession = vi.fn(async () => "{\"status\":\"Drafting\"}");
+    privateHost.adapter.getViewForSeat = vi.fn(async () => ({ status: "Drafting", seats: [] }));
+    privateHost.guestSessions.set(1, session);
+    privateHost.seatTokens.set(1, "leave-token");
+    privateHost.seatNames.set(1, "Guest");
+
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }, session);
+
+    expect(privateHost.adapter.setSeatConnected).toHaveBeenCalledWith(1, false);
+    expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(true);
+    expect(privateHost.seatTokens.has(1)).toBe(false);
+    expect(privateHost.seatNames.get(1)).toBe("Guest");
+    expect(privateHost.isBotSeat(1)).toBe(false);
+    expect(privateHost.paused).toBe(true);
   });
 
   it("commits a joining guest's token before welcome and preserves it for recovery", async () => {

@@ -128,8 +128,12 @@ import type {
  *
  *  21 — complete, validated per-seat workspace snapshots and workspace pool
  *       metadata. This is additive and retains the v13–20 contract.
+ *  22 — durable, session-bound participant leave handshake. `draft_leave`
+ *       and its acknowledgement both carry the exact protocol version and
+ *       capability token, so a guest clears recoverable state only after the
+ *       host has durably revoked that exact seat.
  */
-export const DRAFT_PROTOCOL_VERSION = 21 as const;
+export const DRAFT_PROTOCOL_VERSION = 22 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -258,12 +262,12 @@ export type DraftMatchLaunch =
  *
  * Flow:
  *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
- *                 `draft_request_advance`, `draft_workspace_update`
+ *                 `draft_request_advance`, `draft_workspace_update`, `draft_leave`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
  *                 `draft_kicked`, `draft_pairing`, `draft_match_result`,
  *                 `draft_paused`, `draft_resumed`, `draft_lobby_update`,
- *                 `draft_host_left`, `draft_timer_sync`, `draft_match_start`
+ *                 `draft_host_left`, `draft_timer_sync`, `draft_match_start`, `draft_leave_ack`
  */
 export type DraftP2PMessage =
   // ── Guest → Host ───────────────────────────────────────────────────
@@ -304,6 +308,12 @@ export type DraftP2PMessage =
       type: "draft_workspace_update";
       workspaceState: DraftWorkspaceState;
     }
+  | {
+      /** Explicit participant exit, bound to the currently authenticated seat. */
+      type: "draft_leave";
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
+      draftToken: string;
+    }
   // ── Host → Guest ───────────────────────────────────────────────────
   | {
       type: "draft_welcome";
@@ -330,6 +340,12 @@ export type DraftP2PMessage =
       type: "draft_reconnect_rejected";
       kind: DraftReconnectRejectionKind;
       reason: string;
+    }
+  | {
+      /** Sent only after the host has durably revoked this exact seat. */
+      type: "draft_leave_ack";
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
+      draftToken: string;
     }
   | {
       type: "draft_state_update";
@@ -507,9 +523,11 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_pick_with_draft_effect",
   "draft_submit_deck",
   "draft_workspace_update",
+  "draft_leave",
   "draft_welcome",
   "draft_reconnect_ack",
   "draft_reconnect_rejected",
+  "draft_leave_ack",
   "draft_state_update",
   "draft_deck_submit_ack",
   "draft_pick_ack",
@@ -835,6 +853,17 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   const msg = raw as { type: string };
   if (!VALID_DRAFT_TYPES.has(msg.type)) {
     throw new Error(`Invalid draft message type: ${msg.type}`);
+  }
+  if (msg.type === "draft_leave" || msg.type === "draft_leave_ack") {
+    const leave = raw as Record<string, unknown>;
+    if (
+      leave.draftProtocolVersion !== DRAFT_PROTOCOL_VERSION
+      || typeof leave.draftToken !== "string"
+      || leave.draftToken.length === 0
+    ) {
+      throw new Error("Invalid draft leave message");
+    }
+    return leave as DraftP2PMessage;
   }
   if (msg.type === "draft_pick_with_draft_effect") {
     return validateDraftEffectPick(raw as Record<string, unknown>);

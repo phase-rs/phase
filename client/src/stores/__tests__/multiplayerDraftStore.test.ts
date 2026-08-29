@@ -834,6 +834,18 @@ describe("multiplayerDraftStore", () => {
     });
   });
 
+  describe("leave", () => {
+    it("routes an explicit guest leave through recovery revocation", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+
+      await useMultiplayerDraftStore.getState().leave();
+
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: false });
+    });
+  });
+
   describe("shared actions", () => {
     it.each([
       {
