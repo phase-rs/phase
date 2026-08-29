@@ -536,7 +536,7 @@ describe("LimitedDeckBuilder", () => {
     render(
       <LimitedDeckBuilder
         local={{
-          view: TEST_VIEW,
+          view: { ...TEST_VIEW, min_deck_size: 1 },
           workspace: {
             schemaVersion: 1,
             placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
