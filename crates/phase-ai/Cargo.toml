@@ -77,6 +77,12 @@ path = "src/bin/attack_scaling_bench.rs"
 required-features = ["scenario-benches"]
 test = false
 
+[[bin]]
+name = "candelabra-target-selection-bench"
+path = "src/bin/candelabra_target_selection_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
 [dev-dependencies]
 # cfg(test) modules place objects with the raw zone API (sealed in production builds).
 engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }

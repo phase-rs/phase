@@ -780,6 +780,7 @@ mod issue_787_once_upon_a_time;
 mod issue_788_unexpectedly_absent;
 mod issue_7945_free_grant_face_down;
 mod issue_8024_terminal_rest_captures;
+mod issue_8101_candelabra_target_selection;
 mod issue_8183_static_gate_fail_open;
 mod issue_822_erode_path_to_exile_search_controller;
 mod issue_828_full_throttle;

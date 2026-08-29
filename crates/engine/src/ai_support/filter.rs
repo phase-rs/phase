@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::game::ability_utils::{choose_target_for_ability, TargetSelectionAdvance};
 use crate::game::combat::AttackTarget;
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
@@ -144,6 +145,9 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_pass_priority(state, candidate) {
             return true;
         }
+        if structurally_valid_target_selection_choose_target(state, candidate) {
+            return true;
+        }
         if super::structurally_valid_search_selection(state, &candidate.action) {
             return true;
         }
@@ -166,6 +170,9 @@ impl CandidateFilter for SimulationFilter {
         probe: Option<&casting::PriorityCastProbe>,
     ) -> bool {
         if structurally_valid_pass_priority(state, candidate) {
+            return true;
+        }
+        if structurally_valid_target_selection_choose_target(state, candidate) {
             return true;
         }
         if super::structurally_valid_search_selection(state, &candidate.action) {
@@ -341,6 +348,59 @@ fn structurally_valid_pass_priority(state: &GameState, candidate: &CandidateActi
     }
 
     crate::game::priority::pass_priority_structurally_legal(state, *player)
+}
+
+/// CR 601.2c + CR 602.2b: An ordinary spell or activated-ability target
+/// selection is structurally legal when choosing this target advances, but does
+/// not complete, the pending target walk. Completion still has to assign
+/// targets, pay costs, and put the ability on the stack, so it remains on the
+/// simulation fallback.
+///
+/// Bound interaction sessions deliberately remain on that fallback. Their
+/// capability boundary owns additional authority validation that this local
+/// target-walk predicate cannot model.
+fn structurally_valid_target_selection_choose_target(
+    state: &GameState,
+    candidate: &CandidateAction,
+) -> bool {
+    if state.interaction_session_id.is_some() {
+        return false;
+    }
+
+    let (
+        WaitingFor::TargetSelection {
+            player,
+            pending_cast,
+            target_slots,
+            selection,
+            ..
+        },
+        GameAction::ChooseTarget { target },
+    ) = (&state.waiting_for, &candidate.action)
+    else {
+        return false;
+    };
+
+    if candidate.metadata.semantic_owner != Some(*player)
+        || candidate.metadata.actor
+            != Some(turn_control::authorized_submitter_for_player(
+                state, *player,
+            ))
+    {
+        return false;
+    }
+
+    matches!(
+        choose_target_for_ability(
+            state,
+            &pending_cast.ability,
+            target_slots,
+            &pending_cast.target_constraints,
+            selection,
+            target.clone(),
+        ),
+        Ok(TargetSelectionAdvance::InProgress(_))
+    )
 }
 
 fn structurally_valid_priority_activation(state: &GameState, action: &GameAction) -> bool {
@@ -1568,6 +1628,160 @@ mod tests {
             .expect("PassPriority should be a candidate in the opening state");
         assert!(SimulationFilter.accept(&state, &pass));
         assert!(BasicLegalityFilter.accept(&state, &pass));
+    }
+
+    const CANDELABRA_ORACLE: &str = "{X}, {T}: Untap X target lands.";
+
+    fn candelabra_target_selection() -> (crate::game::scenario::GameRunner, [ObjectId; 2]) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let candelabra = scenario
+            .add_artifact_from_oracle(P0, "Candelabra of Tawnos", CANDELABRA_ORACLE)
+            .id();
+        let lands = [
+            scenario.add_basic_land(P0, ManaColor::Green),
+            scenario.add_basic_land(P0, ManaColor::Green),
+        ];
+        let mut runner = scenario.build();
+        let pool = &mut runner.state_mut().players[P0.0 as usize].mana_pool;
+        for _ in 0..2 {
+            pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: candelabra,
+                ability_index: 0,
+            })
+            .expect("Candelabra activation starts");
+        runner
+            .act(GameAction::ChooseX { value: 2 })
+            .expect("Candelabra X is announced before targets");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        (runner, lands)
+    }
+
+    fn candelabra_target_candidate(state: &GameState, target: ObjectId) -> CandidateAction {
+        candidate_actions(state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(id)),
+                    } if id == target
+                )
+            })
+            .expect("the real Candelabra prompt offers each legal land")
+    }
+
+    /// The Candelabra target walk is a real activated-ability target-selection
+    /// pipeline, not a hand-assembled prompt. Its first target remains in
+    /// progress, whereas the second completes and must retain the fallback.
+    #[test]
+    fn candelabra_target_selection_hatch_skips_only_nonterminal_choices() {
+        let (mut runner, lands) = candelabra_target_selection();
+        let first = candelabra_target_candidate(runner.state(), lands[0]);
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(runner.state(), &first));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            0,
+            "accept must structurally admit the first Candelabra target"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept_with_probe(runner.state(), &first, None));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            0,
+            "accept_with_probe must structurally admit the first Candelabra target"
+        );
+
+        runner
+            .act(first.action.clone())
+            .expect("the engine-enumerated first target is accepted");
+        let final_target = candelabra_target_candidate(runner.state(), lands[1]);
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(runner.state(), &final_target));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            1,
+            "the terminal target choice must retain the full simulation fallback"
+        );
+
+        let (runner, _) = candelabra_target_selection();
+        let cancel = candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::CancelCast))
+            .expect("an uncommitted activation target prompt is cancellable");
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(runner.state(), &cancel));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            1,
+            "CancelCast is outside the hatch and must still simulate"
+        );
+    }
+
+    #[test]
+    fn candelabra_target_selection_hatch_requires_stamped_authority_and_unbound_session() {
+        let (runner, lands) = candelabra_target_selection();
+        let mut mismatched = candelabra_target_candidate(runner.state(), lands[0]);
+        mismatched.metadata.actor = Some(PlayerId(1));
+        crate::game::perf_counters::reset();
+        assert!(!SimulationFilter.accept(runner.state(), &mismatched));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            1,
+            "metadata mismatch must defer to the authoritative rejection"
+        );
+
+        let (mut runner, lands) = candelabra_target_selection();
+        runner.state_mut().turn_decision_controller = Some(PlayerId(1));
+        let controlled = candelabra_target_candidate(runner.state(), lands[0]);
+        assert_eq!(controlled.metadata.semantic_owner, Some(PlayerId(0)));
+        assert_eq!(controlled.metadata.actor, Some(PlayerId(1)));
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(runner.state(), &controlled));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            0,
+            "the hatch must honor the authorized turn controller"
+        );
+
+        let (mut runner, lands) = candelabra_target_selection();
+        runner.state_mut().interaction_session_id = Some(
+            crate::types::interaction::InteractionSessionId("test-session".to_string()),
+        );
+        runner.state_mut().next_interaction_serial = "0".to_string();
+        let bound = candelabra_target_candidate(runner.state(), lands[0]);
+        assert!(!structurally_valid_target_selection_choose_target(
+            runner.state(),
+            &bound
+        ));
+        crate::game::perf_counters::reset();
+        assert!(
+            !SimulationFilter.accept(runner.state(), &bound),
+            "the interaction boundary must reject an invalid bound session"
+        );
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            1,
+            "bound interaction states must reach the simulation boundary"
+        );
     }
 
     // ------------------------------------------------------------------
