@@ -985,6 +985,7 @@ function WorkspaceDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [snowCovered, setSnowCovered] = useState(false);
   const [requestedLands, setRequestedLands] = useState<Record<string, number>>({});
 
@@ -1043,12 +1044,16 @@ function WorkspaceDeckBuilder({
   };
 
   const handleSubmit = async () => {
+    if (isSubmitting) return;
     setLocalSubmissionError(null);
+    setIsSubmitting(true);
     try {
       await onSubmitDeck();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1259,11 +1264,11 @@ function WorkspaceDeckBuilder({
                     <button
                       type="button"
                       onClick={() => void handleSubmit()}
-                      disabled={!deckValid}
+                      disabled={!deckValid || isSubmitting}
                       className={menuButtonClass({
                         tone: "emerald",
                         size: "sm",
-                        disabled: !deckValid,
+                        disabled: !deckValid || isSubmitting,
                         className: "w-full",
                       })}
                     >
@@ -1303,11 +1308,11 @@ function WorkspaceDeckBuilder({
                   <button
                     type="button"
                     onClick={() => void handleSubmit()}
-                    disabled={!deckValid}
+                    disabled={!deckValid || isSubmitting}
                     className={menuButtonClass({
                       tone: "emerald",
                       size: "md",
-                      disabled: !deckValid,
+                      disabled: !deckValid || isSubmitting,
                       className: "w-full",
                     })}
                   >
@@ -1351,11 +1356,11 @@ function WorkspaceDeckBuilder({
               <button
                 type="button"
                 onClick={() => void handleSubmit()}
-                disabled={!deckValid}
+                disabled={!deckValid || isSubmitting}
                 className={menuButtonClass({
                   tone: "emerald",
                   size: "md",
-                  disabled: !deckValid,
+                  disabled: !deckValid || isSubmitting,
                   className: "w-full",
                 })}
               >
@@ -1382,8 +1387,12 @@ function WorkspaceDeckBuilder({
           <button
             type="button"
             onClick={() => void handleSubmit()}
-            disabled={!deckValid}
-            className={menuButtonClass({ tone: "emerald", size: "md", disabled: !deckValid })}
+            disabled={!deckValid || isSubmitting}
+            className={menuButtonClass({
+              tone: "emerald",
+              size: "md",
+              disabled: !deckValid || isSubmitting,
+            })}
           >
             {t("limitedDeck.submitDeck")}
           </button>

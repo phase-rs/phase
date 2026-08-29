@@ -528,6 +528,44 @@ describe("LimitedDeckBuilder", () => {
     expect(row.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
+  it("prevents concurrent workspace deck submissions", async () => {
+    let resolveSubmission!: () => void;
+    const submitDeck = vi.fn(() => new Promise<void>((resolve) => {
+      resolveSubmission = resolve;
+    }));
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: TEST_VIEW,
+          workspace: {
+            schemaVersion: 1,
+            placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submitDeck,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="tablet-landscape"
+        showSuggestions={false}
+      />,
+    );
+
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    fireEvent.click(submit);
+    expect(submitDeck).toHaveBeenCalledOnce();
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
+    expect(submitDeck).toHaveBeenCalledOnce();
+
+    await act(async () => resolveSubmission());
+    expect(submit).not.toBeDisabled();
+  });
+
   it.each(["tablet-portrait", "phone-portrait", "phone-landscape", "desktop"] as const)(
     "does not emit tablet landscape markers in %s",
     (responsiveLayout) => {
