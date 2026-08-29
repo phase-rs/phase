@@ -298,7 +298,7 @@ pub struct TournamentMeta {
     pub bracket: BracketShape,            // Swiss | SingleElimination
     pub total_rounds: u32,                // organizer override, else MTR/MSTR Appendix E default (arity-selected)
     pub current_round: u32,
-    pub status: TournamentStatus,         // Registration | InProgress | Completed
+    pub status: TournamentStatus,         // Registration | InProgress | Completed | Abandoned — see "Expiry" below
     pub players: Vec<TournamentPlayer>,
     pub pairings: Vec<TournamentPairing>,
     pub created_at: u64,
@@ -665,15 +665,72 @@ the drop-timing case above: reject `winner` if `TournamentPlayer.dropped`
 is true for that player at validation time, closing the "credited a win
 after leaving" gap the drop-timing note above calls out.
 
-**Expiry** — fixes #4615 finding #3 directly: `last_activity_at` bumped on
-every mutating call (`join_tournament`, `start_round`, `report_result`,
-`drop_player`), and `check_expired` filters on `last_activity_at`, not
-`created_at`. Additionally, per the discussion's proposal, staleness reaping
-should be restricted to `TournamentStatus::Registration` (abandoned
-registration, nobody ever started) — an `InProgress` tournament should not
-be reaped by a fixed timeout at all, only by genuine inactivity, since a
-real Swiss event with human players between rounds can easily exceed any
-reasonable fixed timeout.
+**Expiry / retention — REVISED, maintainer review: the prior text named a
+policy ("genuine inactivity" for `InProgress`) without ever defining it, the
+owning transition, or a `Completed` retention rule, so the in-memory
+`TournamentManager` had no bound on how long it retains ANY tournament that
+ever leaves `Registration`.** Fixes #4615 finding #3 and completes the
+lifecycle with four explicit rules, one per status, all keyed off the same
+`last_activity_at` (bumped on every mutating call — `join_tournament`,
+`start_round`, `report_result`, `drop_player`, AND, new here, every status
+transition itself, so `last_activity_at` doubles as "time of the most
+recent state change" for retention purposes without a second timestamp
+field):
+
+1. **`Registration`** — unchanged from the original design.
+   `check_expired` reaps (deletes) a `Registration`-status tournament once
+   `last_activity_at` exceeds the same 300-second window the existing
+   lobby reaper already uses (`broker.reap_expired(300, &SysEnv)`,
+   `crates/phase-server/src/main.rs:1000`) — an abandoned registration
+   (organizer created it, nobody ever joined or started it) is exactly the
+   same shape of staleness the lobby's own 300s window already handles.
+2. **`InProgress` — NEW, the previously-undefined case.** "Genuine
+   inactivity" is defined as `last_activity_at` exceeding **7 days**
+   (chosen to comfortably exceed any real multi-round Swiss event's
+   natural between-round gaps — human coordination, players returning
+   later the same day or the next — while still eventually reclaiming a
+   tournament nobody is actually running anymore). The owning transition:
+   `check_expired` moves the tournament to `TournamentStatus::Abandoned`
+   (a NEW status, not a deletion — the record and its full pairing/
+   standings history are preserved, only the "still live" status ends).
+   This threshold is a system default, NOT organizer-overridable (unlike
+   `total_rounds`) — it's server hygiene, not a tournament rule a TO would
+   reasonably want to tune.
+3. **`Completed` / `Abandoned` — NEW, the retention rule maintainer review
+   flagged as entirely missing.** Both are terminal states whose standings
+   are frozen (a genuinely finished event and an abandoned one are kept
+   distinct — see `Abandoned`'s own doc comment below — but both stop
+   accepting mutations the same way). `check_expired` deletes a tournament
+   in either state once `last_activity_at` (i.e., time of completion or
+   abandonment) exceeds a **30-day retention period** — long enough for
+   players/organizers to look up final standings after the fact, bounded
+   enough that the in-memory `HashMap` doesn't grow forever.
+
+```rust
+pub enum TournamentStatus {
+    Registration,
+    InProgress,
+    /// All rounds finished normally, standings frozen — a trustworthy
+    /// final result.
+    Completed,
+    /// NEW — reached only via `check_expired`'s 7-day `InProgress`
+    /// inactivity transition (point 2 above), never organizer-initiated.
+    /// Distinct from `Completed`: an abandoned tournament's final round(s)
+    /// may still have `Pending` pairings, so its "standings" reflect
+    /// whatever was actually reported before activity stopped, not a
+    /// guaranteed-complete result — kept as its own status specifically so
+    /// clients can display that distinction rather than presenting an
+    /// abandoned event's partial standings as equivalent to a real
+    /// `Completed` one.
+    Abandoned,
+}
+```
+
+Both new rules are exercised by `check_expired` alone — no new operation
+or background job beyond the reaper this design already calls for
+`Registration` (`main.rs:1000`'s existing reap site just needs to widen its
+scope to also cover `InProgress`/`Completed`/`Abandoned` on every sweep,
+not add a second timer).
 
 ## 3. Authority model — organizer/player tokens, not socket identity
 
@@ -921,3 +978,17 @@ but incomplete tally like `1-0` (rejected, not a completed Bo3), `2-2`
 one. A sibling test confirms a pod (`arity > 2`) result with a non-empty
 `game_wins` is rejected outright, and one with an empty map validates
 normally.
+
+**NEW — maintainer review (tournament lifecycle retention, "Expiry" §2)**:
+four dedicated tests, one per status — (a) a `Registration` tournament with
+`last_activity_at` past the 300s window is deleted by `check_expired`,
+unchanged from the existing behavior; (b) an `InProgress` tournament with
+`last_activity_at` just under 7 days is untouched (proving a real
+multi-day gap between rounds doesn't get reaped); (c) an `InProgress`
+tournament past the 7-day threshold transitions to `Abandoned` — record
+preserved, `pairings`/standings unchanged, only `status` and
+`last_activity_at` updated by the transition itself; (d) a `Completed` (or
+`Abandoned`) tournament past the 30-day retention window is deleted
+outright by `check_expired`, while one still within the window is
+untouched — proving the previously-missing terminal-state retention rule
+is actually enforced, not just documented.
