@@ -2499,6 +2499,57 @@ mod tests {
         assert!(mgr.sessions.is_empty());
     }
 
+    /// CR 103.4: each player begins with a starting life total of 20, and some
+    /// variant games use a different one — so a host-configured `starting_life`
+    /// is the authority, not the format's default.
+    ///
+    /// This is the server-side half of the desktop (Tauri) solo/host route: the
+    /// native engine is this phase-server running as a sidecar, and the client
+    /// hands it the edited `FormatConfig` in `CreateGameWithSettings`. Dropping
+    /// it here would silently seat every player at the format default.
+    ///
+    /// REVERT-FAIL: make `create_game_n_players` ignore its `format_config`
+    /// argument (or re-derive one from `format_config.format`) ⇒ life is 40.
+    #[test]
+    fn create_game_honors_a_configured_starting_life() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::commander();
+        format_config.starting_life = 25;
+
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect("a custom starting life is a supported configuration");
+
+        let session = mgr.sessions.get(&code).unwrap();
+        assert_eq!(session.state.format_config.starting_life, 25);
+        for player in &session.state.players {
+            assert_eq!(
+                player.life, 25,
+                "every seat must start on the configured life total, not Commander's 40"
+            );
+        }
+
+        // The between-games rebuild re-reads the session's own format config, so
+        // game 2 of a match must not silently revert to the format default.
+        mgr.sessions
+            .get_mut(&code)
+            .unwrap()
+            .rebuild_pregame_state(2);
+        for player in &mgr.sessions.get(&code).unwrap().state.players {
+            assert_eq!(
+                player.life, 25,
+                "the rebuild must preserve the configured life total"
+            );
+        }
+    }
+
     /// CR 732.2a (#4603 opt-in, Best-of-N): the combo-detector opt-in lives on the
     /// immutable `MatchConfig` and is projected onto `GameState::loop_detection` by
     /// `set_match_config` at BOTH game creation AND the between-games rebuild, so a Bo3

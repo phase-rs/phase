@@ -17,6 +17,7 @@ import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
+import { IntegerField } from "../components/ui/IntegerField";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
   getRepresentativeDeckVisual,
@@ -202,7 +203,7 @@ export function GameSetupPage() {
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
-      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig });
     }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
@@ -210,8 +211,14 @@ export function GameSetupPage() {
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
+    // The URL carries the format NAME only, so the edited config (starting
+    // life) has to ride along out-of-band or GamePage re-derives it from
+    // `FORMAT_DEFAULTS` and silently discards the edit. Router state — the
+    // same channel `useBroker` uses — rather than a URL param, because the
+    // native-engine route above deliberately writes no resume pointer.
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      { state: { formatConfig } },
     );
   };
 
@@ -481,11 +488,11 @@ export function GameSetupPage() {
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">{t("gameSetup.config.startingLife")}</span>
-                    <input
-                      type="number"
+                    <IntegerField
                       value={formatConfig.starting_life}
-                      onChange={(e) =>
-                        setFormatConfig({ ...formatConfig, starting_life: Number(e.target.value) })
+                      min={1}
+                      onCommit={(starting_life) =>
+                        setFormatConfig({ ...formatConfig, starting_life })
                       }
                       className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
                     />

@@ -285,9 +285,12 @@ vi.mock("../../hooks/useCardDataMeta", () => ({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function renderGamePage(initialEntry = "/game/test-game-123?mode=ai") {
+function renderGamePage(
+  initialEntry: string | { pathname: string; search: string; state: unknown } =
+    "/game/test-game-123?mode=ai",
+) {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
+    <MemoryRouter initialEntries={[initialEntry as never]}>
       <Routes>
         <Route path="/game/:id" element={<GamePage />} />
         <Route path="/setup" element={<div data-testid="setup-page">Setup</div>} />
@@ -376,6 +379,21 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     renderGamePage("/game/test-game-123?format=Planechase&players=4");
 
     expect(capturedFormatConfig?.format).toBe("Planechase");
+  });
+
+  // The setup screen hands its edited config over on the navigation rather than
+  // in the URL, which carries the format NAME only. Without this the memo falls
+  // back to the format registry and a custom starting life is silently replaced
+  // by the format default — including on the Tauri native route, which writes no
+  // resume pointer and so has no other copy of the user's choice.
+  it("prefers the setup screen's handed-over config over the format default", () => {
+    renderGamePage({
+      pathname: "/game/test-game-123",
+      search: "?mode=ai&format=Commander&players=2",
+      state: { formatConfig: { format: "Commander", starting_life: 25 } },
+    });
+
+    expect(capturedFormatConfig?.starting_life).toBe(25);
   });
 
   it("renders the blocking modal when bracketViolation flag is true", async () => {
