@@ -6467,7 +6467,7 @@ async fn handle_client_message(
                     &deck.scheme_deck,
                     &deck.signature_spell,
                     &[],
-                    fc.format,
+                    fc,
                     Some(match_config.match_type),
                     usize::from(pc),
                 ) {
@@ -6520,7 +6520,7 @@ async fn handle_client_message(
                         &ai_deck_data.signature_spell,
                         // Constructed play, as above: no draft, no concession.
                         &[],
-                        fc.format,
+                        fc,
                         Some(match_config.match_type),
                         usize::from(pc),
                     ) {

@@ -594,6 +594,7 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       range_of_influence: null,
       team_based: false,
       sideboard_policy: { type: "Limited", data: 15 },
+      default_deck_copy_limit: { type: "UpTo", data: 4 },
       uses_commander: false,
       allow_debug_actions: false,
     },

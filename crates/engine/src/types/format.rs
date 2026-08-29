@@ -357,6 +357,16 @@ fn default_sideboard_policy_fallback() -> SideboardPolicy {
     SideboardPolicy::Forbidden
 }
 
+/// CR 100.2a / CR 100.2b / CR 903.5b: Fail-closed default for
+/// `FormatConfig.default_deck_copy_limit` on a payload serialized before
+/// this field existed. `UpTo(1)` — the same value
+/// `GameFormat::Custom(_).default_deck_copy_limit()` already discloses as
+/// its own fail-closed fallback — is the tightest possible cap, so a stale
+/// payload under-permits rather than silently over-permitting extra copies.
+fn default_deck_copy_limit_fallback() -> DeckCopyLimit {
+    DeckCopyLimit::UpTo(1)
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -408,6 +418,20 @@ pub struct FormatConfig {
     /// any payload serialized before this field existed.
     #[serde(default = "default_sideboard_policy_fallback")]
     pub sideboard_policy: SideboardPolicy,
+    /// Engine-derived, stored per-format default deck-construction copy
+    /// ceiling (CR 100.2a / CR 100.2b / CR 903.5b), before per-card printed
+    /// overrides and the basic-land exemption — both applied by
+    /// `game::deck_validation::max_deck_copies`, the single query authority.
+    /// Mirrors `uses_commander`/`supplies_fixed_deck`/`sideboard_policy`'s
+    /// stored-field pattern: real consumers must read this field, never
+    /// `GameFormat::default_deck_copy_limit()` directly — for a built-in
+    /// format the two always agree, but for `GameFormat::Custom` the bare
+    /// method has no way to see the real declared limit sitting in
+    /// `custom_rules.structural` and would silently discard it.
+    /// `#[serde(default)]` fails closed (`UpTo(1)`) for any payload
+    /// serialized before this field existed.
+    #[serde(default = "default_deck_copy_limit_fallback")]
+    pub default_deck_copy_limit: DeckCopyLimit,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -1123,6 +1147,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Standard.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Standard.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1144,6 +1169,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::Commander.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Commander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1182,6 +1208,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::CommanderDraft.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::CommanderDraft.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1275,6 +1302,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::TinyLeaders.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::TinyLeaders.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1300,6 +1328,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Oathbreaker.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Oathbreaker.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1338,6 +1367,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::Brawl.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Brawl.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1370,6 +1400,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::FreeForAll.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::FreeForAll.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1393,6 +1424,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Limited.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Limited.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1419,6 +1451,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Momir.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Momir.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1440,6 +1473,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::TwoHeadedGiant.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::TwoHeadedGiant.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1464,6 +1498,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Planechase.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Planechase.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1487,6 +1522,7 @@ impl FormatConfig {
             archenemy_player: Some(PlayerId(0)),
             uses_commander: false,
             sideboard_policy: GameFormat::Archenemy.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Archenemy.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1567,6 +1603,7 @@ mod tests {
         assert!(!config.command_zone);
         assert_eq!(config.commander_damage_threshold, None);
         assert!(!config.team_based);
+        assert_eq!(config.default_deck_copy_limit, DeckCopyLimit::UpTo(4));
     }
 
     #[test]
@@ -1580,6 +1617,7 @@ mod tests {
         assert!(config.command_zone);
         assert_eq!(config.commander_damage_threshold, Some(21));
         assert!(!config.team_based);
+        assert_eq!(config.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
     }
 
     /// CR 903.5a vs CR 903.13f(1): the two command-zone deck-size rules are
@@ -2066,6 +2104,12 @@ mod tests {
                 "{:?}: registry default disagrees with sideboard_policy predicate",
                 meta.format
             );
+            assert_eq!(
+                meta.default_config.default_deck_copy_limit,
+                meta.format.default_deck_copy_limit(),
+                "{:?}: registry default disagrees with default_deck_copy_limit predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
@@ -2073,6 +2117,10 @@ mod tests {
             assert_eq!(config.uses_commander, format.uses_commander().unwrap());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
             assert_eq!(config.sideboard_policy, format.sideboard_policy());
+            assert_eq!(
+                config.default_deck_copy_limit,
+                format.default_deck_copy_limit()
+            );
         }
     }
 

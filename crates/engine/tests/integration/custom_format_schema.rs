@@ -475,8 +475,15 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     // The real signature takes every deck slot explicitly, plus the
-    // CR 903.13f(3) draft set codes, a match type and a player count — not the
-    // three-argument shape an earlier planning pass assumed.
+    // CR 903.13f(3) draft set codes, a resolved `FormatConfig`, a match type,
+    // and a player count. Passing the config (not a bare `GameFormat`) is the
+    // point: a Custom format's declared rules only exist on the config, so
+    // this is the shape a future resolver would read.
+    let custom_config = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(1)),
+        custom_rules: Some(Box::new(sample_rules(1))),
+        ..FormatConfig::standard()
+    };
     let result = validate_name_deck_for_format_full(
         &db,
         &[],
@@ -487,7 +494,7 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
         &[],
         &[],
         &[],
-        GameFormat::Custom(CustomFormatId(1)),
+        &custom_config,
         None,
         2,
     );

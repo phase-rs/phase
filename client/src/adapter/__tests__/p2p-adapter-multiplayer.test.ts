@@ -479,6 +479,7 @@ function twoHeadedGiantConfig(): FormatConfig {
     range_of_influence: null,
     team_based: true,
     sideboard_policy: { type: "Unlimited" },
+    default_deck_copy_limit: { type: "Unlimited" },
     uses_commander: false,
     allow_debug_actions: false,
   };
@@ -497,6 +498,7 @@ function commanderConfig(): FormatConfig {
     range_of_influence: null,
     team_based: false,
     sideboard_policy: { type: "Forbidden" },
+    default_deck_copy_limit: { type: "UpTo", data: 1 },
     uses_commander: true,
     allow_debug_actions: false,
   };

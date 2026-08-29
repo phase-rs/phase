@@ -360,6 +360,17 @@ pub fn validate_name_deck_for_format_with_sig(
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
 ) -> Result<(), Vec<String>> {
+    // A bare-GameFormat holder can legitimately pass Custom here (e.g. from
+    // untrusted input). Route it through the same shared rejection text
+    // `evaluate_selected_format`/`evaluate_selected_format_summary` already
+    // use (CUSTOM_FORMAT_UNSUPPORTED) instead of `FormatConfig::for_format`'s
+    // differently-worded "no default exists" error, so all three Custom-
+    // rejection paths agree on one wording — never three drifting ones.
+    if matches!(selected_format, GameFormat::Custom(_)) {
+        return Err(vec![CUSTOM_FORMAT_UNSUPPORTED.to_string()]);
+    }
+    let format_config = FormatConfig::for_format(selected_format)
+        .expect("format is guaranteed non-Custom by the preceding check");
     validate_name_deck_for_format_full(
         db,
         main_deck,
@@ -372,7 +383,7 @@ pub fn validate_name_deck_for_format_with_sig(
         // CR 903.13e/f: no draft behind this deck — every caller of this
         // variant is constructed play, which concedes nothing.
         &[],
-        selected_format,
+        &format_config,
         selected_match_type,
         default_player_count(),
     )
@@ -389,7 +400,7 @@ pub fn validate_name_deck_for_format_full(
     scheme_deck: &[String],
     signature_spell: &[String],
     draft_set_codes: &[String],
-    selected_format: GameFormat,
+    format_config: &FormatConfig,
     selected_match_type: Option<MatchType>,
     player_count: usize,
 ) -> Result<(), Vec<String>> {
@@ -401,7 +412,7 @@ pub fn validate_name_deck_for_format_full(
         planar_deck: planar_deck.to_vec(),
         scheme_deck: scheme_deck.to_vec(),
         signature_spell: signature_spell.to_vec(),
-        selected_format: Some(selected_format),
+        selected_format: Some(format_config.format),
         selected_match_type,
         player_count,
         summary_only: false,
@@ -2974,10 +2985,16 @@ fn effective_copy_limit(
     deck_copy_limit_for(db, canonical_name).unwrap_or(format_default)
 }
 
-/// CR 100.2a / CR 100.2b / CR 903.5b: How many copies of `name` a `format` deck
-/// may legally contain, counting main deck, sideboard, and command zone
-/// together (CR 100.4a: "The four-card limit applies to the combined deck and
-/// sideboard"). `Unlimited` means no ceiling.
+/// CR 100.2a / CR 100.2b / CR 903.5b: How many copies of `name` a deck built
+/// under `format_config` may legally contain, counting main deck, sideboard,
+/// and command zone together (CR 100.4a: "The four-card limit applies to the
+/// combined deck and sideboard"). `Unlimited` means no ceiling.
+///
+/// The format half of the rule comes from `format_config`'s **resolved**
+/// `default_deck_copy_limit` field, never from a bare
+/// `GameFormat::default_deck_copy_limit()` call: for a built-in format the two
+/// always agree, but for `GameFormat::Custom` only the stored field can carry
+/// the format's real declared limit.
 ///
 /// This is the query-shaped counterpart to `copy_limit_violations` and the
 /// single authority consumers outside the engine must use — the deck builder
@@ -2989,12 +3006,17 @@ fn effective_copy_limit(
 /// distinct violation (`restricted_copy_violations`), so the shared helper must
 /// keep the two failures separable. A caller asking "how many may I have?"
 /// wants the one ceiling that actually binds.
-pub fn max_deck_copies(db: &CardDatabase, name: &str, format: GameFormat) -> DeckCopyLimit {
+pub fn max_deck_copies(
+    db: &CardDatabase,
+    name: &str,
+    format_config: &FormatConfig,
+) -> DeckCopyLimit {
     // CR 100.2b: a card the format's legality table marks Restricted is legal
     // at no more than one copy, whichever way the format default or the card's
     // printed override would otherwise point. Vintage is the canonical user,
     // but the lookup is format-general.
-    if format
+    if format_config
+        .format
         .legality_format()
         .and_then(|legality_format| {
             db.legality_status(resolve_card_name(db, name), legality_format)
@@ -3006,7 +3028,7 @@ pub fn max_deck_copies(db: &CardDatabase, name: &str, format: GameFormat) -> Dec
     effective_copy_limit(
         db,
         &canonical_deck_count_key(db, name),
-        format.default_deck_copy_limit(),
+        format_config.default_deck_copy_limit,
     )
 }
 
@@ -3467,6 +3489,7 @@ fn subtype_partner_match(
 mod tests {
     use super::*;
 
+    use crate::types::custom_format::CustomFormatId;
     use crate::types::keywords::PartnerType;
     use serde_json::{Map, Value};
 
@@ -4472,44 +4495,44 @@ mod tests {
         // Format default: CR 100.2a four-of in constructed, CR 903.5b singleton
         // in the Commander family.
         assert_eq!(
-            max_deck_copies(&db, "Red Card", GameFormat::Modern),
+            max_deck_copies(&db, "Red Card", &FormatConfig::modern()),
             DeckCopyLimit::UpTo(4)
         );
         assert_eq!(
-            max_deck_copies(&db, "Red Card", GameFormat::Commander),
+            max_deck_copies(&db, "Red Card", &FormatConfig::commander()),
             DeckCopyLimit::UpTo(1)
         );
         // CR 100.2b: limited decks may contain as many duplicates as the
         // product provides, so no ceiling applies.
         assert_eq!(
-            max_deck_copies(&db, "Red Card", GameFormat::Limited),
+            max_deck_copies(&db, "Red Card", &FormatConfig::limited()),
             DeckCopyLimit::Unlimited
         );
 
         // Printed overrides replace the format default in both directions.
         assert_eq!(
-            max_deck_copies(&db, "Seven Dwarves", GameFormat::Modern),
+            max_deck_copies(&db, "Seven Dwarves", &FormatConfig::modern()),
             DeckCopyLimit::UpTo(7)
         );
         assert_eq!(
-            max_deck_copies(&db, "Nazgûl", GameFormat::Commander),
+            max_deck_copies(&db, "Nazgûl", &FormatConfig::commander()),
             DeckCopyLimit::UpTo(9)
         );
         assert_eq!(
-            max_deck_copies(&db, "Relentless Rats", GameFormat::Modern),
+            max_deck_copies(&db, "Relentless Rats", &FormatConfig::modern()),
             DeckCopyLimit::Unlimited
         );
 
         // CR 205.4c: basic lands are exempt regardless of format.
         assert_eq!(
-            max_deck_copies(&db, "Mountain", GameFormat::Commander),
+            max_deck_copies(&db, "Mountain", &FormatConfig::commander()),
             DeckCopyLimit::Unlimited
         );
 
         // Names are canonicalized before lookup, so spelling variants that
         // resolve to the same card share one ceiling.
         assert_eq!(
-            max_deck_copies(&db, "Nazgul", GameFormat::Modern),
+            max_deck_copies(&db, "Nazgul", &FormatConfig::modern()),
             DeckCopyLimit::UpTo(9)
         );
     }
@@ -4535,7 +4558,7 @@ mod tests {
         );
 
         assert_eq!(
-            max_deck_copies(&db, "Black Lotus", GameFormat::Vintage),
+            max_deck_copies(&db, "Black Lotus", &FormatConfig::vintage()),
             DeckCopyLimit::UpTo(1),
             "a Vintage-restricted card is capped at one copy, not the four-of default"
         );
@@ -4544,14 +4567,14 @@ mod tests {
         // so it falls through to the CR 100.2a default rather than inheriting
         // Vintage's restriction.
         assert_eq!(
-            max_deck_copies(&db, "Black Lotus", GameFormat::Legacy),
+            max_deck_copies(&db, "Black Lotus", &FormatConfig::legacy()),
             DeckCopyLimit::UpTo(4)
         );
 
         // CR 205.4c still wins for basics — a restricted lookup must not
         // shadow the exemption for cards the list doesn't name.
         assert_eq!(
-            max_deck_copies(&db, "Island", GameFormat::Vintage),
+            max_deck_copies(&db, "Island", &FormatConfig::vintage()),
             DeckCopyLimit::Unlimited
         );
     }
@@ -5364,6 +5387,60 @@ mod tests {
 
         let reasons = result.expect_err("Premodern validation must reject missing legality");
         assert!(reasons.iter().any(|r| r.contains("Not Premodern legal")));
+    }
+
+    #[test]
+    fn validate_name_deck_for_format_full_reads_resolved_format_config() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        let standard_deck = legal_60_main("Legal Standard");
+        assert!(validate_name_deck_for_format_full(
+            &db,
+            &standard_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &FormatConfig::standard(),
+            None,
+            default_player_count(),
+        )
+        .is_ok());
+
+        let non_premodern_deck = legal_60_main("Pioneer Only");
+        let reasons = validate_name_deck_for_format_full(
+            &db,
+            &non_premodern_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &FormatConfig::premodern(),
+            None,
+            default_player_count(),
+        )
+        .expect_err("Premodern validation must reject missing legality");
+        assert!(reasons.iter().any(|r| r.contains("Not Premodern legal")));
+    }
+
+    #[test]
+    fn validate_name_deck_for_format_rejects_custom_with_the_shared_message() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let result = validate_name_deck_for_format(
+            &db,
+            &[],
+            &[],
+            &[],
+            GameFormat::Custom(CustomFormatId(1)),
+            None,
+        );
+        assert_eq!(result, Err(vec![CUSTOM_FORMAT_UNSUPPORTED.to_string()]));
     }
 
     #[test]
