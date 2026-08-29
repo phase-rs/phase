@@ -838,8 +838,10 @@ export class P2PDraftGuest {
   }
 
   private async revokeRecovery(): Promise<void> {
-    await clearDraftGuestRecovery(this.hostPeerId);
-    await clearDraftDeckSubmission(this.hostPeerId);
+    await Promise.allSettled([
+      clearDraftGuestRecovery(this.hostPeerId),
+      clearDraftDeckSubmission(this.hostPeerId),
+    ]);
     this.recoveryRevoked = true;
   }
 

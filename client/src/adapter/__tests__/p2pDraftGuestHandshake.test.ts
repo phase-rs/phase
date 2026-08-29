@@ -484,6 +484,37 @@ describe("P2P draft guest handshake attempts", () => {
     await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
   });
 
+  it("finishes terminal host handling when recovery cleanup fails", async () => {
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+    persistenceState.clearDraftGuestRecovery.mockRejectedValueOnce(new Error("storage unavailable"));
+    persistenceState.clearDraftDeckSubmission.mockRejectedValueOnce(new Error("outbox unavailable"));
+
+    sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
+
+    await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
+    expect(events).toContainEqual({ type: "hostLeft", reason: "Host left" });
+    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+  });
+
   it("waits for token persistence before completing a reconnect acknowledgement", async () => {
     sessionState.sessions.length = 0;
     persistenceState.saveActiveDraftGuest.mockClear();
