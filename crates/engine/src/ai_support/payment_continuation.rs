@@ -189,9 +189,7 @@ pub fn witness_payment_continuation(
     action: &GameAction,
 ) -> Option<AcceptedPaymentSuccessor> {
     let batch = witness_payment_continuations(state, std::slice::from_ref(action));
-    matches!(batch.status, PaymentContinuationBatchStatus::Complete)
-        .then(|| batch.successors.into_iter().next().flatten())
-        .flatten()
+    batch.successors.into_iter().next().flatten()
 }
 
 /// Witness all raw actions for one exact payment decision with a shared bounded
@@ -366,6 +364,18 @@ fn witness_payment_continuations_inner(
                     action: node.root_action,
                     state: node.root_successor,
                 });
+                if partial_direct_payment_search {
+                    #[cfg(feature = "test-support")]
+                    if let Some(counters) = &mut counters {
+                        counters.total_attempts = attempts;
+                    }
+                    return PaymentContinuationBatch {
+                        status: PaymentContinuationBatchStatus::Indeterminate(
+                            PaymentContinuationIndeterminate::PartialDirectPaymentSearch,
+                        ),
+                        successors,
+                    };
+                }
             }
             continue;
         }
@@ -373,14 +383,19 @@ fn witness_payment_continuations_inner(
             classify_payment_continuation(&next_state),
             PaymentContinuationState::Affiliated(ref current_root) if current_root == &root
         ) {
-            queue.push_back(WitnessNode {
+            let child = WitnessNode {
                 root_index: node.root_index,
                 root_action: node.root_action,
                 root_successor: node.root_successor,
                 state: next_state,
                 events,
                 remaining_actions: None,
-            });
+            };
+            if partial_direct_payment_search {
+                queue.push_front(child);
+            } else {
+                queue.push_back(child);
+            }
         }
     }
 
