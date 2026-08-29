@@ -248,9 +248,6 @@ fn witness_payment_continuations_inner(
             successors: empty(),
         };
     }
-    let attempt_budget = (noncancel_roots * 4)
-        .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
-        .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
     let Some(baseline) = WitnessBaseline::capture(state, &root) else {
         return PaymentContinuationBatch {
             status: PaymentContinuationBatchStatus::Indeterminate(
@@ -279,6 +276,12 @@ fn witness_payment_continuations_inner(
     if partial_direct_payment_search {
         order.truncate(direct_root_count);
     }
+    let attempt_budget = if partial_direct_payment_search {
+        direct_root_count * 4
+    } else {
+        (noncancel_roots * 4).max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
+    }
+    .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
 
     let mut attempts = 0;
     let mut successors = empty();
