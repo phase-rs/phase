@@ -66,6 +66,7 @@ const dragController = {
 };
 
 type WorkspaceController = Extract<PackDisplayController, { kind: "local-workspace" }>;
+type PickCard = WorkspaceController["pickCard"];
 type PickCardStep = WorkspaceController["pickCardStep"];
 type ConfirmPick = WorkspaceController["confirmPick"];
 
@@ -93,12 +94,14 @@ const commanderPickTwoView = {
 };
 
 function CommanderPickTwoPack({
+  pickCard = async () => ({ status: "ignored" as const, reason: "busy" as const }),
   pickCardStep = async () => ({ status: "ignored" as const, reason: "busy" as const }),
   confirmPick = async () => ({ status: "ignored" as const, reason: "busy" as const }),
   doubleClickPick = true,
   dragController: localDrag = dragController,
   responsiveLayout = "desktop",
 }: {
+  pickCard?: PickCard;
   pickCardStep?: PickCardStep;
   confirmPick?: ConfirmPick;
   doubleClickPick?: boolean;
@@ -112,6 +115,7 @@ function CommanderPickTwoPack({
         view: commanderPickTwoView,
         selectedCard,
         selectCard: setSelectedCard,
+        pickCard,
         pickCardStep,
         confirmPick,
         doubleClickPick,
@@ -522,6 +526,26 @@ describe("PackDisplay local workspace controller", () => {
     expect(pickCardStep).toHaveBeenCalledWith(["common", "third"], "deck");
   });
 
+  it("replaces_the_oldest_completed_commander_pick_two_selection_on_desktop_and_submits_the_new_pair_manually", () => {
+    const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<CommanderPickTwoPack pickCardStep={pickCardStep} />);
+    const card = (instanceId: string) => rendered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
+    const activate = (instanceId: string, name: string) => fireEvent.click(within(card(instanceId)).getByRole("button", { name }));
+
+    activate("unknown", "Same"); // [] + A -> [A]
+    activate("common", "Same"); // [A] + B -> [A, B]
+    expect(card("unknown")).toHaveAttribute("data-visual-state", "selected");
+    expect(card("common")).toHaveAttribute("data-visual-state", "selected");
+
+    activate("third", "Third"); // [A, B] + C -> [B, C]
+    expect(card("unknown")).toHaveAttribute("data-visual-state", "default");
+    expect(card("common")).toHaveAttribute("data-visual-state", "selected");
+    expect(card("third")).toHaveAttribute("data-visual-state", "selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
+    expect(pickCardStep).toHaveBeenCalledWith(["common", "third"], "deck");
+  });
+
   it.each([
     { responsiveLayout: "phone-portrait" as const },
     { responsiveLayout: "tablet-portrait" as const },
@@ -536,16 +560,47 @@ describe("PackDisplay local workspace controller", () => {
     expect(first).toHaveAttribute("data-visual-state", "selected");
   });
 
+  it.each(["phone-portrait" as const, "tablet-portrait" as const])("replaces_the_oldest_completed_commander_pick_two_selection_from_a_%s_touch_tap", (responsiveLayout) => {
+    const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const localDrag = { ...dragController, handlePointerDown: vi.fn() };
+    const rendered = render(<CommanderPickTwoPack responsiveLayout={responsiveLayout} dragController={localDrag} pickCardStep={pickCardStep} />);
+    const card = (instanceId: string) => rendered.container.querySelector<HTMLElement>(`[data-instance-id="${instanceId}"]`)!;
+    const tap = (instanceId: string, pointerId: number) => {
+      const element = card(instanceId);
+      fireEvent.pointerDown(element, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+      fireEvent.pointerUp(element, { clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+    };
+
+    tap("unknown", 81); // [] + A -> [A]
+    tap("common", 82); // [A] + B -> [A, B]
+    expect(card("unknown")).toHaveAttribute("data-visual-state", "selected");
+    expect(card("common")).toHaveAttribute("data-visual-state", "selected");
+
+    tap("third", 83); // [A, B] + C -> [B, C]
+    expect(card("unknown")).toHaveAttribute("data-visual-state", "default");
+    expect(card("common")).toHaveAttribute("data-visual-state", "selected");
+    expect(card("third")).toHaveAttribute("data-visual-state", "selected");
+
+    fireEvent.click(screen.getByRole("button", { name: responsiveLayout === "phone-portrait" ? "Deck" : "Confirm Pick" }));
+    expect(pickCardStep).toHaveBeenCalledWith(["common", "third"], "deck");
+  });
+
   it("disables_commander_pick_two_double_click_and_double_tap_confirmation", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_000));
+    const pickCard = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const pickCardStep = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
-    const rendered = render(<CommanderPickTwoPack pickCardStep={pickCardStep} confirmPick={confirmPick} />);
+    const rendered = render(<CommanderPickTwoPack pickCard={pickCard} pickCardStep={pickCardStep} confirmPick={confirmPick} />);
     const first = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const second = rendered.container.querySelector<HTMLElement>('[data-instance-id="common"]')!;
     const activation = within(first).getByRole("button", { name: "Same" });
 
     fireEvent.click(activation);
+    fireEvent.click(within(second).getByRole("button", { name: "Same" }));
+    expect(first).toHaveAttribute("data-visual-state", "selected");
+    expect(second).toHaveAttribute("data-visual-state", "selected");
+
     fireEvent.doubleClick(activation);
     fireEvent.pointerDown(first, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 82, pointerType: "touch" });
     fireEvent.pointerUp(first, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 82, pointerType: "touch" });
@@ -554,6 +609,7 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.pointerUp(first, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 83, pointerType: "touch" });
 
     expect(pickCardStep).not.toHaveBeenCalled();
+    expect(pickCard).not.toHaveBeenCalled();
     expect(confirmPick).not.toHaveBeenCalled();
   });
 
