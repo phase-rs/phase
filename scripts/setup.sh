@@ -91,6 +91,28 @@ if [ "${#missing[@]}" -ne 0 ]; then
   exit 1
 fi
 
+# --- Preflight: pnpm major must match client/package.json's packageManager ---
+# pnpm >= 10 stopped reading the "pnpm" field in package.json. Running it here
+# silently drops client/package.json's `pnpm.overrides` (the supply-chain pins
+# for serialize-javascript, ws, brace-expansion, postcss, …) from
+# pnpm-lock.yaml, writes a stray client/pnpm-workspace.yaml, and then fails
+# `pnpm install` with ERR_PNPM_IGNORED_BUILDS because `onlyBuiltDependencies`
+# is ignored too. That leaves a dirty tree and a lockfile that would ship
+# without its security overrides, so treat a major mismatch as fatal.
+#
+# `packageManager` also lets pnpm >= 10 and corepack auto-select the right
+# version, so this check only fires for a pnpm that cannot self-correct.
+PNPM_WANT="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9]*\)\..*/\1/p' \
+              client/package.json | head -1)"
+PNPM_HAVE="$(pnpm --version 2>/dev/null | cut -d. -f1)"
+if [ -n "$PNPM_WANT" ] && [ -n "$PNPM_HAVE" ] && [ "$PNPM_HAVE" != "$PNPM_WANT" ]; then
+  echo "ERROR: pnpm $PNPM_HAVE found, but this repo pins pnpm $PNPM_WANT." >&2
+  echo "  pnpm >= 10 ignores the \"pnpm\" field in client/package.json and will" >&2
+  echo "  rewrite client/pnpm-lock.yaml without its security overrides." >&2
+  echo "  Fix: pnpm self-update $PNPM_WANT   (or: corepack enable)" >&2
+  exit 1
+fi
+
 # --- Preflight: soft tool (tilt-dev/tilt, NOT other CLIs named "tilt") ---
 # Multiple unrelated binaries ship as `tilt` (e.g. Go template tools). The
 # tilt-dev/tilt binary is the only one whose help text references the
