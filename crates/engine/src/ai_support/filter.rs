@@ -29,6 +29,8 @@
 //! ("resolve_trigger", "apply_damage") here is out of scope; this is a
 //! structural legality pipeline, not a rules engine.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -92,6 +94,20 @@ pub trait CandidateFilter {
     ) -> bool {
         self.accept(state, candidate)
     }
+
+    /// Returns `true` only when this expensive filter can accept `candidate`
+    /// without constructing a legality-equivalence memo key.
+    ///
+    /// The default is deliberately conservative: filters that have no
+    /// structural acceptance proof retain the normal memoized verdict path.
+    fn definitely_accepts_before_memo_key(
+        &self,
+        _state: &GameState,
+        _candidate: &CandidateAction,
+        _probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        false
+    }
 }
 
 /// Structural legality check wrapping [`super::cheap_reject_candidate`].
@@ -145,7 +161,7 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_pass_priority(state, candidate) {
             return true;
         }
-        if structurally_valid_target_selection_choose_target(state, candidate) {
+        if self.definitely_accepts_before_memo_key(state, candidate, None) {
             return true;
         }
         if super::structurally_valid_search_selection(state, &candidate.action) {
@@ -172,7 +188,7 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_pass_priority(state, candidate) {
             return true;
         }
-        if structurally_valid_target_selection_choose_target(state, candidate) {
+        if self.definitely_accepts_before_memo_key(state, candidate, probe) {
             return true;
         }
         if super::structurally_valid_search_selection(state, &candidate.action) {
@@ -188,6 +204,15 @@ impl CandidateFilter for SimulationFilter {
             return true;
         }
         self.fallback_simulation(state, candidate)
+    }
+
+    fn definitely_accepts_before_memo_key(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        _probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        structurally_valid_target_selection_choose_target(state, candidate)
     }
 }
 
@@ -488,6 +513,30 @@ pub struct FilterPipeline {
     filters: Vec<Box<dyn CandidateFilter + Send + Sync>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LEGALITY_EQUIVALENCE_KEY_EVALUATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_legality_equivalence_key_evaluation() {
+    LEGALITY_EQUIVALENCE_KEY_EVALUATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_legality_equivalence_key_evaluation() {}
+
+#[cfg(test)]
+fn reset_legality_equivalence_key_evaluations() {
+    LEGALITY_EQUIVALENCE_KEY_EVALUATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn legality_equivalence_key_evaluations() -> u64 {
+    LEGALITY_EQUIVALENCE_KEY_EVALUATIONS.with(Cell::get)
+}
+
 impl FilterPipeline {
     pub fn new(filters: Vec<Box<dyn CandidateFilter + Send + Sync>>) -> Self {
         Self { filters }
@@ -554,6 +603,10 @@ impl FilterPipeline {
                 if !self.cheap_filters_accept_with_probe(state, c, probe) {
                     return false;
                 }
+                if self.expensive_filters_definitely_accept_before_memo_key(state, c, probe) {
+                    return true;
+                }
+                record_legality_equivalence_key_evaluation();
                 match legality_equivalence_key(state, &c.action, &poison, &mut interner) {
                     Some(key) => *memo
                         .entry(key)
@@ -590,6 +643,29 @@ impl FilterPipeline {
             .iter()
             .filter(|f| f.cost() == FilterCost::Expensive)
             .all(|f| f.accept_with_probe(state, candidate, probe))
+    }
+
+    /// Returns `true` when there is at least one expensive filter and every one
+    /// has a structural proof that it accepts this candidate. This is kept
+    /// generic so a future expensive filter cannot be bypassed accidentally.
+    fn expensive_filters_definitely_accept_before_memo_key(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        let mut has_expensive_filter = false;
+        for filter in self
+            .filters
+            .iter()
+            .filter(|filter| filter.cost() == FilterCost::Expensive)
+        {
+            has_expensive_filter = true;
+            if !filter.definitely_accepts_before_memo_key(state, candidate, probe) {
+                return false;
+            }
+        }
+        has_expensive_filter
     }
 }
 
@@ -1710,6 +1786,41 @@ mod tests {
             "accept_with_probe must structurally admit the first Candelabra target"
         );
 
+        let pipeline = FilterPipeline::default_pipeline();
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert_eq!(pipeline.apply(runner.state(), vec![first.clone()]).len(), 1);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            0,
+            "the ordinary in-progress target must bypass memo-key construction"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "the ordinary in-progress target must bypass simulation"
+        );
+
+        let probe = casting::PriorityCastProbe::new(runner.state(), PlayerId(0));
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert_eq!(
+            pipeline
+                .apply_with_probe(runner.state(), vec![first.clone()], Some(&probe))
+                .len(),
+            1
+        );
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            0,
+            "the probe-aware ordinary target must bypass memo-key construction"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "the probe-aware ordinary target must bypass simulation"
+        );
+
         runner
             .act(first.action.clone())
             .expect("the engine-enumerated first target is accepted");
@@ -1720,6 +1831,26 @@ mod tests {
             crate::game::perf_counters::snapshot().state_clone_for_legality,
             1,
             "the terminal target choice must retain the full simulation fallback"
+        );
+
+        let pipeline = FilterPipeline::default_pipeline();
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert_eq!(
+            pipeline
+                .apply(runner.state(), vec![final_target.clone()])
+                .len(),
+            1
+        );
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            1,
+            "the terminal target choice must still construct its memo key"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 1,
+            "the terminal target choice must retain one simulation fallback"
         );
 
         let (runner, _) = candelabra_target_selection();
@@ -1733,6 +1864,20 @@ mod tests {
             crate::game::perf_counters::snapshot().state_clone_for_legality,
             1,
             "CancelCast is outside the hatch and must still simulate"
+        );
+
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert_eq!(pipeline.apply(runner.state(), vec![cancel]).len(), 1);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            1,
+            "CancelCast must still construct its memo key"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 1,
+            "CancelCast must retain one simulation fallback"
         );
     }
 
@@ -1781,6 +1926,101 @@ mod tests {
             crate::game::perf_counters::snapshot().state_clone_for_legality,
             1,
             "bound interaction states must reach the simulation boundary"
+        );
+
+        let pipeline = FilterPipeline::default_pipeline();
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert!(pipeline.apply(runner.state(), vec![bound]).is_empty());
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            1,
+            "a bound interaction target must retain the memo-key boundary"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 1,
+            "a bound interaction target must retain the simulation boundary"
+        );
+    }
+
+    struct ProbeSensitiveRejectingExpensiveFilter;
+
+    impl CandidateFilter for ProbeSensitiveRejectingExpensiveFilter {
+        fn name(&self) -> &'static str {
+            "ProbeSensitiveRejecting"
+        }
+
+        fn cost(&self) -> FilterCost {
+            FilterCost::Expensive
+        }
+
+        fn accept(&self, _state: &GameState, _candidate: &CandidateAction) -> bool {
+            false
+        }
+
+        fn accept_with_probe(
+            &self,
+            _state: &GameState,
+            _candidate: &CandidateAction,
+            probe: Option<&casting::PriorityCastProbe>,
+        ) -> bool {
+            probe.is_some()
+        }
+
+        fn definitely_accepts_before_memo_key(
+            &self,
+            _state: &GameState,
+            _candidate: &CandidateAction,
+            probe: Option<&casting::PriorityCastProbe>,
+        ) -> bool {
+            probe.is_some()
+        }
+    }
+
+    #[test]
+    fn memo_key_fast_path_requires_every_expensive_filter_to_accept() {
+        let (runner, lands) = candelabra_target_selection();
+        let first = candelabra_target_candidate(runner.state(), lands[0]);
+        let pipeline = FilterPipeline::new(vec![
+            Box::new(SimulationFilter),
+            Box::new(ProbeSensitiveRejectingExpensiveFilter),
+        ]);
+
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert!(
+            pipeline
+                .apply(runner.state(), vec![first.clone()])
+                .is_empty(),
+            "an additional expensive rejection must not be bypassed by SimulationFilter's proof"
+        );
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            1,
+            "the rejecting expensive filter must retain the normal memo path"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "SimulationFilter still structurally accepts the nonterminal target"
+        );
+
+        let probe = casting::PriorityCastProbe::new(runner.state(), PlayerId(0));
+        crate::game::perf_counters::reset();
+        reset_legality_equivalence_key_evaluations();
+        assert_eq!(
+            pipeline
+                .apply_with_probe(runner.state(), vec![first], Some(&probe))
+                .len(),
+            1,
+            "the fast-path hook must receive the same probe-aware verdict as filtering"
+        );
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            legality_equivalence_key_evaluations(),
+            0,
+            "all expensive probe-aware acceptances may bypass memo-key construction"
         );
     }
 

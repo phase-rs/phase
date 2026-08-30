@@ -2,7 +2,7 @@
 //! game state once per non-terminal target choice.
 
 use crate::support::shared_card_db;
-use engine::ai_support::legal_actions;
+use engine::ai_support::{candidate_actions, legal_actions};
 use engine::game::perf_counters;
 use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
@@ -68,9 +68,29 @@ fn candelabra_target_selection() -> (GameRunner, Vec<ObjectId>) {
 fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     let (mut runner, lands) = candelabra_target_selection();
     perf_counters::reset();
+    let mut raw_action_candidates = 0;
+    let mut returned_legal_actions = 0;
+    let mut target_candidates = 0;
+    let mut cancel_candidates = 0;
 
     for remaining in (1..=TARGET_COUNT).rev() {
+        let raw = candidate_actions(runner.state());
         let actions = legal_actions(runner.state());
+        let raw_target_count = raw
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(_)),
+                    }
+                )
+            })
+            .count();
+        let raw_cancel_count = raw
+            .iter()
+            .filter(|candidate| matches!(candidate.action, GameAction::CancelCast))
+            .count();
         let target_actions: Vec<_> = actions
             .iter()
             .filter_map(|action| match action {
@@ -85,9 +105,16 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
             .filter(|action| matches!(action, GameAction::CancelCast))
             .count();
 
+        assert_eq!(raw_target_count, remaining, "raw target candidate census");
+        assert_eq!(raw_cancel_count, 1, "raw cancel candidate census");
+        assert_eq!(raw.len(), remaining + 1, "raw action candidate census");
         assert_eq!(target_actions.len(), remaining, "target action census");
         assert_eq!(cancel_count, 1, "each target prompt remains cancellable");
         assert_eq!(actions.len(), remaining + 1, "full action census");
+        raw_action_candidates += raw.len();
+        returned_legal_actions += actions.len();
+        target_candidates += target_actions.len();
+        cancel_candidates += cancel_count;
 
         let target = target_actions[0];
         runner
@@ -98,6 +125,10 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     }
 
     let counters = perf_counters::snapshot();
+    assert_eq!(raw_action_candidates, 3320, "raw action candidate census");
+    assert_eq!(returned_legal_actions, 3320, "returned legal action census");
+    assert_eq!(target_candidates, 3240, "target candidate census");
+    assert_eq!(cancel_candidates, 80, "cancel candidate census");
     assert_eq!(
         counters.state_clone_for_legality,
         TARGET_COUNT as u64 + 1,
