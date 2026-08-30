@@ -92,32 +92,23 @@ if [ "${#missing[@]}" -ne 0 ]; then
 fi
 
 # --- Preflight: pnpm major must match client/package.json's packageManager ---
-# pnpm >= 10 stopped reading the "pnpm" field in package.json. Running it here
-# silently drops client/package.json's `pnpm.overrides` (the supply-chain pins
-# for serialize-javascript, ws, brace-expansion, postcss, …) from
-# pnpm-lock.yaml, writes a stray client/pnpm-workspace.yaml, and then fails
-# `pnpm install` with ERR_PNPM_IGNORED_BUILDS because `onlyBuiltDependencies`
-# is ignored too. That leaves a dirty tree and a lockfile that would ship
-# without its security overrides, so treat a major mismatch as fatal.
+# pnpm >= 10 stopped reading the "pnpm" field in package.json. Running it in
+# client/ silently drops that file's `pnpm.overrides` (the supply-chain pins for
+# serialize-javascript, ws, brace-expansion, postcss, …) from pnpm-lock.yaml,
+# writes a stray client/pnpm-workspace.yaml, and then fails `pnpm install` with
+# ERR_PNPM_IGNORED_BUILDS because `onlyBuiltDependencies` is ignored too. That
+# leaves a dirty tree and a lockfile that would ship without its security
+# overrides, so treat a major mismatch as fatal.
 #
-# `packageManager` also lets pnpm >= 10 and corepack auto-select the right
-# version, so this check only fires for a pnpm that cannot self-correct.
-# Capture the major without requiring a minor: "pnpm@10" is as legal a pin as
-# "pnpm@9.15.9", and a regex that insists on the dot would silently disarm this
-# check on the shorthand. `|| true` keeps a pnpm whose --version fails (a
-# corepack shim with no network, say) from tripping `set -e` and killing setup
-# with no diagnostic. The empty-value arms below then skip this check and let
-# the real `pnpm install` surface the underlying fault with its own message.
-PNPM_WANT="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9]*\).*/\1/p' \
-              client/package.json | head -1)"
-PNPM_HAVE="$(pnpm --version 2>/dev/null | cut -d. -f1 || true)"
-if [ -n "$PNPM_WANT" ] && [ -n "$PNPM_HAVE" ] && [ "$PNPM_HAVE" != "$PNPM_WANT" ]; then
-  echo "ERROR: pnpm $PNPM_HAVE found, but this repo pins pnpm $PNPM_WANT." >&2
-  echo "  pnpm >= 10 ignores the \"pnpm\" field in client/package.json and will" >&2
-  echo "  rewrite client/pnpm-lock.yaml without its security overrides." >&2
-  echo "  Fix: pnpm self-update $PNPM_WANT   (or: corepack enable)" >&2
-  exit 1
-fi
+# The check resolves pnpm from client/, not from here: `packageManager` is
+# directory-scoped, so corepack and pnpm >= 10 pick it up only when the working
+# directory is under client/. The root can legitimately resolve a different,
+# newer pnpm while client/ resolves the pin — measuring the root would reject
+# that valid setup before installing anything. See scripts/lib/pnpm-preflight.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/pnpm-preflight.sh
+source "$SCRIPT_DIR/lib/pnpm-preflight.sh"
+pnpm_preflight_check client || exit 1
 
 # --- Preflight: soft tool (tilt-dev/tilt, NOT other CLIs named "tilt") ---
 # Multiple unrelated binaries ship as `tilt` (e.g. Go template tools). The

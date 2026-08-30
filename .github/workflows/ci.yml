@@ -123,6 +123,14 @@ jobs:
           fi
           ./scripts/check-test-card-data-load.sh "$BASE"
 
+      - name: pnpm preflight tests
+        # scripts/setup.sh hard-fails when the local pnpm major differs from
+        # client/package.json's `packageManager`. That pin is directory-scoped,
+        # so the root and client/ can resolve different pnpm majors on one
+        # machine; resolving from the wrong one rejects a valid environment.
+        # These tests stub pnpm to reproduce that divergence.
+        run: bash scripts/lib/pnpm_preflight_tests.sh
+
   rust-test-build:
     name: Rust tests (build archive)
     runs-on: ubuntu-latest
