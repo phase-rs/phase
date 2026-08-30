@@ -3172,8 +3172,17 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
+        // Classification lives in the engine (`verified_ai_stack_pass_player`),
+        // not in this adapter: it is the same call the callee gates on, so the
+        // two cannot disagree. CLAUDE.md — transport layers hold zero game
+        // logic.
         let is_stack_recheck_pass =
-            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+            engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
+        // A payment finalize is no longer misclassified, so it now passes
+        // through `permits` — whose `state_revision` equality check can report
+        // `Stale` for a proposal minted against a superseded state. The client
+        // treats `Stale` as a benign race and re-queries without counting a
+        // failure, which is the intended handling for every other action.
         if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
             return AiProposalSubmission::Stale {
                 reason: "decision_changed_or_action_outside_issued_bounds",

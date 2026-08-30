@@ -1056,6 +1056,33 @@ pub fn apply_interaction_with_rejection(
 /// it exists now and may reuse only the verified representative's own pass at
 /// later priority windows. It never infers a pass for an unverified
 /// representative and never authorizes a new stack entry.
+/// The priority player for whom `action` is a verified AI stack-continuation
+/// pass, or `None` when it is not one.
+///
+/// **Single authority for that classification.** Both AI dispatch routers
+/// (`phase_ai::auto_play::run_ai_actions_with_limit` and engine-wasm's
+/// `submit_ai_action_proposal`) pick their reducer boundary with this function,
+/// and [`apply_verified_ai_priority_pass`] gates on the very same call — so the
+/// routers and the callee cannot disagree about what this boundary accepts.
+/// Returning the window's `PlayerId` rather than a bool is what lets the callee
+/// consume the classification it is gated by instead of re-deriving it.
+///
+/// CR 601.2a + CR 601.2h: `GameAction::PassPriority` is overloaded by prompt. At
+/// `WaitingFor::Priority` it passes priority; at `WaitingFor::ManaPayment` the
+/// reducer routes the SAME variant to `casting_costs::finalize_mana_payment` —
+/// there it means "pay the total cost" (CR 601.2h). Announcing a spell puts it
+/// on the stack (CR 601.2a), so a nonempty stack is true throughout every cast
+/// and cannot separate the two meanings on its own; the prompt is what does.
+pub fn verified_ai_stack_pass_player(state: &GameState, action: &GameAction) -> Option<PlayerId> {
+    if !matches!(action, GameAction::PassPriority) || state.stack.is_empty() {
+        return None;
+    }
+    match state.waiting_for {
+        WaitingFor::Priority { player } => Some(player),
+        _ => None,
+    }
+}
+
 pub fn apply_verified_ai_priority_pass(
     state: &mut GameState,
     authenticated_actor: PlayerId,
@@ -1070,18 +1097,21 @@ pub fn apply_verified_ai_priority_pass(
             "AI priority pass no longer matches its issued decision contract".to_string(),
         ));
     }
-    let WaitingFor::Priority { player } = &state.waiting_for else {
+    // The routers select this boundary with the same call, so a mismatch here
+    // is impossible by construction rather than by convention.
+    let Some(player) = verified_ai_stack_pass_player(state, &action) else {
         return Err(EngineError::ActionNotAllowed(
-            "AI stack continuation requires a live priority window".to_string(),
+            "AI stack continuation requires a live priority window over a nonempty stack"
+                .to_string(),
         ));
     };
-    if *player != contract.semantic_owner || state.stack.is_empty() {
+    if player != contract.semantic_owner {
         return Err(EngineError::ActionNotAllowed(
             "AI stack continuation requires the issued nonempty priority window".to_string(),
         ));
     }
 
-    let representative = super::topology::priority_pass_representative(state, *player);
+    let representative = super::topology::priority_pass_representative(state, player);
     let inserted_verified_representative = if let Some(session) =
         state.stack_resolution_session.as_ref()
     {

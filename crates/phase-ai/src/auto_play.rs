@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use engine::ai_support::AiDecisionContract;
-use engine::game::engine::{apply_interaction, apply_verified_ai_priority_pass, EngineError};
+use engine::game::engine::{
+    apply_interaction, apply_verified_ai_priority_pass, verified_ai_stack_pass_player, EngineError,
+};
 use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -275,8 +277,20 @@ fn run_ai_actions_with_limit(
             }
         };
 
-        let is_stack_recheck_pass =
-            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        // `verified_ai_stack_pass_player` is the single authority for this
+        // classification and is what `apply_verified_ai_priority_pass` itself
+        // gates on, so this router cannot drift from the boundary it selects.
+        // Everything it rejects belongs on the ordinary `apply_interaction`
+        // boundary — including a payment finalize, which the reducer routes to
+        // `finalize_mana_payment` (CR 601.2h).
+        let is_stack_recheck_pass = verified_ai_stack_pass_player(state, &action).is_some();
+        // Note the coupling: narrowing the classification above also brings a
+        // payment finalize back under `contract.permits`, which it bypassed
+        // while it was misclassified. `permits` additionally requires
+        // `state_revision` to still match, so a finalize proposed against a
+        // superseded state is now refused here rather than reaching the
+        // reducer — the same staleness discipline every other action already
+        // gets, not a special case.
         if !is_stack_recheck_pass && !contract.permits(state, actor, &action) {
             let error = EngineError::InvalidAction(
                 "AI chose an action outside its issued decision contract".to_string(),
