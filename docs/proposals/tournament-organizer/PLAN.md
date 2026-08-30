@@ -829,8 +829,18 @@ reasoning, which remains correct even as the specific numbers churn).
 `broker.rs` gains the `tournaments: TournamentManager` field
 and the `ConnState` organizer/joined-tournament fields **as tokens** (§3
 above, not bare identifiers). Native server dispatch arms in
-`phase-server/src/main.rs`. Reaper keyed off `last_activity_at`, restricted
-to `Registration`-status tournaments (§2 above).
+`phase-server/src/main.rs`. **Reaper — REVISED, maintainer review: the
+prior text here said the reaper was "restricted to `Registration`-status
+tournaments," which directly contradicted the all-status lifecycle §2
+itself specifies, and would have left the 7-day `InProgress`→`Abandoned`
+transition and the 30-day `Completed`/`Abandoned` retention window entirely
+unwired.** There is exactly ONE `check_expired` sweep, and it implements
+all three rules from §2's "Expiry / retention" note on every call — reap
+stale `Registration` (300s), transition stale `InProgress` to `Abandoned`
+(7 days), and delete retained `Completed`/`Abandoned` records (30 days).
+PR 2 wires this single all-status sweep into the existing native reaper
+call site (`main.rs:1000`) — it does not add a second reaper, a second
+timer, or a status-restricted variant.
 
 **PR 3 — Cloudflare Worker shell.**
 `lobby-worker/broker-wasm` `mutates_lobby` match extension, `lobby-do.ts`
