@@ -1,4 +1,4 @@
-use engine::game::derived_views::{ClientGameState, ClientGameStateRef};
+use engine::game::derived_views::{ClientGameStateRef, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -9,7 +9,13 @@ const BROTHERHOODS_END: &str = "Choose one —\n\
 • Brotherhood's End deals 3 damage to each creature and each planeswalker.\n\
 • Destroy all artifacts with mana value 3 or less.";
 
-fn opponent_client_state(runner: &GameRunner) -> ClientGameState {
+/// The `derived` half of P1's client wire.
+///
+/// A `wrap_filtered` payload is a viewer projection, which
+/// `reject_viewer_projection_as_authority` refuses at decode, so the whole
+/// `ClientGameState` is no longer decodable here. Every assertion below reads
+/// `.derived` anyway, so decode exactly that.
+fn opponent_derived_views(runner: &GameRunner) -> DerivedViews {
     let filtered = filter_state_for_viewer(runner.state(), P1);
     let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
         runner.state(),
@@ -17,7 +23,9 @@ fn opponent_client_state(runner: &GameRunner) -> ClientGameState {
         Some(P1),
     ))
     .expect("serialize opponent state");
-    serde_json::from_str(&json).expect("deserialize opponent state")
+    let wire: serde_json::Value =
+        serde_json::from_str(&json).expect("inspect opponent client wire");
+    serde_json::from_value(wire["derived"].clone()).expect("deserialize opponent derived views")
 }
 
 #[test]
@@ -50,8 +58,7 @@ fn brotherhoods_end_publishes_selected_mode_label_only_after_selection() {
         "the raw entry remains unfinalized before mode selection"
     );
     assert!(
-        opponent_client_state(&runner)
-            .derived
+        opponent_derived_views(&runner)
             .stack_entry_details
             .get(&spell)
             .expect("opponent sees the public stack entry")
@@ -76,8 +83,7 @@ fn brotherhoods_end_publishes_selected_mode_label_only_after_selection() {
         "the finalized stack ability retains the exact selected Oracle mode",
     );
     assert_eq!(
-        opponent_client_state(&runner)
-            .derived
+        opponent_derived_views(&runner)
             .stack_entry_details
             .get(&spell)
             .expect("opponent keeps the public stack entry")
