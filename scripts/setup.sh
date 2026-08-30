@@ -7,8 +7,9 @@ set -euo pipefail
 #
 #   Mode axis — what gets fetched/built:
 #     * Full mode (default): everything an interactive human dev needs to run
-#       the app in a browser, including the three Scryfall image/printing
-#       sidecars consumed at runtime by the React frontend for card art.
+#       the app in a browser, including the five Scryfall sidecars —
+#       image/printing data and the set-icon catalog — consumed at runtime by
+#       the React frontend.
 #     * Agent mode (--agent, env PHASE_SETUP_AGENT=1): skips the Scryfall
 #       sidecars. They are runtime-only image data — no Rust or frontend test
 #       depends on them (the one vitest test that names them mocks `fetch`).
@@ -125,11 +126,16 @@ else
   # the same category of artifact: runtime-only frontend image data, needed
   # only when a non-English UI language is selected.
   ./scripts/gen-scryfall-locale-images.sh  & PID_LOCALE_IMAGES=$!
+  # Set-icon catalog (icon_svg_uri + release dates) for the draft/Sealed set
+  # picker — metadata that drives set-icon images. Fetched from the small
+  # /sets endpoint, not the bulk download.
+  ./scripts/gen-scryfall-sets.sh           & PID_SETS=$!
 
   wait $PID_IMAGES        || FAIL=1
   wait $PID_TOKEN_IMAGES  || FAIL=1
   wait $PID_PRINTINGS     || FAIL=1
   wait $PID_LOCALE_IMAGES || FAIL=1
+  wait $PID_SETS          || FAIL=1
   if [ $FAIL -ne 0 ]; then
     echo "ERROR: Scryfall sidecar fetch failed." >&2
     exit 1
