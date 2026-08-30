@@ -80,6 +80,7 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     let mut cancel_candidates = 0;
 
     for remaining in (1..=TARGET_COUNT).rev() {
+        perf_counters::reset();
         let raw = candidate_actions(runner.state());
         let actions = legal_actions(runner.state());
         let raw_target_count = raw
@@ -123,7 +124,6 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
         cancel_candidates += cancel_count;
 
         let target = target_actions[0];
-        perf_counters::reset();
         let cache_advances_before_choice =
             perf_counters::homogeneous_target_walk_cache_snapshot().advances;
         runner
