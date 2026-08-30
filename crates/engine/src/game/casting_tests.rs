@@ -45691,6 +45691,7 @@ fn play_from_exile_grant(
     companion: bool,
 ) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::PlayFromExile {
+        mode: CardPlayMode::Play,
         duration: crate::types::ability::Duration::Permanent,
         granted_to: player,
         frequency: CastFrequency::Unlimited,
