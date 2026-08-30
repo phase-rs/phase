@@ -325,6 +325,13 @@ function makeMeta(state: DraftStoreState, phase: ActiveQuickDraftMeta["phase"], 
 }
 
 function phaseForView(view: DraftPlayerView, persistedPhase: DraftPhase): DraftPhase {
+  // Run phases are owned by the run record, not the draft session's pairing
+  // status. A Sealed session sits idle in `Pairing` once its deck is in, so
+  // resuming BETWEEN run games (or after the last game) must keep the run
+  // phase (`playing` → BetweenMatches, `complete` → RunComplete) — mapping
+  // `Pairing` to `launching` there bounces the player back to the format
+  // picker mid-run.
+  if (persistedPhase === "playing" || persistedPhase === "complete") return persistedPhase;
   if (view.status === "Deckbuilding") {
     return view.kind === "Sealed" && persistedPhase === "opening" ? "opening" : "deckbuilding";
   }
@@ -913,7 +920,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           pickInteractionLocked: false,
           poolSortMode: saved.poolSortMode,
           poolPanelOpen: saved.poolPanelOpen,
-          runFormat: meta.kind === "Sealed" ? "single" : run?.format ?? "run",
+          // The persisted run's format is authoritative once a run exists — a
+          // Sealed run may be a 7W/3L ladder even though the event's picker
+          // default is a single match. Before the first match there is no run,
+          // so fall back to the meta's remembered choice, then the kind default.
+          runFormat: run?.format ?? meta.runFormat ?? (meta.kind === "Sealed" ? "single" : "run"),
           runState: run,
         },
         persistence: "skip",
@@ -1158,7 +1169,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   togglePoolPanel: () => { set((state) => ({ poolPanelOpen: !state.poolPanelOpen })); schedulePersistence(); },
   setDifficulty: (difficulty) => set({ difficulty }),
   setSelectedSet: (selectedSet) => set({ selectedSet }),
-  setRunFormat: (runFormat) => set({ runFormat }),
+  // The picker selection is the resume authority before the first match (the
+  // run record only appears at launch), so persist it — otherwise reloading on
+  // the launching screen restores the stale default. Mirrors setPoolSortMode.
+  setRunFormat: (runFormat) => { set({ runFormat }); schedulePersistence(); },
 
   launchMatch: async (navigate) => {
     const token = admitExclusive("launch");

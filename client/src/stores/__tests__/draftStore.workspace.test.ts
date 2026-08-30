@@ -44,7 +44,14 @@ const persistence = vi.hoisted(() => ({
   inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
   loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
   loadQuickDraftSession: vi.fn<() => Promise<unknown>>(async () => null),
-  persistQuickDraftSnapshot: vi.fn(async () => undefined),
+  persistQuickDraftSnapshot: vi.fn<
+    (
+      id: string,
+      sessionJson: string,
+      uiState: unknown,
+      meta: { runFormat?: string; phase?: string },
+    ) => Promise<void>
+  >(async () => undefined),
   publishInitialDraftMatch: vi.fn<(input: { run: unknown }) => Promise<void>>(
     async () => undefined,
   ),
@@ -600,6 +607,184 @@ describe("draft store workspace authority", () => {
       useDraftStore.getState().workspaceState!,
       useDraftStore.getState().view!.pool,
     )).toEqual(["Returned"]);
+  });
+
+  it.each([
+    {
+      label: "Sealed run between games (session Pairing, run in progress)",
+      kind: "Sealed",
+      persistedPhase: "playing",
+      sessionStatus: "Pairing",
+      expectedPhase: "playing",
+      fetchDatabase: true,
+    },
+    {
+      label: "Sealed run finished (session Pairing, run complete)",
+      kind: "Sealed",
+      persistedPhase: "complete",
+      sessionStatus: "Pairing",
+      expectedPhase: "complete",
+      fetchDatabase: true,
+    },
+    {
+      label: "Quick run between games (session Complete, run in progress)",
+      kind: "Quick",
+      persistedPhase: "playing",
+      sessionStatus: "Complete",
+      expectedPhase: "playing",
+      fetchDatabase: false,
+    },
+    {
+      label: "Quick run finished (session Complete, run complete)",
+      kind: "Quick",
+      persistedPhase: "complete",
+      sessionStatus: "Complete",
+      expectedPhase: "complete",
+      fetchDatabase: false,
+    },
+  ])("resume keeps the run phase: $label", async ({
+    kind,
+    persistedPhase,
+    sessionStatus,
+    expectedPhase,
+    fetchDatabase,
+  }) => {
+    if (fetchDatabase) {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    }
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "run-id",
+      setCode: "TST",
+      setName: "Test",
+      difficulty: 2,
+      kind,
+      phase: persistedPhase,
+      runFormat: "run",
+      runWins: persistedPhase === "complete" ? 7 : 1,
+      runLosses: persistedPhase === "complete" ? 3 : 0,
+      runDraws: 0,
+    });
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: {},
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValue({
+      format: "run",
+      results: persistedPhase === "complete"
+        ? [
+          { gameId: "g1", result: "win" }, { gameId: "g2", result: "win" },
+          { gameId: "g3", result: "win" }, { gameId: "g4", result: "win" },
+          { gameId: "g5", result: "win" }, { gameId: "g6", result: "win" },
+          { gameId: "g7", result: "win" },
+        ]
+        : [{ gameId: "g1", result: "win" }],
+      playerDeck: ["C1", "C2"],
+      opponentDeck: ["O1", "O2"],
+      usedBotSeats: [1],
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind,
+      status: sessionStatus,
+    });
+
+    await useDraftStore.getState().resumeDraft();
+
+    expect(useDraftStore.getState().phase).toBe(expectedPhase);
+    // A Sealed run launched as Full Run must resume as Full Run, not fall
+    // back to the event's single-match default — next-match staging compares
+    // the store format against the persisted run's format.
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(useDraftStore.getState().runState?.format).toBe("run");
+  });
+
+  it("resume before a Sealed run's first match keeps launching with the remembered format", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "sealed-pre-run-id",
+      setCode: "TST",
+      setName: "Test",
+      difficulty: 2,
+      kind: "Sealed",
+      phase: "launching",
+      runFormat: "run", // user already picked Full Run on the format picker
+    });
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: { Plains: 2 },
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind: "Sealed",
+      status: "Pairing",
+    });
+
+    await useDraftStore.getState().resumeDraft();
+
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(useDraftStore.getState().runState).toBeNull();
+  });
+
+  it("persists a nondefault format picker choice before the first match and restores it on resume", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    const poolView = {
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind: "Sealed" as const,
+      status: "Deckbuilding" as const,
+    };
+    wasm.start_sealed_draft.mockReturnValue(poolView);
+    await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+    useDraftStore.getState().completeSealedOpening();
+    wasm.submit_deck.mockReturnValue({ ...poolView, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("single");
+    const metaOf = (): { runFormat?: string; phase?: string } | null => {
+      const calls = persistence.persistQuickDraftSnapshot.mock.calls;
+      return calls.length > 0 ? calls[calls.length - 1][3] : null;
+    };
+
+    await settleTimers();
+    // Deck submission persisted the Sealed default (Single Match).
+    expect(metaOf()?.runFormat).toBe("single");
+
+    // Choosing Full Run on the picker must persist: the run record only
+    // appears at Start Match, so the persisted meta is the sole pre-run
+    // resume authority. Without the schedule, the last meta stays "single".
+    useDraftStore.getState().setRunFormat("run");
+    await settleTimers();
+    expect(metaOf()?.runFormat).toBe("run");
+
+    // Reload before a run exists — the resumed picker must show the choice.
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(
+      metaOf(),
+    );
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: {},
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    wasm.import_draft_session.mockReturnValue({ ...poolView, status: "Pairing" });
+
+    await useDraftStore.getState().resumeDraft();
+
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(useDraftStore.getState().runState).toBeNull();
   });
 
   it.each([
