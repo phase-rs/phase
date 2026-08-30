@@ -1042,19 +1042,18 @@ impl<'a> ClientGameStateRef<'a> {
 /// `ClientGameStateRef` exactly — fields named identically, no
 /// `#[serde(flatten)]` — so serialize/deserialize round-trip is lossless.
 ///
-/// SCOPED TO UNFILTERED WIRES. This decodes payloads produced by
-/// [`ClientGameStateRef::wrap`], which serializes the authoritative borrow. A
-/// [`ClientGameStateRef::wrap_filtered`] payload is a VIEWER PROJECTION: its
-/// `state` half carries `viewer_projection: Some(..)` and is refused by
-/// `reject_viewer_projection_as_authority` at both `GameStateDecode` ingresses,
-/// so the nested `pub state: GameState` here cannot decode it.
+/// A [`ClientGameStateRef::wrap_filtered`] payload is a VIEWER PROJECTION: its
+/// `state` half carries `viewer_projection: Some(..)`. That decodes fine here —
+/// displaying a projection is exactly what this type is for.
 ///
-/// A state-restore flow must therefore ingest an authoritative snapshot (the
-/// `TrustedGameStateEnvelope` / `PersistedGameState` route), NEVER a viewer
-/// wire. That is deliberate: a projection has had the RNG seed zeroed, the
-/// rules journal cleared and every private resume cursor blanked while its
-/// public `waiting_for` survives, so installing one leaves a prompt no player
-/// can answer.
+/// What a projection may NOT do is come back as a saved game. A state-restore
+/// flow must ingest an authoritative snapshot through the
+/// `TrustedGameStateEnvelope` / `PersistedGameState` route, where
+/// `reject_viewer_projection_as_authority` refuses a marked projection. That is
+/// deliberate: a projection has had the RNG seed zeroed, the rules journal
+/// cleared and every private resume cursor blanked while its public
+/// `waiting_for` survives, so installing one leaves a prompt no player can
+/// answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientGameState {
     pub state: GameState,
@@ -5109,50 +5108,22 @@ mod tests {
         ))
         .expect("serialize filtered client state");
 
-        // The two wires are refused for DIFFERENT reasons, and asserting each on its
-        // own reason is what makes the pair discriminating.
-        //
-        // `wrap` serializes the AUTHORITATIVE borrow, so its `state` half carries no
-        // `viewer_projection` marker; it is refused only because client redaction drops
-        // `pending_trigger_firing` while `pending_trigger` stands.
-        let unfiltered_error = serde_json::from_value::<GameState>(client["state"].clone())
-            .expect_err("redacted client state must not restore as trusted authority");
-        assert!(
-            unfiltered_error
-                .to_string()
-                .contains("pending trigger has no firing carrier"),
-            "client redaction must fail only because it removes private trigger authority: \
-             {unfiltered_error}"
-        );
-
-        // `wrap_filtered` serializes a VIEWER PROJECTION, which the marker refuses
-        // structurally — before, and instead of, the incidental trigger-carrier refusal.
-        //
-        // THIS ASSERTION MUST STAY EXACT, and it is carrying a second property. The gate
-        // runs AFTER `GameStateDecode::decode`'s `materialize_prepared`, so the only way
-        // execution reaches the projection refusal is by having already rebuilt a whole
-        // `GameState` from this payload: an error that IS the refusal is itself proof the
-        // filtered viewer wire round-trips structurally. Break the wire's serde shape and
-        // `materialize_prepared` fails first, the text changes, and this goes red. A
-        // `contains`-of-either check would accept that failure and retire the property
-        // silently — this is the ONLY site that still holds it.
-        let filtered_error = serde_json::from_value::<GameState>(filtered_client["state"].clone())
-            .expect_err("viewer projection must not restore as trusted authority");
-        assert_eq!(
-            filtered_error.to_string(),
-            "This saved game only holds the view that was shown on screen, not the full \
-             game record.",
-            "the filtered wire must be refused as a viewer projection: {filtered_error}"
-        );
-        assert!(
-            !filtered_error
-                .to_string()
-                .contains("pending trigger has no firing carrier"),
-            "the projection refusal must pre-empt the incidental trigger-carrier refusal: \
-             {filtered_error}"
-        );
-
+        // BOTH wires are refused for the SAME reason: client redaction drops
+        // `pending_trigger_firing` while `pending_trigger` stands. The
+        // `viewer_projection` marker rides along on the filtered wire but does NOT
+        // refuse here — this is the transport decode path, which carries projections
+        // on purpose. The marker only refuses on the persistence ingress; see
+        // `tests/integration/viewer_projection_ingest_gate.rs`.
         for client_state in [&client["state"], &filtered_client["state"]] {
+            let error = serde_json::from_value::<GameState>(client_state.clone())
+                .expect_err("redacted client state must not restore as trusted authority");
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending trigger has no firing carrier"),
+                "client redaction must fail only because it removes private trigger \
+                 authority: {error}"
+            );
             for private_field in [
                 "next_delayed_trigger_token",
                 "next_delayed_trigger_instance",

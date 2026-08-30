@@ -19118,24 +19118,22 @@ impl GameStateDecode {
         migrate_legacy_dungeon_choice_previews(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
-        // A viewer projection is not rules authority and cannot be repaired into it
-        // (`filter_state_for_viewer` zeroes the RNG and empties the rules journal), so
-        // both ingresses refuse it — same two-site doctrine as the bound check below.
-        // `tests/integration/loop_shortcut.rs`'s single-site revert probe is the standing
-        // proof that guarding only `decode_persisted_resolution_state` leaves this one
-        // live: delete either call and the module's matching row flips to `Ok`.
-        //
-        // This sits AFTER `materialize_prepared`, which is what makes reaching it proof
-        // the payload deserialized structurally — `derived_views`' filtered-wire round-trip
-        // assertion depends on that ordering.
-        reject_viewer_projection_as_authority(&state)?;
+        // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
+        // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
+        // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
+        // by design, so a bare `GameState` deserialize is how a viewer legitimately
+        // receives a redacted board. Refusing projections here rejects that broadcast.
+        // The gate lives only on the PERSISTENCE ingress
+        // (`decode_persisted_resolution_state`), which is what a saved game restores
+        // through and where installing a projection as authority is the actual defect.
         validate_trigger_firing_coherence(&state)?;
-        // Both decode entry points guard, because they are genuinely two ingresses:
-        // `decode_persisted_resolution_state` above deserializes `ResolutionStateWire`
-        // itself and never routes through `decode`. Hosting the CR 732.2a bound check on
-        // only one of them leaves the other — the one a bare-`GameState` `impl Deserialize`
-        // reaches — able to revive a zero-bound offer. The projection gate above is
-        // hosted on the same pair for the same reason.
+        // The CR 732.2a bound check IS hosted on both decode entry points, because they
+        // are genuinely two ingresses: `decode_persisted_resolution_state` above
+        // deserializes `ResolutionStateWire` itself and never routes through `decode`.
+        // Hosting it on only one leaves the other — the one a bare-`GameState`
+        // `impl Deserialize` reaches — able to revive a zero-bound offer. That argument
+        // is about a value no wire should ever carry; it does NOT extend to the
+        // projection marker, which the transport wire carries on purpose.
         reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);

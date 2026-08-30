@@ -1,5 +1,5 @@
-//! A viewer projection announces itself on the wire and is refused at every
-//! authoritative `GameState` ingest.
+//! A viewer projection announces itself on the wire and is refused at the
+//! PERSISTENCE ingest — and only there.
 //!
 //! `filter_state_for_viewer` blanks ~20 private rules-execution carriers (the
 //! Resolve All consent run, the stack-resolution session, every pending-resume
@@ -13,6 +13,13 @@
 //! The gate keys on `GameState::viewer_projection`, NOT on prompt shape — which
 //! is what `carrier_less_authoritative_state_still_restores` and
 //! `authoritative_consent_with_live_run_still_decodes` exist to prove.
+//!
+//! It is deliberately NOT hosted on the bare-`GameState` decode path. That path
+//! is the multiplayer TRANSPORT: `ServerMessage::GameStarted { state, .. }`
+//! carries a projection on purpose, so refusing there rejects the broadcast a
+//! viewer is supposed to receive. `projection_decodes_on_the_transport_path_and\
+//! _keeps_its_marker` pins that, and the marker surviving transport is what
+//! leaves the persistence ingress something to refuse.
 
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
@@ -75,28 +82,6 @@ fn projection_for(viewer: PlayerId) -> GameState {
     projection
 }
 
-/// Every `?`-fallible step of `GameStateDecode::decode` that precedes the gate
-/// under `DirectCurrentRaw`, by a distinctive fragment of its message.
-///
-/// The gate's position is NOT what guarantees the refusal is the projection
-/// refusal — four fallible steps still stand between the ingress and it, and a
-/// future filter change could put a projection into a shape one of them rejects
-/// first. This list is what turns that guarantee from a positional argument
-/// into an asserted one.
-const INGRESS_A_PREDECESSORS: &[&str] = &[
-    // `reject_legacy_raw_prompt_authority`
-    "legacy raw-ID",
-    // `migrate_legacy_turn_face_up_resume`
-    "legacy TurnFaceUp resume",
-    // `migrate_legacy_dungeon_choice_previews`
-    "legacy dungeon prompt",
-    // `Self::materialize_prepared` (serde shape failure)
-    "missing field",
-    "invalid type",
-    // `normalize_delayed_trigger_allocators`
-    "delayed-trigger provenance",
-];
-
 /// The same enumeration for `GameStateDecode::decode_persisted_resolution_state`.
 const INGRESS_B_PREDECESSORS: &[&str] = &[
     // `value.as_object_mut()`
@@ -127,24 +112,41 @@ fn assert_is_the_projection_refusal(error: &str, predecessors: &[&str], ingress:
     }
 }
 
-/// Matrix row 1 — the bare-`GameState` ingress (`GameStateDecode::decode`).
+/// Decodes a projection through the PERSISTENCE ingress — the only one that
+/// guards — and returns the refusal text.
+fn persisted_decode_error(projection: GameState) -> String {
+    let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(projection)))
+        .expect("a raw persisted projection serializes");
+    serde_json::from_value::<PersistedGameState>(persisted)
+        .expect_err("a viewer projection must not restore through persistence")
+        .to_string()
+}
+
+/// Matrix row 1 — the TRANSPORT decode path must KEEP WORKING.
 ///
-/// REVERT PROBE: delete the `reject_viewer_projection_as_authority` call in
-/// `GameStateDecode::decode` ONLY — leaving the one in
-/// `decode_persisted_resolution_state` — and this row flips to `Ok` while
-/// `projection_is_refused_through_persisted_game_state` still passes. That
-/// single-site revert is why this row exists separately from row 3.
+/// REGRESSION: guarding this path refused the multiplayer broadcast.
+/// `ServerMessage::GameStarted { state, .. }` (`server-core/src/protocol.rs`)
+/// carries a `filter_state_for_viewer` projection BY DESIGN, and a client
+/// receives it through exactly this bare-`GameState` deserialize. Refusing here
+/// broke `phase-server`'s
+/// `stale_websocket_cannot_retire_or_disconnect_a_replaced_full_seat`, which
+/// failed on the real refusal text.
+///
+/// So a projection MUST decode here, and MUST keep its marker — the marker
+/// surviving transport is precisely what leaves the persistence ingress
+/// something to refuse later.
 #[test]
-fn projection_json_is_refused_as_authority() {
+fn projection_decodes_on_the_transport_path_and_keeps_its_marker() {
     let projection = projection_for(P0);
     let json = serde_json::to_string(&projection).expect("a projection serializes");
 
-    let error = serde_json::from_str::<GameState>(&json)
-        .expect_err("a viewer projection must not restore as rules authority");
-    assert_is_the_projection_refusal(
-        &error.to_string(),
-        INGRESS_A_PREDECESSORS,
-        "the bare-GameState ingress",
+    let decoded = serde_json::from_str::<GameState>(&json)
+        .expect("a viewer projection must decode on the transport path");
+    assert_eq!(
+        decoded.viewer_projection,
+        Some(P0),
+        "the marker must survive transport decode, or the persistence gate has \
+         nothing left to read"
     );
 }
 
@@ -166,12 +168,12 @@ fn marker_survives_json_round_trip() {
          JSON boundary"
     );
 
-    let error = serde_json::from_value::<GameState>(wire)
-        .expect_err("the round-tripped marker must still be refused");
+    let decoded = serde_json::from_value::<GameState>(wire)
+        .expect("the round-tripped projection decodes on the transport path");
     assert_eq!(
-        error.to_string(),
-        REFUSAL,
-        "the marker that survived serialization is the one the gate reads"
+        decoded.viewer_projection,
+        Some(P0),
+        "the marker that survived serialization is the one the persistence gate reads"
     );
 }
 
@@ -307,14 +309,13 @@ fn projection_binds_its_own_viewer() {
         serde_json::json!(P1.0),
     );
 
-    // Refusal and binding are separate claims, asserted separately.
-    for projection in [for_p0, for_p1] {
-        let json = serde_json::to_string(&projection).expect("serialize");
+    // Binding and refusal are separate claims, asserted separately. Refusal is a
+    // PERSISTENCE property, so it is asserted through that ingress.
+    for (viewer, projection) in [(P0, for_p0), (P1, for_p1)] {
         assert_eq!(
-            serde_json::from_str::<GameState>(&json)
-                .expect_err("each viewer's projection is refused")
-                .to_string(),
+            persisted_decode_error(projection),
             REFUSAL,
+            "each viewer's projection is refused when restored: {viewer:?}"
         );
     }
 }
@@ -409,13 +410,8 @@ fn absent_marker_key_decodes_as_authoritative() {
 /// identically.
 #[test]
 fn spectator_sentinel_projection_is_refused_identically() {
-    let projection = projection_for(SPECTATOR);
-    let json = serde_json::to_string(&projection).expect("serialize");
-
     assert_eq!(
-        serde_json::from_str::<GameState>(&json)
-            .expect_err("a spectator projection is still a projection")
-            .to_string(),
+        persisted_decode_error(projection_for(SPECTATOR)),
         REFUSAL,
         "the sentinel must not be an accidental bypass"
     );
