@@ -684,6 +684,17 @@ field):
    `crates/phase-server/src/main.rs:1000`) — an abandoned registration
    (organizer created it, nobody ever joined or started it) is exactly the
    same shape of staleness the lobby's own 300s window already handles.
+   **REVISED, maintainer review: this is a deletion path exactly like the
+   30-day `Completed`/`Abandoned` retention deletion below, and needs the
+   identical delivery contract — the omission wasn't a deliberate
+   distinction, it was this rule simply predating the delivery-contract
+   section entirely (it was already in the doc before that section was
+   added) and never getting swept into it.** `check_expired` emits
+   `Outbound::ToSubscribers(LobbyServerMessage::TournamentRemoved { code
+   })` plus `TournamentListUpdate` for a reaped `Registration` tournament
+   too, same as any other deletion — see "Expiry event delivery" below,
+   which now covers all three deletion/transition outcomes uniformly, not
+   two of three.
 2. **`InProgress` — NEW, the previously-undefined case.** "Genuine
    inactivity" is defined as `last_activity_at` exceeding **7 days**
    (chosen to comfortably exceed any real multi-round Swiss event's
@@ -752,13 +763,17 @@ Tournament expiry needs the identical shape, generalized to two outcomes:
    original design) but were never wired to expiry specifically; this is
    the same authoritative full-state push a manual `ReportMatchResult`
    would already trigger, not a new message shape invented for this case.
-2. **Terminal deletion (`Completed`/`Abandoned` past the 30-day retention
-   window)** emits `Outbound::ToSubscribers(LobbyServerMessage::
+2. **Any deletion path — REVISED, maintainer review: this must cover all
+   three, not just the two newest ones** (`Registration` expiry at 300s,
+   same as always; `Completed`/`Abandoned` past the 30-day retention
+   window) — emits `Outbound::ToSubscribers(LobbyServerMessage::
    TournamentRemoved { code })` — a new variant, but named identically to
    the existing `LobbyGameRemoved` precedent it mirrors, for the same
    reason: a client holding a stale view of a now-gone tournament needs an
-   explicit "this no longer exists" signal, not silence.
-3. **Both cases additionally emit `Outbound::ToSubscribers(
+   explicit "this no longer exists" signal, not silence, regardless of
+   which status it was deleted from.
+3. **All three outcomes (the transition and both deletion cases)
+   additionally emit `Outbound::ToSubscribers(
    LobbyServerMessage::TournamentListUpdate { .. })`** (also already named
    in RESEARCH.md §1) so any tournament-browser/list view reflects the
    status change or removal, not just a client already viewing that one
@@ -1063,16 +1078,22 @@ untouched — proving the previously-missing terminal-state retention rule
 is actually enforced, not just documented.
 
 **NEW — maintainer review (expiry event delivery, §2)**: dedicated
-discriminating tests for each transition's outbound contract, not just its
-state change — (a) the `InProgress`→`Abandoned` transition's returned
-`Vec<Outbound>` contains a `TournamentUpdate` with the updated (Abandoned)
-view AND a `TournamentListUpdate`, not just a bare state mutation; (b) the
-terminal-deletion transition's returned outbounds contain a
-`TournamentRemoved` AND a `TournamentListUpdate`, never a bare deletion
-with no outbound at all; (c) a native-server integration test confirming
-the widened `main.rs` reap block actually recovers and dispatches BOTH new
-variants to `bg_lobby_subs` alongside its existing `LobbyGameRemoved`
-handling, not just one or the other; (d) the equivalent Cloudflare Worker
-test confirming the Durable Object alarm path fans out the same two
-variants through its own broadcast mechanism — proving PR 3 doesn't
-silently diverge from PR 2's delivery behavior.
+discriminating tests for EACH of the three outcomes' outbound contract,
+not just its state change — (a) the `InProgress`→`Abandoned` transition's
+returned `Vec<Outbound>` contains a `TournamentUpdate` with the updated
+(Abandoned) view AND a `TournamentListUpdate`, not just a bare state
+mutation; (b) the 30-day `Completed`/`Abandoned` terminal-deletion path's
+returned outbounds contain a `TournamentRemoved` AND a `TournamentListUpdate`;
+(c) **the 300-second `Registration`-expiry deletion path — NEW, maintainer
+review, previously untested alongside the other two — returns the
+identical `TournamentRemoved` + `TournamentListUpdate` pair**, not a bare
+deletion with no outbound at all (this is the exact gap review caught: the
+Registration path predates the delivery-contract section and was never
+swept into its test coverage either); (d) a native-server integration test
+confirming the widened `main.rs` reap block recovers and dispatches all
+three outcomes' variants to `bg_lobby_subs` alongside its existing
+`LobbyGameRemoved` handling, not just some of them; (e) the equivalent
+Cloudflare Worker test confirming the Durable Object alarm path fans out
+the same variants through its own broadcast mechanism for all three
+outcomes — proving PR 3 doesn't silently diverge from PR 2's delivery
+behavior for any of them.
