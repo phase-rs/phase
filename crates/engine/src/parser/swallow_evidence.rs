@@ -228,6 +228,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::parser::oracle::ParsedAbilities;
+use crate::types::ability::{StaticCondition, StaticDefinition};
 
 /// The JSON key whose value is raw Oracle prose, never semantic evidence.
 const DESCRIPTION_KEY: &str = "description";
@@ -412,6 +413,44 @@ const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
     "cap",
     "once_per_turn",
 ];
+
+/// Every JSON key at which a `StaticDefinition`-typed field is serialized.
+///
+/// ```text
+/// $ rg ': (Option<)?(Box<)?(Vec<)?StaticDefinition\b' crates/engine/src/types/
+///   ParsedAbilities.statics                                  Vec<StaticDefinition>
+///   CardFace.static_abilities / CardRules.static_abilities   Vec<StaticDefinition>
+///   Effect::GenericEffect.static_abilities                   Vec<StaticDefinition>
+///   Effect::CreateToken.static_abilities                     Vec<StaticDefinition>
+///   Effect::CreateEmblem.statics                             Vec<StaticDefinition>
+///   ContinuousModification::GrantStaticAbility.definition    Box<StaticDefinition>
+///   CounterSourceRider::LosesAbilities.static_def            Box<StaticDefinition>
+/// ```
+///
+/// Anchoring here is what makes [`UnitEvidence::static_definition_conditions`] ask its
+/// question about the right RULE. The condition slot it needs is
+/// `StaticDefinition.condition` (CR 604.1 — the static's own functioning gate), and the
+/// bare JSON key `condition` is one of the most heavily reused keys in the whole tree:
+/// `ReplacementDefinition.condition` (`Option<ReplacementCondition>`, CR 614.1),
+/// `AbilityDefinition.condition`, `ActivationRestriction::RequiresCondition.condition`,
+/// and more all serialize under it.
+///
+/// `ReplacementCondition::Unrecognized { text }` and `StaticCondition::Unrecognized
+/// { text }` are FIELD-IDENTICAL and share a variant name, so each deserializes cleanly
+/// as the other and the `tag = "type"` discriminates nothing between them — the same
+/// collision shape as `ActivationRestriction`/`CastingRestriction` above. A key-only
+/// `collect_at::<StaticCondition>(&["condition"])` therefore accepted a REPLACEMENT
+/// effect's recorded gap text as proof that a STATIC's gate was recorded, discharging a
+/// dynamic-quantity suppression for a clause on an unrelated rule.
+///
+/// Anchoring on the *carrier struct* instead of the condition node closes it from both
+/// directions at once: the node must sit at a key where a `StaticDefinition` actually
+/// lives (path), and the whole `StaticDefinition` must typecheck (type) — a
+/// `ReplacementDefinition` fails that because its `mode` is a `ReplacementMode` object,
+/// and an `AbilityDefinition` fails it because it has no `mode` field at all and
+/// `StaticDefinition.mode` has no serde default.
+const STATIC_DEFINITION_KEYS: &[&str] =
+    &["statics", "static_abilities", "static_def", "definition"];
 
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
 ///
@@ -608,6 +647,56 @@ impl UnitEvidence {
         pred: impl Fn(&crate::types::statics::StaticMode) -> bool,
     ) -> bool {
         self.any_at(STATIC_MODE_KEYS, pred)
+    }
+
+    /// Every node stored at one of `keys` that deserializes as `T`, in walk order.
+    ///
+    /// The collecting sibling of [`Self::any_at`], with the identical key-anchoring
+    /// contract — use it when a detector needs the carrier's *payload* rather than
+    /// just its presence. The only such fact today is the recorded text on a
+    /// `StaticCondition::Unrecognized`: "which source text did the parser explicitly
+    /// admit it could not parse?" cannot be answered by a boolean.
+    ///
+    /// Anchor on the key of the **carrier that owns the payload's field**, not on the
+    /// payload's own key, whenever the payload type is not self-discriminating. See
+    /// [`Self::static_definition_conditions`], the one caller, for why: the payload
+    /// there is a `StaticCondition`, whose `Unrecognized` variant is field-identical to
+    /// `ReplacementCondition::Unrecognized`, and both live under the same bare key
+    /// `condition`.
+    fn collect_at<T: DeserializeOwned>(&self, keys: &[&str]) -> Vec<T> {
+        let mut found = Vec::new();
+        Self::visit(&self.root, None, &mut |node, key| {
+            if key.is_some_and(|k| keys.contains(&k)) {
+                if let Ok(value) = T::deserialize(node) {
+                    found.push(value);
+                }
+            }
+            // Never short-circuit: this is a full walk, not a search.
+            false
+        });
+        found
+    }
+
+    /// CR 604.1: every `StaticDefinition.condition` gate on this unit, in walk order.
+    ///
+    /// The ONE way a detector may read a static's own functioning gate. It collects the
+    /// `StaticDefinition` CARRIERS — key-anchored per [`STATIC_DEFINITION_KEYS`], and
+    /// required to typecheck as a whole `StaticDefinition` — and then reads the typed
+    /// `Option<StaticCondition>` field off each. The condition node is therefore reached
+    /// through the static-definition path, by field type, and can never be some other
+    /// rule's condition that merely happens to share the JSON key `condition` and a
+    /// variant name (`ReplacementCondition::Unrecognized`, CR 614.1, is field-identical
+    /// to the static one and was being accepted here).
+    ///
+    /// Nested `ContinuousModification::GrantStaticAbility` definitions are included:
+    /// `definition` is in the anchored key set and the walk is total, so a granted
+    /// static's gate is collected exactly once, at its own node — the outer carrier
+    /// contributes only its own `condition` field.
+    pub(super) fn static_definition_conditions(&self) -> Vec<StaticCondition> {
+        self.collect_at::<StaticDefinition>(STATIC_DEFINITION_KEYS)
+            .into_iter()
+            .filter_map(|def| def.condition)
+            .collect()
     }
 }
 

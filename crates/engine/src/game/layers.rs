@@ -2824,6 +2824,70 @@ fn quantity_expr_reads_zone(expr: &QuantityExpr, zone: Zone) -> bool {
     }
 }
 
+/// CR 404 + CR 611.3a: Does a `PlayerFilter` population/predicate depend on the
+/// membership of `zone`? Mirrors `player_filter_reads_life`'s recursion at the
+/// zone axis — a `PlayerCount`/`EventContextPlayerCount` quantity wraps a
+/// `PlayerFilter`, and that filter's nested `TargetFilter` / `QuantityRef` /
+/// `QuantityExpr` payloads must be walked here or the wrapping quantity
+/// silently reports zone-independent. Master's Councillors class ("+2/+0 for
+/// each graveyard with seven or more cards in it") parses to `PlayerCount {
+/// filter: PlayerAttribute { attr: GraveyardSize, .. } }`: without this route,
+/// an ordinary mill/discard/zone move through `zones::move_to_zone` never
+/// re-evaluates the census, so the P/T boost can go stale after any graveyard
+/// move that isn't the one full-refresh path some other unrelated static
+/// happens to trigger.
+fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
+    match filter {
+        // CR 120.9: the damage-history player set can restrict by a source
+        // `TargetFilter`; route it.
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|f| target_filter_reads_zone(f, zone)),
+        // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
+        PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
+        // comparison `count` expression.
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_reads_zone(filter, zone) || quantity_expr_reads_zone(count, zone)
+        }
+        // CR 404.1 (graveyard) / CR 402.1 (hand) / etc: per-candidate scalar
+        // attribute (`attr = GraveyardSize` reads `zone` when `zone ==
+        // Graveyard`) compared against a controller-relative `value`
+        // expression (Master's Councillors / Wolfcaller's Howl class). Route
+        // both.
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_reads_zone(attr, zone) || quantity_expr_reads_zone(value, zone)
+        }
+        // CR 608.2c + CR 109.4: the tracked-set possession predicate applies its
+        // object `filter` to each member; route it like `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor { filter, .. } => target_filter_reads_zone(filter, zone),
+        // Payload-free player sets, action/vote ledgers, and combat/attack
+        // relations — none read zone membership. Enumerated explicitly (no
+        // wildcard), mirroring `player_filter_reads_life`.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => false,
+    }
+}
+
 /// CR 404 + CR 611.3a: Leaf classification for `quantity_expr_reads_zone` — does
 /// a `QuantityRef` read the card count / object population of `zone`? EXHAUSTIVE
 /// and wildcard-free (mirroring `quantity_ref_uses_object_count`) so any future
@@ -2866,6 +2930,15 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_zone(source, zone)
         }
+        // CR 404.1 + CR 611.3a: a player-population census routes its
+        // `PlayerFilter` — `PlayerCount{PlayerAttribute{attr: GraveyardSize}}`
+        // (Master's Councillors: "for each graveyard with seven or more cards
+        // in it") reads `zone` exactly when the wrapped filter does. Mirrors
+        // `quantity_ref_reads_life`'s identical routing of these two variants
+        // through `player_filter_reads_life`.
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_reads_zone(filter, zone)
+        }
         QuantityRef::PropertyAggregate(aggregate) => {
             characteristic_source_reads_zone(aggregate.source(), zone)
         }
@@ -2889,8 +2962,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
-        | QuantityRef::PlayerCount { .. }
-        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -10842,6 +10913,110 @@ mod tests {
         assert!(
             equipped.has_keyword(&Keyword::Shroud),
             "equipped creature must gain Shroud from the keyword companion"
+        );
+    }
+
+    /// Attach `line`'s parsed static to a fresh Aura on a fresh 2/2, run the real
+    /// layer pipeline, and hand back the enchanted creature's post-layer state.
+    ///
+    /// Shared by the pair of tests below so the gated and ungated cases differ in
+    /// exactly one thing — the Oracle text — rather than in test scaffolding.
+    fn apply_aura_static(line: &str) -> (GameState, ObjectId, StaticDefinition) {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let def = crate::parser::oracle_static::parse_static_line(line)
+            .unwrap_or_else(|| panic!("{line} should parse to a static"));
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+            obj.static_definitions.push(def.clone());
+        }
+        state.objects.get_mut(&bear).unwrap().attachments.push(aura);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        (state, bear, def)
+    }
+
+    /// CR 118.12a + CR 611.3a + CR 613.1f + CR 613.4c: an "as long as <payment>"
+    /// gate on a continuous GRANT must leave the grant off at runtime, because the
+    /// CR 613 layer pipeline offers no optional-payment round-trip and the player
+    /// is therefore never given the "may".
+    ///
+    /// The two layers cited are the two this test actually drives: CR 613.1f is
+    /// Layer 6 (ability-adding effects), which carries the `has flying` shape, and
+    /// CR 613.4c is Layer 7c (effects that MODIFY power/toughness without setting
+    /// it), which carries the `gets +2/+2` shape. Both are gated by the same
+    /// condition slot, which is why one gate defect would surface in both.
+    ///
+    /// This is the runtime half of
+    /// `oracle_static::tests::attached_conditional_grant_payment_gate_is_deferred_not_accepted`,
+    /// and it exists because the parser assertion alone cannot see the defect it
+    /// guards: the deferral marker's SHAPE decides whether the grant applies.
+    /// `evaluate_condition` reads `StaticCondition::Unrecognized` as `true`, so a
+    /// bare marker would have made `"Enchanted creature gets +2/+2 as long as you
+    /// pay {1}"` an UNCONDITIONAL +2/+2 — a buff the printed card never grants for
+    /// free — while the coverage gap marker still looked correct.
+    /// `static_helpers::unenforceable_gate_marker` emits the `Not`-wrapped inert
+    /// shape instead, which pins the gate `false` and keeps the grant off.
+    ///
+    /// Both grant shapes the branch serves are exercised (P/T and keyword),
+    /// because the gate is shared by the class, not by one Oracle phrasing.
+    #[test]
+    fn conditional_grant_with_unenforceable_payment_gate_does_not_apply() {
+        let (state, bear, def) =
+            apply_aura_static("Enchanted creature gets +2/+2 as long as you pay {1}.");
+        assert!(
+            def.condition
+                .as_ref()
+                .is_some_and(StaticCondition::contains_unrecognized),
+            "the coverage marker must survive alongside the fail-closed runtime, got {:?}",
+            def.condition
+        );
+        let enchanted = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            (enchanted.power, enchanted.toughness),
+            (Some(2), Some(2)),
+            "an unofferable CR 118.12a payment gate must leave the grant INACTIVE — \
+             the creature must stay 2/2, not become 4/4"
+        );
+
+        let (state, bear, _) =
+            apply_aura_static("Enchanted creature has flying as long as you pay {1}.");
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "the keyword shape of the same branch must also stay inactive"
+        );
+    }
+
+    /// Non-vacuity control for the test above: the identical scaffolding DOES
+    /// apply an ungated grant. Without this, a harness that silently failed to
+    /// wire the Aura's static into the layer pipeline would make the fail-closed
+    /// assertion pass for the wrong reason.
+    #[test]
+    fn unconditional_aura_grant_applies_through_the_same_harness() {
+        let (state, bear, def) = apply_aura_static("Enchanted creature gets +2/+2.");
+        assert_eq!(def.condition, None, "control line must carry no gate");
+        let enchanted = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            (enchanted.power, enchanted.toughness),
+            (Some(4), Some(4)),
+            "the harness must actually apply an ungated Aura grant"
         );
     }
 

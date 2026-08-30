@@ -34,6 +34,7 @@ import {
   getBattlefieldSacrificeChoice,
   getBoardChoiceView,
   getCastableZoneViewerTarget,
+  getAllOpponentIds,
   getOpponentIds,
   getSeatCount,
   getVisibleBoardPlayerIds,
@@ -873,8 +874,12 @@ describe("getCastableZoneViewerTarget", () => {
 });
 
 describe("getOpponentIds", () => {
-  it("excludes the perspective player and eliminated players", () => {
-    expect(getOpponentIds(makeState([0, 1, 2, 3], [2]), 0)).toEqual([1, 3]);
+  it("rotates clockwise after a non-zero perspective player", () => {
+    expect(getOpponentIds(makeState([0, 3, 1, 2]), 1)).toEqual([2, 0, 3]);
+  });
+
+  it("excludes eliminated players without changing clockwise seat order", () => {
+    expect(getOpponentIds(makeState([0, 3, 1, 2], [0]), 1)).toEqual([2, 3]);
   });
 
   it("returns an empty array in a 2-player game with the opponent eliminated", () => {
@@ -882,6 +887,17 @@ describe("getOpponentIds", () => {
     // guards against — `opponents[0]` is undefined here, and the layout
     // must not index `gameState.players[undefined]`.
     expect(getOpponentIds(makeState([0, 1], [1]), 0)).toEqual([]);
+  });
+});
+
+describe("getAllOpponentIds", () => {
+  it("retains eliminated opponents in their physical clockwise seats", () => {
+    expect(getAllOpponentIds(makeState([0, 3, 1, 2], [0]), 1)).toEqual([2, 0, 3]);
+  });
+
+  it("rotates the players fallback when seat_order is absent", () => {
+    const state = buildGameStateWithoutSeatOrder({ players: buildPlayers([0, 3, 1, 2]) });
+    expect(getAllOpponentIds(state, 1)).toEqual([2, 0, 3]);
   });
 });
 

@@ -599,7 +599,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
-        TargetFilter::EventTarget => "damaged object of the triggering event".into(),
+        TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -8403,6 +8403,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+            // EventTarget is a generic object participant of the trigger event
+            // (damage recipient or BecomesTarget object), resolved by the shared
+            // event-target extractor rather than a damage-only special case.
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
@@ -11868,6 +11871,97 @@ mod tests {
         assert!(
             gaps.iter().any(|gap| gap.contains("you pay {2}")),
             "card_face_gaps must name the deferred payment clause so the gap is              actionable in coverage tooling, got {gaps:?}"
+        );
+    }
+
+    /// The same outcome check for the two PRINTED cards a follow-up audit of PR
+    /// #8012 found carrying the identical defect on non-`CantUntap` modes.
+    ///
+    /// CR 118.12a / CR 509.1c: the payment prompt
+    /// (`WaitingFor::CombatTaxPayment`) exists only for `CantAttack` /
+    /// `CantBlock` / `CantAttackOrBlock` (`combat::combat_tax_mode_matches`).
+    /// Awesome Presence lowers to `CantBeBlocked` and Hipparion to
+    /// `BlockRestriction`, so neither gate can ever be satisfied and both were
+    /// being reported as fully supported. Driving the real Oracle lines through
+    /// the parser and then the card-face coverage entry points is the end-to-end
+    /// half: the AST proofs live in
+    /// `oracle_static::tests::awesome_presence_block_tax_is_deferred_for_lack_of_a_payment_prompt`
+    /// and `object_composes_with_a_trailing_unless_condition`.
+    #[test]
+    fn block_side_payment_gated_statics_are_not_fully_supported() {
+        for (name, line, gap_needle) in [
+            (
+                "Awesome Presence",
+                "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+                "defending player pays {3}",
+            ),
+            (
+                "Hipparion",
+                "~ can't block creatures with power 3 or greater unless you pay {1}.",
+                "you pay {1}",
+            ),
+        ] {
+            let def = crate::parser::oracle_static::parse_static_line(line)
+                .unwrap_or_else(|| panic!("{name} should still parse to a static"));
+            let face = CardFace {
+                name: name.to_string(),
+                static_abilities: vec![def],
+                ..Default::default()
+            };
+
+            assert!(
+                super::card_face_has_unimplemented_parts(&face),
+                "{name}: a payment gate on a mode with no combat-tax prompt must be \
+                 flagged as having unimplemented parts, not reported as fully supported"
+            );
+
+            let gaps = super::card_face_gaps(&face);
+            assert!(
+                gaps.iter().any(|gap| gap.contains(gap_needle)),
+                "{name}: card_face_gaps must name the deferred payment clause so the \
+                 gap is actionable in coverage tooling, got {gaps:?}"
+            );
+        }
+    }
+
+    /// The same end-to-end check for the POSITIVE-tail route the maintainer
+    /// review of this PR found still bypassing the acceptance authority:
+    /// `grammar::parse_enchanted_equipped_predicate`'s `"as long as"`
+    /// conditional continuous grant.
+    ///
+    /// CR 118.12a + CR 613: `oracle_nom::condition::parse_unless_pay_condition`
+    /// accepts a bare `"you pay {N}"` with no `"unless"` prefix, so an
+    /// `"as long as"` tail can carry a payment gate onto a
+    /// `StaticMode::Continuous` — a mode whose enforcement point is the layer
+    /// pipeline, which offers no payment round-trip. Coverage reported such a
+    /// grant fully supported. The AST proof is
+    /// `oracle_static::tests::attached_conditional_grant_payment_gate_is_deferred_not_accepted`;
+    /// this is the half that pins what `coverage-report` actually consumes.
+    ///
+    /// No printed card matches this shape today — which is exactly why it needs
+    /// a regression test rather than a corpus entry: the route is live, so the
+    /// first card printed into it must not be silently green.
+    #[test]
+    fn attached_conditional_grant_payment_gate_is_not_fully_supported() {
+        let line = "Enchanted creature gets +2/+2 as long as you pay {1}.";
+        let def = crate::parser::oracle_static::parse_static_line(line)
+            .expect("the conditional attached grant should still parse to a static");
+        let face = CardFace {
+            name: "Conditional Grant Probe".to_string(),
+            static_abilities: vec![def],
+            ..Default::default()
+        };
+
+        assert!(
+            super::card_face_has_unimplemented_parts(&face),
+            "a payment gate on a Continuous grant has no enforcement point anywhere \
+             in the engine and must not be reported as fully supported"
+        );
+
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter().any(|gap| gap.contains("you pay {1}")),
+            "card_face_gaps must name the deferred payment clause, got {gaps:?}"
         );
     }
 

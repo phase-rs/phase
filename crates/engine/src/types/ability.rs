@@ -6321,14 +6321,12 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
-    /// CR 603.2 + CR 120.1: Resolves to the object that *received* the damage
-    /// referenced by the current trigger event — the recipient counterpart to
-    /// [`TargetFilter::TriggeringSource`] and the `TargetFilter`-side analogue of
-    /// [`ObjectScope::EventTarget`]. This binds "that creature" / "that
-    /// permanent" in an intervening-`if` (CR 603.4) to the *specific* damaged
-    /// object carried by the `DamageDealt` event, not a generic type filter, so
-    /// "if that creature was dealt excess damage this turn" (Maarika, Brutal
-    /// Gladiator) checks only the creature this trigger's damage went to.
+    /// CR 603.2: Resolves to the object targeted or receiving the current
+    /// trigger event — the target counterpart to [`TargetFilter::TriggeringSource`]
+    /// and the `TargetFilter`-side analogue of [`ObjectScope::EventTarget`].
+    /// This binds "that creature" / "that permanent" in an intervening-`if`
+    /// (CR 603.4) to the event's *specific* object, not a generic type filter.
+    /// It covers damage recipients and objects that become targets.
     /// Resolved via `extract_target_object_from_event` against
     /// `state.current_trigger_event`; matches no object outside a trigger.
     /// DealDamage has a narrow CR 115.10a / CR 120.3 exception for "that
@@ -6783,14 +6781,12 @@ pub enum ObjectScope {
     /// resolution-local state carried by `ResolvedAbility.amassed_army_object`,
     /// not the generic demonstrative/effect-context slot.
     AmassedArmy,
-    /// CR 603.2 + CR 120.1: The object that **received** the damage referenced
-    /// by the current trigger event — the recipient counterpart to
-    /// [`ObjectScope::EventSource`]. This is "that creature" in "deals
-    /// noncombat damage to a creature equal to that creature's toughness":
-    /// the antecedent is the damaged object carried by the `DamageDealt` event,
-    /// not the ability source or a target. Resolved at both trigger detection
-    /// and resolution (CR 603.4 intervening-if) via
-    /// `extract_target_object_from_event`.
+    /// CR 603.2: The object targeted or receiving the current trigger event —
+    /// the target counterpart to [`ObjectScope::EventSource`]. This includes a
+    /// damage recipient and a permanent that becomes a spell or ability target;
+    /// the antecedent is the event's carried object, not the ability source or
+    /// a newly chosen target. Resolved at both trigger detection and resolution
+    /// (CR 603.4 intervening-if) via `extract_target_object_from_event`.
     EventTarget,
     /// CR 608.2c + CR 701.20b + CR 108.3 + CR 202.3: In an exactly-two-target
     /// symmetric reveal ("two target players each reveal the top card of their
@@ -9509,6 +9505,76 @@ pub(crate) enum ConditionContinuation {
     PendingCast,
 }
 
+impl StaticMode {
+    /// Engine limitation, not CR-mandated: does THIS static mode's ENFORCEMENT
+    /// POINT actually run `continuation`?
+    ///
+    /// This is the mode-side half of the [`ConditionContinuation`] contract. A
+    /// leaf that needs a continuation ([`StaticCondition::required_continuation`])
+    /// is satisfiable only where the enforcement point runs it; everywhere else
+    /// the layer pipeline can only ever return its degenerate `false`, so a
+    /// parser that attaches such a leaf reports a condition "supported" that no
+    /// player can ever satisfy.
+    ///
+    /// Dispatching on the CONTINUATION (two variants, each naming the one
+    /// runtime site that provides it) rather than on `StaticMode` (122 variants)
+    /// is deliberate: the fact being encoded is "which enforcement point runs
+    /// this round-trip", and each answer is verifiable by reading that one site.
+    /// A 122-arm match would instead demand a guess per mode, and a wrong guess
+    /// in either direction is a defect — `false` demotes working cards to
+    /// unsupported, `true` re-creates the false green. Adding a
+    /// `ConditionContinuation` variant IS a compile error here.
+    pub(crate) fn provides_continuation(&self, continuation: ConditionContinuation) -> bool {
+        match continuation {
+            // CR 118.12a + CR 508.1h-j / CR 509.1d-f: the payment is OFFERED
+            // exactly once — CR 509.1d "if any of the chosen creatures require
+            // paying costs to block, the defending player determines the total
+            // cost to block" (CR 508.1h is the attack-side twin) — and
+            // CR 118.12a + CR 508.1d / CR 509.1c make that offer the whole
+            // enforcement mechanism, since the player is never REQUIRED to pay.
+            // The engine runs it in one place: `combat::combat_tax_mode_matches`
+            // / `WaitingFor::CombatTaxPayment` at attack/block declaration, and
+            // that site inspects exactly these three modes. Any other mode —
+            // `CantBeBlocked` (Awesome Presence), `BlockRestriction`
+            // (Hipparion), `CantUntap`, `CantBeActivated`, … — has no prompt,
+            // so an `UnlessPay` gate on it is unsatisfiable by construction.
+            // Kept in sync with combat.rs by
+            // `combat::tests::combat_tax_mode_match_agrees_with_provides_continuation`.
+            ConditionContinuation::OptionalCostPayment => matches!(
+                self,
+                StaticMode::CantAttack | StaticMode::CantBlock | StaticMode::CantAttackOrBlock
+            ),
+            // CR 601.2f: `casting::collect_self_spell_cost_modifiers` reads
+            // `state.pending_cast` while a cast of the source object is in
+            // flight. CR 502.3's untap step is the one enforcement point that
+            // has been AUDITED to lack it (PR #8012 round 5): it is a turn-based
+            // action, so there is never a cast in flight. Every other mode is
+            // left un-gated on this axis rather than guessed at — a wrong
+            // `false` here would demote working cost-modifier cards
+            // (`ModifyCost`, `CastWithAlternativeCost`, …) to unsupported.
+            // Narrowing this arm requires the same per-mode audit combat.rs got.
+            ConditionContinuation::PendingCast => !matches!(self, StaticMode::CantUntap),
+        }
+    }
+
+    /// Engine limitation, not CR-mandated: can THIS static mode's enforcement
+    /// point bind a scoped-player designation anchor
+    /// ([`StaticCondition::has_unbindable_designation_anchor`])?
+    ///
+    /// Separate axis from [`Self::provides_continuation`]: a designation anchor
+    /// needs a RECIPIENT (or a triggering event) to resolve "that player"
+    /// against, which recipient-bearing evaluators
+    /// (`game::layers::evaluate_condition_with_recipient`) supply and the plain
+    /// `evaluate_condition` does not. CR 502.3's untap step is the one
+    /// enforcement point audited to lack it (PR #8012 rounds 3-4); every other
+    /// mode is left un-gated rather than guessed at, for the same reason as
+    /// above. Widening this needs a per-mode audit of which evaluator each
+    /// enforcement point calls.
+    pub(crate) fn binds_scoped_player_anchor(&self) -> bool {
+        !matches!(self, StaticMode::CantUntap)
+    }
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10033,7 +10099,7 @@ impl StaticCondition {
     /// latent false green in every gate that consults this.
     ///
     /// Boolean combinators return `None`; the tree-level view
-    /// ([`Self::requires_out_of_layer_continuation`]) walks them.
+    /// ([`Self::requires_unavailable_continuation`]) walks them.
     pub(crate) fn required_continuation(&self) -> Option<ConditionContinuation> {
         match self {
             // CR 118.12a: resolved by `WaitingFor::CombatTaxPayment` at
@@ -10115,18 +10181,56 @@ impl StaticCondition {
         }
     }
 
-    /// True when this condition, or a Boolean sub-condition of it at ANY
-    /// nesting depth, has a leaf whose truth is decided by an out-of-layer
-    /// [`ConditionContinuation`].
+    /// True when this condition, or a Boolean sub-condition of it at ANY nesting
+    /// depth, has a leaf whose truth is decided by a [`ConditionContinuation`]
+    /// that `mode`'s enforcement point does NOT run
+    /// ([`StaticMode::provides_continuation`]).
     ///
-    /// Callers must only use this where the enforcement point does NOT run the
-    /// continuation in question. The untap step (CR 502.3) is such a point: it
-    /// is a turn-based action with no cast in flight and no payment prompt, so
-    /// BOTH continuations are unavailable and any such leaf is unsatisfiable
-    /// there. The combat-tax and self-spell-cost gates deliberately do NOT call
-    /// this — they are the continuations.
-    pub(crate) fn requires_out_of_layer_continuation(&self) -> bool {
-        self.any_leaf(|leaf| leaf.required_continuation().is_some())
+    /// The mode parameter is load-bearing, not decoration: the same leaf is
+    /// legitimate on one mode and unsatisfiable on another. A CR 118.12a
+    /// `UnlessPay` is exactly right on `CantAttack` (Ghostly Prison —
+    /// `WaitingFor::CombatTaxPayment` prompts for it at declaration) and a false
+    /// green on `CantBeBlocked` (Awesome Presence) or `BlockRestriction`
+    /// (Hipparion), where no prompt exists and the layer pipeline returns
+    /// `false` forever. An earlier mode-blind form of this view was the reason
+    /// those two cards stayed falsely "supported" after the untap-step fix.
+    ///
+    /// The enforcement points that DO run a continuation
+    /// (`game::combat::compute_combat_tax`,
+    /// `game::casting::collect_self_spell_cost_modifiers`) deliberately never
+    /// consult this — they are the continuations.
+    pub(crate) fn requires_unavailable_continuation(&self, mode: &StaticMode) -> bool {
+        self.any_leaf(|leaf| {
+            leaf.required_continuation()
+                .is_some_and(|continuation| !mode.provides_continuation(continuation))
+        })
+    }
+
+    /// Engine limitation, not CR-mandated: the ACCEPTANCE PREDICATE — can this
+    /// condition ever be satisfied at `mode`'s enforcement point?
+    ///
+    /// The union of the two rejection classes, and the single authority both
+    /// consumers read:
+    ///
+    /// - `oracle_static::static_helpers::gate_static_condition` — the PARSER
+    ///   gate, which substitutes the honest gap marker when this is true.
+    /// - `database::CardDatabase::export_integrity_errors` — the corpus-wide
+    ///   CI gate, which fails the shipped export when any face still carries
+    ///   one.
+    ///
+    /// Having both read ONE predicate is the point. The parser gate is a
+    /// call-site discipline — it only fires where a call site routes through it
+    /// — and that discipline has now been breached three separate times
+    /// (PR #8012's `CantUntap`-only gate; the `" unless "` split in
+    /// `evasion::parse_subject_rule_static`; the `"as long as"` conditional
+    /// continuous grant in `grammar::parse_enchanted_equipped_predicate`). A
+    /// predicate the export must satisfy no matter WHICH parser route built the
+    /// definition converts that discipline into an invariant: a fourth bypass
+    /// fails CI on the card that reaches it instead of shipping as a false
+    /// green.
+    pub(crate) fn is_unenforceable_on(&self, mode: &StaticMode) -> bool {
+        self.requires_unavailable_continuation(mode)
+            || (!mode.binds_scoped_player_anchor() && self.has_unbindable_designation_anchor())
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -10178,7 +10282,7 @@ impl StaticCondition {
     /// Single authority for tree recursion over `StaticCondition`. Every
     /// tree-level view — [`Self::contains_unrecognized`],
     /// [`Self::unrecognized_texts`], [`Self::has_unbindable_designation_anchor`],
-    /// [`Self::requires_out_of_layer_continuation`] — is DERIVED from this one
+    /// [`Self::requires_unavailable_continuation`] — is DERIVED from this one
     /// walk rather than reimplementing its own `And`/`Or`/`Not` recursion.
     /// Parallel walks are exactly how a nested `Unrecognized` came to be seen by
     /// one coverage check and missed by another (PR #8012, review rounds 2-5):
@@ -25817,6 +25921,44 @@ impl StaticDefinition {
             condition: self.condition.as_ref(),
         })
     }
+
+    /// THE `StaticDefinition` nesting walk: visits `self`, then every static
+    /// definition nested beneath it by a
+    /// [`ContinuousModification::GrantStaticAbility`], transitively, in Oracle
+    /// order.
+    ///
+    /// CR 613.1f + CR 604.1: a granted static is a static ability in its own
+    /// right — it carries its own `mode`, `affected` scope, `modifications` and
+    /// (load-bearing here) its own `condition`. Any authority that asks a
+    /// question about "this face's static abilities" must therefore ask it of
+    /// the granted definitions too, or a nested definition is invisible to it.
+    ///
+    /// Single authority for that recursion, for the same reason
+    /// [`StaticCondition::walk_leaves`] is the single authority for the
+    /// condition-tree recursion: parallel walks are exactly how a nested node
+    /// comes to be seen by one coverage gate and missed by another. The
+    /// corpus-wide unenforceable-gate backstop
+    /// (`database::CardDatabase::export_integrity_errors`) originally read only
+    /// each face's top-level `static_abilities`, so an unofferable CR 118.12a
+    /// `UnlessPay` sitting on a definition inside a `GrantStaticAbility`
+    /// bypassed it entirely and the card shipped falsely supported.
+    ///
+    /// `GrantAbility` / `GrantTrigger` / `GrantReplacement` are deliberately NOT
+    /// descended into: they nest an `AbilityDefinition` / `TriggerDefinition` /
+    /// `ReplacementDefinition`, not a `StaticDefinition`, so they hold nothing
+    /// this walk's element type can yield.
+    pub(crate) fn walk_self_and_granted<F>(&self, visit: &mut F) -> ControlFlow<()>
+    where
+        F: FnMut(&StaticDefinition) -> ControlFlow<()>,
+    {
+        visit(self)?;
+        for modification in &self.modifications {
+            if let ContinuousModification::GrantStaticAbility { definition } = modification {
+                definition.walk_self_and_granted(visit)?;
+            }
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 impl CostModifierCasterScope {
@@ -34136,7 +34278,7 @@ mod monarch_subject_axis_tests {
 /// `contains_unrecognized`, `unrecognized_texts` and
 /// `has_unbindable_designation_anchor` used to be three INDEPENDENT
 /// wildcard-recursive walks that could silently diverge. They — plus the new
-/// `requires_out_of_layer_continuation` — are now all derived from the single
+/// `requires_unavailable_continuation` — are now all derived from the single
 /// exhaustive [`StaticCondition::walk_leaves`]. These tests pin that
 /// derivation: every view must agree on the same tree at the same depth.
 #[cfg(test)]
@@ -34263,7 +34405,8 @@ mod static_condition_traversal_tests {
                 "{leaf:?} has no layer-pipeline answer and must report a required continuation"
             );
             assert!(
-                nested_at_depth(leaf.clone()).requires_out_of_layer_continuation(),
+                nested_at_depth(leaf.clone())
+                    .requires_unavailable_continuation(&StaticMode::CantUntap),
                 "{leaf:?} nested under And(Or(Not(..))) must still be found"
             );
         }
@@ -34290,7 +34433,8 @@ mod static_condition_traversal_tests {
                 None,
                 "{leaf:?} is a pure function of game state and must stay enforceable"
             );
-            assert!(!nested_at_depth(leaf.clone()).requires_out_of_layer_continuation());
+            assert!(!nested_at_depth(leaf.clone())
+                .requires_unavailable_continuation(&StaticMode::CantUntap));
         }
     }
 }

@@ -2295,7 +2295,18 @@ pub(crate) fn parse_static_line_inner(
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string());
             if let Some(c) = condition {
-                def.condition = Some(c);
+                // CR 509.1b + CR 118.12a: this fallback reaches the SAME
+                // `CantBeBlocked` mode as the evasion route above, so it must
+                // clear the same enforcement-point bar. `parse_unless_static_
+                // condition` passes an `UnlessPay` leaf through RAW, and no
+                // payment is ever offered at block declaration against an evasion
+                // static (CR 509.1c's tax is offered only for `CantAttack` /
+                // `CantBlock` / `CantAttackOrBlock`; see
+                // `combat::combat_tax_mode_matches`). Assigning `def.condition`
+                // directly here would report such a gate as fully supported while
+                // no player can satisfy it, so route it through the single
+                // acceptance authority like every other gated site.
+                attach_gated_condition(&mut def, c, after_blocked);
             }
             return Some(def);
         }
@@ -2415,13 +2426,12 @@ pub(crate) fn parse_static_line_inner(
         // attach whichever is present. "as long as" is tried before "if" to match
         // `split_trailing_gate_condition`'s precedence. (CR 509.1b is the block
         // *restriction* rule — "a creature can't block" — not 509.1c, which is
-        // block *requirements*.)
-        let gate_affected = def.affected.as_ref();
-        let gate = parse_unless_static_condition(&tp, gate_affected)
-            .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
-            .or_else(|| parse_if_static_condition(&tp, gate_affected));
-        if let Some(condition) = gate {
-            def.condition = Some(condition);
+        // block *requirements*.) Whichever branch produced the condition, an
+        // unenforceable one is deferred to the inert gap marker
+        // (`static_helpers::unenforceable_gate_marker`), so the restriction is
+        // never switched on by a gate the engine cannot evaluate.
+        if let Some(condition) = parse_trailing_gate_condition(&tp, def.affected.as_ref()) {
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -2465,12 +2475,8 @@ pub(crate) fn parse_static_line_inner(
         // attach whichever is present. "as long as" is tried before "if" to match
         // `split_trailing_gate_condition`'s precedence (Seer of the Bright Side:
         // "... can't attack or block as long as it has a stun counter on it.").
-        let gate_affected = def.affected.as_ref();
-        let gate = parse_unless_static_condition(&tp, gate_affected)
-            .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
-            .or_else(|| parse_if_static_condition(&tp, gate_affected));
-        if let Some(condition) = gate {
-            def.condition = Some(condition);
+        if let Some(condition) = parse_trailing_gate_condition(&tp, def.affected.as_ref()) {
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -2557,7 +2563,12 @@ pub(crate) fn parse_static_line_inner(
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
         if let Some(condition) = parse_unless_static_condition(&tp, def.affected.as_ref()) {
-            def.condition = Some(condition);
+            // CR 602.5 + CR 118.12a: the prohibition is enforced when a player
+            // "can't begin to activate an ability that's prohibited from being
+            // activated" — a legality check at activation, which runs no
+            // CR 118.12a payment round-trip. So an `UnlessPay` gate here is
+            // deferred rather than accepted (see `attach_gated_condition`).
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -3379,8 +3390,16 @@ pub(crate) fn parse_static_line_inner(
         // gates the restriction. If the rider is present but its condition is
         // NOT recognized, leave the whole line unsupported (return None) rather
         // than marking it a CantPlayLand enforced unconditionally.
+        // CR 118.12a: an unenforceable gate declines the same way an unparsed
+        // one does — `accept_enforceable_condition` is the fail-closed sibling
+        // of the deferral gate, for exactly this "positive gap marker would
+        // enforce unconditionally" reason.
         return match split_trailing_gate_condition(tp.lower) {
-            Some(condition_text) => Some(def.condition(parse_static_condition(condition_text)?)),
+            Some(condition_text) => {
+                let condition = parse_static_condition(condition_text)?;
+                let condition = accept_enforceable_condition(&def.mode, condition)?;
+                Some(def.condition(condition))
+            }
             None => Some(def),
         };
     }
@@ -3452,7 +3471,12 @@ pub(crate) fn parse_static_line_inner(
     }
     if let Some((body, condition_text)) = split_trailing_gate_condition_with_body(&tp) {
         if let Some(mut def) = parse_extra_blockers_static(body) {
-            def.condition = Some(parse_static_condition(condition_text)?);
+            // CR 118.12a: same fail-closed acceptance bar as the `CantPlayLand`
+            // arm above — a gate this mode's enforcement point can never satisfy
+            // declines the line rather than granting the extra block behind an
+            // always-true marker.
+            let condition = parse_static_condition(condition_text)?;
+            def.condition = Some(accept_enforceable_condition(&def.mode, condition)?);
             return Some(def);
         }
     }

@@ -2742,6 +2742,53 @@ fn validate_blockers_core(
     Ok(())
 }
 
+/// CR 508.1c / CR 509.1b + CR 508.1h-j / CR 509.1d-f + CR 118.12a: does this
+/// static mode's combat-tax enforcement point run in `context`?
+///
+/// The three rule groups are distinct and all three matter here. CR 508.1c /
+/// CR 509.1b are the RESTRICTION checks ("effects that say a creature can't
+/// attack / can't block"), i.e. what these modes encode. CR 508.1h-j /
+/// CR 509.1d-f are where the payment is actually OFFERED — "if any of the
+/// chosen creatures require paying costs to block, the defending player
+/// determines the total cost to block", then activates mana abilities, then
+/// pays. CR 118.12a is what makes that offer the entire enforcement mechanism:
+/// "unless [a player] pays" means "[a player] MAY pay", and CR 508.1d /
+/// CR 509.1c confirm the player "is not required to pay that cost".
+///
+/// The SINGLE authority for which `StaticMode`s the CR 118.12a payment
+/// round-trip (`WaitingFor::CombatTaxPayment`) is ever offered for. Its union
+/// over both contexts is what `StaticMode::provides_continuation` reports for
+/// `ConditionContinuation::OptionalCostPayment`, which is what the parser's
+/// acceptance gate consults before letting an `UnlessPay` leaf gate a
+/// static. The two are pinned together by
+/// `combat_tax_mode_match_agrees_with_provides_continuation` — if either side
+/// changes without the other following, that test fails rather than the parser
+/// silently re-acquiring a false green (or silently demoting a newly-taxable
+/// mode).
+///
+/// Scope of that pin, stated honestly: it iterates a REPRESENTATIVE set of
+/// modes spanning the taxed/untaxed boundary (the three taxed ones plus the
+/// sibling combat/evasion modes an `unless` tail can actually reach), not all
+/// `StaticMode` variants. It therefore catches a change to either side for a
+/// mode in that set, but it cannot catch a newly-taxed mode added here that is
+/// absent from both the set and the mode axis. Making it exhaustive needs a
+/// `StaticMode` iterator (the enum has no `EnumIter` derive today); until then,
+/// adding a mode to this function requires adding it to the pin list too.
+pub(crate) fn combat_tax_mode_matches(
+    mode: &StaticMode,
+    context: &crate::types::game_state::CombatTaxContext,
+) -> bool {
+    use crate::types::game_state::CombatTaxContext;
+    match context {
+        CombatTaxContext::Attacking => {
+            matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock)
+        }
+        CombatTaxContext::Blocking => {
+            matches!(mode, StaticMode::CantBlock | StaticMode::CantAttackOrBlock)
+        }
+    }
+}
+
 /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Walk every battlefield / command-zone
 /// static ability that imposes `CantAttack`/`CantAttackOrBlock` or `CantBlock`/
 /// `CantAttackOrBlock` with a `StaticCondition::UnlessPay` condition, compute the
@@ -2766,7 +2813,6 @@ pub fn compute_combat_tax(
     Vec<(ObjectId, crate::types::mana::ManaCost)>,
 )> {
     use crate::types::ability::UnlessPayScaling;
-    use crate::types::game_state::CombatTaxContext;
     use crate::types::mana::ManaCost;
 
     if creatures.is_empty() {
@@ -2825,17 +2871,7 @@ pub fn compute_combat_tax(
             if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
                 continue;
             }
-            let mode_matches = match context {
-                CombatTaxContext::Attacking => matches!(
-                    def.mode,
-                    StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                ),
-                CombatTaxContext::Blocking => matches!(
-                    def.mode,
-                    StaticMode::CantBlock | StaticMode::CantAttackOrBlock
-                ),
-            };
-            if !mode_matches {
+            if !combat_tax_mode_matches(&def.mode, &context) {
                 continue;
             }
             // CR 611.3a + CR 118.12a: The combat-tax payload may live directly
@@ -6912,6 +6948,51 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
+
+    /// CR 118.12a: pins the runtime combat-tax mode set against the parser-facing
+    /// mode axis it is mirrored by.
+    ///
+    /// `combat_tax_mode_matches` is the ONLY place the CR 118.12a payment
+    /// round-trip is ever offered; `StaticMode::provides_continuation` is what the
+    /// parser's acceptance gate consults before letting an `UnlessPay` leaf gate a
+    /// static (PR #8012 follow-up audit — Awesome Presence / Hipparion carried
+    /// such a leaf on modes this function never walks). If the two ever disagree,
+    /// one of two defects follows silently: a mode that IS taxed gets its cards
+    /// demoted to unsupported, or a mode that ISN'T re-acquires the false green.
+    /// Asserting both directions over both contexts is what keeps them one fact.
+    #[test]
+    fn combat_tax_mode_match_agrees_with_provides_continuation() {
+        use crate::types::ability::ConditionContinuation;
+        use crate::types::game_state::CombatTaxContext;
+
+        // Representative modes spanning the boundary: the three taxed ones plus
+        // the sibling combat/evasion modes an `unless` tail can reach.
+        for mode in [
+            StaticMode::CantAttack,
+            StaticMode::CantBlock,
+            StaticMode::CantAttackOrBlock,
+            StaticMode::CantBeBlocked,
+            StaticMode::BlockRestriction {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CantBeBlockedBy {
+                filter: TargetFilter::Any,
+            },
+            StaticMode::CantUntap,
+            StaticMode::MustBlock,
+            StaticMode::Continuous,
+        ] {
+            let taxed = [CombatTaxContext::Attacking, CombatTaxContext::Blocking]
+                .iter()
+                .any(|context| combat_tax_mode_matches(&mode, context));
+            assert_eq!(
+                taxed,
+                mode.provides_continuation(ConditionContinuation::OptionalCostPayment),
+                "{mode:?}: compute_combat_tax walks it = {taxed}, but the parser-facing \
+                 continuation axis disagrees — the two must describe the same fact"
+            );
+        }
+    }
 
     // ---------------------------------------------------------------------
     // CR 508.5 defending-player anchor — `defending_player_cr508_5`

@@ -11,6 +11,7 @@ import type {
   MatchType,
   PlayerId,
 } from "../adapter/types";
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import {
@@ -1234,6 +1235,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           releaseAttempt();
           if (!isCurrentAttempt()) return false;
           console.error("[startP2PHostingSession] failed:", err);
+          if (
+            err instanceof AdapterError
+            && err.code === AdapterErrorCode.NOT_INITIALIZED
+          ) {
+            get().showToast(err.message);
+          }
           resetFailedHosting();
           return false;
         }

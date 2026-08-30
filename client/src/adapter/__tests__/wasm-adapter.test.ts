@@ -344,7 +344,7 @@ describe("WasmAdapter", () => {
       expect(adapter.getEngineClient()).toBeNull();
     });
 
-    it("does not reactivate after disposal while initialization is pending", async () => {
+    it("rejects initialization canceled by disposal", async () => {
       let finishInitialization!: () => void;
       mockWorkerClient.initialize.mockImplementationOnce(
         () =>
@@ -356,7 +356,10 @@ describe("WasmAdapter", () => {
       const staleInitialization = adapter.initialize();
       adapter.dispose();
       finishInitialization();
-      await staleInitialization;
+      await expect(staleInitialization).rejects.toMatchObject({
+        code: AdapterErrorCode.NOT_INITIALIZED,
+        message: "Adapter initialization was canceled. Please try again.",
+      });
 
       await expect(adapter.ping()).rejects.toMatchObject({
         code: AdapterErrorCode.NOT_INITIALIZED,

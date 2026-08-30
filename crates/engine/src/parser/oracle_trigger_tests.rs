@@ -88,6 +88,287 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
 }
 
 #[test]
+fn becomes_target_event_object_binds_immediate_card_bodies() {
+    let fixtures = [
+        (
+            "King of the Oathbreakers",
+            "Flying\nWhenever King of the Oathbreakers or another Spirit you control becomes the target of a spell, it phases out. (Treat it and anything attached to it as though they don't exist until your next turn.)\nWhenever King of the Oathbreakers or another Spirit you control phases in, create a tapped 1/1 white Spirit creature token with flying.",
+            vec!["Flying".to_string()],
+            vec!["Legendary".to_string(), "Creature".to_string()],
+            vec!["Spirit".to_string()],
+            "King of the Oathbreakers",
+            TargetFilter::EventTarget,
+        ),
+        (
+            "Daru Spiritualist",
+            "Whenever a Cleric creature you control becomes the target of a spell or ability, it gets +0/+2 until end of turn.",
+            vec![],
+            vec!["Creature".to_string()],
+            vec!["Cleric".to_string()],
+            "Daru Spiritualist",
+            TargetFilter::EventTarget,
+        ),
+        (
+            "Wild Defiance",
+            "Whenever a creature you control becomes the target of an instant or sorcery spell, that creature gets +3/+3 until end of turn.",
+            vec![],
+            vec!["Enchantment".to_string()],
+            vec![],
+            "Wild Defiance",
+            TargetFilter::EventTarget,
+        ),
+        (
+            "Shay Cormac",
+            "{1}: Permanents your opponents control lose hexproof, indestructible, protection, shroud, and ward until end of turn.\nWhenever a creature an opponent controls becomes the target of a spell or ability you control, put a bounty counter on that creature.\nWhenever a creature with a bounty counter on it dies, put two +1/+1 counters on Shay Cormac.",
+            vec![],
+            vec!["Legendary".to_string(), "Creature".to_string()],
+            vec!["Human".to_string(), "Assassin".to_string()],
+            "Shay Cormac",
+            TargetFilter::EventTarget,
+        ),
+    ];
+
+    for (name, oracle, keywords, types, subtypes, expected_name, expected_target) in fixtures {
+        let parsed = parse_oracle_text(oracle, name, &keywords, &types, &subtypes);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::BecomesTarget)
+            .expect("fixture must parse a BecomesTarget trigger");
+        let execute = trigger.execute.as_deref().expect("immediate trigger body");
+        assert!(
+            !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{expected_name} must reach a supported immediate effect: {:?}",
+            execute.effect
+        );
+        let target = match execute.effect.as_ref() {
+            Effect::PhaseOut { target }
+            | Effect::Pump { target, .. }
+            | Effect::PumpAll { target, .. }
+            | Effect::PutCounter { target, .. } => target,
+            other => {
+                panic!("{expected_name} expected immediate target-bearing effect, got {other:?}")
+            }
+        };
+        assert_eq!(
+            *target, expected_target,
+            "{expected_name} must preserve its parsed immediate event binding"
+        );
+    }
+}
+
+#[test]
+fn pawpatch_recruit_rebinds_structural_distinct_from_to_event_target() {
+    let parsed = parse_oracle_text(
+        "Offspring {2} (You may pay an additional {2} as you cast this spell. If you do, when this creature enters, create a 1/1 token copy of it.)\nTrample\nWhenever a creature you control becomes the target of a spell or ability an opponent controls, put a +1/+1 counter on target creature you control other than that creature.",
+        "Pawpatch Recruit",
+        &["Trample".to_string()],
+        &["Creature".to_string()],
+        &["Rabbit".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::BecomesTarget)
+        .expect("Pawpatch Recruit trigger");
+    let execute = trigger.execute.as_deref().expect("counter trigger body");
+    let Effect::PutCounter { target, .. } = execute.effect.as_ref() else {
+        panic!("expected PutCounter, got {:?}", execute.effect);
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected typed target, got {target:?}");
+    };
+    assert!(
+        typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::DistinctFrom { reference }
+                    if **reference == TargetFilter::EventTarget
+            )
+        }),
+        "the fresh target must exclude the event target, not an unbound ParentTarget"
+    );
+}
+
+#[test]
+fn becomes_target_stops_rebinding_after_a_fresh_object_choice() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, destroy target creature. Put a +1/+1 counter on it.",
+        "Synthetic",
+    );
+    assert_eq!(trigger.mode, TriggerMode::BecomesTarget);
+    let destroy = trigger.execute.as_deref().expect("destroy head");
+    assert!(matches!(
+        destroy.effect.as_ref(),
+        Effect::Destroy {
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+    let counter = destroy
+        .sub_ability
+        .as_deref()
+        .expect("counter continuation");
+    assert!(
+        matches!(
+            counter.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "post-choice anaphor must remain the newly chosen object"
+    );
+}
+
+#[test]
+fn becomes_target_rebinds_otherwise_branch_before_fresh_choice_boundary() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, draw a card if you control a Wizard. Otherwise, destroy that creature.",
+        "Synthetic",
+    );
+    let execute = trigger.execute.as_deref().expect("immediate trigger body");
+    let otherwise = execute
+        .else_ability
+        .as_deref()
+        .expect("Otherwise branch must be attached to the trigger body");
+    assert!(matches!(
+        otherwise.effect.as_ref(),
+        Effect::Destroy {
+            target: TargetFilter::EventTarget,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn becomes_target_delayed_payload_fails_honestly() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, put a +1/+1 counter on it.",
+        "Delayed Guard",
+    );
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("delayed trigger installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn becomes_target_delayed_condition_fails_honestly() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, draw a card.",
+        "Delayed Condition Guard",
+    );
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("delayed trigger installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn becomes_target_delayed_copy_token_payload_fails_honestly() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, create a token that's a copy of it.",
+        "Delayed Copy Guard",
+    );
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("delayed trigger installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn becomes_target_delayed_become_copy_payload_fails_honestly() {
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::BecomeCopy {
+            target: TargetFilter::EventTarget,
+            recipient: TargetFilter::SelfRef,
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: Vec::new(),
+        },
+    );
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(delayed),
+            uses_tracked_set: false,
+        },
+    );
+
+    demote_becomes_target_delayed_payloads(&mut execute);
+
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        unreachable!("constructed delayed trigger installer")
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn becomes_target_nonreferential_delayed_payload_is_preserved() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, when a creature dies, draw a card.",
+        "Delayed Preservation Guard",
+    );
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("delayed trigger installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(effect.effect.as_ref(), Effect::Draw { .. }));
+}
+
+#[test]
+fn teferis_veil_delayed_trigger_keeps_non_event_target_binding() {
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control attacks, it phases out at end of combat. (While it's phased out, it's treated as though it doesn't exist. It phases in before you untap during your next untap step.)",
+        "Teferi's Veil",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("Teferi's Veil trigger");
+    let execute = trigger.execute.as_deref().expect("delayed installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::PhaseOut {
+            target: TargetFilter::TriggeringSource
+        }
+    ));
+}
+
+#[test]
 fn combustible_gearhulk_damage_uses_milled_chain_set() {
     let parsed = parse_oracle_text(
         "First strike\nWhen Combustible Gearhulk enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then Combustible Gearhulk deals damage to that player equal to the total mana value of those cards.",
@@ -15515,6 +15796,15 @@ fn trigger_becomes_target_of_instant_or_sorcery_spell() {
             ],
         })
     );
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|execute| execute.effect.as_ref()),
+        Some(Effect::Pump {
+            target: TargetFilter::EventTarget,
+            ..
+        })
+    ));
 }
 
 #[test]

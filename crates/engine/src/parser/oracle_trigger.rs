@@ -55,13 +55,13 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
     CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement,
-    SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
+    EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -2269,6 +2269,14 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //      AND `optional_targeting == false`) — otherwise `ParentTarget`
     //      legitimately inherits the player's chosen target.
     if let Some(execute) = def.execute.as_deref_mut() {
+        // BecomesTarget's event object is the permanent/player that received the
+        // target designation, not the spell or ability that selected it. Keep
+        // the binding within the immediate chain: delayed triggers need a
+        // creation-time snapshot, which this path intentionally does not add.
+        if def.mode == TriggerMode::BecomesTarget {
+            rebind_immediate_parent_target_to_event_target(execute);
+            demote_becomes_target_delayed_payloads(execute);
+        }
         if mode_carries_event_source_object(&def.mode)
             && !valid_target_blocks_event_source_lift(&def.mode, def.valid_target.as_ref())
             && !execute.optional_targeting
@@ -2441,6 +2449,270 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
         lift_parent_target_to_triggering_source(link.effect.as_mut(), allow_set_tap_lift);
         node = link.sub_ability.as_deref_mut();
         is_top_level = false;
+    }
+}
+
+/// Engine contract: rebind immediate `ParentTarget` or `TriggeringSource`
+/// anaphora in a BecomesTarget trigger to the object that became a target. This
+/// mirrors the event-source lift's first fresh-choice boundary: the triggering
+/// object remains the antecedent only until an instruction introduces a
+/// player-chosen object, after which a `ParentTarget` denotes that new choice.
+///
+/// Delayed payloads are intentionally not traversed. They resolve in a later
+/// trigger window and require a creation-time snapshot rather than live event
+/// context; the strict-failure companion below keeps that unsupported shape
+/// coverage-honest.
+fn rebind_immediate_parent_target_to_event_target(ability: &mut AbilityDefinition) {
+    for mode in &mut ability.mode_abilities {
+        rebind_immediate_parent_target_to_event_target(mode);
+    }
+
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }) {
+            break;
+        }
+        if let Some(else_ability) = link.else_ability.as_deref_mut() {
+            rebind_immediate_parent_target_to_event_target(else_ability);
+        }
+        rebind_parent_target_to_event_target_in_effect(link.effect.as_mut());
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+}
+
+fn rebind_parent_target_to_event_target_in_effect(effect: &mut Effect) {
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        rebind_parent_target_to_event_target_in_filter(filter);
+    });
+
+    // Population filters are not target slots, so the shared target-field
+    // walker deliberately excludes them. They still carry immediate anaphora:
+    // Pawpatch Formation's `DistinctFrom { ParentTarget }` is the proof case.
+    match effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => {
+            rebind_parent_target_to_event_target_in_filter(target)
+        }
+        _ => {}
+    }
+}
+
+fn rebind_parent_target_to_event_target_in_filter(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource => {
+            *filter = TargetFilter::EventTarget
+        }
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                rebind_parent_target_to_event_target_in_prop(prop);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for filter in filters {
+                rebind_parent_target_to_event_target_in_filter(filter);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_parent_target_to_event_target_in_filter(filter);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_parent_target_to_event_target_in_prop(prop: &mut FilterProp) {
+    match prop {
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_parent_target_to_event_target_in_filter(target);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_parent_target_to_event_target_in_filter(reference),
+        FilterProp::AnyOf { props } => {
+            for prop in props {
+                rebind_parent_target_to_event_target_in_prop(prop);
+            }
+        }
+        FilterProp::Not { prop } => rebind_parent_target_to_event_target_in_prop(prop),
+        _ => {}
+    }
+}
+
+fn target_filter_contains_event_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::EventTarget | TargetFilter::ParentTarget | TargetFilter::TriggeringSource => {
+            true
+        }
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_contains_event_target),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_contains_event_target)
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_contains_event_target(filter)
+        }
+        _ => false,
+    }
+}
+
+fn filter_prop_contains_event_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => target_filter_contains_event_target(target),
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => target_filter_contains_event_target(reference),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_event_target),
+        FilterProp::Not { prop } => filter_prop_contains_event_target(prop),
+        _ => false,
+    }
+}
+
+fn ability_contains_event_target(ability: &AbilityDefinition) -> bool {
+    effect_contains_event_target(ability.effect.as_ref())
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_contains_event_target)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_contains_event_target)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_contains_event_target)
+}
+
+fn trigger_definition_contains_event_target(trigger: &TriggerDefinition) -> bool {
+    [
+        trigger.valid_card.as_ref(),
+        trigger.valid_source.as_ref(),
+        trigger.valid_target.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(target_filter_contains_event_target)
+}
+
+fn delayed_condition_contains_event_target(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            target_filter_contains_event_target(filter)
+        }
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
+            trigger_definition_contains_event_target(trigger)
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => {
+            trigger_definition_contains_event_target(trigger)
+                || or_trigger
+                    .as_deref()
+                    .is_some_and(trigger_definition_contains_event_target)
+        }
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => false,
+    }
+}
+
+fn effect_contains_event_target(effect: &Effect) -> bool {
+    let mut effect = effect.clone();
+    let mut found = false;
+    crate::parser::oracle_effect::each_target_filter_mut(&mut effect, &mut |filter| {
+        found |= target_filter_contains_event_target(filter);
+    });
+    if found {
+        return true;
+    }
+
+    // `each_target_filter_mut` intentionally covers the common target slots.
+    // These explicit branches cover all current known non-walker target-bearing
+    // payload carriers: copy source/recipient pairs and population filters. The
+    // delayed tests lock preservation plus the CopyTokenOf and BecomeCopy cases.
+    match &effect {
+        Effect::BecomeCopy {
+            target, recipient, ..
+        } => {
+            target_filter_contains_event_target(target)
+                || target_filter_contains_event_target(recipient)
+        }
+        Effect::CopyTokenOf {
+            target,
+            owner,
+            source_filter,
+            ..
+        } => {
+            target_filter_contains_event_target(target)
+                || target_filter_contains_event_target(owner)
+                || source_filter
+                    .as_ref()
+                    .is_some_and(target_filter_contains_event_target)
+        }
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => target_filter_contains_event_target(target),
+        _ => false,
+    }
+}
+
+fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
+    if let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = ability.effect.as_mut()
+    {
+        if delayed_condition_contains_event_target(condition)
+            || ability_contains_event_target(effect)
+        {
+            *effect.effect = Effect::unimplemented(
+                "becomes_target_delayed_event_target",
+                "delayed BecomesTarget payload requires an unsupported event snapshot",
+            );
+            effect.sub_ability = None;
+            effect.else_ability = None;
+        }
+        return;
+    }
+    for mode in &mut ability.mode_abilities {
+        demote_becomes_target_delayed_payloads(mode);
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        demote_becomes_target_delayed_payloads(sub);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        demote_becomes_target_delayed_payloads(else_ability);
     }
 }
 

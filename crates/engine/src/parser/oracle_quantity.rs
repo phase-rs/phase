@@ -1672,6 +1672,45 @@ fn parse_hand_size_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i3
     ))
 }
 
+/// CR 404.1: "graveyard with <N> or more cards in it" → a census of every
+/// player's graveyard meeting the size threshold (Master's Councillors class:
+/// "This creature gets +2/+0 for each graveyard with seven or more cards in
+/// it"). Unlike the "opponent(s) with N or more cards in hand" attribute
+/// clauses above, the subject noun here IS the zone itself rather than a
+/// possessive population word — the implicit population is every player in
+/// the game (CR 102.1), since each player owns exactly one graveyard (CR
+/// 404.1). Reuses the exact same `PlayerFilter::PlayerAttribute` +
+/// `QuantityRef::GraveyardSize` building blocks the hand-size class already
+/// uses, just with `PlayerRelation::All` and no leading population word — a
+/// sibling zone noun ("hand", "library") would extend this the same way if a
+/// future card needs it.
+fn parse_for_each_graveyard_size_clause(clause: &str) -> Option<QuantityRef> {
+    let (n, rest) = nom_on_lower(clause, clause, |input| {
+        let (input, _) = tag("graveyard with ").parse(input)?;
+        let (input, n) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" or more cards in it").parse(input)?;
+        Ok((input, n))
+    })?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(QuantityRef::PlayerCount {
+        filter: PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::All,
+            attr: Box::new(QuantityRef::GraveyardSize {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            // A raw `n as i32` would wrap values above `i32::MAX` (e.g.
+            // `2_147_483_648` → `i32::MIN`), making the `GE` threshold vacuous
+            // — reject rather than silently wrap.
+            value: Box::new(QuantityExpr::Fixed {
+                value: i32::try_from(n).ok()?,
+            }),
+        },
+    })
+}
+
 /// CR 121.1: "who drew N or more cards this turn" → the candidate's draw count.
 fn parse_cards_drawn_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
     let (input, _) = tag("who drew ").parse(input)?;
@@ -3399,6 +3438,15 @@ fn parse_for_each_clause_with_they_controller(
     // "opponent who had N or more [type] enter the battlefield under their
     // control this turn" (Smuggler's Share class).
     if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
+        return Some(qty);
+    }
+
+    // CR 404.1: "graveyard with N or more cards in it" (Master's Councillors
+    // class) — a census of every player's graveyard meeting the size
+    // threshold. Tried alongside the opponent/player population-attribute
+    // arm above since it is the same `PlayerAttribute` predicate family, just
+    // headed by the zone noun instead of a population word.
+    if let Some(qty) = parse_for_each_graveyard_size_clause(clause) {
         return Some(qty);
     }
 
@@ -8827,5 +8875,125 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// CR 404.1: "graveyard with seven or more cards in it" (Master's
+    /// Councillors: "This creature gets +2/+0 for each graveyard with seven
+    /// or more cards in it.") lowers to a `PlayerCount{PlayerAttribute}`
+    /// census over EVERY player (`PlayerRelation::All`, not `Opponent`) whose
+    /// graveyard size is at least 7 — the zone-noun-headed sibling of the
+    /// "opponent(s) with N or more cards in hand" class above.
+    #[test]
+    fn for_each_graveyard_size_lowers_to_all_players_player_count() {
+        assert_eq!(
+            parse_for_each_clause("graveyard with seven or more cards in it"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::GraveyardSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+            })
+        );
+    }
+
+    /// Digit-form numeral ("7") parses identically to the word form ("seven")
+    /// — proving `nom_primitives::parse_number` handles both, not just the
+    /// literal card text.
+    #[test]
+    fn for_each_graveyard_size_accepts_digit_numeral() {
+        assert_eq!(
+            parse_for_each_clause("graveyard with 7 or more cards in it"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::GraveyardSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+            })
+        );
+    }
+
+    /// Master's Councillors' full static-ability line parses into a dynamic
+    /// P/T modification (not a frozen fixed +2/+0) scaled by the graveyard
+    /// census above, via the shared `push_dynamic_pt_modifications` /
+    /// `scale_pt_quantity` building block ("+2/+0 for each X" →
+    /// `AddDynamicPower(Multiply(2, X))`, toughness delta 0 emits no
+    /// `AddDynamicToughness`). Asserts zero `Effect::Unimplemented` residue —
+    /// this line must no longer be swallowed by the `DynamicQty` gap
+    /// detector.
+    #[test]
+    fn masters_councillors_static_gets_dynamic_power_for_graveyard_census() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::ContinuousModification;
+
+        let text = "Vigilance\nThis creature gets +2/+0 for each graveyard with seven or more cards in it.\nWhenever you draw your second card each turn, target player mills three cards. (They put the top three cards of their library into their graveyard.)";
+        let parsed = parse_oracle_text(text, "Master's Councillors", &[], &[], &[]);
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "expected zero swallowed clauses, got {:?}",
+            parsed.parse_warnings
+        );
+
+        let expected_census = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::GraveyardSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+            },
+        };
+        let expected_power = QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(expected_census),
+        };
+
+        let pt_static = parsed
+            .statics
+            .iter()
+            .find(|def| {
+                def.modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. }))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a static with AddDynamicPower, got {:?}",
+                    parsed.statics
+                )
+            });
+
+        assert_eq!(
+            pt_static.modifications,
+            vec![ContinuousModification::AddDynamicPower {
+                value: expected_power,
+            }],
+            "expected ONLY a dynamic +2/+0-per-graveyard power modification (toughness delta \
+             is 0, so no AddToughness/AddDynamicToughness should be emitted)"
+        );
+
+        // No Effect::Unimplemented anywhere in the parsed abilities/triggers.
+        for effect in parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_ref())
+            .map(|exec| exec.effect.as_ref())
+        {
+            assert!(
+                !matches!(effect, crate::types::ability::Effect::Unimplemented { .. }),
+                "unexpected Effect::Unimplemented in trigger: {effect:?}"
+            );
+        }
     }
 }

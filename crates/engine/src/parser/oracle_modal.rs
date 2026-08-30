@@ -5083,9 +5083,9 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         );
     }
 
-    /// R7(b): a real typed (non-self) trigger subject flows through the
-    /// filter's identity arm and keeps its threading — the mode-body "It"
-    /// resolves to the triggering object (CR 608.2k), NOT the mode target.
+    /// R7(b): a mode-local target is the nearest typed antecedent, even when
+    /// the surrounding trigger has a typed subject — the mode-body "It"
+    /// resolves to that target, not the triggering object.
     #[test]
     fn mode_anaphor_subject_retains_typed_subject() {
         let ctx = ParseContext {
@@ -5100,8 +5100,8 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             .expect("mode 2 second sentence present");
         assert_eq!(
             generic_effect_affected(sub),
-            TargetFilter::TriggeringSource,
-            "retained typed subject: mode-body 'It' binds the triggering object"
+            TargetFilter::ParentTarget,
+            "mode-local target: mode-body 'It' binds the preceding target creature"
         );
     }
 

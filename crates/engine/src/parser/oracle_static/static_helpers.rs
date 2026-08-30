@@ -1610,13 +1610,22 @@ pub(crate) fn apply_raw_parenthetical_cant_cast_gate(
 /// CR 611.3a: Attach an optional parsed static gate to a prohibition static.
 /// When `gate_condition_text` is present but `parse_static_condition` declines,
 /// return `None` so the caller does not enforce the restriction unconditionally.
+///
+/// CR 118.12a: a condition this static's ENFORCEMENT POINT can never satisfy
+/// declines the same way — `parse_static_condition` accepts a bare
+/// `"you pay {N}"` as `UnlessPay`, and the prohibition modes this helper serves
+/// have no payment prompt (see [`accept_enforceable_condition`]).
 pub(crate) fn attach_parsed_static_gate(
     def: StaticDefinition,
     gate_condition_text: Option<&str>,
 ) -> Option<StaticDefinition> {
     match gate_condition_text {
         None => Some(def),
-        Some(text) => Some(def.condition(parse_static_condition(text)?)),
+        Some(text) => {
+            let condition = parse_static_condition(text)?;
+            let condition = accept_enforceable_condition(&def.mode, condition)?;
+            Some(def.condition(condition))
+        }
     }
 }
 
@@ -1662,104 +1671,357 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
     if let Some(unless_text) = nom_tag_lower(remaining, remaining, "unless ") {
         return Some(match nom_condition::parse_unless_condition(unless_text) {
             Ok((rest, condition)) if rest.trim().is_empty() => {
-                gate_cant_untap_condition(condition, unless_text, UntapGatePolarity::Negative)
+                gate_cant_untap_condition(condition, unless_text)
             }
-            _ => unenforceable_cant_untap_condition(unless_text, UntapGatePolarity::Negative),
+            _ => unparsed_gate_condition(unless_text, ConditionGatePolarity::Negative),
         });
     }
     // Strip "as long as" or "if" prefix
     let condition_text = nom_tag_lower(remaining, remaining, "as long as ")
         .or_else(|| nom_tag_lower(remaining, remaining, "if "))?;
     Some(match parse_static_condition(condition_text) {
-        Some(condition) => {
-            gate_cant_untap_condition(condition, condition_text, UntapGatePolarity::Positive)
-        }
-        None => unenforceable_cant_untap_condition(condition_text, UntapGatePolarity::Positive),
+        Some(condition) => gate_cant_untap_condition(condition, condition_text),
+        None => unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive),
     })
 }
 
-/// CR 502.3: the polarity an untap-step gate condition is STORED with, and
-/// therefore the shape its unsupported-condition fallback must take.
+/// CR 604.1 + CR 611.3a: the polarity a static's gate condition is STORED with,
+/// and therefore the shape its UNPARSED-clause fallback must take.
 ///
-/// `active_static_definitions` reads a static's `condition` as "restriction
-/// ACTIVE when TRUE", so a positive `"as long as X"` tail stores `X` while a
-/// negative `"unless X"` tail stores `Not(X)`. The fallback has to match, or the
-/// gap marker would flip the restriction's sense. A typed axis rather than a raw
-/// bool so the two readings stay self-documenting at every call site.
+/// `active_static_definitions` reads a static's `condition` as "static ACTIVE
+/// when TRUE", so a positive `"as long as X"` / `"if X"` tail stores `X` while a
+/// negative `"unless X"` tail stores `Not(X)`. When the clause parser produced
+/// NOTHING at all, the fallback has to match that storage sense or the gap
+/// marker would flip the static's sense relative to what the same route already
+/// did before any gate existed. A typed axis rather than a raw bool so the two
+/// readings stay self-documenting at every call site.
+///
+/// This axis governs [`unparsed_gate_condition`] ONLY. It deliberately does NOT
+/// reach [`unenforceable_gate_marker`], the remedy for a clause that DID parse
+/// but cannot be enforced at the static's enforcement point: that marker is
+/// unconditionally inert, because a gate the engine cannot evaluate must never
+/// switch a static ON. See [`unenforceable_gate_marker`] for the full argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UntapGatePolarity {
-    /// `"… doesn't untap during your untap step as long as X"` / `"… if X"`.
+pub(crate) enum ConditionGatePolarity {
+    /// `"… as long as X"` / `"… if X"`.
     Positive,
-    /// `"… doesn't untap during your untap step unless X"`.
+    /// `"… unless X"`.
     Negative,
 }
 
-/// CR 502.3 + engine limitation (not CR-mandated): the honest "this untap-step
-/// gate isn't supported yet" condition, in the requested polarity.
+/// CR 611.3a: the honest, ALWAYS-INERT marker for a gate clause the engine
+/// parsed but whose enforcement point can never evaluate
+/// ([`StaticCondition::is_unenforceable_on`]).
 ///
-/// `Unrecognized` evaluates `true`, so the `Positive` shape leaves the
-/// restriction unconditionally ON and the `Negative` shape leaves it
-/// unconditionally OFF — in both cases matching what the branch already did for
-/// an outright parse failure. The point is not the runtime value (either way the
-/// gate is inert); it is that `StaticCondition::contains_unrecognized`
-/// — which every coverage-honesty gate consults — now sees the gap instead of a
-/// fully-typed condition that can never be satisfied.
-pub(crate) fn unenforceable_cant_untap_condition(
-    gap_text: &str,
-    polarity: UntapGatePolarity,
-) -> StaticCondition {
-    let unrecognized = StaticCondition::Unrecognized {
-        text: gap_text.to_string(),
-    };
-    match polarity {
-        UntapGatePolarity::Positive => unrecognized,
-        UntapGatePolarity::Negative => StaticCondition::Not {
-            condition: Box::new(unrecognized),
-        },
+/// `Not(Unrecognized { text })` is the single shape, for both grammatical
+/// polarities, and it is chosen for two properties that must hold together:
+///
+/// 1. **Inert at runtime.** `game::layers::evaluate_condition` reads
+///    `Unrecognized` as `true`, so the wrapping `Not` pins the gate to `false`
+///    forever and `active_static_definitions` never switches the static on.
+/// 2. **Visible to coverage.** `StaticCondition::contains_unrecognized` walks
+///    through `Not` (see its doc), so every coverage-honesty gate still reports
+///    the clause as an unsupported gap. Declining the static outright would
+///    satisfy (1) and silently lose (2).
+///
+/// WHY POLARITY IS NOT AN INPUT HERE. It used to be, and that was a defect:
+/// the positive branch returned a BARE `Unrecognized`, so a `"… as long as
+/// <unenforceable clause>"` static became permanently ON. That is fail-OPEN in
+/// the one direction the gate exists to prevent. Two independent arguments
+/// close it:
+///
+/// - **Don't invent behavior.** The gate fires precisely because the engine
+///   cannot decide the clause. Applying the static anyway asserts a P/T bonus,
+///   keyword grant, evasion, or untap lock that the printed card confers only
+///   conditionally. `"Enchanted creature gets +2/+2 as long as you pay {1}"`
+///   became an unconditional +2/+2 — a rules-wrong buff, not a conservative
+///   approximation. Leaving it off is the only outcome that adds nothing the
+///   card does not unconditionally grant.
+/// - **Truth conservation.** Every leaf `is_unenforceable_on` rejects already
+///   evaluates `false` at this enforcement point: `game::layers` hard-codes
+///   `UnlessPay` (CR 118.12a) and `CastingAsVariant` (CR 702.34a) to `false`,
+///   `AdditionalCostPaid` (CR 601.2f) is `false` with no in-flight cast, and
+///   `evaluate_condition` rejects a scoped-player designation anchor (CR 725.1)
+///   at its entry boundary. A marker that reads `true` therefore INVERTS the
+///   very truth value that justified rejecting the leaf, turning a
+///   coverage-honesty deferral into a rules-behavior change. The inert marker
+///   preserves it.
+///
+/// The failure mode this closes is worst on grant-shaped modes
+/// (`StaticMode::Continuous`, and the keyword companions it feeds), where a
+/// permanently-true gate manufactures a buff out of nothing. It is real but
+/// less alarming on restriction-shaped modes (`CantUntap`, `CantBeBlocked`,
+/// `CantAttack`, `BlockRestriction`), where it manufactures an unconditional
+/// restriction instead. Both are wrong; the marker is uniform so no future
+/// route has to re-litigate which shape it is.
+///
+/// This reverses the `Positive` half of the fallback that PR #8012 shipped —
+/// deliberately, and with its pinned test updated rather than deleted. #8012's
+/// load-bearing property was that EVERY unenforceable leaf, at any nesting
+/// depth, is replaced by a coverage-visible marker; that property is unchanged
+/// and still asserted. Only the marker's runtime truth value moved, and it moved
+/// toward the value the rejected leaf already had.
+///
+/// NOTE for the layer cache: `Unrecognized` is opaque to
+/// `static_condition_uses_object_population`,
+/// `static_condition_characteristic_reads`, and
+/// `entered_object_perturbs_static_condition`, so a gated static is
+/// re-evaluated more eagerly than a fully-typed one. That was already true of
+/// the negative branch; over-invalidation cannot produce a wrong board state,
+/// only redundant work.
+pub(crate) fn unenforceable_gate_marker(gap_text: &str) -> StaticCondition {
+    StaticCondition::Not {
+        condition: Box::new(StaticCondition::Unrecognized {
+            text: gap_text.to_string(),
+        }),
     }
 }
 
-/// CR 502.3 + engine limitation (not CR-mandated — these are runtime binding
-/// gaps, not rules restrictions): the SINGLE authority for whether a parsed
-/// condition may gate a `StaticMode::CantUntap` static. Every site that attaches
-/// a condition to a `CantUntap` def routes through this
-/// (`extract_cant_untap_condition` here, the `" as long as "` split in
-/// `oracle_static::grammar`, and the inherited-gate companion in
-/// `oracle_static::evasion`), so the acceptance boundary is defined once.
+/// Engine limitation, not CR-mandated: the honest "we could not parse this gate
+/// clause at all" condition, in the polarity the branch STORES its condition in.
 ///
-/// CR 502.3 makes untapping a TURN-BASED ACTION: the active player determines
-/// which permanents untap, then untaps them. That gives the untap loop
-/// (`game::turns`) a game state, the source, and the affected permanent as
-/// recipient — and nothing else. Two classes of leaf therefore have no
-/// answerable truth value there, and both must be reported as gaps rather than
-/// accepted:
+/// Distinct from [`unenforceable_gate_marker`], and the distinction is the whole
+/// point: this fallback is for a clause the parser could not decompose, where
+/// the engine has learned NOTHING about the gate and the only defensible
+/// behavior is the one the route already had before any gate existed. That
+/// behavior is polarity-shaped, so this function is too:
 ///
-/// 1. [`StaticCondition::has_unbindable_designation_anchor`] — a scoped-player
-///    designation ("that player is the monarch"). There is no triggering event
-///    or combat context to bind the scope against, so
+/// - `Negative` yields `Not(Unrecognized)` → `false` forever → the static is
+///   permanently INERT. The `"unless X"` escape clause we could not model might
+///   always hold, so leaving the restriction off never invents a restriction the
+///   card doesn't have.
+/// - `Positive` yields a bare `Unrecognized` → `true` forever → the static is
+///   permanently ON, matching what the `"as long as"` / `"if"` branches have
+///   always done for an unparsed tail.
+///
+/// The asymmetry is inherited, not designed, and it is preserved ONLY here.
+/// Each branch reproduces exactly what its call site did before, so adding the
+/// enforceability gate to a route did not move any card's runtime behavior on
+/// the unparsed path. Narrowing the positive branch to inert would silently
+/// disable statics that apply today across the whole unparsed-tail corpus —
+/// a far broader change than the enforcement-point defect, and one that needs
+/// its own parse-diff evidence.
+///
+/// It is NOT a no-op for the layer CACHE. Three classifiers in `game::layers` —
+/// `static_condition_uses_object_population`,
+/// `static_condition_characteristic_reads`, and
+/// `entered_object_perturbs_static_condition` — group the typed leaves with the
+/// cheap, inert conditions (`false` / `EMPTY` / `false`) but must treat
+/// `Unrecognized` as opaque (`true` / `ALL` / `true`). A gated card therefore
+/// stops being cached as population-independent and gets re-evaluated more
+/// eagerly. That direction is the safe one (over-invalidation cannot produce a
+/// wrong board state, only redundant work).
+///
+/// The load-bearing property either way is that
+/// `StaticCondition::contains_unrecognized` — which every coverage-honesty gate
+/// consults — sees the gap instead of a fully-typed condition.
+pub(crate) fn unparsed_gate_condition(
+    gap_text: &str,
+    polarity: ConditionGatePolarity,
+) -> StaticCondition {
+    match polarity {
+        ConditionGatePolarity::Positive => StaticCondition::Unrecognized {
+            text: gap_text.to_string(),
+        },
+        // Same SHAPE as the enforcement-point remedy, reached for a different
+        // reason. Built from that one constructor so the two can never drift
+        // into differently-nested markers that coverage tooling has to special-
+        // case; `contains_unrecognized` and `evaluate_condition` see one shape.
+        ConditionGatePolarity::Negative => unenforceable_gate_marker(gap_text),
+    }
+}
+
+/// Engine limitation, not CR-mandated (these are runtime binding gaps, not rules
+/// restrictions): the SINGLE authority for whether a parsed condition may gate a
+/// static of the given `mode`.
+///
+/// The acceptance boundary is a property of the mode's ENFORCEMENT POINT, not of
+/// the condition alone — the same CR 118.12a `UnlessPay` leaf is exactly right
+/// on `CantAttack` (Ghostly Prison: `WaitingFor::CombatTaxPayment` prompts for
+/// it at declaration) and unsatisfiable on `CantBeBlocked` (Awesome Presence) or
+/// `BlockRestriction` (Hipparion), where no prompt exists. Two classes of leaf
+/// are therefore rejected, each against the mode that would carry it:
+///
+/// 1. [`StaticCondition::requires_unavailable_continuation`] — a leaf whose
+///    truth is established by a payment round-trip (CR 118.12a `UnlessPay`) or
+///    by an in-flight cast (CR 601.2f `AdditionalCostPaid` / `CastingAsVariant`)
+///    that THIS mode's enforcement point never runs
+///    ([`StaticMode::provides_continuation`]). The layer pipeline just returns
+///    the hard-coded `false`, so no player can ever satisfy the gate.
+/// 2. [`StaticCondition::has_unbindable_designation_anchor`] — a scoped-player
+///    designation ("that player is the monarch") on a mode whose enforcement
+///    point cannot bind the scope ([`StaticMode::binds_scoped_player_anchor`]).
+///    CR 502.3's untap step is the audited such point: a turn-based action with
+///    no triggering event or combat context, so
 ///    `game::layers::evaluate_condition` rejects the whole condition outright.
-/// 2. [`StaticCondition::requires_out_of_layer_continuation`] — a leaf whose
-///    truth is established by a payment round-trip (CR 118.12a `UnlessPay`, only
-///    ever offered at attack/block declaration) or by an in-flight cast (CR
-///    601.2f `AdditionalCostPaid` / `CastingAsVariant`). The untap step runs
-///    neither continuation, so the player can never satisfy the condition — the
-///    layer pipeline just returns the hard-coded `false`.
 ///
 /// Everything else — including the combat-scoped leaves, which are computed
 /// correctly and are legitimately `false` outside combat — is enforceable and
 /// passes through unchanged. Bombur, Gentle Dreamer's controller-scoped
 /// `Not(HasEnduringStory)` is in that supported set.
+///
+/// Call sites are listed on [`attach_gated_condition`], which is how nearly all
+/// of them reach this.
+///
+/// The remedy is [`unenforceable_gate_marker`] — inert at runtime, visible to
+/// coverage — and it takes NO polarity. A clause that reached this function
+/// parsed successfully; the engine knows exactly which enforcement point cannot
+/// run it and that the leaf itself already evaluates `false` there, so the
+/// marker must not read `true` in either grammatical direction. That is a
+/// deliberate departure from [`unparsed_gate_condition`], whose input carries no
+/// such information; see [`unenforceable_gate_marker`] for the argument.
+pub(crate) fn gate_static_condition(
+    mode: &StaticMode,
+    condition: StaticCondition,
+    gap_text: &str,
+) -> StaticCondition {
+    if condition.is_unenforceable_on(mode) {
+        return unenforceable_gate_marker(gap_text);
+    }
+    condition
+}
+
+/// CR 611.3a: the fail-CLOSED sibling of [`gate_static_condition`], for sites
+/// whose honesty policy is to DECLINE the whole static rather than keep it
+/// behind a gap marker.
+///
+/// Same acceptance predicate ([`StaticCondition::is_unenforceable_on`]),
+/// different remedy. These sites already return `None` when
+/// `parse_static_condition` declines, and they keep that shape for the
+/// unenforceable case too, so the two failure modes stay indistinguishable at
+/// the call site. `evasion::parse_forced_attack_defender_static` is the existing
+/// precedent: gate first, decline if a gap resulted.
+///
+/// [`gate_static_condition`]'s marker is now inert in both grammatical
+/// directions ([`unenforceable_gate_marker`]), so substituting it here would no
+/// longer enforce the restriction unconditionally — the hazard that originally
+/// forced these sites apart is closed. The split survives because the two
+/// remedies still differ in what they REPORT: this one drops the static (and
+/// with it the clause), the marker keeps it visible to
+/// `contains_unrecognized`. Prefer the marker for any new site; use this one
+/// only where the surrounding parser genuinely has no definition to hang a
+/// condition on.
+///
+/// Call sites (all fail-closed prohibition/permission gates):
+///
+/// - [`attach_parsed_static_gate`] (this module) — the shared trailing-gate
+///   attach for prohibition statics.
+/// - `oracle_static::dispatch`'s `"can't play lands … as long as X"` arm.
+/// - `oracle_static::dispatch`'s `"can block an additional creature … as long
+///   as X"` arm.
+pub(crate) fn accept_enforceable_condition(
+    mode: &StaticMode,
+    condition: StaticCondition,
+) -> Option<StaticCondition> {
+    (!condition.is_unenforceable_on(mode)).then_some(condition)
+}
+
+/// Attach `condition` to `def`, deferring it to the honest gap marker when
+/// `def.mode`'s enforcement point cannot satisfy it
+/// ([`gate_static_condition`]).
+///
+/// Reading the mode off the definition is what makes this the practical single
+/// entry point: a call site cannot pass a mode that disagrees with the
+/// definition it is building. Every site that attaches a parsed `"unless"` /
+/// `"as long as"` / `"if"` gate to a `StaticDefinition` routes through here or
+/// through [`gate_static_condition`] directly:
+///
+/// Sites that call [`gate_static_condition`] DIRECTLY, because they hold a bare
+/// condition rather than a definition:
+///
+/// - `extract_cant_untap_condition` (this module) — the `"doesn't untap …"`
+///   tail, both polarities, via the [`gate_cant_untap_condition`] specialization.
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s
+///   `" as long as "` split for `CantUntap`.
+/// - `oracle_static::evasion::try_split_and_doesnt_untap`'s inherited `CantUntap`
+///   companion gate (the companion is assembled before its condition is known).
+/// - `oracle_static::evasion::parse_forced_attack_defender_static`, which gates
+///   first and then DECLINES the whole static if a gap resulted.
+///
+/// Sites that go through this function:
+///
+/// - `oracle_static::evasion::parse_subject_rule_static` — both its
+///   `cant_be_blocked_mode` tail conditions and its `" unless you control … "`
+///   split (which reaches `RuleStaticPredicate::CantUntap` BEFORE the dedicated
+///   untap arm, and every other rule-static predicate besides).
+/// - `oracle_static::evasion::parse_subject_combat_rule_static` — the trailing
+///   `"unless"` gate on `CantBlock` / `BlockRestriction` / `CantBeBlockedBy`
+///   (Hipparion).
+/// - `oracle_static::evasion::parse_combat_tax_static` — the dedicated
+///   combat-tax form (Archangel of Tithes, War Cadence). Always ACCEPTED today,
+///   because that parser only yields the three taxed modes; routed through the
+///   gate anyway so this list is exhaustive by construction rather than by
+///   assertion.
+/// - `oracle_static::dispatch`'s `"~ can't block"`, `"~ can't attack"` (both via
+///   [`parse_trailing_gate_condition`]) and `"activated abilities can't be
+///   activated"` arms.
+/// - `oracle_static::dispatch`'s `"<subject> can't be blocked …"` FALLBACK arm —
+///   the second authority that catches lines `parse_subject_rule_static`
+///   declined (flavor-word subject prefixes, untyped gates). It builds the same
+///   `CantBeBlocked` mode as the evasion route, so it clears the same bar.
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s three
+///   `"can't be blocked …"` branches, whose gated condition is also what the
+///   granted-keyword companion inherits (Awesome Presence).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s conditional
+///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
+///   and the whole-predicate `Continuous` default beneath it that carries the
+///   trailing `"unless"` rider (Heroic Defiance).
+pub(crate) fn attach_gated_condition(
+    def: &mut StaticDefinition,
+    condition: StaticCondition,
+    gap_text: &str,
+) {
+    // No `def.mode.clone()`: `StaticMode` carries `TargetFilter`/`PlayerFilter`
+    // trees, and the assignment's RHS is evaluated (ending the immutable borrow
+    // of `def.mode`) before the `def.condition` place is written.
+    def.condition = Some(gate_static_condition(&def.mode, condition, gap_text));
+}
+
+/// CR 604.1 + CR 611.3a: parse a static line's trailing gate clause — `"unless
+/// X"`, `"as long as X"`, or `"if X"` — in the one precedence order every
+/// trailing-gate site must share.
+///
+/// The three shared clause parsers are otherwise indistinguishable at the call
+/// site, and `"as long as"` must be tried before `"if"` to match
+/// `split_trailing_gate_condition`'s precedence; ordering them once here means
+/// no call site has to re-derive it.
+///
+/// Callers hand the result straight to [`attach_gated_condition`], which no
+/// longer needs to know WHICH branch fired: the enforcement-point remedy
+/// ([`unenforceable_gate_marker`]) is inert in both directions. Only the
+/// unparsed-clause fallback still cares, and its call sites know their own
+/// grammar locally — see [`ConditionGatePolarity`].
+///
+/// `affected` is the host static's affected set, threaded unchanged to all three
+/// clause parsers so the gate's anaphoric "it" binds to the source only for a
+/// SelfRef static (CR 611.3a). Centralizing the precedence must not centralize
+/// away that binding: a gate parsed without the host's affected set would resolve
+/// "it" against the wrong object, so the parameter travels with the text.
+/// Call sites pass `def.affected.as_ref()` — the same definition the resulting
+/// condition is attached to by [`attach_gated_condition`].
+pub(crate) fn parse_trailing_gate_condition(
+    tp: &TextPair<'_>,
+    affected: Option<&TargetFilter>,
+) -> Option<StaticCondition> {
+    super::shared::parse_unless_static_condition(tp, affected).or_else(|| {
+        super::shared::parse_as_long_as_static_condition(tp, affected)
+            .or_else(|| super::shared::parse_if_static_condition(tp, affected))
+    })
+}
+
+/// [`gate_static_condition`] specialized to `StaticMode::CantUntap` (CR 502.3).
+///
+/// CR 502.3 makes untapping a TURN-BASED ACTION: the active player determines
+/// which permanents untap, then untaps them. That gives the untap loop
+/// (`game::turns`) a game state, the source, and the affected permanent as
+/// recipient — and nothing else, so it runs NEITHER continuation and binds no
+/// scoped-player anchor. It is the strictest enforcement point in the engine and
+/// the one the untap-tail parsers hand bare conditions to.
 pub(crate) fn gate_cant_untap_condition(
     condition: StaticCondition,
     gap_text: &str,
-    polarity: UntapGatePolarity,
 ) -> StaticCondition {
-    if condition.has_unbindable_designation_anchor()
-        || condition.requires_out_of_layer_continuation()
-    {
-        return unenforceable_cant_untap_condition(gap_text, polarity);
-    }
-    condition
+    gate_static_condition(&StaticMode::CantUntap, condition, gap_text)
 }
 
 /// CR 611.3: Peel a `"all <X> … and all <Y> …"` phrase into per-conjunct strings
