@@ -1557,6 +1557,7 @@ impl ContinuationPlanner for BeamContinuationPlanner {
     }
 }
 
+#[cfg(test)]
 pub fn rank_candidates<F>(
     candidates: impl IntoIterator<Item = CandidateAction>,
     mut scorer: F,
