@@ -25,7 +25,14 @@ const mocks = vi.hoisted(() => ({
     // host locator. `absent` terminates it, leaving the kind-intent effect as
     // this suite's only subject.
     resumeDraft: vi.fn(async () => "absent" as const),
-    view: null as { kind: string; seats: { seat_index: number }[] } | null,
+    view: null as {
+      kind: string;
+      seats: { seat_index: number }[];
+      pack_count: number;
+      cards_per_pack: number;
+      pack_sizes: number[];
+      min_deck_size: number;
+    } | null,
   },
 }));
 
@@ -68,13 +75,27 @@ vi.mock("../../components/draft/CubeSetupPanel", () => ({ CubeSetupPanel: () => 
 import { DraftPodPage } from "../DraftPodPage";
 import { useDraftPodStore } from "../../stores/draftPodStore";
 
-/** An engine-published `DraftPlayerView` slice: the two fields the intro reads.
+/** An engine-published `DraftPlayerView` slice containing the procedure the intro reads.
  *  `seats` is the pod's real size — `draftPodStore.config.podSize` is this client's
  *  own intent and is deliberately left on its default in every fixture below. */
-function engineView(kind: string, seatCount: number) {
+function engineView(
+  kind: string,
+  seatCount: number,
+  procedure: Partial<{
+    pack_count: number;
+    cards_per_pack: number;
+    pack_sizes: number[];
+    min_deck_size: number;
+  }> = {},
+) {
   return {
     kind,
     seats: Array.from({ length: seatCount }, (_, seat_index) => ({ seat_index })),
+    pack_count: 4,
+    cards_per_pack: 12,
+    pack_sizes: [12, 12, 12, 12],
+    min_deck_size: 45,
+    ...procedure,
   };
 }
 
@@ -182,13 +203,22 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // kind, so the intro must read `view.kind`. This fixture is exactly that
     // case: the store is left on its "Premier" default.
     mocks.multiplayerState.phase = "drafting";
-    mocks.multiplayerState.view = engineView("CommanderDraft", 4);
+    mocks.multiplayerState.view = engineView("CommanderDraft", 4, {
+      min_deck_size: 63,
+    });
     renderAt("/draft-pod");
 
     expect(useDraftPodStore.getState().config.kind).toBe("Premier");
     // REVERT-FAILING: BASE renders `<DraftIntro mode="pod" .../>` unconditionally.
     expect(
-      screen.getByText("Pick two cards from each pack, then pass the rest"),
+      screen.getByText(
+        "Open 4 packs; each pack contains 12 cards — pick two cards, pass the rest",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "After drafting, build a Commander deck of at least 63 cards and play one multiplayer game",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -234,11 +264,34 @@ describe("DraftPodPage ?kind= mode entry", () => {
     renderAt("/draft-pod");
 
     expect(
-      screen.getByText("Open 3 packs of 14 cards — pick one, pass the rest"),
+      screen.getByText("Open 4 packs; each pack contains 12 cards — pick one, pass the rest"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "After drafting, build a deck of at least 45 cards and play tournament matches",
+      ),
     ).toBeInTheDocument();
     // Non-vacuous: the positive above proves the intro mounted.
     expect(
-      screen.queryByText("Pick two cards from each pack, then pass the rest"),
+      screen.queryByText(
+        "Open 4 packs; each pack contains 12 cards — pick two cards, pass the rest",
+      ),
     ).toBeNull();
+  });
+
+  it("renders mixed pack sizes from the engine-published view", () => {
+    mocks.multiplayerState.phase = "drafting";
+    mocks.multiplayerState.view = engineView("Premier", 8, {
+      pack_count: 3,
+      cards_per_pack: 15,
+      pack_sizes: [15, 14, 15],
+    });
+    renderAt("/draft-pod");
+
+    expect(
+      screen.getByText(
+        "Open 3 packs of mixed sizes, in this order: 15 cards, 14 cards, and 15 cards — pick one, pass the rest",
+      ),
+    ).toBeInTheDocument();
   });
 });

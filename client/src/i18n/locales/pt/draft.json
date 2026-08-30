@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Veja como funciona",
     "startDrafting": "Começar a Draftar",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} booster",
+      "packsOpened_few": "{{count, number}} boosters",
+      "packsOpened_many": "{{count, number}} boosters",
+      "packsOpened_other": "{{count, number}} boosters",
+      "cardsContained_one": "{{count, number}} carta",
+      "cardsContained_few": "{{count, number}} cartas",
+      "cardsContained_many": "{{count, number}} cartas",
+      "cardsContained_other": "{{count, number}} cartas",
+      "packSizeEntry_one": "{{count, number}} carta",
+      "packSizeEntry_few": "{{count, number}} cartas",
+      "packSizeEntry_many": "{{count, number}} cartas",
+      "packSizeEntry_other": "{{count, number}} cartas",
+      "minimumDeckCards_one": "{{count, number}} carta",
+      "minimumDeckCards_few": "{{count, number}} cartas",
+      "minimumDeckCards_many": "{{count, number}} cartas",
+      "minimumDeckCards_other": "{{count, number}} cartas"
+    },
+    "packPassing_one": "Este draft tem apenas uma rodada de boosters, então a direção dos passes não muda",
+    "packPassing_few": "A direção dos passes muda a cada rodada",
+    "packPassing_many": "A direção dos passes muda a cada rodada",
+    "packPassing_other": "A direção dos passes muda a cada rodada",
     "quick": {
-      "step1": "Você abrirá 3 boosters de 14 cartas cada",
+      "step1": "Você abrirá {{packs}}; cada booster contém {{cardsPerPack}}",
       "step2": "Escolha uma carta por booster e passe o restante para os draftadores de IA",
-      "step3": "Os boosters alternam de direção a cada rodada — esquerda, direita, esquerda",
-      "step4": "Após todas as escolhas, monte um deck de 40 cartas e jogue uma partida",
-      "step1Mixed": "Você abrirá {{packCount}} boosters de tamanhos diferentes — {{packSizes}} cartas, nessa ordem"
+      "step4": "Após todas as escolhas, monte um deck de pelo menos {{minimumDeckCards}} e jogue uma partida",
+      "step1Mixed": "Você abrirá {{packs}} de tamanhos diferentes, nesta ordem: {{packSizes, list}}"
     },
     "pod": {
       "step1": "Você está draftando com {{count}} jogadores em um pod",
-      "step2": "Abra 3 boosters de 14 cartas — escolha uma, passe o restante",
-      "step3": "Os boosters alternam de direção a cada rodada — esquerda, direita, esquerda",
-      "step4": "Após o draft, monte um deck de 40 cartas e jogue as partidas do torneio"
+      "step2": "Abra {{packs}}; cada booster contém {{cardsPerPack}} — escolha uma carta e passe o restante",
+      "step2Mixed": "Abra {{packs}} de tamanhos diferentes, nesta ordem: {{packSizes, list}} — escolha uma carta e passe o restante",
+      "step4": "Após o draft, monte um deck de pelo menos {{minimumDeckCards}} e jogue as partidas do torneio"
     },
     "commander": {
-      "step2": "Escolha duas cartas de cada booster e passe o restante",
-      "step4": "Após o draft, monte um deck Commander de 60 cartas e jogue uma partida multijogador"
+      "step2": "Abra {{packs}}; cada booster contém {{cardsPerPack}} — escolha duas cartas e passe o restante",
+      "step2Mixed": "Abra {{packs}} de tamanhos diferentes, nesta ordem: {{packSizes, list}} — escolha duas cartas e passe o restante",
+      "step4": "Após o draft, monte um deck Commander de pelo menos {{minimumDeckCards}} e jogue uma partida multijogador"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Abra seu pool de Selado",
-    "subtitle": "Abra seis boosters, um de cada vez.",
+    "subtitle_one": "Abra {{count}} booster.",
+    "subtitle_few": "Abra {{count}} boosters, um de cada vez.",
+    "subtitle_many": "Abra {{count}} boosters, um de cada vez.",
+    "subtitle_other": "Abra {{count}} boosters, um de cada vez.",
     "packProgress": "Booster {{current}} de {{total}}",
     "openPack": "Abrir booster",
     "openPackArt": "Abrir arte do booster",

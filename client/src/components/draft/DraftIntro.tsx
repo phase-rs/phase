@@ -8,9 +8,10 @@ type DraftMode = "quick" | "pod" | "commander";
 
 interface DraftIntroProps {
   mode: DraftMode;
-  podSize?: number;
-  packCount?: number;
-  cardsPerPack?: number;
+  podSize: number;
+  packCount: number;
+  cardsPerPack: number;
+  minDeckSize: number;
   /**
    * Engine-provided size of each booster, in pack order. A multi-set draft
    * mixes sizes, so the "packs of N cards" line only holds when they agree.
@@ -30,9 +31,10 @@ interface Step {
 
 export function DraftIntro({
   mode,
-  podSize = 8,
-  packCount = 3,
-  cardsPerPack = 14,
+  podSize,
+  packCount,
+  cardsPerPack,
+  minDeckSize,
   packSizes,
   onContinue,
 }: DraftIntroProps) {
@@ -40,36 +42,58 @@ export function DraftIntro({
 
   const mixedPackSizes = (packSizes?.length ?? 0) > 1
     && new Set(packSizes).size > 1;
+  const packs = t("intro.quantity.packsOpened", { count: packCount });
+  const cardsPerPackLabel = t("intro.quantity.cardsContained", { count: cardsPerPack });
+  const minimumDeckCards = t("intro.quantity.minimumDeckCards", { count: minDeckSize });
+  const packSizeLabels = (packSizes ?? [])
+    .map((size) => t("intro.quantity.packSizeEntry", { count: size }));
+  const packPassing = t("intro.packPassing", { count: packCount });
 
   const quickSteps: Step[] = [
     {
       icon: "1",
       text: mixedPackSizes
         ? t("intro.quick.step1Mixed", {
-            packCount,
-            packSizes: (packSizes ?? []).join(", "),
+            packs,
+            packSizes: packSizeLabels,
           })
-        : t("intro.quick.step1", { packCount, cardsPerPack }),
+        : t("intro.quick.step1", { packs, cardsPerPack: cardsPerPackLabel }),
     },
     { icon: "2", text: t("intro.quick.step2") },
-    { icon: "3", text: t("intro.quick.step3") },
-    { icon: "4", text: t("intro.quick.step4") },
+    { icon: "3", text: packPassing },
+    { icon: "4", text: t("intro.quick.step4", { minimumDeckCards }) },
   ];
   const podStepList: Step[] = [
     { icon: "1", text: t("intro.pod.step1", { count: podSize }) },
-    { icon: "2", text: t("intro.pod.step2") },
-    { icon: "3", text: t("intro.pod.step3") },
-    { icon: "4", text: t("intro.pod.step4") },
+    {
+      icon: "2",
+      text: mixedPackSizes
+        ? t("intro.pod.step2Mixed", {
+            packs,
+            packSizes: packSizeLabels,
+          })
+        : t("intro.pod.step2", { packs, cardsPerPack: cardsPerPackLabel }),
+    },
+    { icon: "3", text: packPassing },
+    { icon: "4", text: t("intro.pod.step4", { minimumDeckCards }) },
   ];
-  // CR 903.13a/b. Steps 1 and 3 are identical to the pod procedure, so they REUSE the
-  // pod keys rather than duplicating two sentences into seven locales — the same reuse
-  // the draft landing page makes for the menu-namespace "Enter" CTA. It also keeps
-  // `{{count}}` on a key whose seven translations already interpolate it correctly.
+  // CR 903.13a/b: Commander Draft is a draft followed by a multiplayer game,
+  // and players draft two cards from each booster before passing it. Commander
+  // reuses the pod player-count key and the shared pack-passing key rather than
+  // duplicating either sentence into seven locales.
   const commanderSteps: Step[] = [
     { icon: "1", text: t("intro.pod.step1", { count: podSize }) },
-    { icon: "2", text: t("intro.commander.step2") },
-    { icon: "3", text: t("intro.pod.step3") },
-    { icon: "4", text: t("intro.commander.step4") },
+    {
+      icon: "2",
+      text: mixedPackSizes
+        ? t("intro.commander.step2Mixed", {
+            packs,
+            packSizes: packSizeLabels,
+          })
+        : t("intro.commander.step2", { packs, cardsPerPack: cardsPerPackLabel }),
+    },
+    { icon: "3", text: packPassing },
+    { icon: "4", text: t("intro.commander.step4", { minimumDeckCards }) },
   ];
 
   // Total over `DraftMode`: a future mode is a compile error here rather than a

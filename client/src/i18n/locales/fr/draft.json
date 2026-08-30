@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Voici comment ça fonctionne",
     "startDrafting": "Commencer le draft",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} booster",
+      "packsOpened_few": "{{count, number}} boosters",
+      "packsOpened_many": "{{count, number}} boosters",
+      "packsOpened_other": "{{count, number}} boosters",
+      "cardsContained_one": "{{count, number}} carte",
+      "cardsContained_few": "{{count, number}} cartes",
+      "cardsContained_many": "{{count, number}} cartes",
+      "cardsContained_other": "{{count, number}} cartes",
+      "packSizeEntry_one": "{{count, number}} carte",
+      "packSizeEntry_few": "{{count, number}} cartes",
+      "packSizeEntry_many": "{{count, number}} cartes",
+      "packSizeEntry_other": "{{count, number}} cartes",
+      "minimumDeckCards_one": "{{count, number}} carte",
+      "minimumDeckCards_few": "{{count, number}} cartes",
+      "minimumDeckCards_many": "{{count, number}} cartes",
+      "minimumDeckCards_other": "{{count, number}} cartes"
+    },
+    "packPassing_one": "Ce draft ne comporte qu'une seule manche de boosters, donc le sens de passage n'alterne pas",
+    "packPassing_few": "Le sens de passage change à chaque manche",
+    "packPassing_many": "Le sens de passage change à chaque manche",
+    "packPassing_other": "Le sens de passage change à chaque manche",
     "quick": {
-      "step1": "Vous ouvrirez 3 boosters de 14 cartes chacun",
+      "step1": "Vous ouvrirez {{packs}} ; chaque booster contient {{cardsPerPack}}",
       "step2": "Choisissez une carte par booster, puis passez le reste aux drafteurs IA",
-      "step3": "Les boosters changent de sens à chaque manche — gauche, droite, gauche",
-      "step4": "Après tous les choix, construisez un deck de 40 cartes et jouez un match",
-      "step1Mixed": "Vous ouvrirez {{packCount}} boosters de tailles différentes — {{packSizes}} cartes, dans cet ordre"
+      "step4": "Après tous les choix, construisez un deck d'au moins {{minimumDeckCards}} et jouez un match",
+      "step1Mixed": "Vous ouvrirez {{packs}} de tailles différentes, dans cet ordre : {{packSizes, list}}"
     },
     "pod": {
       "step1": "Vous draftez avec {{count}} joueurs dans un pod",
-      "step2": "Ouvrez 3 boosters de 14 cartes — choisissez-en une, passez le reste",
-      "step3": "Les boosters changent de sens à chaque manche — gauche, droite, gauche",
-      "step4": "Après le draft, construisez un deck de 40 cartes et jouez des matchs de tournoi"
+      "step2": "Ouvrez {{packs}} ; chaque booster contient {{cardsPerPack}} — choisissez une carte, puis passez le reste",
+      "step2Mixed": "Ouvrez {{packs}} de tailles différentes, dans cet ordre : {{packSizes, list}} — choisissez une carte, puis passez le reste",
+      "step4": "Après le draft, construisez un deck d'au moins {{minimumDeckCards}} et jouez des matchs de tournoi"
     },
     "commander": {
-      "step2": "Choisissez deux cartes dans chaque booster, puis passez le reste",
-      "step4": "Après le draft, construisez un deck Commander de 60 cartes et jouez une partie multijoueur"
+      "step2": "Ouvrez {{packs}} ; chaque booster contient {{cardsPerPack}} — choisissez deux cartes, puis passez le reste",
+      "step2Mixed": "Ouvrez {{packs}} de tailles différentes, dans cet ordre : {{packSizes, list}} — choisissez deux cartes, puis passez le reste",
+      "step4": "Après le draft, construisez un deck Commander d'au moins {{minimumDeckCards}} et jouez une partie multijoueur"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Ouvrez votre pool scellé",
-    "subtitle": "Ouvrez six boosters, un à la fois.",
+    "subtitle_one": "Ouvrez {{count}} booster.",
+    "subtitle_few": "Ouvrez {{count}} boosters, un à la fois.",
+    "subtitle_many": "Ouvrez {{count}} boosters, un à la fois.",
+    "subtitle_other": "Ouvrez {{count}} boosters, un à la fois.",
     "packProgress": "Booster {{current}} sur {{total}}",
     "openPack": "Ouvrir le booster",
     "openPackArt": "Ouvrir l’illustration du booster",

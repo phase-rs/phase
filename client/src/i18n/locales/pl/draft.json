@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Oto jak to działa",
     "startDrafting": "Rozpocznij draft",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} booster",
+      "packsOpened_few": "{{count, number}} boostery",
+      "packsOpened_many": "{{count, number}} boosterów",
+      "packsOpened_other": "{{count, number}} boostera",
+      "cardsContained_one": "{{count, number}} kartę",
+      "cardsContained_few": "{{count, number}} karty",
+      "cardsContained_many": "{{count, number}} kart",
+      "cardsContained_other": "{{count, number}} karty",
+      "packSizeEntry_one": "{{count, number}} karta",
+      "packSizeEntry_few": "{{count, number}} karty",
+      "packSizeEntry_many": "{{count, number}} kart",
+      "packSizeEntry_other": "{{count, number}} karty",
+      "minimumDeckCards_one": "{{count, number}} karty",
+      "minimumDeckCards_few": "{{count, number}} kart",
+      "minimumDeckCards_many": "{{count, number}} kart",
+      "minimumDeckCards_other": "{{count, number}} karty"
+    },
+    "packPassing_one": "Ten draft ma tylko jedną rundę boosterów, więc kierunek przekazywania się nie zmienia",
+    "packPassing_few": "Kierunek przekazywania zmienia się w każdej rundzie",
+    "packPassing_many": "Kierunek przekazywania zmienia się w każdej rundzie",
+    "packPassing_other": "Kierunek przekazywania zmienia się w każdej rundzie",
     "quick": {
-      "step1": "Otworzysz 3 boostery po 14 kart każdy",
+      "step1": "Otworzysz {{packs}}; każdy booster zawiera {{cardsPerPack}}",
       "step2": "Wybierz jedną kartę z każdego boostera, a resztę przekaż dalej do botów",
-      "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
-      "step4": "Po wszystkich wyborach zbuduj talię z 40 kart i rozegraj mecz",
-      "step1Mixed": "Otworzysz {{packCount}} boosterów o różnych rozmiarach — {{packSizes}} kart, w tej kolejności"
+      "step4": "Po wszystkich wyborach zbuduj talię z co najmniej {{minimumDeckCards}} i rozegraj mecz",
+      "step1Mixed": "Otworzysz {{packs}} o różnych rozmiarach, w tej kolejności: {{packSizes, list}}"
     },
     "pod": {
       "step1": "Draftujesz z {{count}} graczami w grupie",
-      "step2": "Otwórz 3 boostery po 14 kart — wybierz jedną, resztę przekaż dalej",
-      "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
-      "step4": "Po drafcie zbuduj talię z 40 kart i rozegraj mecze turniejowe"
+      "step2": "Otwórz {{packs}}; każdy booster zawiera {{cardsPerPack}} — wybierz jedną kartę, a resztę przekaż dalej",
+      "step2Mixed": "Otwórz {{packs}} o różnych rozmiarach, w tej kolejności: {{packSizes, list}} — wybierz jedną kartę, a resztę przekaż dalej",
+      "step4": "Po drafcie zbuduj talię z co najmniej {{minimumDeckCards}} i rozegraj mecze turniejowe"
     },
     "commander": {
-      "step2": "Wybierz dwie karty z każdego boostera, a resztę przekaż dalej",
-      "step4": "Po drafcie zbuduj talię Commander z 60 kart i rozegraj jedną grę wieloosobową"
+      "step2": "Otwórz {{packs}}; każdy booster zawiera {{cardsPerPack}} — wybierz dwie karty, a resztę przekaż dalej",
+      "step2Mixed": "Otwórz {{packs}} o różnych rozmiarach, w tej kolejności: {{packSizes, list}} — wybierz dwie karty, a resztę przekaż dalej",
+      "step4": "Po drafcie zbuduj talię Commander z co najmniej {{minimumDeckCards}} i rozegraj jedną grę wieloosobową"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Otwórz swoją pulę Sealed",
-    "subtitle": "Otwórz sześć boosterów, po jednym na raz.",
+    "subtitle_one": "Otwórz {{count}} booster.",
+    "subtitle_few": "Otwórz {{count}} boostery, po jednym na raz.",
+    "subtitle_many": "Otwórz {{count}} boosterów, po jednym na raz.",
+    "subtitle_other": "Otwórz {{count}} boostera, po jednym na raz.",
     "packProgress": "Booster {{current}} z {{total}}",
     "openPack": "Otwórz booster",
     "openPackArt": "Otwórz grafikę boostera",

@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} pack",
+      "packsOpened_few": "{{count, number}} packs",
+      "packsOpened_many": "{{count, number}} packs",
+      "packsOpened_other": "{{count, number}} packs",
+      "cardsContained_one": "{{count, number}} card",
+      "cardsContained_few": "{{count, number}} cards",
+      "cardsContained_many": "{{count, number}} cards",
+      "cardsContained_other": "{{count, number}} cards",
+      "packSizeEntry_one": "{{count, number}} card",
+      "packSizeEntry_few": "{{count, number}} cards",
+      "packSizeEntry_many": "{{count, number}} cards",
+      "packSizeEntry_other": "{{count, number}} cards",
+      "minimumDeckCards_one": "{{count, number}} card",
+      "minimumDeckCards_few": "{{count, number}} cards",
+      "minimumDeckCards_many": "{{count, number}} cards",
+      "minimumDeckCards_other": "{{count, number}} cards"
+    },
+    "packPassing_one": "This draft has one pack round, so the passing direction does not alternate",
+    "packPassing_few": "The passing direction alternates each round",
+    "packPassing_many": "The passing direction alternates each round",
+    "packPassing_other": "The passing direction alternates each round",
     "quick": {
-      "step1": "You'll open {{packCount}} packs of {{cardsPerPack}} cards each",
+      "step1": "You'll open {{packs}}; each pack contains {{cardsPerPack}}",
       "step2": "Pick one card per pack, then pass the rest to AI drafters",
-      "step3": "Packs alternate direction each round — left, right, left",
-      "step4": "After all picks, build a 40-card deck and play a match",
-      "step1Mixed": "You'll open {{packCount}} packs of mixed sizes — {{packSizes}} cards, in that order"
+      "step4": "After all picks, build a deck of at least {{minimumDeckCards}} and play a match",
+      "step1Mixed": "You'll open {{packs}} of mixed sizes, in this order: {{packSizes, list}}"
     },
     "pod": {
       "step1": "You're drafting with {{count}} players in a pod",
-      "step2": "Open 3 packs of 14 cards — pick one, pass the rest",
-      "step3": "Packs alternate direction each round — left, right, left",
-      "step4": "After drafting, build a 40-card deck and play tournament matches"
+      "step2": "Open {{packs}}; each pack contains {{cardsPerPack}} — pick one, pass the rest",
+      "step2Mixed": "Open {{packs}} of mixed sizes, in this order: {{packSizes, list}} — pick one, pass the rest",
+      "step4": "After drafting, build a deck of at least {{minimumDeckCards}} and play tournament matches"
     },
     "commander": {
-      "step2": "Pick two cards from each pack, then pass the rest",
-      "step4": "After drafting, build a 60-card Commander deck and play one multiplayer game"
+      "step2": "Open {{packs}}; each pack contains {{cardsPerPack}} — pick two cards, pass the rest",
+      "step2Mixed": "Open {{packs}} of mixed sizes, in this order: {{packSizes, list}} — pick two cards, pass the rest",
+      "step4": "After drafting, build a Commander deck of at least {{minimumDeckCards}} and play one multiplayer game"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Open your sealed pool",
-    "subtitle": "Open six packs, one at a time.",
+    "subtitle_one": "Open {{count}} pack.",
+    "subtitle_few": "Open {{count}} packs, one at a time.",
+    "subtitle_many": "Open {{count}} packs, one at a time.",
+    "subtitle_other": "Open {{count}} packs, one at a time.",
     "packProgress": "Pack {{current}} of {{total}}",
     "openPack": "Open pack",
     "openPackArt": "Open pack artwork",

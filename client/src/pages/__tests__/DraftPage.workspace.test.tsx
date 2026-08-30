@@ -13,6 +13,16 @@ import type { LocalDeckBuilderController } from "../../components/draft/LimitedD
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
 import { projectWorkspaceLandCounts } from "../../components/draft/workspace/workspaceProjection";
 
+interface DraftIntroCapture {
+  mode: string;
+  podSize: number;
+  packCount: number;
+  cardsPerPack: number;
+  packSizes?: number[];
+  minDeckSize: number;
+  onContinue(): void;
+}
+
 const wasm = vi.hoisted(() => ({
   ...(() => {
     Object.assign(globalThis, {
@@ -59,6 +69,7 @@ const captured = vi.hoisted(() => ({
   phoneToolbarPinned: null as boolean | null,
   shellMode: null as string | null,
   steps: null as { phase?: string; compact?: boolean; arrowSeparators?: boolean } | null,
+  intro: null as DraftIntroCapture | null,
 }));
 
 vi.mock("@wasm/draft", () => wasm);
@@ -112,7 +123,10 @@ vi.mock("../../components/draft/SealedPackOpening", () => ({
   ),
 }));
 vi.mock("../../components/draft/DraftIntro", () => ({
-  DraftIntro: ({ onContinue }: { onContinue(): void }) => <button type="button" onClick={onContinue}>Continue</button>,
+  DraftIntro: (props: DraftIntroCapture) => {
+    captured.intro = props;
+    return <button type="button" onClick={props.onContinue}>Continue</button>;
+  },
 }));
 
 import { useDraftStore } from "../../stores/draftStore";
@@ -155,6 +169,7 @@ describe("DraftPage local deckbuilding wiring", () => {
     captured.phoneToolbarPinned = null;
     captured.shellMode = null;
     captured.steps = null;
+    captured.intro = null;
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
     useDraftStore.getState().reset();
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
@@ -212,6 +227,29 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(stepsSpacing).toHaveClass("mb-4");
     expect(captured.preview).toMatchObject({ mode: "side", hoverDelayMs: 0 });
     expect(captured.pack).toMatchObject({ kind: "local-workspace", doubleClickPick: true });
+  });
+
+  it("forwards the engine-published procedure to the draft intro", async () => {
+    wasm.start_quick_draft.mockReturnValue(view({
+      pack_count: 4,
+      cards_per_pack: 12,
+      pack_sizes: [12, 12, 12, 12],
+      min_deck_size: 35,
+    }));
+    await act(async () => {
+      await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    });
+
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+
+    expect(captured.intro).toMatchObject({
+      mode: "quick",
+      podSize: 0,
+      packCount: 4,
+      cardsPerPack: 12,
+      packSizes: [12, 12, 12, 12],
+      minDeckSize: 35,
+    });
   });
 
   it("hides_draft_progress_on_phone_viewports", async () => {

@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Ecco come funziona",
     "startDrafting": "Inizia il draft",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} busta",
+      "packsOpened_few": "{{count, number}} buste",
+      "packsOpened_many": "{{count, number}} buste",
+      "packsOpened_other": "{{count, number}} buste",
+      "cardsContained_one": "{{count, number}} carta",
+      "cardsContained_few": "{{count, number}} carte",
+      "cardsContained_many": "{{count, number}} carte",
+      "cardsContained_other": "{{count, number}} carte",
+      "packSizeEntry_one": "{{count, number}} carta",
+      "packSizeEntry_few": "{{count, number}} carte",
+      "packSizeEntry_many": "{{count, number}} carte",
+      "packSizeEntry_other": "{{count, number}} carte",
+      "minimumDeckCards_one": "{{count, number}} carta",
+      "minimumDeckCards_few": "{{count, number}} carte",
+      "minimumDeckCards_many": "{{count, number}} carte",
+      "minimumDeckCards_other": "{{count, number}} carte"
+    },
+    "packPassing_one": "Questo draft ha un solo round di buste, quindi la direzione di passaggio non cambia",
+    "packPassing_few": "La direzione di passaggio cambia a ogni round",
+    "packPassing_many": "La direzione di passaggio cambia a ogni round",
+    "packPassing_other": "La direzione di passaggio cambia a ogni round",
     "quick": {
-      "step1": "Aprirai 3 buste da 14 carte ciascuna",
+      "step1": "Aprirai {{packs}}; ogni busta contiene {{cardsPerPack}}",
       "step2": "Scegli una carta per busta, poi passa il resto agli altri draftatori IA",
-      "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
-      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita",
-      "step1Mixed": "Aprirai {{packCount}} buste di dimensioni diverse — {{packSizes}} carte, in quest'ordine"
+      "step4": "Dopo tutte le scelte, costruisci un mazzo di almeno {{minimumDeckCards}} e gioca una partita",
+      "step1Mixed": "Aprirai {{packs}} di dimensioni diverse, in quest'ordine: {{packSizes, list}}"
     },
     "pod": {
       "step1": "Stai draftando con {{count}} giocatori in un pod",
-      "step2": "Apri 3 buste da 14 carte — scegline una, passa il resto",
-      "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
-      "step4": "Dopo il draft, costruisci un mazzo da 40 carte e gioca le partite del torneo"
+      "step2": "Apri {{packs}}; ogni busta contiene {{cardsPerPack}} — scegli una carta e passa il resto",
+      "step2Mixed": "Apri {{packs}} di dimensioni diverse, in quest'ordine: {{packSizes, list}} — scegli una carta e passa il resto",
+      "step4": "Dopo il draft, costruisci un mazzo di almeno {{minimumDeckCards}} e gioca le partite del torneo"
     },
     "commander": {
-      "step2": "Scegli due carte da ogni busta, poi passa il resto",
-      "step4": "Dopo il draft, costruisci un mazzo Commander da 60 carte e gioca una partita multigiocatore"
+      "step2": "Apri {{packs}}; ogni busta contiene {{cardsPerPack}} — scegli due carte e passa il resto",
+      "step2Mixed": "Apri {{packs}} di dimensioni diverse, in quest'ordine: {{packSizes, list}} — scegli due carte e passa il resto",
+      "step4": "Dopo il draft, costruisci un mazzo Commander di almeno {{minimumDeckCards}} e gioca una partita multigiocatore"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Apri il tuo pool Sealed",
-    "subtitle": "Apri sei buste, una alla volta.",
+    "subtitle_one": "Apri {{count}} busta.",
+    "subtitle_few": "Apri {{count}} buste, una alla volta.",
+    "subtitle_many": "Apri {{count}} buste, una alla volta.",
+    "subtitle_other": "Apri {{count}} buste, una alla volta.",
     "packProgress": "Busta {{current}} di {{total}}",
     "openPack": "Apri busta",
     "openPackArt": "Apri l’illustrazione della busta",

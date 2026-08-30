@@ -33,16 +33,7 @@ const KNOWN_PLACEHOLDER_GAPS: ReadonlyArray<{
   ns: string;
   key: string;
   why: string;
-}> = [
-  {
-    ns: "draft.json",
-    key: "intro.quick.step1",
-    why:
-      "All six translations hard-code the default '3 packs of 14 cards' instead " +
-      "of interpolating {{packCount}}/{{cardsPerPack}}, so a non-default draft " +
-      "shows wrong numbers. Pre-existing; tracked separately.",
-  },
-];
+}> = [];
 
 type Flat = Record<string, unknown>;
 
@@ -144,6 +135,12 @@ const WORKSPACE_SHELL_KEYS = [
 ] as const;
 
 const FOUR_FORM_STEMS = [
+  "intro.quantity.packsOpened",
+  "intro.quantity.cardsContained",
+  "intro.quantity.packSizeEntry",
+  "intro.quantity.minimumDeckCards",
+  "intro.packPassing",
+  "sealedOpening.subtitle",
   "workspace.count.deck",
   "workspace.count.sideboard",
   "workspace.sideboard.expand",
@@ -198,7 +195,7 @@ describe("locale parity", () => {
     }
   });
 
-  it("keeps_all_workspace_plural_families_complete_in_every_locale", () => {
+  it("keeps_all_plural_families_complete_in_every_locale", () => {
     for (const locale of [SOURCE, ...locales]) {
       const target = load(locale, "draft.json");
       for (const stem of FOUR_FORM_STEMS) {
@@ -219,6 +216,30 @@ describe("locale parity", () => {
     expect(instance.t("pack.cardsInPack", { ns: "draft", count: 5 })).toBe("5 kart w boosterze");
     expect(instance.t("pack.cardsInPack", { ns: "draft", count: 12 })).toBe("12 kart w boosterze");
     expect(instance.t("pack.cardsInPack", { ns: "draft", count: 1.5 })).toBe("1.5 karty w boosterze");
+
+    const quantityFamilies = [
+      ["intro.quantity.packsOpened", ["1 booster", "2 boostery", "5 boosterów", "12 boosterów", "1,5 boostera"]],
+      ["intro.quantity.cardsContained", ["1 kartę", "2 karty", "5 kart", "12 kart", "1,5 karty"]],
+      ["intro.quantity.packSizeEntry", ["1 karta", "2 karty", "5 kart", "12 kart", "1,5 karty"]],
+      ["intro.quantity.minimumDeckCards", ["1 karty", "2 kart", "5 kart", "12 kart", "1,5 karty"]],
+    ] as const;
+    for (const [key, expected] of quantityFamilies) {
+      expect([1, 2, 5, 12, 1.5].map((count) => instance.t(key, { ns: "draft", count }))).toEqual(expected);
+    }
+
+    const packs = instance.t("intro.quantity.packsOpened", { ns: "draft", count: 3 });
+    const packSizes = [1, 2, 5].map((count) =>
+      instance.t("intro.quantity.packSizeEntry", { ns: "draft", count }),
+    );
+    expect(instance.t("intro.quick.step1Mixed", { ns: "draft", packs, packSizes })).toBe(
+      "Otworzysz 3 boostery o różnych rozmiarach, w tej kolejności: 1 karta, 2 karty i 5 kart",
+    );
+    expect(instance.t("intro.packPassing", { ns: "draft", count: 1 })).toBe(
+      "Ten draft ma tylko jedną rundę boosterów, więc kierunek przekazywania się nie zmienia",
+    );
+    expect(instance.t("intro.packPassing", { ns: "draft", count: 3 })).toBe(
+      "Kierunek przekazywania zmienia się w każdej rundzie",
+    );
 
     const header = (count: number) => instance.t("workspace.headers.accessible", {
       ns: "draft", count, column: 3, labels: "Niebieskie",
