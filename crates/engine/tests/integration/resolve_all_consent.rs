@@ -1747,9 +1747,21 @@ fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
     assert!(state.auto_pass.is_empty());
 }
 
+/// The row-8 negative sibling for `viewer_projection_ingest_gate`: the same
+/// prompt as [`pending_consent_without_its_run`], but with its run still LIVE
+/// and built by the real reducer. An authoritative state in this shape must
+/// keep decoding — it is what proves the projection gate keys on the marker
+/// rather than on the prompt.
+pub(crate) fn pending_consent_with_live_run() -> GameState {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE2);
+    state.stack.push_back(no_op_entry(1, P0));
+    begin(&mut state);
+    state
+}
+
 /// The reporter's shape: P0 proposes Resolve All, P1's consent is queued, and
 /// the private run is gone while the public prompt still stands.
-fn pending_consent_without_its_run() -> GameState {
+pub(crate) fn pending_consent_without_its_run() -> GameState {
     let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE2);
     state.stack.push_back(no_op_entry(1, P0));
     let epoch = begin(&mut state);

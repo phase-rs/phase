@@ -1038,10 +1038,22 @@ impl<'a> ClientGameStateRef<'a> {
     }
 }
 
-/// Owned counterpart for deserialize paths (round-trip tests, any future
-/// state-restore flow that ingests the wire format). The JSON shape matches
+/// Owned counterpart for deserialize paths. The JSON shape matches
 /// `ClientGameStateRef` exactly — fields named identically, no
 /// `#[serde(flatten)]` — so serialize/deserialize round-trip is lossless.
+///
+/// A [`ClientGameStateRef::wrap_filtered`] payload is a VIEWER PROJECTION: its
+/// `state` half carries `viewer_projection: Some(..)`. That decodes fine here —
+/// displaying a projection is exactly what this type is for.
+///
+/// What a projection may NOT do is come back as a saved game. A state-restore
+/// flow must ingest an authoritative snapshot through the
+/// `TrustedGameStateEnvelope` / `PersistedGameState` route, where
+/// `reject_viewer_projection_as_authority` refuses a marked projection. That is
+/// deliberate: a projection has had the RNG seed zeroed, the rules journal
+/// cleared and every private resume cursor blanked while its public
+/// `waiting_for` survives, so installing one leaves a prompt no player can
+/// answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientGameState {
     pub state: GameState,
@@ -3523,10 +3535,15 @@ mod tests {
             Some(PlayerId(0)),
         ))
         .expect("serialize filtered client state");
-        let client: ClientGameState =
-            serde_json::from_str(&json).expect("deserialize filtered client state");
+        // A `wrap_filtered` payload is a viewer projection, which
+        // `reject_viewer_projection_as_authority` refuses at decode — so decode the
+        // `derived` half alone, which is what this test asserts on anyway.
+        let wire: serde_json::Value =
+            serde_json::from_str(&json).expect("deserialize filtered client wire");
+        let derived: DerivedViews = serde_json::from_value(wire["derived"].clone())
+            .expect("deserialize filtered derived views");
         assert_eq!(
-            client.derived.blocker_assignment_pairs,
+            derived.blocker_assignment_pairs,
             vec![(blocker, attacker)],
             "the authoritative public blocking pair survives the filtered viewer wire path"
         );
@@ -3594,19 +3611,27 @@ mod tests {
             Some(PlayerId(0)),
         ))
         .expect("serialize filtered debug viewer state");
-        let client: ClientGameState =
-            serde_json::from_str(&wire).expect("deserialize filtered debug viewer state");
+        // A `wrap_filtered` payload is a viewer projection and no longer decodes as a
+        // whole `ClientGameState`. Neither claim below needs a `GameState` to exist: the
+        // redaction claim is about the WIRE, so read it off the wire directly (the idiom
+        // `temporary_cant_be_blocked_view.rs` already uses), and decode only `derived`.
+        let wire: serde_json::Value =
+            serde_json::from_str(&wire).expect("inspect filtered debug viewer wire");
 
         assert_eq!(
-            client.state.objects[&own].name, "Hidden Card",
+            wire["state"]["objects"][own.0.to_string()]["name"],
+            "Hidden Card",
             "normal filtered library objects must remain hidden"
         );
         assert_eq!(
-            client.state.objects[&opponent].name, "Hidden Card",
+            wire["state"]["objects"][opponent.0.to_string()]["name"],
+            "Hidden Card",
             "an opponent's library must remain hidden"
         );
+        let derived: DerivedViews = serde_json::from_value(wire["derived"].clone())
+            .expect("deserialize filtered debug derived views");
         assert_eq!(
-            client.derived.debug_library_cards,
+            derived.debug_library_cards,
             vec![
                 DebugLibraryCardView {
                     object_id: own,
@@ -3627,7 +3652,7 @@ mod tests {
             serde_json::from_str(&local_wire).expect("deserialize local debug viewer state");
         assert_eq!(
             local.derived.debug_library_cards,
-            client.derived.debug_library_cards
+            derived.debug_library_cards
         );
 
         let unauthorized = derive_views(&state, Some(PlayerId(1)));
@@ -4772,9 +4797,13 @@ mod tests {
             Some(PlayerId(1)),
         ))
         .expect("serialize filtered opponent view");
-        let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
-        let details = client
-            .derived
+        // A `wrap_filtered` payload is a viewer projection; decode only the `derived`
+        // half, which is the half this test asserts on.
+        let wire: serde_json::Value =
+            serde_json::from_str(&json).expect("deserialize filtered client wire");
+        let derived: DerivedViews = serde_json::from_value(wire["derived"].clone())
+            .expect("deserialize filtered derived views");
+        let details = derived
             .stack_entry_details
             .get(&spell)
             .expect("public pending spell has stack details");
@@ -5079,6 +5108,12 @@ mod tests {
         ))
         .expect("serialize filtered client state");
 
+        // BOTH wires are refused for the SAME reason: client redaction drops
+        // `pending_trigger_firing` while `pending_trigger` stands. The
+        // `viewer_projection` marker rides along on the filtered wire but does NOT
+        // refuse here — this is the transport decode path, which carries projections
+        // on purpose. The marker only refuses on the persistence ingress; see
+        // `tests/integration/viewer_projection_ingest_gate.rs`.
         for client_state in [&client["state"], &filtered_client["state"]] {
             let error = serde_json::from_value::<GameState>(client_state.clone())
                 .expect_err("redacted client state must not restore as trusted authority");
@@ -5086,7 +5121,8 @@ mod tests {
                 error
                     .to_string()
                     .contains("pending trigger has no firing carrier"),
-                "client redaction must fail only because it removes private trigger authority: {error}"
+                "client redaction must fail only because it removes private trigger \
+                 authority: {error}"
             );
             for private_field in [
                 "next_delayed_trigger_token",

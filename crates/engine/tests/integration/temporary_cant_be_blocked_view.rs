@@ -2,7 +2,7 @@
 //! `CantBeBlocked` grants, sourced only from current Layer 6 attribution.
 
 use engine::game::derived_views::{
-    derive_filtered_views, derive_views, ClientGameState, ClientGameStateRef,
+    derive_filtered_views, derive_views, ClientGameStateRef, DerivedViews,
 };
 use engine::game::filter_state_for_viewer;
 use engine::game::functioning_abilities::active_static_definitions;
@@ -149,11 +149,15 @@ fn wrapper_round_trip_keeps_the_badge_but_hides_a_departed_source() {
             .is_some_and(serde_json::Value::is_null),
         "the wire map represents a departed source as null rather than leaking its id"
     );
-    let round: ClientGameState = serde_json::from_str(&json).expect("deserialize client state");
+    // A `wrap_filtered` payload is a viewer projection, which
+    // `reject_viewer_projection_as_authority` refuses at decode; this claim is about the
+    // `derived` half, so decode exactly that.
+    let round: DerivedViews =
+        serde_json::from_value(wire["derived"].clone()).expect("deserialize derived views");
     assert_eq!(
-        round.derived.temporary_cant_be_blocked.get(&recipient),
+        round.temporary_cant_be_blocked.get(&recipient),
         Some(&None),
-        "the owned client wrapper round-trips the source-less badge"
+        "the derived half of the client wire round-trips the source-less badge"
     );
 
     let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(
