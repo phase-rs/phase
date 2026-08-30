@@ -251,13 +251,69 @@ fn becomes_target_delayed_payload_fails_honestly() {
         .execute
         .as_deref()
         .expect("delayed trigger installer");
-    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
         panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        condition,
+        DelayedTriggerCondition::WhenDies {
+            filter: TargetFilter::ParentTarget
+        }
+    ));
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn becomes_target_delayed_modal_payload_fails_honestly() {
+    let nested_delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::EventTarget,
+                    cant_regenerate: false,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+    );
+    let modal_payload = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        },
+        vec![nested_delayed],
+    );
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(modal_payload),
+            uses_tracked_set: false,
+        },
+    );
+
+    demote_becomes_target_delayed_payloads(&mut execute);
+
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        unreachable!("constructed delayed trigger installer")
     };
     assert!(matches!(
         effect.effect.as_ref(),
         Effect::Unimplemented { .. }
     ));
+    assert!(effect.modal.is_none());
+    assert!(effect.mode_abilities.is_empty());
 }
 
 #[test]
@@ -270,9 +326,18 @@ fn becomes_target_delayed_condition_fails_honestly() {
         .execute
         .as_deref()
         .expect("delayed trigger installer");
-    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
         panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
     };
+    assert!(matches!(
+        condition,
+        DelayedTriggerCondition::WhenDies {
+            filter: TargetFilter::ParentTarget
+        }
+    ));
     assert!(matches!(
         effect.effect.as_ref(),
         Effect::Unimplemented { .. }

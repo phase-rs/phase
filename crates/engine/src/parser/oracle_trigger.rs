@@ -2675,6 +2675,12 @@ fn effect_contains_event_target(effect: &Effect) -> bool {
                     .as_ref()
                     .is_some_and(target_filter_contains_event_target)
         }
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            delayed_condition_contains_event_target(condition)
+                || ability_contains_event_target(effect)
+        }
         Effect::PutCounterAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::DamageAll { target, .. }
@@ -2700,6 +2706,8 @@ fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
                 "becomes_target_delayed_event_target",
                 "delayed BecomesTarget payload requires an unsupported event snapshot",
             );
+            effect.modal = None;
+            effect.mode_abilities.clear();
             effect.sub_ability = None;
             effect.else_ability = None;
         }
