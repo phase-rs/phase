@@ -66,13 +66,13 @@ fn candelabra_target_selection() -> (GameRunner, Vec<ObjectId>) {
 
 #[test]
 fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
+    perf_counters::reset();
     let (mut runner, lands) = candelabra_target_selection();
     let initial_target_walk_counters = perf_counters::homogeneous_target_walk_cache_snapshot();
     assert_eq!(
         initial_target_walk_counters.initializations, 1,
         "the homogeneous target walk must enumerate its initial legal set once"
     );
-    perf_counters::reset();
     let mut raw_action_candidates = 0;
     let mut returned_legal_actions = 0;
     let mut target_candidates = 0;
