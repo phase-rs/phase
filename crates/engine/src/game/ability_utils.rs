@@ -1325,7 +1325,6 @@ pub fn choose_target_for_ability(
     }
 
     if let Some(next_progress) = homogeneous_required_target_walk_progress(
-        state,
         ability,
         target_slots,
         constraints,
@@ -6363,7 +6362,6 @@ fn build_target_selection_progress_for_ability(
 /// instance to be different; every shape whose later target legality can
 /// depend on earlier choices deliberately returns `None` and recomputes.
 fn homogeneous_required_target_walk_progress(
-    _state: &GameState,
     ability: &ResolvedAbility,
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],

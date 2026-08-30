@@ -2,10 +2,6 @@ use std::cell::Cell;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
-    #[cfg(feature = "test-support")]
-    pub homogeneous_target_walk_cache_initializations: u64,
-    #[cfg(feature = "test-support")]
-    pub homogeneous_target_walk_cache_advances: u64,
     pub state_clone_for_legality: u64,
     pub generation_state_clones: u64,
     pub strict_fast_path_state_clones: u64,
@@ -50,6 +46,17 @@ pub struct PerfCounterSnapshot {
     pub sba_empty_battlefield_short_circuits: u64,
 }
 
+/// Test-only cache-use counters for the homogeneous target-selection walk.
+///
+/// Kept separate from [`PerfCounterSnapshot`], whose serialized field set powers
+/// the AI performance baseline rather than integration-test instrumentation.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HomogeneousTargetWalkCacheCounters {
+    pub initializations: u64,
+    pub advances: u64,
+}
+
 thread_local! {
     /// Per-thread (NOT process-global) so parallel `cargo test` runs do not
     /// cross-pollute counters between a test's `reset()` and `snapshot()`.
@@ -63,10 +70,6 @@ thread_local! {
     /// that needs a cross-thread aggregate. Do not "fix" this back to a global
     /// `AtomicU64`: that reintroduces the parallel-test flakiness this replaces.
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
-        #[cfg(feature = "test-support")]
-        homogeneous_target_walk_cache_initializations: 0,
-        #[cfg(feature = "test-support")]
-        homogeneous_target_walk_cache_advances: 0,
         state_clone_for_legality: 0,
         generation_state_clones: 0,
         strict_fast_path_state_clones: 0,
@@ -110,6 +113,13 @@ thread_local! {
         sba_battlefield_snapshot_builds: 0,
         sba_empty_battlefield_short_circuits: 0,
     }) };
+    #[cfg(feature = "test-support")]
+    static HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS: Cell<HomogeneousTargetWalkCacheCounters> = const {
+        Cell::new(HomogeneousTargetWalkCacheCounters {
+            initializations: 0,
+            advances: 0,
+        })
+    };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
 }
 
@@ -153,12 +163,20 @@ pub fn record_state_clone_for_legality() {
 
 #[cfg(feature = "test-support")]
 pub fn record_homogeneous_target_walk_cache_initialization() {
-    with_mut(|s| s.homogeneous_target_walk_cache_initializations += 1);
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|counters| {
+        let mut counters = counters.get();
+        counters.initializations += 1;
+        counters.set(counters);
+    });
 }
 
 #[cfg(feature = "test-support")]
 pub fn record_homogeneous_target_walk_cache_advance() {
-    with_mut(|s| s.homogeneous_target_walk_cache_advances += 1);
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|counters| {
+        let mut counters = counters.get();
+        counters.advances += 1;
+        counters.set(counters);
+    });
 }
 
 fn record_phase_owned_state_clone_for(
@@ -382,6 +400,14 @@ pub fn snapshot() -> PerfCounterSnapshot {
     COUNTERS.with(|c| c.get())
 }
 
+#[cfg(feature = "test-support")]
+pub fn homogeneous_target_walk_cache_snapshot() -> HomogeneousTargetWalkCacheCounters {
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(Cell::get)
+}
+
 pub fn reset() {
     COUNTERS.with(|c| c.set(PerfCounterSnapshot::default()));
+    #[cfg(feature = "test-support")]
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS
+        .with(|counters| counters.set(HomogeneousTargetWalkCacheCounters::default()));
 }
