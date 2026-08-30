@@ -130,6 +130,15 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
     assert_eq!(
+        counters.homogeneous_target_walk_cache_initializations, 1,
+        "the homogeneous target walk must enumerate its initial legal set once"
+    );
+    assert_eq!(
+        counters.homogeneous_target_walk_cache_advances,
+        TARGET_COUNT as u64 - 1,
+        "each nonterminal target selection must consume the cached legal set"
+    );
+    assert_eq!(
         counters.state_clone_for_legality,
         (TARGET_COUNT * 2) as u64,
         "memoized validation still probes each CancelCast plus one target per prompt"

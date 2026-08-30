@@ -2,6 +2,10 @@ use std::cell::Cell;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
+    #[cfg(feature = "test-support")]
+    pub homogeneous_target_walk_cache_initializations: u64,
+    #[cfg(feature = "test-support")]
+    pub homogeneous_target_walk_cache_advances: u64,
     pub state_clone_for_legality: u64,
     pub generation_state_clones: u64,
     pub strict_fast_path_state_clones: u64,
@@ -59,6 +63,10 @@ thread_local! {
     /// that needs a cross-thread aggregate. Do not "fix" this back to a global
     /// `AtomicU64`: that reintroduces the parallel-test flakiness this replaces.
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
+        #[cfg(feature = "test-support")]
+        homogeneous_target_walk_cache_initializations: 0,
+        #[cfg(feature = "test-support")]
+        homogeneous_target_walk_cache_advances: 0,
         state_clone_for_legality: 0,
         generation_state_clones: 0,
         strict_fast_path_state_clones: 0,
@@ -141,6 +149,16 @@ fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
 
 pub fn record_state_clone_for_legality() {
     with_mut(|s| s.state_clone_for_legality += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_homogeneous_target_walk_cache_initialization() {
+    with_mut(|s| s.homogeneous_target_walk_cache_initializations += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_homogeneous_target_walk_cache_advance() {
+    with_mut(|s| s.homogeneous_target_walk_cache_advances += 1);
 }
 
 fn record_phase_owned_state_clone_for(

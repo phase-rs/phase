@@ -6246,6 +6246,8 @@ fn build_target_selection_progress_for_ability(
         if let Some(first_spec) =
             homogeneous_required_target_walk_spec(ability, target_slots, constraints, &specs)
         {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_homogeneous_target_walk_cache_initialization();
             let current_legal_targets =
                 legal_targets_for_selected_slot(state, ability, first_spec, &[], &[]);
             if current_legal_targets.len() < target_slots.len() {
@@ -6382,6 +6384,8 @@ fn homogeneous_required_target_walk_progress(
     let mut cached_targets = progress.current_legal_targets.clone();
     let index = cached_targets.iter().position(|target| target == chosen)?;
     cached_targets.remove(index);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_homogeneous_target_walk_cache_advance();
     Some(TargetSelectionProgress {
         current_slot: next_slot,
         selected_slots: selected_slots.to_vec(),
