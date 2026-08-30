@@ -573,4 +573,200 @@ describe("useCardImage", () => {
     await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/back-1"));
   });
 
+  // Regression anchor for the art-selection chain. Before these, the suite
+  // configured only an EMPTY `artChain`, so `applyChain`/`applyChainEntry`
+  // could be changed arbitrarily without a single test turning red. They must
+  // stay at the `useCardImage` level: an extracted-function unit test asserts
+  // the extracted function against itself and cannot show that the hook still
+  // reaches it.
+  describe("art precedence", () => {
+    // `dmu` is printings[0] (what a `newest` entry would pick) and `sld` is the
+    // only borderless one, so every expectation below distinguishes the entry
+    // under test from its neighbours. The scryfall-data face URL is a third,
+    // distinct value, so "the chain did nothing" is also distinguishable.
+    const PRINTINGS = [
+      {
+        id: "dmu-bolt",
+        set: "dmu",
+        set_name: "Dominaria United",
+        collector_number: "137",
+        released_at: "2022-09-09",
+        border_color: "black",
+        frame_effects: [],
+        full_art: false,
+        faces: [{ normal: "https://img.example/dmu.jpg", art_crop: "https://img.example/dmu-art.jpg" }],
+      },
+      {
+        id: "sld-bolt",
+        set: "sld",
+        set_name: "Secret Lair Drop",
+        collector_number: "1",
+        released_at: "2023-04-01",
+        border_color: "borderless",
+        frame_effects: [],
+        full_art: false,
+        faces: [{ normal: "https://img.example/sld.jpg", art_crop: "https://img.example/sld-art.jpg" }],
+      },
+    ];
+
+    function stubPrintingsFixture(): void {
+      vi.doMock("../../services/visualPacks/repository.ts", () => ({
+        visualPackRepository: {
+          currentRevision: () => "0",
+          subscribe: () => () => {},
+          resolve: vi.fn(async ({ remote }: { remote: { src: string } }) => ({
+            revision: "0",
+            sources: [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }],
+          })),
+        },
+      }));
+      vi.stubGlobal("fetch", vi.fn((url: string) => {
+        if (url === "/scryfall-data.json") {
+          return Promise.resolve(jsonResponse({
+            "lightning bolt": {
+              oracle_id: "oracle-bolt",
+              face_names: ["lightning bolt"],
+              faces: [{ normal: "https://img.example/default.jpg", art_crop: "https://img.example/default-art.jpg" }],
+              name: "Lightning Bolt",
+              mana_cost: "{R}",
+              cmc: 1,
+              type_line: "Instant",
+              colors: ["R"],
+              color_identity: ["R"],
+              keywords: [],
+            },
+          }));
+        }
+        if (url === "/scryfall-printings.json") {
+          return Promise.resolve(jsonResponse({ "oracle-bolt": PRINTINGS }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }));
+    }
+
+    it("walks past a chain entry that matches no printing and applies the next one", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      usePreferencesStore.getState().setArtChain([
+        { type: "set", setCode: "zzz", label: "Nonexistent Set" },
+        { type: "prefer_borderless" },
+      ]);
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() => useCardImage("Lightning Bolt"));
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/sld.jpg"));
+    });
+
+    it("honors a set entry ahead of the rest of the chain", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      usePreferencesStore.getState().setArtChain([
+        { type: "set", setCode: "dmu", label: "Dominaria United" },
+        { type: "prefer_borderless" },
+      ]);
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() => useCardImage("Lightning Bolt"));
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/dmu.jpg"));
+    });
+
+    it("resolves a source_printing chain entry from the deck's printing", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      // `newest` sits behind `source_printing` and would pick `dmu`, so an sld
+      // result can only come from the source-printing entry consuming the
+      // caller's `sourcePrinting`.
+      usePreferencesStore.getState().setArtChain([
+        { type: "source_printing" },
+        { type: "newest" },
+      ]);
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() =>
+        useCardImage("Lightning Bolt", {
+          sourcePrinting: { setCode: "SLD", collectorNumber: "1" },
+        })
+      );
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/sld.jpg"));
+    });
+
+    // Precedence branch 4: with an EMPTY chain, a `sourcePrinting` still wins
+    // over the canonical scryfall-data art. This is the default configuration,
+    // so any planner that models only the chain disagrees with the renderer
+    // for every default-config user.
+    it("uses the source printing when the chain is empty", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      usePreferencesStore.getState().setArtChain([]);
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() =>
+        useCardImage("Lightning Bolt", {
+          sourcePrinting: { setCode: "SLD", collectorNumber: "1" },
+        })
+      );
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/sld.jpg"));
+    });
+
+    // Precedence branch 2: a per-card override outranks the whole chain.
+    it("prefers an art override over the chain", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      usePreferencesStore.getState().setArtChain([{ type: "prefer_borderless" }]);
+      usePreferencesStore.getState().setArtOverride("oracle-bolt", {
+        scryfallId: "dmu-bolt",
+        setCode: "dmu",
+        collectorNumber: "137",
+      });
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() => useCardImage("Lightning Bolt"));
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/dmu.jpg"));
+      usePreferencesStore.getState().clearAllArtOverrides();
+    });
+
+    // Pins the renderer's behavior that `services/artSelection.ts` must model:
+    // `else if (artOverrides[oracleId])` gates on key PRESENCE, so a pin whose
+    // scryfallId is no longer in the printings data consumes the branch and
+    // yields no override URL — but with an EMPTY chain the async path is still
+    // handed the source printing, so the deck's art is what renders. Neither
+    // the canonical art nor nothing.
+    it("still shows the deck's printing when a stale art override resolves to no printing", async () => {
+      stubPrintingsFixture();
+
+      const { usePreferencesStore } = await import("../../stores/preferencesStore");
+      usePreferencesStore.getState().clearAllArtOverrides();
+      usePreferencesStore.getState().setArtChain([]);
+      usePreferencesStore.getState().setArtOverride("oracle-bolt", {
+        scryfallId: "printing-that-no-longer-exists",
+        setCode: "xxx",
+        collectorNumber: "1",
+      });
+
+      const { useCardImage } = await import("../useCardImage");
+      const { result } = renderHook(() =>
+        useCardImage("Lightning Bolt", {
+          sourcePrinting: { setCode: "SLD", collectorNumber: "1" },
+        })
+      );
+
+      await waitFor(() => expect(result.current.src).toBe("https://img.example/sld.jpg"));
+      usePreferencesStore.getState().clearAllArtOverrides();
+    });
+  });
 });

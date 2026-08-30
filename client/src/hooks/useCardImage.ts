@@ -14,13 +14,13 @@ import {
   isLocaleArtReady,
   imageUrlSize,
   loadLocaleArt,
-  pickOldestPrinting,
   resolveFaceIndexSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
 } from "../services/scryfall.ts";
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
+import { applyChain } from "../services/artSelection.ts";
 import type { TokenImageRef } from "../adapter/types.ts";
 import {
   cardBackCandidate,
@@ -272,39 +272,6 @@ export function useLocaleArt(): string {
   }, [language]);
 
   return localeArtCacheKey(language);
-}
-
-function applyChainEntry(
-  entry: ArtChainEntry,
-  printings: PrintingEntry[],
-  source?: SourcePrinting,
-): PrintingEntry | null {
-  switch (entry.type) {
-    case "set":
-      return printings.find((p) => p.set === entry.setCode) ?? null;
-    case "newest":
-      return printings[0];
-    case "oldest":
-      return pickOldestPrinting(printings);
-    case "prefer_borderless":
-      return printings.find((p) => p.border_color === "borderless") ?? null;
-    case "prefer_extended":
-      return printings.find((p) => p.frame_effects.includes("extendedart")) ?? null;
-    case "source_printing": {
-      if (!source) return null;
-      const setLower = source.setCode.toLowerCase();
-      return printings.find((p) => p.set === setLower && p.collector_number === source.collectorNumber) ?? null;
-    }
-  }
-}
-
-function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[], source?: SourcePrinting): PrintingEntry | null {
-  if (printings.length === 0) return null;
-  for (const entry of chain) {
-    const match = applyChainEntry(entry, printings, source);
-    if (match) return match;
-  }
-  return null;
 }
 
 function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
