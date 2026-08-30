@@ -29,9 +29,9 @@ use engine::game::scenario::GameScenario;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission, Duration, Effect,
-    GameRestriction, PermissionGrantee, PlayerFilter, PlayerScope, ProhibitedActivity,
-    QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, TargetFilter,
+    AbilityDefinition, AbilityKind, ActivationRestriction, CardPlayMode, CastingPermission,
+    Duration, Effect, GameRestriction, PermissionGrantee, PlayerFilter, PlayerScope,
+    ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -55,6 +55,7 @@ fn play_from_exile_grant() -> CastingPermission {
             player: PlayerScope::Controller,
         },
         granted_to: PlayerId(0), // placeholder; grant_permission::resolve rebinds to owner
+        mode: CardPlayMode::Play,
         frequency: CastFrequency::Unlimited,
         source_id: None,
         invalidation: None,

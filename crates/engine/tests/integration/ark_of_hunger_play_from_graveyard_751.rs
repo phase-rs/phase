@@ -25,7 +25,7 @@ use engine::game::layers::prune_end_of_turn_casting_permissions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, CastingPermission, Duration};
+use engine::types::ability::{AbilityKind, CardPlayMode, CastingPermission, Duration};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::CardId;
@@ -251,6 +251,7 @@ fn exiled_card_with_play_permission_stays_on_exile_path() {
                 provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: P0,
+                mode: CardPlayMode::Play,
                 frequency: engine::types::statics::CastFrequency::Unlimited,
                 source_id: None,
                 invalidation: None,

@@ -319,7 +319,7 @@ fn a_face_up_creature_spell_is_not_reduced() {
 fn exile_morph_with_competing_permissions(
     pool: usize,
 ) -> (engine::game::scenario::GameRunner, ObjectId) {
-    use engine::types::ability::{CastingPermission, Duration};
+    use engine::types::ability::{CardPlayMode, CastingPermission, Duration};
     use engine::types::statics::CastFrequency;
     use engine::types::zones::EtbTapState;
 
@@ -342,6 +342,7 @@ fn exile_morph_with_competing_permissions(
             provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::UntilEndOfTurn,
             granted_to: P0,
+            mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
