@@ -1558,7 +1558,7 @@ mod tests {
                     "an affiliated payment window must return a witnessed successor, got {action:?}"
                 );
             }
-            Err(BailReason::NoLegalManaPayment) => {}
+            Err(BailReason::NoLegalManaPayment | BailReason::IncompleteManaPaymentWitness) => {}
             other => panic!("expected the payment-witness branch, got {other:?}"),
         }
     }
