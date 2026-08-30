@@ -17,6 +17,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import {
+  getAllOpponentIds,
   getOpponentIds,
   getWaitingForClickTargetRefs,
   getWaitingForPlayerChoiceIds,
@@ -73,11 +74,10 @@ export function OpponentHud({
 
   const teamBased = gameState?.format_config?.team_based ?? false;
 
-  const allOpponents = useMemo(() => {
-    if (!gameState) return [];
-    const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
-    return seatOrder.filter((id) => id !== playerId);
-  }, [gameState, playerId]);
+  const allOpponents = useMemo(
+    () => getAllOpponentIds(gameState, playerId),
+    [gameState, playerId],
+  );
 
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = useMemo(() => getOpponentIds(gameState, playerId), [gameState, playerId]);

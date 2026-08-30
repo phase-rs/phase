@@ -88,10 +88,14 @@ describe("OpponentHud", () => {
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 
-  it("keeps multiplayer opponent tabs in stable seat order while marking next up", () => {
+  it("renders opponent tabs clockwise from a non-zero viewer, including eliminated seats", () => {
+    useMultiplayerStore.setState({ activePlayerId: 1 });
+    useUiStore.setState({ focusedOpponent: 2 });
     useGameStore.setState({
+      gameMode: "online",
       gameState: createGameState({
         seat_order: [0, 3, 1, 2],
+        eliminated_players: [0],
         derived: {
           turn_order: [
             { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
@@ -105,7 +109,8 @@ describe("OpponentHud", () => {
     render(<OpponentHud />);
 
     const tabs = Array.from(document.querySelectorAll('button[data-player-hud]'));
-    expect(tabs.map((tab) => tab.getAttribute("data-player-hud"))).toEqual(["3", "1", "2"]);
+    expect(tabs.map((tab) => tab.getAttribute("data-player-hud"))).toEqual(["2", "0", "3"]);
+    expect(tabs[1]).toBeDisabled();
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 

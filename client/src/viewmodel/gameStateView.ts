@@ -28,14 +28,34 @@ export interface PlayerBattlefieldView {
   other: GroupedPermanent[];
 }
 
-export function getOpponentIds(
+/**
+ * Returns every opposing seat in fixed physical clockwise order, starting
+ * immediately after the viewer and wrapping once. Eliminated seats remain so
+ * seat-rendering UI can preserve their physical position.
+ */
+export function getAllOpponentIds(
   gameState: GameState | null,
   playerId: PlayerId,
 ): PlayerId[] {
   if (!gameState) return [];
   const seatOrder = gameState.seat_order ?? gameState.players.map((player) => player.id);
+  const viewerSeatIndex = seatOrder.indexOf(playerId);
+  if (viewerSeatIndex === -1) return seatOrder.filter((id) => id !== playerId);
+
+  return [
+    ...seatOrder.slice(viewerSeatIndex + 1),
+    ...seatOrder.slice(0, viewerSeatIndex),
+  ];
+}
+
+/** Returns live opposing seats in fixed physical clockwise order. */
+export function getOpponentIds(
+  gameState: GameState | null,
+  playerId: PlayerId,
+): PlayerId[] {
+  if (!gameState) return [];
   const eliminated = new Set(gameState.eliminated_players ?? []);
-  return seatOrder.filter((id) => id !== playerId && !eliminated.has(id));
+  return getAllOpponentIds(gameState, playerId).filter((id) => !eliminated.has(id));
 }
 
 /** Resolve the opponent tab/board focus, ignoring eliminated seats. */
