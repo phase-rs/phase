@@ -2475,10 +2475,10 @@ fn rebind_immediate_parent_target_to_event_target(ability: &mut AbilityDefinitio
         if let Some(else_ability) = link.else_ability.as_deref_mut() {
             rebind_immediate_parent_target_to_event_target(else_ability);
         }
+        rebind_parent_target_to_event_target_in_effect(link.effect.as_mut());
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
         }
-        rebind_parent_target_to_event_target_in_effect(link.effect.as_mut());
         node = link.sub_ability.as_deref_mut();
     }
 }
@@ -2552,7 +2552,6 @@ fn rebind_parent_target_to_event_target_in_prop(prop: &mut FilterProp) {
     }
 }
 
-#[allow(dead_code)]
 fn target_filter_contains_event_target(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::EventTarget => true,
@@ -2570,7 +2569,6 @@ fn target_filter_contains_event_target(filter: &TargetFilter) -> bool {
     }
 }
 
-#[allow(dead_code)]
 fn filter_prop_contains_event_target(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::CanEnchant { target }
@@ -2588,7 +2586,6 @@ fn filter_prop_contains_event_target(prop: &FilterProp) -> bool {
     }
 }
 
-#[allow(dead_code)]
 fn ability_contains_event_target(ability: &AbilityDefinition) -> bool {
     effect_contains_event_target(ability.effect.as_ref())
         || ability
@@ -2605,7 +2602,6 @@ fn ability_contains_event_target(ability: &AbilityDefinition) -> bool {
             .is_some_and(ability_contains_event_target)
 }
 
-#[allow(dead_code)]
 fn effect_contains_event_target(effect: &Effect) -> bool {
     let mut effect = effect.clone();
     let mut found = false;
@@ -2654,12 +2650,14 @@ fn effect_contains_event_target(effect: &Effect) -> bool {
 
 fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
     if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
-        *effect.effect = Effect::unimplemented(
-            "becomes_target_delayed_event_target",
-            "delayed BecomesTarget payload requires an unsupported event snapshot",
-        );
-        effect.sub_ability = None;
-        effect.else_ability = None;
+        if ability_contains_event_target(effect) {
+            *effect.effect = Effect::unimplemented(
+                "becomes_target_delayed_event_target",
+                "delayed BecomesTarget payload requires an unsupported event snapshot",
+            );
+            effect.sub_ability = None;
+            effect.else_ability = None;
+        }
         return;
     }
     for mode in &mut ability.mode_abilities {
