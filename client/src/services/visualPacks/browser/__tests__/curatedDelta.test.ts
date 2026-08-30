@@ -1100,4 +1100,42 @@ describe("curated delta install", () => {
     release();
     await vi.waitFor(() => { expect(failed).toHaveLength(1); }, { timeout: 5000 });
   });
+
+  it("writes nothing more once cancel has returned", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+
+    // Park a download and wait until it is provably AT the gate, so a task is
+    // certainly past the guard and inside `fetchImage` when the cancel lands.
+    // `installObject` consults `signal` only there — its donor-reuse and
+    // cache-hit paths never do — so such a task reaches `markComplete`
+    // whatever the abort says. Waiting on a request COUNT instead would not
+    // pin this down: the batch reaches the gate at a variable point, and the
+    // assertion below then holds or fails on timing rather than on behaviour.
+    let seen = 0;
+    let parked = false;
+    const release = holdImages((source) => {
+      if (!source.startsWith("https://cards.scryfall.io/")) return false;
+      if ((seen += 1) !== 2) return false;
+      parked = true;
+      return true;
+    });
+    const started = await startCurated(backend);
+    await vi.waitFor(() => { expect(parked).toBe(true); }, { timeout: 5000 });
+
+    // Released on a timer rather than inline: `cancel()` now waits for the
+    // worker, so it cannot return until this fires, while a `cancel()` that
+    // did NOT wait returns first and reports a count the parked task then
+    // moves. That ordering is what the assertion reads.
+    const pending = backend.cancel(started.operation);
+    setTimeout(release, 150);
+    const status = await pending;
+    expect(status.state).toBe("cancelled");
+
+    // THE INVARIANT, asserted on the SNAPSHOT `cancel()` returns, because that
+    // is the value the panel publishes its terminal outcome from. Once it is
+    // handed over, nothing may still be promoting into the operation.
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+    const settledRecord = await backend.operationStatus(started.operation);
+    expect(settledRecord.objectsPromoted).toBe(status.objectsPromoted);
+  });
 });
