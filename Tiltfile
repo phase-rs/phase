@@ -265,6 +265,31 @@ local_resource('check-frontend',
     labels = ['lint'],
 )
 
+# scripts/setup.sh refuses to run when the pnpm major resolved in client/ differs
+# from that directory's `packageManager` pin. The pin is DIRECTORY-SCOPED, so the
+# repo root and client/ legitimately resolve different majors on one machine
+# (measured: 11.24.0 at the root, 9.15.9 in client/), and a check that reads the
+# wrong one rejects a valid environment instead of a broken one. These tests stub
+# a pnpm that reports by working directory to pin that distinction.
+#
+# Tilt is the enforcement venue, NOT GitHub CI: enrolling a script gate in CI
+# needs a `.github/workflows/**` edit, which is a hard stop for agent changes.
+# This mirrors probe-pin, which is enforced here for exactly that reason --
+# see docs/probe-pin.md. So this gate is local-only, and a contributor who never
+# runs `tilt up -- lint` never runs it; setup.sh remains the real backstop.
+#
+# No CARGO_TARGET_DIR and no cargo at all: pure bash against stubbed binaries in
+# a mktemp dir, so it cannot contend for a build lock.
+local_resource('pnpm-preflight',
+    cmd = 'bash scripts/lib/pnpm_preflight_tests.sh',
+    deps = ['scripts/lib/pnpm-preflight.sh', 'scripts/lib/pnpm_preflight_tests.sh',
+            'scripts/setup.sh', 'client/package.json'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------

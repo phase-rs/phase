@@ -17,6 +17,11 @@
 # on its working directory. That is the only way to reproduce the divergence
 # without installing two real pnpm majors.
 #
+# Venue: the Tilt `pnpm-preflight` resource (label 'lint'). NOT GitHub CI —
+# enrolling a script gate there needs a `.github/workflows/**` edit, which is a
+# hard stop for agent changes; probe-pin is enforced the same way for the same
+# reason (docs/probe-pin.md). This gate is therefore local-only.
+#
 # Run:  bash scripts/lib/pnpm_preflight_tests.sh
 
 set -uo pipefail
