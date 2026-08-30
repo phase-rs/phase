@@ -3354,10 +3354,22 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// no affected set (`MaxUntapPerType`) is categorically not SelfRef and must not
 /// be coerced into a literal it does not carry.
 ///
-/// SINGLE AUTHORITY for that binding decision. Every static gate parser
-/// ("as long as" / "unless" / "if") routes through here; no call site re-decides
-/// it. Replaces the ternary formerly duplicated in `parse_continuous_gets_has`
-/// (anthem.rs, both the as-long-as and unless arms).
+/// Authority for that binding decision on every AFFECTED-BEARING static gate
+/// ("as long as" / "unless" / "if"): those route through here and no call site
+/// re-decides it. Replaces the ternary formerly duplicated in
+/// `parse_continuous_gets_has` (anthem.rs, both the as-long-as and unless arms).
+///
+/// ONE DELIBERATE EXCEPTION, and it is the same static named above:
+/// `parse_max_untap_per_type_static` (dispatch.rs) calls
+/// `rewrite_self_pronoun_subject` directly and ALWAYS applies it. That is not an
+/// oversight and must not be "fixed" by routing it through here. The two
+/// statements are reconciled by scope, not by precedence: this helper decides
+/// binding from `affected`, and a `None` affected set carries no SelfRef literal
+/// to read — so it correctly declines. `MaxUntapPerType` has no attached-subject
+/// variant at all (CR 611.3a), so its gate is always a state check on the cap's
+/// own source and the rewrite is unconditionally right there. A caller with that
+/// proof out-of-band may rewrite before calling; a caller without one may not.
+/// These are the only two production callers of `rewrite_self_pronoun_subject`.
 ///
 /// NORMALIZATION IS PART OF THE CONTRACT, not the caller's job.
 /// `rewrite_self_pronoun_subject` matches an EXACT closed list, so a trailing

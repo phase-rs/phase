@@ -896,7 +896,7 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    "blocking" / "blocked" and the compound "attacking or blocking" (which
 ///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
 ///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
-///    (CR 301.5a) and "enchanted" (CR 303.4) — nine phrases — plus the two
+///    (CR 301.5a) and "enchanted" (CR 303.4b) — nine phrases — plus the two
 ///    non-contraction "it entered …" forms handled below, "it entered this turn"
 ///    and "it entered the battlefield this turn" (CR 400.7).
 ///    "it" is otherwise overloaded: "it's your

@@ -2223,8 +2223,10 @@ pub(crate) fn parse_static_line_inner(
             // <cond>" / "if <cond>". CR 509.1b is the rule that governs it: it
             // names evasion abilities explicitly ("A restriction may be created by
             // an evasion ability (a static ability an attacking creature has that
-            // restricts what can block it)") and is re-checked each time blockers
-            // are declared.
+            // restricts what can block it)"). The check happens when blockers are
+            // declared; CR 509.1b adds that an attacking creature gaining or losing
+            // an evasion ability AFTER a legal block has been declared does not
+            // affect that block.
             //
             // This branch is the FALLBACK in a two-authority series:
             // `parse_subject_rule_static` (dispatch.rs, above → evasion.rs's

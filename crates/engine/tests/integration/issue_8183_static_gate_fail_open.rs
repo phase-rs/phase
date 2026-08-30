@@ -24,7 +24,7 @@
 //!     restriction NEVER applied: an unequipped Training Drone could attack.
 //!     With the fix the gate is `Not(SourceIsEquipped)` (CR 301.5a — the
 //!     creature an Equipment is attached to is the "equipped creature"), so an
-//!     unequipped Drone cannot be declared as an attacker (CR 508.1d) and an
+//!     unequipped Drone cannot be declared as an attacker (CR 508.1c) and an
 //!     equipped one can.
 //!
 //!  3. **Ancestral Katana** — `Equipped creature gets +2/+2 and has "This
@@ -60,9 +60,11 @@ const GRAXIPLON: &str = "This creature can't be blocked unless defending player 
 /// Verbatim Training Drone Oracle text (MTGJSON AtomicCards).
 const TRAINING_DRONE: &str = "This creature can't attack or block unless it's equipped.";
 
-/// Verbatim Ancestral Katana Oracle text — the Alchemy rebalanced printing,
+/// Ancestral Katana Oracle text — the Alchemy rebalanced printing,
 /// which MTGJSON keys as `A-Ancestral Katana` and whose printed card name is
-/// "Ancestral Katana". The PAPER Ancestral Katana reads
+/// "Ancestral Katana". Lines 1-2 are verbatim; the trailing `Equip {2}` drops
+/// MTGJSON's reminder text, which no assertion here reads.
+/// The PAPER Ancestral Katana reads
 /// "Equipped creature gets +2/+1." and carries no quoted granted ability at
 /// all, so a fixture built from the paper text could not exercise this defect.
 const ANCESTRAL_KATANA: &str = "Whenever a Samurai or Warrior you control attacks alone, you may pay {1}. When you do, attach Ancestral Katana to it.\nEquipped creature gets +2/+2 and has \"This creature has first strike as long as it's attacking.\"\nEquip {2}";
@@ -171,7 +173,7 @@ fn graxiplon_can_be_blocked_when_gate_unmet() {
         .declare_attackers(&[(graxiplon, AttackTarget::Player(P1))])
         .expect("Graxiplon must be a legal attacker");
 
-    // CR 508.2 + CR 117.1c: the active player gets priority after attackers are
+    // CR 508.2: the active player gets priority after attackers are
     // declared; pass through it to reach the declare-blockers step.
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
         runner.pass_both_players();
@@ -196,7 +198,7 @@ fn graxiplon_can_be_blocked_when_gate_unmet() {
 // 2. Training Drone — the unresolved source anaphor
 // ---------------------------------------------------------------------------
 
-/// CR 508.1d + CR 301.5a: an UNEQUIPPED Training Drone cannot be declared as an
+/// CR 508.1c + CR 301.5a: an UNEQUIPPED Training Drone cannot be declared as an
 /// attacker.
 ///
 /// Discriminating: revert U1 (make the helper's SelfRef arm unreachable) and the
@@ -229,7 +231,7 @@ fn training_drone_cannot_attack_while_unequipped() {
             .declare_attackers(&[(drone, AttackTarget::Player(P1))])
             .is_err(),
         "an unequipped Training Drone must not be a legal attacker \
-         (CR 508.1d; the `unless it's equipped` gate is unmet)"
+         (CR 508.1c; the `unless it's equipped` gate is unmet)"
     );
 }
 

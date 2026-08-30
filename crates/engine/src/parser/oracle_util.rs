@@ -2712,6 +2712,62 @@ mod tests {
     use crate::types::mana::ManaCostShard;
     use nom::Parser;
 
+    fn tp(text: &str) -> (String, String) {
+        (text.to_string(), text.to_lowercase())
+    }
+
+    /// CR 604.1: the building block, exercised across its documented contract
+    /// rather than through any one card. An EVEN quote count before the
+    /// separator means the split point is outside a quoted granted ability and
+    /// the split is safe; an ODD count means the separator was found inside
+    /// `"…"` and the split must be refused, so the quoted ability keeps its own
+    /// gate instead of the gate being hoisted onto the granting clause.
+    #[test]
+    fn split_around_outside_quotes_refuses_separator_inside_a_quoted_ability() {
+        // Zero quotes before the separator — plain conditional static, splits.
+        let (o, l) = tp("this creature gets +1/+1 as long as you control a Swamp");
+        let (body, cond) = TextPair::new(&o, &l)
+            .split_around_outside_quotes(" as long as ")
+            .expect("an unquoted gate must split");
+        assert_eq!(body.original, "this creature gets +1/+1");
+        assert_eq!(cond.original, "you control a Swamp");
+
+        // ONE quote before the separator — the separator is inside the quoted
+        // granted ability (the Ancestral Katana / Giant's Amulet shape). Refuse:
+        // splitting here would drop the granted ability and hoist its gate onto
+        // the unconditional buff.
+        let (o, l) =
+            tp("gets +2/+2 and has \"this creature has first strike as long as it's attacking.\"");
+        assert!(
+            TextPair::new(&o, &l)
+                .split_around_outside_quotes(" as long as ")
+                .is_none(),
+            "a separator inside a quoted granted ability must not split"
+        );
+
+        // TWO quotes before the separator — the quoted region CLOSED before the
+        // separator, so the gate belongs to the granting clause. Splits.
+        let (o, l) =
+            tp("creatures you control have \"first strike\" as long as you control a Swamp");
+        let (body, cond) = TextPair::new(&o, &l)
+            .split_around_outside_quotes(" as long as ")
+            .expect("a closed quoted region must not block a later outside split");
+        assert_eq!(body.original, "creatures you control have \"first strike\"");
+        assert_eq!(cond.original, "you control a Swamp");
+
+        // Documented FIRST-OCCURRENCE property: an odd-quote body refuses
+        // outright rather than scanning on to a later outside-quotes separator.
+        // No corpus line has this shape; pinning it makes the deviation
+        // deliberate rather than accidental if one ever appears.
+        let (o, l) = tp("has \"x as long as y\" as long as you control a Swamp");
+        assert!(
+            TextPair::new(&o, &l)
+                .split_around_outside_quotes(" as long as ")
+                .is_none(),
+            "first-occurrence semantics: refuse, do not scan on to the later separator"
+        );
+    }
+
     fn parse_every_creature_type_prefix(input: &str) -> OracleResult<'_, ()> {
         let (input, _) = tag("creatures you control are").parse(input)?;
         let (input, _) = tag(" every creature type.").parse(input)?;
