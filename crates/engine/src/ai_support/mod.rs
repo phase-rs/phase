@@ -2230,6 +2230,7 @@ fn target_selection_actions_with_nonterminal_fast_path(
             actions.push(candidate.action);
         }
     }
+    actions.sort_by(|a, b| a.cmp_stable(b));
     Some(actions)
 }
 
