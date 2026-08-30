@@ -1639,6 +1639,16 @@ pub enum CardPlayMode {
     Play,
 }
 
+impl CardPlayMode {
+    pub fn is_play(&self) -> bool {
+        matches!(self, Self::Play)
+    }
+}
+
+fn play_from_exile_mode_default() -> CardPlayMode {
+    CardPlayMode::Play
+}
+
 impl fmt::Display for CardPlayMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -4003,6 +4013,17 @@ pub enum CastingPermission {
     PlayFromExile {
         duration: Duration,
         granted_to: PlayerId,
+        /// A "play" permission can authorize either a spell cast or a land
+        /// play; a "cast" permission cannot authorize a
+        /// land play. This field deliberately defaults to `Play` for legacy
+        /// serialized grants, even though `CardPlayMode` itself defaults to
+        /// `Cast`: `PlayFromExile` was historically the "may play" building
+        /// block.
+        #[serde(
+            default = "play_from_exile_mode_default",
+            skip_serializing_if = "CardPlayMode::is_play"
+        )]
+        mode: CardPlayMode,
         /// CR 601.2a: Per-source use frequency for persistent play
         /// permissions. `Unlimited` preserves existing impulse-draw behavior;
         /// `OncePerTurn` models linked static permissions like Evelyn.
@@ -32411,6 +32432,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn play_from_exile_mode_serde_defaults_to_play_and_serializes_cast() {
+        let legacy = serde_json::json!({
+            "type": "PlayFromExile",
+            "duration": "UntilEndOfTurn",
+            "granted_to": 0,
+        });
+        let permission: CastingPermission = serde_json::from_value(legacy.clone())
+            .expect("legacy play-from-exile permission deserializes");
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                mode: CardPlayMode::Play,
+                ..
+            }
+        ));
+        assert!(
+            !serde_json::to_value(&permission)
+                .expect("serialize legacy-default permission")
+                .as_object()
+                .expect("permission is an object")
+                .contains_key("mode"),
+            "Play is the field-specific wire default and stays omitted"
+        );
+
+        let mut explicit_cast = legacy;
+        explicit_cast["mode"] = serde_json::json!("Cast");
+        let permission: CastingPermission =
+            serde_json::from_value(explicit_cast).expect("explicit cast permission deserializes");
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                mode: CardPlayMode::Cast,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(permission).expect("serialize explicit cast permission")["mode"],
+            serde_json::json!("Cast"),
+            "Cast must remain explicit because it narrows a legacy PlayFromExile grant"
+        );
     }
 
     /// CR 106.1 + CR 202.2c: the dynamic-color `AnyCombinationOfObjectColors`

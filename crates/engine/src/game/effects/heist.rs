@@ -212,6 +212,7 @@ pub fn resolve_exile(
                 obj.casting_permissions
                     .push(CastingPermission::PlayFromExile {
                         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                        mode: crate::types::ability::CardPlayMode::Play,
                         duration: crate::types::ability::Duration::Permanent,
                         granted_to: controller,
                         frequency: CastFrequency::Unlimited,

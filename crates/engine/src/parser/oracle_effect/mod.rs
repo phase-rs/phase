@@ -13205,13 +13205,18 @@ fn try_parse_chosen_kind_filter(filter_text: &str) -> Option<TargetFilter> {
 /// way") and Memory Vessel ("players may play cards they exiled this way")
 /// without enumerating the permutations. The mandatory " they exiled this way"
 /// suffix keeps the grant class scoped to exactly those two cards.
-fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, ()> {
+fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     let (i, _) = alt((tag("each player "), tag("players "))).parse(i)?;
-    let (i, _) = alt((tag("may play "), tag("may cast "))).parse(i)?;
+    let (i, mode) = alt((
+        value(CardPlayMode::Play, tag("may play ")),
+        value(CardPlayMode::Cast, tag("may cast ")),
+    ))
+    .parse(i)?;
     let (i, _) = opt(tag("the ")).parse(i)?;
     // Longest-first so "cards" wins over the "card" prefix.
     let (i, _) = alt((tag("cards"), tag("card"))).parse(i)?;
-    value((), tag(" they exiled this way")).parse(i)
+    let (i, _) = tag(" they exiled this way").parse(i)?;
+    Ok((i, mode))
 }
 
 /// CR 611.2a + CR 108.3: Parse per-grantee grant clauses that follow a
@@ -13232,6 +13237,9 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, ()> {
 fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let lower = tp.lower;
 
+    let per_owner_mode = parse_per_owner_exiled_this_way(lower)
+        .ok()
+        .map(|(_, mode)| mode);
     let grantee = if alt((
         tag::<_, _, OracleError<'_>>("for each of those cards, its owner may play it"),
         tag("for each of those cards, its owner may cast it"),
@@ -13287,6 +13295,27 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     } else {
         return None;
     };
+    let mode = per_owner_mode.unwrap_or_else(|| {
+        if alt((
+            tag::<_, _, OracleError<'_>>("for each of those cards, its owner may cast it"),
+            tag("its owner may cast it"),
+            tag("may cast that card"),
+            tag("may cast that spell"),
+            tag("may cast those cards"),
+            tag("may cast it"),
+            tag("they may cast those cards"),
+            tag("they may cast them"),
+            tag("they may cast that card"),
+            tag("they may cast that spell"),
+        ))
+        .parse(lower)
+        .is_ok()
+        {
+            CardPlayMode::Cast
+        } else {
+            CardPlayMode::Play
+        }
+    });
 
     // CR 400.7i + CR 611.2a: "for as long as it remains exiled" persists until
     // the exile-scoped permission is cleared on zone exit
@@ -13305,6 +13334,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             // Placeholder — `grant_permission::resolve` normalizes per-iteration.
             granted_to: crate::types::player::PlayerId(0),
@@ -13440,6 +13470,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: CardPlayMode::Cast,
             // Duration is a placeholder; `with_clause_duration` patches this
             // when a leading "Until end of turn, " or trailing "... this turn"
             // is stripped. CR 611.2a + CR 514.2: the duration governs prune
@@ -13482,11 +13513,12 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     // Night Minister) binds to the parent player target via `ParentTargetController`
     // and the tracked exile set. First-person forms keep the legacy `Any` target
     // (rebound to TrackedSet by the chain parser when chained after an exile).
-    let (rest, grantee, target) = if let Ok((rest, _)) =
+    let (rest, mode, grantee, target) = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
     {
         (
             rest,
+            CardPlayMode::Play,
             crate::types::ability::PermissionGrantee::ParentTargetController,
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -13495,23 +13527,31 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
         (
             rest,
+            CardPlayMode::Cast,
             crate::types::ability::PermissionGrantee::ParentTargetController,
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
             },
         )
     } else {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("you may look at and play "),
-            tag("you may play "),
-            tag("you may cast "),
-            tag("look at and play "),
-            tag("play "),
-            tag("cast "),
+        let (rest, mode) = alt((
+            value(
+                CardPlayMode::Play,
+                alt((
+                    tag::<_, _, OracleError<'_>>("you may look at and play "),
+                    tag("you may play "),
+                    tag("look at and play "),
+                    tag("play "),
+                )),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((tag("you may cast "), tag("cast "))),
+            ),
         ))
         .parse(tp.lower)
         .ok()?;
-        (rest, Default::default(), TargetFilter::Any)
+        (rest, mode, Default::default(), TargetFilter::Any)
     };
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that card"),
@@ -13545,6 +13585,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration: Duration::Permanent,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -13626,23 +13667,29 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // cards" path (the with-mana form is handled earlier by
     // `try_parse_exile_play_grant_with_any_mana`).
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
-        value(
-            (),
-            alt((
-                tag("you may look at and play "),
-                tag("you may look at and cast "),
-                tag("you may play "),
-                tag("you may cast "),
-            )),
-        )
+        alt((
+            value(
+                CardPlayMode::Play,
+                alt((tag("you may look at and play "), tag("you may play "))),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((tag("you may look at and cast "), tag("you may cast "))),
+            ),
+        ))
         .parse(input)
     })
-    .map(|((), rest_orig)| {
+    .map(|(mode, rest_orig)| {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        TextPair::new(rest_orig, rest_lower)
+        (mode, TextPair::new(rest_orig, rest_lower))
     });
 
-    if let Some(rest) = full_rest {
+    let mut mode = full_rest
+        .as_ref()
+        .map(|(mode, _)| *mode)
+        .unwrap_or(CardPlayMode::Play);
+
+    if let Some((_, rest)) = full_rest {
         // Full form: rest must start with a card reference
         // CR 400.7i + CR 603.7: "(the) cards exiled this way" is the impulse-set
         // anaphor used by Escape to the Wilds — semantically identical to "those
@@ -13674,6 +13721,25 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             return None;
         }
     } else {
+        mode = alt((
+            value(
+                CardPlayMode::Play,
+                alt((
+                    tag::<_, _, OracleError<'_>>("look at and play "),
+                    tag("play "),
+                )),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((
+                    tag::<_, _, OracleError<'_>>("look at and cast "),
+                    tag("cast "),
+                )),
+            ),
+        ))
+        .parse(tp.lower)
+        .map(|(_, mode)| mode)
+        .unwrap_or(mode);
         // Bare form (after "you may" was stripped by parse_effect_chain).
         if scan_contains_phrase(tp.lower, "without paying") {
             return None;
@@ -13764,6 +13830,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             // Placeholder — `grant_permission::resolve` rewrites this to the
             // ability's controller at grant time (CR 611.2a/b).
@@ -13801,10 +13868,14 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
-    let ((duration, mana_spend_permission), rest_orig) =
+    let ((mode, duration, mana_spend_permission), rest_orig) =
         nom_on_lower(tp.original, tp.lower, |input| {
             let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
-            let (input, _) = alt((tag("play "), tag("cast "))).parse(input)?;
+            let (input, mode) = alt((
+                value(CardPlayMode::Play, tag("play ")),
+                value(CardPlayMode::Cast, tag("cast ")),
+            ))
+            .parse(input)?;
             // "the exiled nonland card" generalizes the bare "the exiled card"
             // referent — the optional "nonland " qualifier (Black Widow, Super
             // Spy) selects the same tracked exile set, so the grant is identical.
@@ -13832,7 +13903,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 ),
             ))
             .parse(input)?;
-            Ok((input, (duration, mana_spend_permission)))
+            Ok((input, (mode, duration, mana_spend_permission)))
         })?;
     if !rest_orig.trim().is_empty() {
         return None;
@@ -13841,6 +13912,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -14016,6 +14088,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: CardPlayMode::Cast,
                 duration: Duration::Permanent,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,

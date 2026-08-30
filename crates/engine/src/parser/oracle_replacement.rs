@@ -34,7 +34,6 @@ use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
 };
-use crate::types::ability::CastingPermission;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
@@ -46,6 +45,7 @@ use crate::types::ability::{
     ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
+use crate::types::ability::{CardPlayMode, CastingPermission};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -936,6 +936,7 @@ struct SearchFoundExileAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchFoundPlayPermission {
+    mode: CardPlayMode,
     duration: Duration,
     target: TargetFilter,
     grantee: PermissionGrantee,
@@ -1001,7 +1002,7 @@ fn parse_search_found_exile_action(input: &str) -> OracleResult<'_, SearchFoundE
 }
 
 fn parse_search_found_play_permission(input: &str) -> OracleResult<'_, SearchFoundPlayPermission> {
-    let (input, _) = tag("you may play ").parse(input)?;
+    let (input, mode) = value(CardPlayMode::Play, tag("you may play ")).parse(input)?;
     let (input, _) = alt((tag("those cards"), tag("them"))).parse(input)?;
     let (input, _) = tag(" for as long as ").parse(input)?;
     let (input, _) =
@@ -1010,6 +1011,7 @@ fn parse_search_found_play_permission(input: &str) -> OracleResult<'_, SearchFou
     Ok((
         input,
         SearchFoundPlayPermission {
+            mode,
             // The permission is stored on each exiled object and removed when
             // that object changes zones, so the existing permanent duration is
             // the engine representation of this linked-exile lifetime.
@@ -1090,6 +1092,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 // one-alternative-cost invariant (CR 118.9a) decidable at
                 // cast election.
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: parsed.play_permission.mode,
                 duration: parsed.play_permission.duration,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::Unlimited,

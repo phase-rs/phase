@@ -14931,6 +14931,7 @@ fn record_exile_play_permission(
         Some(casting::ExileLandPlayAuthorization::ObjectAttached {
             source,
             frequency: CastFrequency::OncePerTurn,
+            ..
         }) => crate::game::ledger::consume_once_per_turn_permission(
             state,
             source,
@@ -15348,7 +15349,13 @@ fn handle_play_land(
         let enters_tapped = state
             .objects
             .get(&object_id)
-            .is_some_and(|obj| super::casting::exile_play_land_enters_tapped(obj, player));
+            .zip(
+                exile_play_authorization
+                    .and_then(|authorization| authorization.casting_permission_index()),
+            )
+            .is_some_and(|(obj, permission_index)| {
+                super::casting::exile_play_land_enters_tapped(state, obj, player, permission_index)
+            });
         if enters_tapped {
             if let Some(slot) = proposed.battlefield_entry_tap_state_mut() {
                 *slot = crate::types::zones::EtbTapState::Tapped;

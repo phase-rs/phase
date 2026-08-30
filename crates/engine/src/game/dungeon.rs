@@ -417,6 +417,7 @@ pub fn room_effects(
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
                         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                        mode: crate::types::ability::CardPlayMode::Play,
                         duration: Duration::UntilEndOfTurn,
                         // Placeholder — rewritten to ability.controller at
                         // grant time by `grant_permission::resolve`.

@@ -17273,6 +17273,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17302,6 +17303,7 @@ mod tests {
         let perms = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
         perms.push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::UntilNextTurnOf {
                 player: PlayerScope::Controller,
             },
@@ -17319,6 +17321,7 @@ mod tests {
         });
         perms.push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17360,6 +17363,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17502,6 +17506,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilNextStepOf {
                     step: Phase::Upkeep,
                     player: PlayerScope::Controller,
@@ -17653,6 +17658,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17675,6 +17681,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17716,6 +17723,7 @@ mod tests {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,

@@ -1669,6 +1669,7 @@ fn record_lingering_permissions(
 
                 let play_permission = CastingPermission::PlayFromExile {
                     provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: play_duration,
                     granted_to: ability.controller,
                     frequency: CastFrequency::Unlimited,
