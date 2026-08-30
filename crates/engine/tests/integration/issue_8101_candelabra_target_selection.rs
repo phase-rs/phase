@@ -78,7 +78,6 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     let mut returned_legal_actions = 0;
     let mut target_candidates = 0;
     let mut cancel_candidates = 0;
-    let mut accepted_action_legality_clones = 0;
 
     for remaining in (1..=TARGET_COUNT).rev() {
         let raw = candidate_actions(runner.state());
@@ -133,10 +132,9 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
             })
             .expect("the engine-enumerated target must be accepted");
         let action_counters = perf_counters::snapshot();
-        accepted_action_legality_clones += action_counters.state_clone_for_legality;
         assert_eq!(
-            action_counters.state_clone_for_legality, 2,
-            "memoized validation must probe only CancelCast plus the chosen target"
+            action_counters.state_clone_for_legality, 0,
+            "memoized target selection must not clone state for legality"
         );
         assert_eq!(
             perf_counters::homogeneous_target_walk_cache_snapshot().advances
@@ -150,11 +148,6 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     assert_eq!(returned_legal_actions, 3320, "returned legal action census");
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
-    assert_eq!(
-        accepted_action_legality_clones,
-        (TARGET_COUNT * 2) as u64,
-        "memoized validation still probes each CancelCast plus one target per prompt"
-    );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
         "completing all targets must continue to the activation payment step"
