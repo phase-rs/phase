@@ -43,7 +43,7 @@
 //! shape as its primary claim; the two AST assertions present are explicitly
 //! labelled reach-guards.
 
-use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;
@@ -321,11 +321,17 @@ fn ancestral_katana_granted_first_strike_binds_to_equipped_creature() {
     );
 
     // Attacking: CR 508.1k — the equipped creature is now an attacking
-    // creature, so the granted static's gate is TRUE.
-    runner.state_mut().combat = Some(CombatState {
-        attackers: vec![AttackerInfo::attacking_player(bearer, P1)],
-        ..Default::default()
-    });
+    // creature, so the granted static's gate is TRUE. Drive this through the
+    // engine's own declaration rather than installing a hand-built CombatState:
+    // a hand-built one makes the assertion depend on this test's idea of how
+    // attackers are recorded, so it could stay green while real combat stopped
+    // granting first strike. The bearer is an unrestricted Runeclaw Bear, so it
+    // is itself the legal attacker that makes the step reachable, and the
+    // Katana's own trigger needs a Samurai or Warrior and so cannot fire here.
+    advance_to_declare_attackers(&mut runner);
+    runner
+        .declare_attackers(&[(bearer, AttackTarget::Player(P1))])
+        .expect("the equipped bearer must be a legal attacker");
     assert!(
         has_kw(&mut runner, bearer, &Keyword::FirstStrike),
         "an ATTACKING equipped creature must have the granted first strike \
