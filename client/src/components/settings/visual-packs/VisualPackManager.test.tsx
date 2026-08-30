@@ -1,16 +1,24 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { VisualPackBackendError, type VisualPackBackend } from "../../../services/visualPacks/backend.ts";
+import {
+  VisualPackBackendError,
+  VisualPackStorageRefusalError,
+  type VisualPackBackend,
+} from "../../../services/visualPacks/backend.ts";
 import {
   catalogRoot,
+  estimatedImageBytes,
   installedRevision,
   operationId,
   packId,
   type CatalogSummary,
+  type CuratedDrift,
+  type InstallEstimate,
   type ProgressEvent,
   type RevisionEvent,
 } from "../../../services/visualPacks/types.ts";
+import { shortDigest } from "./packLabels.ts";
 import { VisualPackManager } from "./VisualPackManager.tsx";
 import i18n from "../../../i18n/index.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -22,11 +30,45 @@ vi.mock("../../../hooks/useSetSymbols.ts", () => ({ useSetCatalog: () => ({ cata
 const ROOT_A = catalogRoot("a".repeat(64));
 const ROOT_B = catalogRoot("b".repeat(64));
 const OPERATION = operationId("c".repeat(32));
+/** A curated pack's root IS its membership digest, so it is deliberately
+ *  neither of the catalog roots above — an estimate that matched one of those
+ *  would hide a selector-identity bug rather than expose it. */
+const CURATED_DIGEST = catalogRoot("d".repeat(64));
+
+/** The storage half of an `InstallEstimate`, as a browser that answers reports
+ *  it. These tests are about the panel, not about storage, so every fixture
+ *  uses the same roomy, granted snapshot. */
+const STORAGE = {
+  usageBytes: 0,
+  quotaBytes: 8 * 1024 * 1024 * 1024,
+  availableBytes: 8 * 1024 * 1024 * 1024,
+  persistence: "persisted" as const,
+};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+/**
+ * The default drift answer: nothing installed, so nothing has drifted.
+ *
+ * `installedDigest: null` is what the backend returns when no curated pack is
+ * on disk, and it is the right default here because the default `summary()`
+ * installs only `core`. A fixture that reported an installed digest would put
+ * a Sync affordance on a panel with no curated pack to sync.
+ */
+function noDrift(): CuratedDrift {
+  return { membershipDigest: CURATED_DIGEST, installedDigest: null, add: 105_165, remove: 0, refresh: 0 };
+}
+
+/** A summary whose installed list carries a curated pack at `digest`. */
+function curatedSummary(digest = CURATED_DIGEST, revision = "90071992547409930"): CatalogSummary {
+  return {
+    ...summary(ROOT_A, revision),
+    installedPacks: [{ packId: packId("core"), catalogRoot: ROOT_A }, { packId: packId("curated"), catalogRoot: digest }],
+  };
 }
 
 function summary(root = ROOT_A, revision = "90071992547409930"): CatalogSummary {
@@ -37,6 +79,7 @@ function summary(root = ROOT_A, revision = "90071992547409930"): CatalogSummary 
     shardCount: 3,
     installedRevision: installedRevision(revision),
     installedPacks: [{ packId: packId("core"), catalogRoot: root }],
+    storage: STORAGE,
   };
 }
 
@@ -45,28 +88,35 @@ function backend(status: VisualPackBackend["catalogStatus"] = vi.fn(async () => 
   let revision: ((event: RevisionEvent) => void) | null = null;
   const value: VisualPackBackend = {
     catalogStatus: status,
+    curatedSelector: vi.fn(async () => ({ kind: "curated" as const, membershipDigest: CURATED_DIGEST })),
+    curatedDrift: vi.fn(async () => noDrift()),
     refreshCatalog: vi.fn(async () => summary()),
     catalogSummary: vi.fn(async () => summary()),
     estimateInstall: vi.fn(async (selector) => ({
       catalogRoot: ROOT_A,
       installedRevision: installedRevision("90071992547409930"),
       selector: selector.kind,
-      packIds: [packId("core")],
+      packIds: [packId(selector.kind === "curated" ? "curated" : "core")],
       assetRecords: "1",
       uniqueObjects: "1",
       logicalImageBytes: "2",
       uniqueImageBytes: "2",
       shardCount: "1",
       shardBytes: "3",
+      estimatedImageBytes: estimatedImageBytes(1),
+      storage: STORAGE,
+      headroom: "sufficient" as const,
     })),
-    start: vi.fn(async () => ({ status: "started" as const, operationId: OPERATION, catalogRoot: ROOT_A })),
+    start: vi.fn(async () => ({
+      status: "started" as const, operationId: OPERATION, catalogRoot: ROOT_A, persistence: "persisted" as const,
+    })),
     cancel: vi.fn(async () => ({
       operationId: OPERATION, catalogRoot: ROOT_A, kind: "install" as const, state: "cancelled" as const,
-      packTotal: 1, packsPromoted: 0, objectTotal: 1, objectsPromoted: 0, completedRevision: null,
+      packTotal: 1, packsPromoted: 0, objectTotal: 1, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
     })),
     operationStatus: vi.fn(async () => ({
       operationId: OPERATION, catalogRoot: ROOT_A, kind: "install" as const, state: "downloading" as const,
-      packTotal: 1, packsPromoted: 0, objectTotal: 2, objectsPromoted: 0, completedRevision: null,
+      packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
     })),
     remove: vi.fn(async () => ({ removed: [], revision: installedRevision("90071992547409931"), cleanupIssues: [] })),
     verify: vi.fn(async () => ({ revision: installedRevision("90071992547409930"), issues: [] })),
@@ -161,13 +211,13 @@ describe("VisualPackManager initialization", () => {
     render(<VisualPackManager />);
     await screen.findByText(/Offline card images/i);
     fixture.emitRevision({ cause: "remove", operationId: null, catalogRoot: ROOT_B, revision: installedRevision("90071992547409931") });
-    expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
+    expect(await screen.findByText(shortDigest(ROOT_B))).toBeInTheDocument();
     fixture.emitProgress({
       phase: "failed",
       error: "storage",
       operation: {
         operationId: operationId("d".repeat(32)), catalogRoot: ROOT_A, kind: "install", state: "cancelled",
-        packTotal: 1, packsPromoted: 0, objectTotal: 1, objectsPromoted: 0, completedRevision: null,
+        packTotal: 1, packsPromoted: 0, objectTotal: 1, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
       },
     });
     await waitFor(() => expect(screen.queryByText(/could not be written/i)).not.toBeInTheDocument());
@@ -183,7 +233,7 @@ describe("VisualPackManager initialization", () => {
     await screen.findByText(/Offline card images/i);
     fireEvent.click(screen.getByRole("button", { name: /verify metadata/i }));
     fireEvent.click(screen.getByRole("button", { name: /check Scryfall catalog/i }));
-    expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
+    expect(await screen.findByText(shortDigest(ROOT_B))).toBeInTheDocument();
     pending.resolve({ revision: installedRevision("90071992547409930"), issues: [{ kind: "projection_drift" }] });
     await waitFor(() => expect(screen.queryByText(/lookup records differ/i)).not.toBeInTheDocument());
   });
@@ -197,7 +247,7 @@ describe("VisualPackManager initialization", () => {
     fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
     expect(await screen.findByText(/Scryfall snapshot scan/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /check Scryfall catalog/i }));
-    expect(await screen.findByText(ROOT_B)).toBeInTheDocument();
+    expect(await screen.findByText(shortDigest(ROOT_B))).toBeInTheDocument();
     expect(screen.queryByText(/Scryfall snapshot scan/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /install selection/i })).toBeDisabled();
   });
@@ -213,6 +263,64 @@ describe("VisualPackManager initialization", () => {
     fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
     expect(await screen.findByText(/catalog operation could not be completed/i)).toBeInTheDocument();
     expect(screen.getByText("TypeError: DecompressionStream is not a constructor")).toBeInTheDocument();
+  });
+
+  it("shows catalog scan progress while an estimate is running", async () => {
+    const fixture = backend();
+    const estimate = deferred<Awaited<ReturnType<VisualPackBackend["estimateInstall"]>>>();
+    vi.mocked(fixture.value.estimateInstall).mockImplementation((_selector, onProgress) => {
+      onProgress?.({
+        compressedBytesRead: 50 * 1024 * 1024,
+        compressedBytesTotal: 100 * 1024 * 1024,
+        recordsScanned: 12_345,
+        assetRecords: 36_000,
+      });
+      return estimate.promise;
+    });
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    expect(await screen.findByRole("progressbar")).toHaveAttribute("value", "52428800");
+    expect(screen.getByText(/50 MB of 100 MB read.*12,345 cards scanned.*36,000 images found/i)).toBeInTheDocument();
+    estimate.resolve({
+      catalogRoot: ROOT_A,
+      installedRevision: installedRevision("90071992547409930"),
+      selector: "core",
+      packIds: [packId("core")],
+      assetRecords: "1", uniqueObjects: "1", logicalImageBytes: "2",
+      uniqueImageBytes: "2", shardCount: "1", shardBytes: "3",
+      estimatedImageBytes: estimatedImageBytes(1), storage: STORAGE, headroom: "sufficient",
+    });
+    await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
+  });
+
+  it("starts an install with the pinned image estimate", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue({
+      catalogRoot: ROOT_A,
+      installedRevision: installedRevision("90071992547409930"),
+      selector: "core",
+      packIds: [packId("core")],
+      // DISTINCT from `assetRecords` on purpose: PackSelector renders both
+      // metrics, so equal values make the `findByText` below match two
+      // elements and fail as an ambiguous query. `objectEstimate` is derived
+      // from `assetRecords` alone, so the assertion at the end is unaffected.
+      assetRecords: "353331", uniqueObjects: "353330", logicalImageBytes: "unknown",
+      uniqueImageBytes: "unknown", shardCount: "1", shardBytes: "392267935",
+      estimatedImageBytes: estimatedImageBytes(353_331), storage: STORAGE, headroom: "sufficient",
+    });
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    await screen.findByText("353331");
+    fireEvent.click(screen.getByRole("button", { name: /install selection/i }));
+    expect(fixture.value.start).toHaveBeenCalledWith({
+      kind: "install",
+      selector: { kind: "core" },
+      objectEstimate: 353331,
+    });
   });
 
   it("allows unrelated estimate and verification reads to overlap", async () => {
@@ -235,9 +343,787 @@ describe("VisualPackManager initialization", () => {
       packIds: [packId("core")],
       assetRecords: "1", uniqueObjects: "1", logicalImageBytes: "2",
       uniqueImageBytes: "2", shardCount: "1", shardBytes: "3",
+      estimatedImageBytes: estimatedImageBytes(1), storage: STORAGE, headroom: "sufficient",
     });
     verification.resolve({ revision: installedRevision("90071992547409930"), issues: [] });
     expect(await screen.findByText(/No verification issues found/i)).toBeInTheDocument();
+  });
+
+  /**
+   * Drive the panel to the point where Install is live, then press it.
+   *
+   * Install is gated on a matching estimate, so the scan has to happen first;
+   * waiting on the button's own enabled state rather than on a rendered metric
+   * keeps this independent of what the estimate panel chooses to show.
+   */
+  async function pressInstall(estimateLabel: RegExp, installLabel: RegExp): Promise<void> {
+    fireEvent.click(screen.getByRole("button", { name: estimateLabel }));
+    await waitFor(() => expect(screen.getByRole("button", { name: installLabel })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: installLabel }));
+  }
+
+  /** 5.67 GiB needed against 1 GiB free — the shape `reserveStorage` refuses
+   *  with, in the units it reports: raw bytes, for the panel to format. */
+  const REFUSAL = { requiredBytes: 6_090_752_000, availableBytes: 1_073_741_824 };
+
+  it("reports a storage refusal as a size, not as engine bytes", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.start).mockRejectedValue(new VisualPackStorageRefusalError(REFUSAL));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("6.1 GB");
+    expect(alert).toHaveTextContent("1.1 GB");
+    // The defect this replaces, asserted as an ABSENCE and on the digits
+    // themselves: a grouped "6,090,752,000" would slip past a match on the
+    // literal, so compare what is left once every separator is stripped.
+    expect(alert.textContent?.replace(/\D/g, "")).not.toContain("6090752000");
+    expect(alert.textContent?.replace(/\D/g, "")).not.toContain("1073741824");
+    // A refusal carries no verbatim detail line, so the Error's own
+    // developer-facing message never reaches the panel either.
+    expect(alert).not.toHaveTextContent(/visual-pack backend/i);
+  });
+
+  it("renders the refusal size in the active locale's unit and separators", async () => {
+    // The half a hand-written `toFixed(1) + " GB"` gets wrong in six of the
+    // seven locales: French writes Go, and the decimal separator is a comma.
+    usePreferencesStore.getState().setLanguage("fr");
+    await waitFor(() => expect(i18n.resolvedLanguage).toBe("fr"));
+    const fixture = backend();
+    vi.mocked(fixture.value.start).mockRejectedValue(new VisualPackStorageRefusalError(REFUSAL));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText("Catalogue visuel hors ligne");
+
+    await pressInstall(/téléchargement de devis/i, /sélection d'installation/i);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("6,1 Go");
+    expect(alert).toHaveTextContent("1,1 Go");
+    expect(alert).toHaveTextContent(/espace libre insuffisant/i);
+  });
+
+  /** A summary whose storage half the browser answered differently. */
+  function summaryWithStorage(storage: CatalogSummary["storage"]): CatalogSummary {
+    return { ...summary(), storage };
+  }
+
+  it("reports disk in use and the eviction grant without running an estimate", async () => {
+    const fixture = backend(vi.fn(async () => ({
+      status: "ready" as const,
+      summary: summaryWithStorage({ ...STORAGE, usageBytes: 6_500_000_000 }),
+    })));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(await screen.findByText(/Storage used by this site/i)).toBeInTheDocument();
+    expect(screen.getByText("6.5 GB")).toBeInTheDocument();
+    expect(screen.getByText(/will keep these images/i)).toBeInTheDocument();
+    // The whole of NB7 + G1: a user who has ALREADY installed can see their
+    // disk without first pricing an install they are not making. The figure
+    // used to be reachable only through `InstallEstimate`.
+    expect(fixture.value.estimateInstall).not.toHaveBeenCalled();
+    // And the panel started no operation of its own to get them. That the
+    // BACKEND asks for no storage grant while reading a summary is a different
+    // claim, checked against the real backend in `installSizing.test.ts` —
+    // this fixture is a mock and could not show it.
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it("omits the usage row when the browser will not say, rather than showing zero", async () => {
+    const fixture = backend(vi.fn(async () => ({
+      status: "ready" as const,
+      summary: summaryWithStorage({
+        usageBytes: null, quotaBytes: null, availableBytes: null, persistence: "unsupported",
+      }),
+    })));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(await screen.findByText(/will not say/i)).toBeInTheDocument();
+    // `null` is unknown, and "0 B" would read as "nothing stored" — a figure
+    // the panel would be inventing.
+    expect(screen.queryByText(/Storage used by this site/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^0 /)).not.toBeInTheDocument();
+  });
+
+  it("names an ungranted origin as evictable in the status panel", async () => {
+    const fixture = backend(vi.fn(async () => ({
+      status: "ready" as const,
+      summary: summaryWithStorage({ ...STORAGE, usageBytes: 512_000_000, persistence: "best_effort" }),
+    })));
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(await screen.findByText(/may delete these images/i)).toBeInTheDocument();
+
+    // REACH GUARD for the absence below. The headroom warning lives inside
+    // PackSelector's estimate block, which is UNMOUNTED until an estimate is on
+    // screen — asserting it absent without one asserts nothing whatever.
+    chooseCurated();
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+    // Rendered, not judged: the panel states what the browser reported and
+    // computes no headroom verdict from it. This estimate says `sufficient`,
+    // so the warning must be absent from a block that is mounted and would
+    // otherwise show it. `InstallEstimate.headroom` is where a verdict lives,
+    // and the engine produces that one.
+    expect(screen.queryByText(/larger than the free space/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * A curated estimate as the backend signs one: named by its PACK id — which
+   * is what `signedSelectorName` maps a curated selector to, and what the hook
+   * checks before accepting an estimate — and taken against the catalog the
+   * summary reports rather than against the membership digest.
+   *
+   * 105,165 image records is the measured curated default — 35,055 non-token
+   * faces at three rungs each — so the size it projects is the one a real user
+   * reads rather than a toy figure.
+   */
+  function curatedEstimate(overrides: Partial<InstallEstimate> = {}): InstallEstimate {
+    return {
+      catalogRoot: ROOT_A,
+      installedRevision: installedRevision("90071992547409930"),
+      selector: "curated",
+      packIds: [packId("curated")],
+      assetRecords: "105165", uniqueObjects: "105165",
+      logicalImageBytes: "unknown", uniqueImageBytes: "unknown",
+      shardCount: "0", shardBytes: "unknown",
+      estimatedImageBytes: estimatedImageBytes(105_165),
+      storage: STORAGE,
+      headroom: "sufficient",
+      ...overrides,
+    };
+  }
+
+  /** Longer than PackSelector's curated debounce, so an estimate that was
+   *  going to fire has fired by the time this resolves. */
+  /** A `complete` estimate — what displaces a curated one from the panel. */
+  function bulkEstimate(): InstallEstimate {
+    return {
+      ...curatedEstimate(),
+      selector: "complete",
+      packIds: [packId("complete")],
+      shardCount: "1", shardBytes: "392267935",
+    };
+  }
+
+  function pastCuratedDebounce(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 600));
+  }
+
+  function chooseCurated(): void {
+    fireEvent.click(screen.getByRole("radio", { name: /one image per card/i }));
+  }
+
+  it("estimates the curated pack on selection and installs it without a second click", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate({
+      assetRecords: "6", uniqueObjects: "6", estimatedImageBytes: estimatedImageBytes(6),
+    }));
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    expect(fixture.value.curatedSelector).not.toHaveBeenCalled();
+
+    chooseCurated();
+
+    // The panel names a kind; the backend resolves the digest. A UI that built
+    // the selector itself would be planning a membership in a display layer,
+    // and would be a second assembly of the planner's input beside the one
+    // `start()` compares against.
+    await waitFor(() => expect(fixture.value.curatedSelector).toHaveBeenCalledTimes(1));
+    // No button was pressed between the radio and this call.
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "curated", membershipDigest: CURATED_DIGEST },
+      expect.any(Function),
+    ));
+
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+
+    expect(fixture.value.start).toHaveBeenCalledWith({
+      kind: "install",
+      selector: { kind: "curated", membershipDigest: CURATED_DIGEST },
+      objectEstimate: 6,
+    });
+  });
+
+  it("leaves the bulk selectors' catalog scan behind a deliberate click", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    // Positive control in the same test: curated auto-estimates, so a zero
+    // below is a property of the bulk selectors rather than of a debounce that
+    // never fired at all.
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    await pastCuratedDebounce();
+
+    // `complete` reads the whole multi-gigabyte Scryfall archive. Estimating
+    // that because a radio moved would start a very expensive download nobody
+    // asked for.
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("estimates curated once the scan it arrived during releases the slot", async () => {
+    const fixture = backend();
+    const scan = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockReturnValueOnce(scan.promise)
+      .mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    // A bulk scan holds the single estimate slot. `estimateInstall` REFUSES a
+    // second request outright, so a curated selection made while this runs is
+    // dropped in silence — no estimate, no error, Install disabled for ever.
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+
+    chooseCurated();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
+
+    scan.resolve(bulkEstimate());
+    // Freeing the slot must be what re-asks; nothing else changes here.
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+  });
+
+  it("re-estimates curated after a bulk estimate displaced it", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockResolvedValueOnce(curatedEstimate())
+      .mockResolvedValueOnce(bulkEstimate())
+      .mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+
+    // A bulk estimate replaces the one on screen. Returning to curated finds
+    // no matching estimate, and the auto-estimate must be free to ask again —
+    // the plan behind it is memoized, so re-asking costs nothing.
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(3), { timeout: 3000 });
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+  });
+
+  it("asks again for an estimate that failed once the option is reselected", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockRejectedValueOnce(new VisualPackBackendError("network"))
+      .mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+
+    // A failed estimate must NOT be retried on the debounce timer — that would
+    // be five requests a second at a backend that is already failing — so the
+    // key stays recorded and the auto-estimate stays quiet.
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
+
+    // Reselecting is the recovery the panel offers beside the button, and it
+    // only works because leaving the option forgets that we asked.
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+  });
+
+  it("shows the curated download size and free space, and none of the bulk catalog figures", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    const size = await screen.findByText(/Estimated download size/i);
+    const estimatePanel = size.closest("section");
+    expect(estimatePanel).toHaveTextContent("6.9 GB");
+    expect(estimatePanel).toHaveTextContent(/Free space available/i);
+    expect(estimatePanel).toHaveTextContent("8.6 GB");
+    // False about a curated pack, not merely uninteresting: it opens no shard
+    // of the Scryfall archive, so these describe an archive it never reads.
+    expect(estimatePanel).not.toHaveTextContent(/Metadata files/i);
+    expect(estimatePanel).not.toHaveTextContent(/Compressed Scryfall catalog/i);
+    expect(estimatePanel).not.toHaveTextContent(/known after download/i);
+    // No raw byte integer anywhere, compared on the digits alone so a grouped
+    // "6,928,003,000" cannot slip past a match on the literal.
+    expect(estimatePanel?.textContent?.replace(/\D/g, ""))
+      .not.toContain(String(estimatedImageBytes(105_165)));
+  });
+
+  it("warns about insufficient headroom without blocking the install", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate({
+      headroom: "insufficient",
+      storage: { ...STORAGE, quotaBytes: 2_000_000_000, availableBytes: 2_000_000_000 },
+    }));
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/larger than the free space/i)).toBeInTheDocument();
+    // A warning, never a veto: the projection is an order-of-magnitude figure
+    // from six samples per rung, and a quota failure mid-download is the
+    // milder outcome because the operation stays resumable.
+    await waitFor(() => expect(screen.getByRole("button", { name: /install selection/i })).toBeEnabled());
+  });
+
+  it("warns that a best-effort pack may be evicted", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate({
+      storage: { ...STORAGE, persistence: "best_effort" },
+    }));
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/has not granted persistent storage/i)).toBeInTheDocument();
+  });
+
+  it("says the pack follows each card's default art when no art rules are set", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    // The SHIPPED default (preferencesStore), and the state most users are in:
+    // with no rules, no override and no deck source, every card falls to its
+    // canonical art. Copy claiming "your configured set priority" would credit
+    // the user with a choice they have not made.
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/no card art rules/i)).toBeInTheDocument();
+    expect(screen.getByText(/default art/i)).toBeInTheDocument();
+    // And it names where to change that, because the setting lives in a
+    // different panel entirely.
+    expect(screen.getByText(/Card Art Preferences/i)).toBeInTheDocument();
+  });
+
+  it("says the pack follows the configured art rules once there are any", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/chosen by your Card Art Preferences/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no card art rules/i)).not.toBeInTheDocument();
+  });
+
+  it("reports a failed curated resolution in the panel's own language", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.curatedSelector).mockRejectedValue(new VisualPackBackendError("network"));
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Scryfall catalog or image download failed/i);
+    // The `Error`'s own developer-facing default must not appear under the
+    // translated sentence. It is the message whenever no detail was supplied,
+    // and it is English in all seven languages.
+    expect(alert).not.toHaveTextContent(/visual-pack backend/i);
+  });
+
+  /**
+   * A panel whose summary already carries an installed curated pack, plus the
+   * drift the backend reports for it.
+   *
+   * `catalogSummary` is mocked alongside `catalogStatus` because the hook
+   * re-reads it after any revision event, and a second answer without the
+   * curated pack would silently take the drift indicator off screen.
+   */
+  function installedCuratedFixture(drift: CuratedDrift | null, installedAt = CURATED_DIGEST) {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: curatedSummary(installedAt) })));
+    vi.mocked(fixture.value.catalogSummary).mockResolvedValue(curatedSummary(installedAt));
+    vi.mocked(fixture.value.curatedDrift).mockResolvedValue(drift);
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    return fixture;
+  }
+
+  it("reports the three-way drift of an installed curated pack and offers Sync", async () => {
+    const fixture = installedCuratedFixture(
+      { membershipDigest: CURATED_DIGEST, installedDigest: ROOT_B, add: 1200, remove: 34, refresh: 7 },
+      ROOT_B,
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/1,200 to add, 34 to remove, 7 to refresh/i)).toBeInTheDocument();
+    // Renaming the primary control is how the panel says this is an update to
+    // a pack that is already there rather than a new install.
+    expect(await screen.findByRole("button", { name: /sync images/i })).toBeInTheDocument();
+    // The whole point of a user-initiated Sync: reading the drift downloads
+    // nothing. Asserted on the START spy, because a mocked backend downloads
+    // nothing whatever the panel does.
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it("reports a refresh-only drift rather than an empty diff", async () => {
+    // A Scryfall re-scan moves a `sourceUrl` under an unchanged asset key: the
+    // membership digest differs, so Sync is live, while both key sets are
+    // identical. An add/remove-only report reads as a bug in the panel.
+    installedCuratedFixture(
+      { membershipDigest: CURATED_DIGEST, installedDigest: ROOT_B, add: 0, remove: 0, refresh: 412 },
+      ROOT_B,
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/0 to add, 0 to remove, 412 to refresh/i)).toBeInTheDocument();
+  });
+
+  it("says an installed curated pack is up to date when its digest matches", async () => {
+    installedCuratedFixture(
+      { membershipDigest: CURATED_DIGEST, installedDigest: CURATED_DIGEST, add: 0, remove: 0, refresh: 0 },
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/already match these settings/i)).toBeInTheDocument();
+    // The badge is the discoverable half of the same fact, and a curated pack
+    // whose digest matches has nothing to upgrade to. It was lit here BY
+    // CONSTRUCTION before: a membership digest can never equal a catalog root.
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+  });
+
+  it("lights the upgrade badge for a curated pack only once drift says so", async () => {
+    installedCuratedFixture(
+      { membershipDigest: CURATED_DIGEST, installedDigest: ROOT_B, add: 5, remove: 0, refresh: 0 },
+      ROOT_B,
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(await screen.findByText(/Upgrade available/i)).toBeInTheDocument();
+  });
+
+  it("recomputes drift on an art-preference change without downloading anything", async () => {
+    const fixture = installedCuratedFixture(
+      { membershipDigest: CURATED_DIGEST, installedDigest: CURATED_DIGEST, add: 0, remove: 0, refresh: 0 },
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.curatedDrift).toHaveBeenCalledTimes(1));
+
+    vi.mocked(fixture.value.curatedDrift).mockResolvedValue(
+      { membershipDigest: ROOT_B, installedDigest: CURATED_DIGEST, add: 9, remove: 2, refresh: 0 },
+    );
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+
+    await waitFor(() => expect(fixture.value.curatedDrift).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Upgrade available/i)).toBeInTheDocument();
+    // A preference toggle must never start a multi-gigabyte fetch on its own.
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it("names installed packs and shortens their digests instead of quoting wire ids", async () => {
+    const fixture = backend(vi.fn(async () => ({
+      status: "ready" as const,
+      summary: {
+        ...summary(),
+        installedPacks: [
+          { packId: packId("printing:fin"), catalogRoot: ROOT_A },
+          { packId: packId("curated"), catalogRoot: CURATED_DIGEST },
+        ],
+      },
+    })));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    // Scoped to the installed list: "One image per card" also names the
+    // curated RADIO, and an unscoped query would pass on that alone.
+    const installed = (await screen.findByText(/FIN printings/)).closest("section");
+    expect(installed).toHaveTextContent(/One image per card/);
+    expect(screen.queryByText("printing:fin")).not.toBeInTheDocument();
+    // A curated pack's root is its membership, not a snapshot it was built
+    // from, so it must not be labelled as one.
+    expect(screen.getByText(/Membership fingerprint: dddddddddddd…/)).toBeInTheDocument();
+    expect(screen.getByText(/Installed from snapshot: aaaaaaaaaaaa…/)).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(CURATED_DIGEST))).not.toBeInTheDocument();
+  });
+
+  it("reports a stale selection as out of date rather than as a dependency", async () => {
+    // `conflict` is thrown when the catalog root or the curated membership a
+    // selection names is no longer current. `remove()` never throws it — it
+    // ignores its `RemovalMode` entirely — so the removal sentence this used to
+    // carry described a behaviour no backend in this app has.
+    const fixture = backend();
+    vi.mocked(fixture.value.start).mockRejectedValue(new VisualPackBackendError("conflict"));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/selection is out of date/i);
+    expect(alert).not.toHaveTextContent(/depend on this selection/i);
+  });
+
+  /** Drive the panel to an operation that has failed and is offering Resume. */
+  async function reachFailedOperation(fixture: ReturnType<typeof backend>): Promise<void> {
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalled());
+    fixture.emitProgress({
+      phase: "failed",
+      error: "network",
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 1, completedRevision: null,
+      },
+    });
+    await screen.findByRole("button", { name: /resume operation/i });
+  }
+
+  it("reports a terminated operation as stopped, not as a cancellation", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await reachFailedOperation(fixture);
+
+    // The resume path: `run()` terminates a non-retryable operation by writing
+    // `state: "cancelled"` — the same value a user's Cancel writes — so the
+    // status `trackStarted` reads back cannot say which happened, and only the
+    // event that follows it can.
+    vi.mocked(fixture.value.operationStatus).mockResolvedValue({
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "cancelled",
+      packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 1, completedRevision: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /resume operation/i }));
+    await waitFor(() => expect(fixture.value.operationStatus).toHaveBeenCalled());
+
+    fixture.emitProgress({
+      phase: "failed",
+      error: "conflict",
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "cancelled",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 1, completedRevision: null,
+      },
+    });
+
+    expect(await screen.findByText(/cannot be resumed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Cancelled$/)).not.toBeInTheDocument();
+    // And the diagnostic that says WHY, which was dropped with the event.
+    expect(await screen.findByText(/selection is out of date/i)).toBeInTheDocument();
+  });
+
+  it("keeps a deliberate cancellation from being re-reported as a failure", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+    await screen.findByRole("button", { name: /cancel operation/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel operation/i }));
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+
+    // A late event for the operation the user just cancelled. The panel
+    // witnessed the cancellation, so nothing arriving afterwards may relabel it.
+    fixture.emitProgress({
+      phase: "failed",
+      error: "network",
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "cancelled",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
+      },
+    });
+
+    await pastCuratedDebounce();
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText(/cannot be resumed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/image download failed/i)).not.toBeInTheDocument();
+  });
+
+  it("says nothing about drift the backend declined to measure", async () => {
+    // `null` is the backend refusing to load 76 MB of card data to answer a
+    // question nobody asked. It is UNMEASURED, never "no drift" — so the badge
+    // and the selector must both stay silent rather than report "up to date".
+    const fixture = installedCuratedFixture(null, ROOT_B);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    // Reach guard: the effect really did run and really did ask. Without this
+    // the absences below would pass just as well if drift were never read.
+    await waitFor(() => expect(fixture.value.curatedDrift).toHaveBeenCalled());
+
+    chooseCurated();
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/already match these settings/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/out of date/i)).not.toBeInTheDocument();
+    // But the ACTION is still a sync: a curated pack is on disk, and the
+    // summary says so for free. Keying the label on whether drift was measured
+    // instead offered to "install" an installed pack — reachable and permanent,
+    // because a `curatedSelector()` that rejects leaves both null for the life
+    // of the tab.
+    expect(screen.getByRole("button", { name: /sync images/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /install selection/i })).not.toBeInTheDocument();
+  });
+
+  it("reads a null installed digest as nothing installed, not as total drift", async () => {
+    // The divergence F3 named: the badge tested `installedDigest !==
+    // membershipDigest`, which is TRUE for a null, while the selector read the
+    // same null as "nothing to report". They now ask one predicate, and it
+    // compares against the digest the SUMMARY reports installed.
+    installedCuratedFixture(
+      { membershipDigest: ROOT_B, installedDigest: null, add: 105_165, remove: 0, refresh: 0 },
+      ROOT_B,
+    );
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+
+    expect(await screen.findByText(/already match these settings/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+  });
+
+  it("offers Resume for a finalize that failed, and does not call it unresumable", async () => {
+    // `finish()` leaves the record `finalizing` when its transaction rejects;
+    // that classifies as `storage`, which is retryable, and `create()`'s pending
+    // loop re-runs every `downloading` OR `finalizing` record on next launch.
+    // Calling it "stopped, cannot be resumed" was false, and it said so while
+    // `durableMutationActive` held every other control disabled.
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalled());
+
+    fixture.emitProgress({
+      phase: "failed",
+      error: "storage",
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "finalizing",
+        packTotal: 1, packsPromoted: 1, objectTotal: 2, objectEstimate: null, objectsPromoted: 2, completedRevision: null,
+      },
+    });
+
+    expect(await screen.findByText(/ready to resume/i)).toBeInTheDocument();
+    expect(screen.queryByText(/cannot be resumed/i)).not.toBeInTheDocument();
+    // The label promises a control, so the control has to be there — and it has
+    // to reach the backend, which the hook's own guard used to refuse.
+    const resume = await screen.findByRole("button", { name: /resume operation/i });
+    fireEvent.click(resume);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalledWith({ kind: "resume", operationId: OPERATION }));
+  });
+
+  it("re-reads drift once the user's own action has loaded the card data", async () => {
+    // The cold path: mount with a curated pack installed but no card data
+    // resident, so the backend declines to measure. Choosing the curated option
+    // resolves a selector through the same planner, which loads that data — so
+    // the read that was unmeasurable a moment ago is now free, and the panel
+    // has to ask again or the badge stays dark until a remount.
+    const fixture = installedCuratedFixture(null, ROOT_B);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.curatedDrift).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+
+    vi.mocked(fixture.value.curatedDrift).mockResolvedValue(
+      { membershipDigest: CURATED_DIGEST, installedDigest: ROOT_B, add: 12, remove: 0, refresh: 3 },
+    );
+    chooseCurated();
+
+    await waitFor(() => expect(fixture.value.curatedDrift).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Upgrade available/i)).toBeInTheDocument();
+    expect(await screen.findByText(/12 to add, 0 to remove, 3 to refresh/i)).toBeInTheDocument();
+  });
+
+  it("does not attribute a curated download's total to the Scryfall snapshot", async () => {
+    // `OperationStatus` carries no selector, so this note is shown for every
+    // install alike — which made it claim a bulk provenance over a total that
+    // came from `planCuratedPack()` over this app's own data files.
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(curatedEstimate());
+    vi.mocked(fixture.value.operationStatus).mockResolvedValue({
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+      packTotal: 1, packsPromoted: 0, objectTotal: 105_165, objectEstimate: 105_165,
+      objectsPromoted: 0, completedRevision: null,
+    });
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+
+    const note = await screen.findByText(/total was fixed when this download started/i);
+    expect(note).toBeInTheDocument();
+    expect(note).not.toHaveTextContent(/snapshot/i);
+    // And the operation's own root is a label, not a 64-character identifier
+    // dropped into the most prominent position on the screen.
+    const operation = note.closest("section");
+    expect(operation).toHaveTextContent("aaaaaaaaaaaa…");
+    expect(operation?.textContent).not.toContain(ROOT_A);
   });
 
   it("renders a representative translated locale through the real manager", async () => {

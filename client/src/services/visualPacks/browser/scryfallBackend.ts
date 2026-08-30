@@ -1,8 +1,12 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 
-import { VisualPackBackendError, type VisualPackBackend } from "../backend.ts";
+import { VisualPackBackendError, VisualPackStorageRefusalError, type VisualPackBackend } from "../backend.ts";
+import { isCardDataResident } from "../../scryfall.ts";
+import { curatedDescriptors, planCuratedPack } from "../curatedPack.ts";
 import {
+  estimatedImageBytes,
   installedRevision,
+  minimumImageBytes,
   operationId,
   packId,
   type AssetKey,
@@ -10,6 +14,9 @@ import {
   type CatalogRoot,
   type CatalogStatus,
   type CatalogSummary,
+  type CatalogScanProgress,
+  type CuratedDrift,
+  type CuratedInstallSelector,
   type InstallEstimate,
   type InstallSelector,
   type OperationId,
@@ -24,6 +31,9 @@ import {
   type RevisionEvent,
   type StartRequest,
   type StartResponse,
+  type StorageHeadroom,
+  type StorageOutlook,
+  type StoragePersistence,
   type VerificationMode,
   type VerificationResponse,
   type VisualPackErrorKind,
@@ -31,6 +41,7 @@ import {
 } from "../types.ts";
 import { syntheticCachePath } from "./records.ts";
 import {
+  countScryfallAssets,
   forEachScryfallAsset,
   loadScryfallBulkSource,
   ScryfallBulkError,
@@ -41,6 +52,8 @@ import {
 const DATABASE = "phase-visual-packs-scryfall-v1";
 const CACHE = "phase-visual-pack-scryfall-images-v1";
 const STATE = "state";
+const DOWNLOAD_CONCURRENCY = 4;
+const PROGRESS_INTERVAL_MS = 250;
 
 type CatalogRecord = Readonly<ScryfallBulkSource>;
 
@@ -64,9 +77,29 @@ type ObjectRecord = Readonly<{
   packId: PackId;
   assetKey: AssetKey;
   candidateKeys: readonly CandidateKey[];
+  /**
+   * The URL these bytes were downloaded from — half of the identity by which a
+   * NEW root may reuse them instead of downloading them again.
+   *
+   * Optional because it is additive. A row written before this field existed
+   * carries `undefined`, which no descriptor's `sourceUrl` can equal, so such a
+   * row is never reused. That is the safe default in the direction that
+   * matters: re-downloading only costs time, whereas reusing bytes whose
+   * provenance is unrecorded would serve the wrong art. It is also why the
+   * store needs no version bump and no migration.
+   */
+  sourceUrl?: string;
   object: CatalogRoot;
   byteLength: number;
   media: VisualPackMedia;
+  path: string;
+}>;
+
+/** The content half of an `ObjectRecord`: the bytes a row points at, with no
+ *  claim about which pack or root points at them. */
+type ObjectContent = Readonly<{
+  object: CatalogRoot;
+  byteLength: number;
   path: string;
 }>;
 
@@ -87,6 +120,7 @@ type ScryfallOperationRecord = Readonly<{
   packTotal: number;
   packsPromoted: number;
   objectTotal: number;
+  objectEstimate?: number;
   objectsPromoted: number;
   completedRevision: string | null;
 }>;
@@ -107,6 +141,28 @@ function operationObjectId(selectedOperation: OperationId, selectedObject: strin
   return `${selectedOperation}:${selectedObject}`;
 }
 
+/**
+ * The identity under which an already-downloaded image may be reused by a
+ * DIFFERENT catalog root. `objectId` cannot serve: it is keyed on the root, so
+ * a new root matches nothing and every image is fetched again.
+ *
+ * Both halves are load-bearing. An asset key alone names a slot, not bytes: a
+ * `canonical_card:` key carries no printing identity, so what stands behind it
+ * is whatever `scryfall-data.json` currently supplies, and a regeneration of
+ * that file moves the URL while the key stays put. Reusing on the key alone
+ * would pin the superseded art with no way to notice — which is the same
+ * reason the membership digest covers source URLs as well as keys.
+ */
+function contentId(selectedAsset: AssetKey, sourceUrl: string): string {
+  return `${selectedAsset}\t${sourceUrl}`;
+}
+
+/** The reuse snapshot for a selector that does not participate in content
+ *  reuse. Shared and empty, so a non-curated install never scans `objects` and
+ *  `installObject` keeps ONE code path rather than growing a second one that
+ *  could drift from it. */
+const NO_DONORS = (): Promise<Map<string, ObjectContent>> => Promise.resolve(new Map());
+
 function operationStatus(record: ScryfallOperationRecord): OperationStatus {
   return {
     operationId: record.id,
@@ -116,6 +172,7 @@ function operationStatus(record: ScryfallOperationRecord): OperationStatus {
     packTotal: record.packTotal,
     packsPromoted: record.packsPromoted,
     objectTotal: record.objectTotal,
+    objectEstimate: record.objectEstimate ?? null,
     objectsPromoted: record.objectsPromoted,
     completedRevision: record.completedRevision === null ? null : installedRevision(record.completedRevision),
   };
@@ -142,6 +199,35 @@ function errorKind(error: unknown): VisualPackErrorKind {
   return "storage";
 }
 
+/**
+ * Whether re-running an operation record could ever reach a different outcome.
+ *
+ * `conflict` is the one kind that says the request no longer describes
+ * reality. A curated selector stores only a membership digest, and a digest is
+ * not invertible, so once the stored preferences move there is no way to
+ * reconstruct the membership the record named — replanning would install a
+ * DIFFERENT membership under the old root, and adopting the new digest would
+ * orphan every row already written under the old one. Network and storage
+ * failures carry no such claim: they are transient, and an operation that hits
+ * one MUST stay resumable, which is what the panel's Resume control is for.
+ *
+ * `internal` is the second, for a different reason and with the same
+ * consequence: it is what a defect in our own deterministic planning code is
+ * classified as, and re-running deterministic code reaches the same defect.
+ * Leaving such an operation resumable wedges the panel across restarts, since
+ * `create()` re-runs every record still `downloading` on every launch.
+ *
+ * Everything else is retryable by default, which `insufficient_storage`
+ * inherits CORRECTLY: freeing disk changes the outcome, so a record left
+ * resumable can still succeed. It is also unreachable from here today —
+ * `reserveStorage` throws out of `start()` before any record is persisted, and
+ * this function is consulted only from `run()`'s catch — so the default is a
+ * statement about a future caller rather than about the refusal path.
+ */
+function retryable(kind: VisualPackErrorKind): boolean {
+  return kind !== "conflict" && kind !== "internal";
+}
+
 function backendError(error: unknown): VisualPackBackendError {
   if (error instanceof VisualPackBackendError) return error;
   return new VisualPackBackendError(errorKind(error), error instanceof Error ? error.message : undefined);
@@ -153,12 +239,26 @@ function selectorPack(selector: InstallSelector): PackId {
     case "printing": return packId(`printing:${selector.set}`);
     case "locale": return packId(`locale:${selector.language}:${selector.set}`);
     case "complete": return packId("complete");
+    case "curated": return packId("curated");
   }
+}
+
+/**
+ * The catalog root a selector's packs and objects are stored at.
+ *
+ * Curated membership is identified by its own digest; every other selector is
+ * identified by the bulk catalog it was built from. The root is a property of
+ * a SELECTOR, not of an operation — an operation installs and repairs a list
+ * of packs — so it is derived here rather than stored on the record.
+ */
+function selectorRoot(selector: InstallSelector, catalog: CatalogRecord): CatalogRoot {
+  return selector.kind === "curated" ? selector.membershipDigest : catalog.root;
 }
 
 function selectorForPack(selectedPack: PackId, root: CatalogRoot): InstallSelector {
   if (selectedPack === packId("core")) return { kind: "core" };
   if (selectedPack === packId("complete")) return { kind: "complete", rootSha256: root };
+  if (selectedPack === packId("curated")) return { kind: "curated", membershipDigest: root };
   const printing = /^printing:([a-z0-9]{3,6})$/.exec(selectedPack);
   if (printing) return { kind: "printing", set: printing[1] };
   const locale = /^locale:(de|es|fr|it|pt):([a-z0-9]{3,6})$/.exec(selectedPack);
@@ -186,8 +286,90 @@ async function state(database: IDBPDatabase<ScryfallVisualPackSchema>): Promise<
   return (await database.get("state", STATE)) ?? initialState();
 }
 
-async function cacheContains(path: string): Promise<boolean> {
-  return (await (await caches.open(CACHE)).match(path)) !== undefined;
+/**
+ * `navigator.storage`, or `undefined` where there is none.
+ *
+ * Read through `globalThis` and through optional chaining because the Storage
+ * API is absent in older Safari, absent in some private windows, and absent in
+ * the test environment. Every caller below turns both "absent" and "threw"
+ * into the same answer, so that a pack download which would otherwise succeed
+ * is never blocked by a failure to introspect the storage it writes to.
+ *
+ * The explicit `!manager` checks in the two callers are therefore REDUNDANT
+ * with their `catch`, and MEASURED to be: deleting them turns no test red,
+ * because the resulting TypeError lands in the same handler. They are kept
+ * anyway, and only for the reason that an absent API is an ordinary condition
+ * rather than a failure, so it should not be routed through an exception. Do
+ * not read them as the thing that makes absence safe — the `catch` is.
+ */
+function storageManager(): StorageManager | undefined {
+  return globalThis.navigator?.storage;
+}
+
+/** Whether this origin's storage is already exempt from eviction. */
+async function currentPersistence(): Promise<StoragePersistence> {
+  try {
+    const manager = storageManager();
+    if (!manager) return "unsupported";
+    return (await manager.persisted()) ? "persisted" : "best_effort";
+  } catch {
+    return "unsupported";
+  }
+}
+
+/**
+ * Ask the browser to stop evicting this origin's storage, and report what it
+ * said.
+ *
+ * A refusal is a normal outcome, not an error: without the grant Cache Storage
+ * stays best-effort and the browser MAY discard the whole pack under disk
+ * pressure, but the download itself works either way. Reporting `best_effort`
+ * is how that stays visible instead of being assumed away.
+ *
+ * `persisted()` is consulted first so an origin that already holds the grant
+ * does not ask for it a second time.
+ */
+async function requestPersistence(): Promise<StoragePersistence> {
+  try {
+    const manager = storageManager();
+    if (!manager) return "unsupported";
+    if (await manager.persisted()) return "persisted";
+    return (await manager.persist()) ? "persisted" : "best_effort";
+  } catch {
+    return "unsupported";
+  }
+}
+
+/** The origin's usage and quota, with `persistence` supplied by whichever of
+ *  the two calls above the caller made. */
+async function storageOutlook(persistence: StoragePersistence): Promise<StorageOutlook> {
+  let usageBytes: number | null = null;
+  let quotaBytes: number | null = null;
+  try {
+    const report = await storageManager()?.estimate();
+    if (typeof report?.usage === "number") usageBytes = report.usage;
+    if (typeof report?.quota === "number") quotaBytes = report.quota;
+  } catch {
+    // Reported as "would not say" below, exactly like an absent API.
+  }
+  const availableBytes = usageBytes === null || quotaBytes === null ? null : Math.max(quotaBytes - usageBytes, 0);
+  return { usageBytes, quotaBytes, availableBytes, persistence };
+}
+
+/**
+ * Whether a projected download fits the space the browser reports.
+ *
+ * `unknown` when the browser would not say, and callers must treat that as
+ * "cannot tell" rather than as "fits": a browser with no Storage API must
+ * still be able to install.
+ */
+function headroomFor(projectedBytes: number, outlook: StorageOutlook): StorageHeadroom {
+  if (outlook.availableBytes === null) return "unknown";
+  return projectedBytes <= outlook.availableBytes ? "sufficient" : "insufficient";
+}
+
+async function cacheContains(cache: Cache, path: string): Promise<boolean> {
+  return (await cache.match(path)) !== undefined;
 }
 
 async function sha256(bytes: Uint8Array): Promise<CatalogRoot> {
@@ -210,8 +392,7 @@ async function fetchImage(descriptor: ScryfallAssetDescriptor, signal: AbortSign
   return new Uint8Array(await response.arrayBuffer());
 }
 
-async function storeVerifiedObject(path: string, media: VisualPackMedia, bytes: Uint8Array): Promise<void> {
-  const cache = await caches.open(CACHE);
+async function storeVerifiedObject(cache: Cache, path: string, media: VisualPackMedia, bytes: Uint8Array): Promise<void> {
   await cache.put(path, new Response(bytes, {
     headers: {
       "Content-Type": media,
@@ -258,8 +439,18 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     this.work = task.catch(() => undefined);
     void task.catch(async (error) => {
       if (controller.signal.aborted) return;
-      const operation = await this.database.get("operations", selectedOperation);
-      if (operation) this.emit({ phase: "failed", operation: operationStatus(operation), error: errorKind(error) });
+      const kind = errorKind(error);
+      // A retryable failure leaves the record `downloading`, which is exactly
+      // what makes it resumable. A non-retryable one never can be, so leaving
+      // it there wedges the panel: OperationProgress offers Resume instead of
+      // Cancel, every durable mutation stays disabled, and `create()`'s
+      // pending loop re-runs the same doomed operation on every launch.
+      // Terminating the record restores those controls and stops the loop.
+      const operation = retryable(kind)
+        ? await this.database.get("operations", selectedOperation)
+        : await this.updateOperation(selectedOperation, (current) =>
+            current.state === "completed" ? current : { ...current, state: "cancelled" }).catch(() => undefined);
+      if (operation) this.emit({ phase: "failed", operation: operationStatus(operation), error: kind });
     }).finally(() => this.workers.delete(selectedOperation));
   }
 
@@ -317,62 +508,227 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     await transaction.done;
   }
 
-  private async installObject(operation: ScryfallOperationRecord, descriptor: ScryfallAssetDescriptor, signal: AbortSignal): Promise<void> {
-    const id = objectId(operation.catalog.root, descriptor.packId, descriptor.assetKey);
+  /**
+   * Every already-downloaded image that a different root may reuse, keyed by
+   * `contentId`.
+   *
+   * One streamed pass over `objects`, reduced to the three content fields.
+   * `objects` is indexed by pack and not by asset key, and this step adds no
+   * index — so the choice is one pass per selector or a full-store scan per
+   * descriptor. Callers build it lazily, so an install whose rows are all
+   * already present at its own root never pays for it at all.
+   */
+  private async adoptableContent(): Promise<Map<string, ObjectContent>> {
+    const found = new Map<string, ObjectContent>();
+    let cursor = await this.database.transaction("objects").store.openCursor();
+    while (cursor) {
+      const row = cursor.value;
+      if (row.sourceUrl !== undefined) {
+        const key = contentId(row.assetKey, row.sourceUrl);
+        if (!found.has(key)) found.set(key, { object: row.object, byteLength: row.byteLength, path: row.path });
+      }
+      cursor = await cursor.continue();
+    }
+    return found;
+  }
+
+  /** `root` is the SELECTOR's root, supplied by the per-selector loop. It
+   *  cannot be re-derived here: neither `descriptor.packId` nor the operation
+   *  record carries a curated membership digest, so any local derivation would
+   *  silently key and stamp curated objects at the bulk root.
+   *
+   *  `donors` is the per-selector reuse snapshot, deferred behind a thunk so it
+   *  is built only if some descriptor actually misses at this root. */
+  private async installObject(
+    operation: ScryfallOperationRecord,
+    descriptor: ScryfallAssetDescriptor,
+    root: CatalogRoot,
+    signal: AbortSignal,
+    cache: Cache,
+    donors: () => Promise<Map<string, ObjectContent>>,
+  ): Promise<void> {
+    const id = objectId(root, descriptor.packId, descriptor.assetKey);
     const completion = await this.markSeen(operation.id, id);
     const existing = await this.database.get("objects", id);
-    if (completion.complete && existing && await cacheContains(existing.path)) return;
+    if (completion.complete && existing && await cacheContains(cache, existing.path)) return;
     if (completion.complete) await this.invalidateCompletion(operation.id, id);
-    if (existing && await cacheContains(existing.path)) {
+    if (existing && await cacheContains(cache, existing.path)) {
       await this.markComplete(operation.id, id, existing);
       return;
     }
-    const bytes = await fetchImage(descriptor, signal);
-    const object = await sha256(bytes);
+    // A preference change gives the curated pack a new root, so nothing above
+    // matched even though most of the membership is byte-for-byte the images
+    // already on disk. Reuse them; the cache, not the row, is the authority on
+    // whether the bytes are really still there, since an eviction or a sweep
+    // may have run since the snapshot was taken.
+    //
+    // This `cacheContains` is also the ONLY thing that repairs a curated row
+    // whose cache entry has gone missing. `repair` cannot: it builds its
+    // selector from the installed packs row and then filters against that same
+    // row, so a curated repair is always removed before an operation exists and
+    // returns `{status:"healthy"}` while the entry stays missing. MEASURED —
+    // `verify` reports `missing_object`, `repair` reports healthy, and a second
+    // `verify` still reports it. Recovery is a preference change (this check
+    // fails and the asset is fetched again) or remove-and-reinstall. Do not
+    // justify anything here by "verify/repair will fix it".
+    const donor = (await donors()).get(contentId(descriptor.assetKey, descriptor.sourceUrl));
+    let content: ObjectContent;
+    if (donor && await cacheContains(cache, donor.path)) {
+      content = donor;
+    } else {
+      const bytes = await fetchImage(descriptor, signal);
+      const object = await sha256(bytes);
+      content = { object, byteLength: bytes.byteLength, path: syntheticCachePath(object, descriptor.media) };
+      await storeVerifiedObject(cache, content.path, descriptor.media, bytes);
+    }
     const metadata: ObjectRecord = Object.freeze({
       id,
-      root: operation.catalog.root,
+      // The stamp every deletion path filters on. It must agree with the key
+      // `id` was built from, or the row is deletable by no path at all.
+      root,
       packId: descriptor.packId,
       assetKey: descriptor.assetKey,
       candidateKeys: [...descriptor.candidateKeys],
-      object,
-      byteLength: bytes.byteLength,
+      sourceUrl: descriptor.sourceUrl,
+      object: content.object,
+      byteLength: content.byteLength,
       media: descriptor.media,
-      path: syntheticCachePath(object, descriptor.media),
+      path: content.path,
     });
-    await storeVerifiedObject(metadata.path, metadata.media, bytes);
+    // Reuse and download converge here deliberately: a reuse path that skipped
+    // `markComplete` would never increment `objectsPromoted`. `finish()` does
+    // not compare that counter against `objectTotal`, so the record would
+    // still reach `completed` and the only symptom would be a progress figure
+    // permanently short by however many images were reused — a wrong number no
+    // fetch count can see. One exit is what makes that unrepresentable.
     await this.markComplete(operation.id, id, metadata);
   }
 
-  private async completePack(operation: ScryfallOperationRecord, selectedPack: PackId): Promise<void> {
+  /** `root` is the SELECTOR's root, supplied by the per-selector loop — the
+   *  same value `installObject` keyed and stamped this pack's objects with.
+   *
+   *  Returns the cache paths of the rows it deleted, so a caller that owns this
+   *  pack's garbage can ask whether those images are now unreferenced. The
+   *  deletion and the promotion stay in ONE transaction, which is why the paths
+   *  are handed back rather than recollected afterwards — by then the rows that
+   *  named them are gone. Callers that own no garbage simply ignore the value;
+   *  nothing else about this method changed. */
+  private async completePack(operation: ScryfallOperationRecord, selectedPack: PackId, root: CatalogRoot): Promise<Set<string>> {
+    const dropped = new Set<string>();
     const transaction = this.database.transaction(["packs", "objects", "operations"], "readwrite");
     const current = await transaction.objectStore("operations").get(operation.id);
     if (!current || current.state !== "downloading") {
       await transaction.done;
-      return;
+      return dropped;
     }
     const existing = await transaction.objectStore("packs").get(selectedPack);
-    if (existing?.operationId === operation.id && existing.root === operation.catalog.root) {
+    if (existing?.operationId === operation.id && existing.root === root) {
       await transaction.done;
-      return;
+      return dropped;
     }
     if (existing) {
       const index = transaction.objectStore("objects").index("by-pack");
       let cursor = await index.openCursor(existing.packId);
       while (cursor) {
-        if (cursor.value.root === existing.root) await cursor.delete();
+        if (cursor.value.root === existing.root) {
+          dropped.add(cursor.value.path);
+          await cursor.delete();
+        }
         cursor = await cursor.continue();
       }
     }
     await transaction.objectStore("packs").put({
       id: selectedPack,
       packId: selectedPack,
-      root: operation.catalog.root,
+      root,
       dependencies: [],
       operationId: operation.id,
     });
     await transaction.objectStore("operations").put({ ...current, packsPromoted: current.packsPromoted + 1 });
     await transaction.done;
+    return dropped;
+  }
+
+  /**
+   * Delete every path in `paths` that no remaining objects row — in ANY pack —
+   * still references.
+   *
+   * Content addressing means two packs that downloaded the same bytes share one
+   * cache entry, so "this pack's row is gone" is never on its own a reason to
+   * delete the image. `remove()` has always swept exactly this way; naming it
+   * here lets the curated delta path reuse that sweep instead of growing a
+   * second one that could disagree with it.
+   *
+   * The reference set is indexed rather than rescanned per path. `remove()`
+   * swept a handful of paths on a rare user action, so a linear scan inside the
+   * loop never showed; a curated preference change hands this every path of the
+   * replaced membership, and both sides are then the whole membership. MEASURED
+   * at 105,261 paths against 105,261 rows: 103.8 s scanning, 36.6 ms indexed,
+   * with identical deletion sets. The predicate is unchanged — `path` is in the
+   * set exactly when some remaining row references it — so WHICH paths are
+   * deleted does not move for either caller.
+   */
+  private async sweepUnreferenced(paths: ReadonlySet<string>, cache: Cache): Promise<void> {
+    if (paths.size === 0) return;
+    const referenced = new Set((await this.database.getAll("objects")).map((entry) => entry.path));
+    for (const path of paths) {
+      if (!referenced.has(path)) await cache.delete(path);
+    }
+  }
+
+  /**
+   * Drop every curated objects row that no root still points at, then sweep the
+   * images that leaves unreferenced.
+   *
+   * `markComplete` writes rows DURING the download, before `completePack`
+   * promotes the pack, while every deletion path is scoped to a single root
+   * (`completePack` to the row it replaces, `remove()` to the row it removes).
+   * So a curated install at digest D2 that is cancelled or interrupted leaves
+   * its rows at D2 while the packs row still names D1, and the next install at
+   * D3 clears only D1. Nothing can ever reach the D2 rows again: they are keyed
+   * and stamped at a root no pack names. The cache sweep cannot help either —
+   * those rows still exist and still reference their paths, which is exactly
+   * what makes the sweep keep them. Because a curated pack re-syncs on every
+   * preference change, they accumulate against the disk budget the pack exists
+   * to protect.
+   *
+   * A root is abandoned only if NOTHING still claims it, and three things can:
+   * this operation, the installed packs row, and any operation that has not
+   * reached a terminal state. The third is not a refinement — IDB is shared
+   * across tabs while a backend instance is not, so another tab's install is
+   * writing rows under a root that is neither of the first two, and it writes
+   * them DURING its download. Without that clause this sweep deletes a live
+   * membership out from under the tab installing it, and nothing downstream can
+   * notice: `objectsPromoted` counts `operationObjects` completion flags, never
+   * the surviving rows, so that tab still reports `completed` with every asset
+   * promoted while its pack is missing whatever this sweep took. Terminal
+   * operations are deliberately NOT kept — a cancelled or completed record's
+   * root is exactly the garbage this collects.
+   */
+  private async collectCuratedGarbage(root: CatalogRoot, dropped: ReadonlySet<string>, cache: Cache): Promise<void> {
+    const curated = packId("curated");
+    const paths = new Set(dropped);
+    const transaction = this.database.transaction(["packs", "objects", "operations"], "readwrite");
+    const installed = await transaction.objectStore("packs").get(curated);
+    const keep = new Set<CatalogRoot>([root]);
+    if (installed) keep.add(installed.root);
+    for (const operation of await transaction.objectStore("operations").getAll()) {
+      if (operation.state === "completed" || operation.state === "cancelled") continue;
+      for (const [position, selector] of operation.selectors.entries()) {
+        if (operation.packIds[position] === curated) keep.add(selectorRoot(selector, operation.catalog));
+      }
+    }
+    const index = transaction.objectStore("objects").index("by-pack");
+    let cursor = await index.openCursor(curated);
+    while (cursor) {
+      if (!keep.has(cursor.value.root)) {
+        paths.add(cursor.value.path);
+        await cursor.delete();
+      }
+      cursor = await cursor.continue();
+    }
+    await transaction.done;
+    await this.sweepUnreferenced(paths, cache);
   }
 
   private async finish(selectedOperation: OperationId): Promise<void> {
@@ -403,22 +759,86 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       await this.updateOperation(selectedOperation, (current) => ({ ...current, state: "cancelled" }));
       return;
     }
+    const cache = await caches.open(CACHE);
     for (const [index, selector] of operation.selectors.entries()) {
       operation = await this.database.get("operations", selectedOperation);
       if (!operation || operation.state === "cancel_requested" || signal.aborted) break;
       const selectedPack = operation.packIds[index];
+      const root = selectorRoot(selector, operation.catalog);
       const installed = await this.database.get("packs", selectedPack);
-      if (installed?.operationId === selectedOperation && installed.root === operation.catalog.root) continue;
-      await forEachScryfallAsset(operation.catalog, selector, signal, async (descriptor) => {
-        const current = await this.database.get("operations", selectedOperation);
-        if (!current || current.state === "cancel_requested" || signal.aborted) return;
-        await this.installObject(current, descriptor, signal);
-        const updated = await this.operationStatus(selectedOperation);
-        this.emit({ phase: "running", operation: updated, error: null });
-      });
+      if (installed?.operationId === selectedOperation && installed.root === root) continue;
+      const inFlight = new Set<Promise<void>>();
+      // The reuse snapshot for this selector, taken at most once, only if some
+      // descriptor misses at this root, and only for `curated`.
+      //
+      // Deferred rather than eager because a resume, where every row is already
+      // present, must not pay a full pass over `objects` to learn that.
+      //
+      // Restricted to `curated` because curated is what this step was scoped
+      // to make cheap, and because the snapshot is not free: MEASURED at ~520
+      // bytes of retained Map per row, so ~55 MiB across a curated membership
+      // and ~191 MiB across a `complete` pack's rows, held live for the whole
+      // download on a client with mobile OOM history.
+      //
+      // The gate is NOT a claim that reuse would be worthless for the others.
+      // A republished bulk catalog leaves most image URLs where they were, so
+      // letting `complete` adopt would very likely turn a root bump into
+      // almost no downloads at all. That is a feature with a memory bound to
+      // establish and tests to write, and it is not something to acquire as a
+      // side effect of a change whose rule was that the other selectors do not
+      // move. Adopting ACROSS packs is a separate axis and stays fully
+      // available: keying on content rather than on pack means a curated
+      // install reads every row in the store, `complete`/`printing`/`locale`
+      // included.
+      let adoptable: Promise<Map<string, ObjectContent>> | null = null;
+      const donors = selectedPack === packId("curated")
+        ? () => (adoptable ??= this.adoptableContent())
+        : NO_DONORS;
+      let failure: unknown = null;
+      let lastProgressAt = 0;
+      let progressUpdate = Promise.resolve();
+      const reportProgress = (force = false) => {
+        const now = performance.now();
+        if (!force && now - lastProgressAt < PROGRESS_INTERVAL_MS) return;
+        lastProgressAt = now;
+        progressUpdate = progressUpdate.then(async () => {
+          const updated = await this.operationStatus(selectedOperation);
+          this.emit({ phase: "running", operation: updated, error: null });
+        }).catch(() => undefined);
+      };
+      const schedule = (descriptor: ScryfallAssetDescriptor): Promise<void> | void => {
+        if (failure) throw failure;
+        const task: Promise<void> = (async () => {
+          const current = await this.database.get("operations", selectedOperation);
+          if (!current || current.state === "cancel_requested" || signal.aborted) return;
+          await this.installObject(current, descriptor, root, signal, cache, donors);
+          reportProgress();
+        })().catch((error) => {
+          failure ??= error;
+        }).finally(() => inFlight.delete(task));
+        inFlight.add(task);
+        return inFlight.size >= DOWNLOAD_CONCURRENCY ? Promise.race(inFlight) : undefined;
+      };
+      await forEachScryfallAsset(operation.catalog, selector, signal, schedule);
+      await Promise.all(inFlight);
+      // Every `installObject` for this selector has settled, so the reuse
+      // snapshot has no reader left. Dropping the reference here rather than at
+      // the end of the iteration keeps it from overlapping the sweep below,
+      // which materialises every remaining row AND a path set of its own —
+      // three structures the size of the membership, live at once, on the peak
+      // this pack exists to keep small.
+      adoptable = null;
+      if (failure) throw failure;
+      reportProgress(true);
+      await progressUpdate;
       operation = await this.database.get("operations", selectedOperation);
       if (!operation || operation.state === "cancel_requested" || signal.aborted) break;
-      await this.completePack(operation, selectedPack);
+      const dropped = await this.completePack(operation, selectedPack, root);
+      // Curated is the only pack whose root moves under the user rather than
+      // under Scryfall, so it is the only one that strands rows and images
+      // behind on a change of preference. Every other selector is left exactly
+      // as it was: it discards `dropped` and collects no garbage.
+      if (selectedPack === packId("curated")) await this.collectCuratedGarbage(root, dropped, cache);
       this.emit({ phase: "running", operation: await this.operationStatus(selectedOperation), error: null });
     }
     operation = await this.database.get("operations", selectedOperation);
@@ -431,22 +851,278 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     await this.finish(selectedOperation);
   }
 
-  private async estimate(source: CatalogRecord, selector: InstallSelector, revision: string): Promise<InstallEstimate> {
+  /**
+   * Secure the storage an operation is about to consume, and refuse one that
+   * provably will not fit.
+   *
+   * The grant is requested for every USER-INITIATED operation that downloads,
+   * not only for something judged "large". It is deliberately NOT requested on
+   * the auto-resume path: `create()` calls `run()` directly for every record
+   * left `downloading`/`finalizing`, so a launch never prompts without the user
+   * having asked for anything. Without it Cache Storage is best-effort and the browser MAY
+   * evict the pack under disk pressure — for a pack downloaded so the app works
+   * offline, that is the exact failure the pack exists to prevent, and it is no
+   * less a failure for a small pack than for a big one. It is requested BEFORE
+   * any byte is written, since it protects the bytes that follow it.
+   *
+   * The size refusal is gated on `objectEstimate`, which only an `install`
+   * request carries. `repair` re-fetches objects an install already accounted
+   * for, and `resume` continues an operation that was checked when it started,
+   * so neither has a figure to check and neither introduces bytes this could
+   * have caught.
+   *
+   * IT REFUSES ON `minimumImageBytes`, NOT ON THE EXPECTED SIZE, and the gap
+   * between the two is the whole design. `estimatedImageBytes` rests on six
+   * CDN samples per rung; against ~35,000 faces of wildly varying card art the
+   * real total could plausibly sit tens of percent either side of it. The two
+   * outcomes are not symmetric:
+   *
+   *  - Refusing wrongly denies an install that would have worked, and there is
+   *    no override anywhere in this backend or the panel to undo it.
+   *  - Running out of quota mid-download is recoverable. A `QuotaExceededError`
+   *    from `cache.put` is classified `storage`, `storage` is `retryable`, so
+   *    the record stays `downloading` and the panel offers Resume; and the
+   *    resume re-downloads almost nothing, because `installObject` returns
+   *    early for every object already complete and still cached.
+   *
+   * So the expected figure is a WARNING, carried on `InstallEstimate.headroom`
+   * for the UI to show, and this gate fires only where even the cheapest
+   * possible reading of the same constants cannot fit — a case no error bar on
+   * them can rescue.
+   */
+  private async reserveStorage(request: StartRequest): Promise<StoragePersistence> {
+    const persistence = await requestPersistence();
+    if (request.kind !== "install") return persistence;
+    // The same delta the estimate reports, recomputed here rather than taken
+    // from `request.objectEstimate`. Two reasons: `objectEstimate` is the
+    // progress denominator and so is the whole membership by design, and a
+    // caller's figure was read at whatever moment it ran its estimate — a gate
+    // must compare the space free NOW against the work outstanding NOW. Only
+    // curated has a recoverable installed membership to diff against; every
+    // other selector keeps the caller's count.
+    const floorBytes = minimumImageBytes(
+      request.selector.kind === "curated"
+        ? await this.curatedFetchCount(request.selector.membershipDigest)
+        : request.objectEstimate,
+    );
+    const outlook = await storageOutlook(persistence);
+    // `unknown` proceeds deliberately. A browser that will not report a quota
+    // is not reporting that the download fails to fit, and refusing on silence
+    // would make every browser without the Storage API unable to install
+    // anything at all.
+    //
+    // Refused as its own kind rather than as `storage`, and with the two
+    // figures as typed fields rather than interpolated into a message: the
+    // panel renders them in the user's language and unit, and it must render
+    // the numbers THIS comparison was made on. The alternative — a floor
+    // recomputed in the panel from the estimate — reads the browser's quota at
+    // a different instant than the gate did and can disagree with it.
+    const { availableBytes } = outlook;
+    if (availableBytes !== null && headroomFor(floorBytes, outlook) === "insufficient") {
+      throw new VisualPackStorageRefusalError({ requiredBytes: floorBytes, availableBytes });
+    }
+    return persistence;
+  }
+
+  private async estimate(
+    source: CatalogRecord,
+    selector: InstallSelector,
+    revision: string,
+    onProgress?: (progress: CatalogScanProgress) => void,
+  ): Promise<InstallEstimate> {
     if (selector.kind === "complete" && selector.rootSha256 !== source.root) throw new VisualPackBackendError("conflict");
-    let assetRecords = 0;
-    await forEachScryfallAsset(source, selector, new AbortController().signal, async () => { assetRecords += 1; });
+    const assetRecords = await countScryfallAssets(source, selector, new AbortController().signal, onProgress);
+    // The size question is "what will this DOWNLOAD", which for a pack already
+    // installed is not the size of its membership. Step 4 made a re-sync nearly
+    // free by skipping cached objects per object at download time, but that
+    // saving was invisible ahead of the run, so a sync fetching a handful of
+    // moved images reported the whole 6.5 GB — and `reserveStorage` could
+    // refuse it at low disk.
+    //
+    // TWO COUNTS, TWO CONSUMERS, and they legitimately differ for a curated
+    // re-sync:
+    //
+    //  - `assetRecords` is what the run will PROMOTE. It stays the WHOLE
+    //    membership: the panel passes it as `objectEstimate`, and that is the
+    //    denominator of a progress bar whose numerator counts every object the
+    //    run promotes, reused ones included. A denominator smaller than the
+    //    numerator's reach would run the bar past its end.
+    //  - `uniqueObjects` is what the run will DOWNLOAD. It is the panel's only
+    //    count row for a curated estimate, rendered directly beside
+    //    `estimatedImageBytes` under a label that says "Images to download", so
+    //    it must be the SAME figure that byte projection was computed from.
+    //    Reporting the membership there put "Images to download: 105,165"
+    //    beside "Estimated download size: 0 B" on an already-installed pack.
+    //
+    // For every non-curated selector the two are the same number, so nothing
+    // but the curated re-sync moves.
+    const downloadRecords = selector.kind === "curated"
+      ? await this.curatedFetchCount(selector.membershipDigest)
+      : assetRecords;
+    const projectedBytes = estimatedImageBytes(downloadRecords);
+    const storage = await storageOutlook(await currentPersistence());
     return {
       catalogRoot: source.root,
       installedRevision: installedRevision(revision),
       selector: selectorPack(selector),
       packIds: [selectorPack(selector)],
       assetRecords: String(assetRecords),
-      uniqueObjects: String(assetRecords),
+      uniqueObjects: String(downloadRecords),
+      // Still "unknown", and NOT where the projection below goes. These two are
+      // the ONLY write sites they have, and both hardcode this string: nothing
+      // in the codebase has ever populated them, and their labels say so in no
+      // language — `en` hedges with "(known after download)" and the other six
+      // name a measurement outright. They are left alone
+      // rather than repurposed only so a projection is never written into a
+      // field whose label claims to be a measurement; deciding their fate
+      // (populate or delete, with their seven locales) is open work.
       logicalImageBytes: "unknown",
       uniqueImageBytes: "unknown",
-      shardCount: "1",
-      shardBytes: String(source.compressedBytes),
+      // A curated pack reads no shard of the bulk archive, so reporting that
+      // archive's compressed size would show the user the multi-gigabyte
+      // download this selector exists to avoid.
+      shardCount: selector.kind === "curated" ? "0" : "1",
+      shardBytes: selector.kind === "curated" ? "unknown" : String(source.compressedBytes),
+      // The size question every selector must answer, curated and bulk alike:
+      // the whole point of the curated pack is that this figure is far smaller
+      // than `complete`'s, and a user cannot see that unless both report one.
+      estimatedImageBytes: projectedBytes,
+      storage,
+      headroom: headroomFor(projectedBytes, storage),
     };
+  }
+
+  /**
+   * The curated selector for the preferences stored right now.
+   *
+   * Reads no catalog and opens no bulk stream: the digest comes from the same
+   * `planCuratedPack()` memo that `start()`'s conflict guard and `run()`'s
+   * descriptor pass go through, so a selector this returns is one those two
+   * agree with rather than a second opinion about it.
+   */
+  async curatedSelector(): Promise<CuratedInstallSelector> {
+    try {
+      const { membershipDigest } = await planCuratedPack();
+      return { kind: "curated", membershipDigest };
+    } catch (error) {
+      throw backendError(error);
+    }
+  }
+
+  /**
+   * What a curated sync would do right now: the planned membership against the
+   * one on disk, in the three categories `CuratedDrift` documents.
+   *
+   * The installed membership needs no new storage to recover. `objects` rows
+   * carry `assetKey` and `sourceUrl` and are indexed `by-pack`, and for curated
+   * the pack's root IS its membership digest — so the `by-pack` rows filtered
+   * to the installed root are exactly the installed `(assetKey, sourceUrl)` set.
+   *
+   * READ ONLY, so it takes them in ONE indexed request rather than cursoring.
+   * `collectCuratedGarbage` and `adoptableContent` cursor the same rows, but
+   * neither is precedent for doing so here: the first DELETES through its
+   * cursor and the second streams while it builds. The read-only precedent in
+   * this file is `sweepUnreferenced`, which went indexed with a measurement
+   * attached — 105,261 rows, 103.8 s cursoring against 36.6 ms indexed. This
+   * runs at that same scale and now runs twice per install start (`estimate()`
+   * and `reserveStorage()`) plus once per `curatedDrift()`, all on the main
+   * thread.
+   *
+   * Rows at any OTHER root under the curated pack are deliberately excluded:
+   * those belong to a superseded or an in-flight membership, and counting them
+   * would report a sync as having work to remove that `completePack` is going
+   * to remove anyway.
+   */
+  private async curatedDiff(
+    descriptors: readonly ScryfallAssetDescriptor[],
+  ): Promise<Omit<CuratedDrift, "membershipDigest">> {
+    const curated = packId("curated");
+    const installedPack = await this.database.get("packs", curated);
+    // Nothing installed: every descriptor is an add, which is what the
+    // first-install estimate has always reported.
+    if (!installedPack) return { installedDigest: null, add: descriptors.length, remove: 0, refresh: 0 };
+    const installed = new Map<AssetKey, string | undefined>();
+    for (const row of await this.database.getAllFromIndex("objects", "by-pack", curated)) {
+      if (row.root === installedPack.root) installed.set(row.assetKey, row.sourceUrl);
+    }
+    const planned = new Set<AssetKey>();
+    let add = 0;
+    let refresh = 0;
+    for (const descriptor of descriptors) {
+      planned.add(descriptor.assetKey);
+      // `has` before `get`, so a row that stores `undefined` is told apart from
+      // a row that is not there: the first is a refresh, the second an add.
+      // Both are fetched, but they are different facts and the panel names them
+      // differently.
+      if (!installed.has(descriptor.assetKey)) add += 1;
+      else if (installed.get(descriptor.assetKey) !== descriptor.sourceUrl) refresh += 1;
+    }
+    let remove = 0;
+    for (const key of installed.keys()) if (!planned.has(key)) remove += 1;
+    return { installedDigest: installedPack.root, add, remove, refresh };
+  }
+
+  /**
+   * The images a curated install would actually FETCH, as opposed to the size
+   * of its membership: `add + refresh`.
+   *
+   * This is a count of ROWS, and whether a fetch happens is a CACHE fact. Not
+   * counted requires `installed.has(assetKey) && installed.get(assetKey) ===
+   * descriptor.sourceUrl` — an `objects` row saying those bytes were stored;
+   * `installObject` decides reuse by asking `cacheContains` whether they are
+   * still there. So the figure moves in BOTH directions:
+   *
+   *  - It OVERSTATES when a row under a DIFFERENT pack holds the same content:
+   *    that row donates and no request is made, while this counts only the
+   *    curated pack's own rows.
+   *  - It UNDERSTATES when a cache entry has been evicted out from under a
+   *    surviving row. That state is reachable and permanent — see
+   *    `installObject`, where the MEASURED note records `verify` reporting
+   *    `missing_object` while `repair` reports healthy — so an eviction leaves
+   *    the row counted as installed and the sync fetches it anyway.
+   *
+   * No guard, because the only consumer that can refuse a user gates on
+   * `minimumImageBytes` of this — roughly a quarter of `estimatedImageBytes` —
+   * and `reserveStorage`'s own doc block takes the asymmetry deliberately: a
+   * wrong refusal has no override, while running out of quota mid-download is a
+   * `storage` failure, which is retryable, and the resume re-fetches almost
+   * nothing.
+   */
+  private async curatedFetchCount(digest: CatalogRoot): Promise<number> {
+    const diff = await this.curatedDiff(await curatedDescriptors(digest));
+    return diff.add + diff.refresh;
+  }
+
+  /**
+   * `curatedDiff` against the membership preferences and decks name right now,
+   * for the panel to render before a sync runs.
+   *
+   * Reached through `VisualPackBackend`: the panel reads it whenever the
+   * summary reports an installed curated pack, and again whenever the art
+   * preferences behind the membership move. It only ever REPORTS — the sync it
+   * describes waits for the user to press it.
+   *
+   * NULL WHEN MEASURING WOULD MEAN LOADING, and that is the point of the guard
+   * rather than an incidental early return. `planCuratedPack()` awaits
+   * `loadScryfallData()` and `loadPrintingsData()`; together those are a 76 MB
+   * fetch and JSON parse, and the caller is a settings panel reading this on
+   * mount. Opening Preferences having rendered no card is ordinary, passive
+   * navigation with no progress indication and no way to cancel.
+   *
+   * Decided HERE and not in the panel: which data files are resident is engine
+   * knowledge, and a display layer that reasoned about it would be deriving
+   * state. Once anything has loaded them — a rendered card image, or the user
+   * choosing the curated option, which resolves a selector through this same
+   * planner — the next call measures for free.
+   */
+  async curatedDrift(): Promise<CuratedDrift | null> {
+    try {
+      if (!isCardDataResident()) return null;
+      const { membershipDigest, descriptors } = await planCuratedPack();
+      return { membershipDigest, ...await this.curatedDiff(descriptors) };
+    } catch (error) {
+      throw backendError(error);
+    }
   }
 
   async catalogStatus(): Promise<CatalogStatus> {
@@ -478,18 +1154,22 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     return {
       catalogRoot: current.catalog.root,
       epoch: 0,
-      selectorCount: 4,
+      selectorCount: 5,
       shardCount: 1,
       installedRevision: installedRevision(current.revision),
       installedPacks: installed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })),
+      // `currentPersistence`, never `requestPersistence`: this is a read, and a
+      // summary refresh must not ask the user for a storage grant. The grant is
+      // requested exactly where a user has started an operation that writes.
+      storage: await storageOutlook(await currentPersistence()),
     };
   }
 
-  async estimateInstall(selector: InstallSelector): Promise<InstallEstimate> {
+  async estimateInstall(selector: InstallSelector, onProgress?: (progress: CatalogScanProgress) => void): Promise<InstallEstimate> {
     try {
       const current = await state(this.database);
       const catalog = current.catalog ?? await loadScryfallBulkSource();
-      return this.estimate(catalog, selector, current.revision);
+      return this.estimate(catalog, selector, current.revision, onProgress);
     } catch (error) {
       throw backendError(error);
     }
@@ -506,24 +1186,49 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         if (!operation) throw new VisualPackBackendError("invalid_input");
         if (operation.state === "completed") return { status: "healthy" };
         if (operation.state === "cancelled") throw new VisualPackBackendError("cancelled");
+        const resumePersistence = await this.reserveStorage(request);
         this.run(request.operationId);
-        return { status: "started", operationId: request.operationId, catalogRoot: operation.catalog.root };
+        return {
+          status: "started",
+          operationId: request.operationId,
+          catalogRoot: operation.catalog.root,
+          persistence: resumePersistence,
+        };
       }
       if (request.kind === "repair") {
         if (!current.catalog) throw new VisualPackBackendError("unavailable");
         catalog = current.catalog;
-        selectors = request.packIds.map((selectedPack) => selectorForPack(selectedPack, catalog.root));
+        // A repair must target the root the pack was INSTALLED at, not the
+        // current bulk root. For a curated pack the two differ by definition,
+        // and repairing at the bulk root would write objects there and then
+        // let completePack cursor-delete the entire installed membership.
+        selectors = request.packIds.map((selectedPack) =>
+          selectorForPack(selectedPack, installed.find((entry) => entry.packId === selectedPack)?.root ?? catalog.root));
       } else {
         catalog = current.catalog ?? await loadScryfallBulkSource();
         if (request.selector.kind === "complete" && request.selector.rootSha256 !== catalog.root) {
           throw new VisualPackBackendError("conflict");
         }
+        // The curated counterpart of the guard above, and it belongs HERE for
+        // the same reason: a conflict is not retryable, so it must reach the
+        // caller as a rejected request rather than as a failed operation
+        // record. This is the common case — estimate, change the art chain,
+        // then install — and catching it before any record exists leaves
+        // nothing behind to unwedge.
+        if (request.selector.kind === "curated") await curatedDescriptors(request.selector.membershipDigest);
         selectors = [request.selector];
       }
-      const packIds = selectors.map(selectorPack).filter((selectedPack) =>
-        !installed.some((entry) => entry.packId === selectedPack && entry.root === catalog.root));
-      if (packIds.length === 0) return { status: "healthy" };
-      selectors = selectors.filter((selector) => packIds.includes(selectorPack(selector)));
+      // Filtered over the SELECTORS rather than their pack ids: a pack id
+      // alone cannot say which root that selector installs at, and mapping
+      // first discards the curated selector's digest.
+      selectors = selectors.filter((selector) =>
+        !installed.some((entry) => entry.packId === selectorPack(selector) && entry.root === selectorRoot(selector, catalog)));
+      if (selectors.length === 0) return { status: "healthy" };
+      // After the short-circuit above, never before it: a sync that turns out
+      // to have nothing to do must not ask for a persistence grant, and it
+      // cannot run out of room for bytes it will not download.
+      const persistence = await this.reserveStorage(request);
+      const packIds = selectors.map(selectorPack);
       const selectedOperation = operationToken();
       const operation: ScryfallOperationRecord = Object.freeze({
         id: selectedOperation,
@@ -535,6 +1240,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         packTotal: packIds.length,
         packsPromoted: 0,
         objectTotal: 0,
+        objectEstimate: request.kind === "install" ? request.objectEstimate : undefined,
         objectsPromoted: 0,
         completedRevision: null,
       });
@@ -544,7 +1250,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       await transaction.done;
       this.emit({ phase: "started", operation: operationStatus(operation), error: null });
       this.run(selectedOperation);
-      return { status: "started", operationId: selectedOperation, catalogRoot: catalog.root };
+      return { status: "started", operationId: selectedOperation, catalogRoot: catalog.root, persistence };
     } catch (error) {
       throw backendError(error);
     }
@@ -597,11 +1303,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const revision = String(BigInt(current.revision) + 1n);
       await transaction.objectStore("state").put({ ...current, revision });
       await transaction.done;
-      const cache = await caches.open(CACHE);
-      const remaining = await this.database.getAll("objects");
-      for (const path of paths) {
-        if (!remaining.some((entry) => entry.path === path)) await cache.delete(path);
-      }
+      await this.sweepUnreferenced(paths, await caches.open(CACHE));
       this.publish({ cause: "remove", operationId: null, catalogRoot: null, revision: installedRevision(revision) });
       return { removed: removed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })), revision: installedRevision(revision), cleanupIssues: [] };
     } catch (error) {

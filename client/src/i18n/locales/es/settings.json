@@ -225,6 +225,11 @@
       "printing": "Impresiones en inglés",
       "locale": "Impresiones de conjuntos localizados",
       "complete": "Todas las imágenes actuales de cartas en inglés",
+      "curated": "Una imagen por carta",
+      "curatedNote": "Una imagen por carta, elegida por tus Preferencias de ilustración de cartas en la pestaña Visual. Si las cambias allí, esta selección las sigue.",
+      "curatedDefaultNote": "Una imagen por carta. No tienes reglas de ilustración, así que se descarga la ilustración predeterminada de cada carta: añade reglas en Preferencias de ilustración de cartas, en la pestaña Visual, para elegir otras ediciones.",
+      "driftNone": "Tus imágenes instaladas ya coinciden con estos ajustes.",
+      "driftSummary": "Tus imágenes instaladas están desactualizadas: {{add}} por añadir, {{remove}} por quitar, {{refresh}} por actualizar.",
       "setCode": "Código de colección",
       "setPlaceholder": "por ej. fin",
       "language": "Idioma de la imagen",
@@ -234,7 +239,10 @@
     "actions": {
       "estimate": "Descarga de presupuesto",
       "estimating": "Analizando el catálogo de Scryfall…",
+      "estimateCurated": "Recalcular tamaño",
+      "estimatingCurated": "Calculando el tamaño…",
       "install": "Instalar selección",
+      "sync": "Sincronizar imágenes",
       "cancel": "Cancelar operación",
       "resume": "Reanudar operación",
       "retry": "Inténtalo de nuevo",
@@ -248,11 +256,18 @@
       "removeAll": "Eliminar todos los elementos visuales sin conexión"
     },
     "estimate": {
-      "title": "Análisis de la instantánea de Scryfall"
+      "title": "Análisis de la instantánea de Scryfall",
+      "progressTitle": "Progreso del análisis del catálogo",
+      "curatedTitle": "Descarga estimada",
+      "headroomWarning": "Esto supera el espacio libre que informa este navegador. Aun así puedes instalarlo: si se queda sin espacio, la descarga puede reanudarse y conserva todo lo ya guardado.",
+      "evictionWarning": "Este navegador no ha concedido almacenamiento persistente, por lo que puede borrar estas imágenes cuando al dispositivo le quede poco espacio.",
+      "progress": "{{downloaded}} MB de {{total}} MB leídos · {{records}} cartas analizadas · {{images}} imágenes encontradas"
     },
     "metrics": {
       "assetRecords": "Registros de activos",
-      "uniqueObjects": "Objetos únicos",
+      "estimatedImageBytes": "Tamaño estimado de descarga",
+      "availableBytes": "Espacio libre disponible",
+      "uniqueObjects": "Imágenes por descargar",
       "logicalImageBytes": "Bytes de imagen lógica",
       "uniqueImageBytes": "Bytes de imagen únicos",
       "shardCount": "fragmentos",
@@ -265,6 +280,7 @@
         "cancel_requested": "Cancelación solicitada",
         "finalizing": "Finalizando",
         "failed": "Error: listo para reanudar",
+        "terminated": "Detenido: esta operación no se puede reanudar",
         "completed": "Completado",
         "cancelled": "Cancelado"
       },
@@ -273,6 +289,7 @@
       "packs": "Paquetes: {{current}} de {{total}}",
       "objects": "Imágenes: {{current}} de {{total}}",
       "scanNote": "El total aumenta mientras se analiza la instantánea de Scryfall. Las imágenes ya descargadas permanecen locales y se omiten al reanudar.",
+      "estimateNote": "El total quedó fijado al iniciar esta descarga. Las imágenes ya descargadas permanecen locales y se omiten al reanudar.",
       "finalizing": "Finalizando la instalación del catálogo"
     },
     "status": {
@@ -285,7 +302,15 @@
       "installed": "Paquetes instalados",
       "noneInstalled": "No hay paquetes visuales instalados.",
       "upgradeAvailable": "Actualización disponible",
-      "receiptRoot": "Raíz del recibo: {{root}}"
+      "receiptRoot": "Instalado desde la instantánea: {{root}}",
+      "membershipDigest": "Huella de la selección: {{digest}}",
+      "storageUsage": "Almacenamiento usado por este sitio",
+      "persistence": "Protección contra borrado",
+      "persistenceState": {
+        "persisted": "Concedida: este navegador conservará estas imágenes",
+        "best_effort": "No concedida: este navegador puede borrar estas imágenes cuando quede poco espacio",
+        "unsupported": "Este navegador no lo indica"
+      }
     },
     "verification": {
       "revision": "Revisión instalada verificada {{revision}}.",
@@ -312,15 +337,23 @@
       "remove_failed": "No se pudo eliminar un archivo de caché",
       "catalog_state": "No se pudo recuperar el estado del catálogo histórico"
     },
+    "packs": {
+      "core": "Reverso de carta",
+      "complete": "Todas las imágenes actuales de cartas en inglés",
+      "curated": "Una imagen por carta",
+      "printing": "Impresiones de {{set}}",
+      "locale": "Impresiones de {{set}} ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "Esta versión de la aplicación no admite catálogos visuales sin conexión.",
       "unauthorized": "Esta ventana no puede administrar catálogos visuales sin conexión.",
       "unavailable": "La gestión del catálogo visual sin conexión no está disponible temporalmente.",
       "invalid_input": "La selección de catálogo solicitada no es válida.",
-      "conflict": "Los paquetes instalados dependen de esta selección.",
+      "conflict": "Esta selección está desactualizada: el catálogo o tus preferencias de ilustración cambiaron después de hacerla. Vuelve a calcularla e inténtalo de nuevo.",
       "cancelled": "La operación fue cancelada.",
       "network": "La solicitud de red del catálogo falló.",
       "storage": "El catálogo no se pudo escribir en el almacenamiento del dispositivo.",
+      "insufficient_storage": "No hay espacio suficiente: esta descarga necesita al menos {{required}}, pero solo hay {{available}} libres.",
       "trust": "No se puede confiar en la respuesta del catálogo.",
       "emit": "La aplicación no pudo informar el progreso del catálogo.",
       "internal": "No se pudo completar la operación del catálogo."

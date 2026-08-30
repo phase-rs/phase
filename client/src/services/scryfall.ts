@@ -97,6 +97,51 @@ export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
   return printingsDataPromise;
 }
 
+/**
+ * True when both card-data maps are already in memory, so a caller that needs
+ * them can run without a fetch.
+ *
+ * `scryfall-data.json` is 36,748,238 bytes and `scryfall-printings.json` is
+ * 39,541,979 bytes, and the two loaders above memoize at module scope — so this
+ * is the difference between a free read and a 76 MB download-and-parse. It
+ * exists so a PASSIVE surface can decline to be what triggers that: the
+ * visual-pack panel measures curated drift on mount, and a user who opens
+ * Preferences without having rendered a card must not pay for a measurement
+ * they never asked for.
+ *
+ * WHICH SESSIONS REACH THE RESIDENT STATE, precisely, because the two maps are
+ * NOT loaded together and the conjunction is much narrower than "has drawn a
+ * card":
+ *
+ *  - `scryfall-data.json` is the common one. `fetchCardImageAsset` and
+ *    `fetchCardImageAssetByOracleId` each await `loadScryfallData` and nothing
+ *    else, so any rendered card image has it.
+ *  - `scryfall-printings.json` is reached only on CONDITIONAL paths: the
+ *    placeholder fallback in `resolveImageAssetWithPrintingFallback` (only when
+ *    the resolved art is a placeholder), `resolveStrategyInBackground` in
+ *    `useCardImage` (only inside the `artChain.length > 0` branch), and the
+ *    deck-pinned lookup (only when a `sourcePrinting` is set).
+ *
+ * So a user on the DEFAULT empty art chain, with no overrides and no
+ * `(SET) NUM` annotations in their decks, can play a whole game and still have
+ * the printings map unloaded — and this stays false for the life of the tab.
+ * That user is not exotic; `PackSelector` ships a `curatedDefaultNote` written
+ * for exactly them. For them the drift badge does not appear on mount, and
+ * becomes available only when something else loads printings or when they
+ * select the curated option, which plans a membership and loads both.
+ *
+ * The conjunction is still the right test and must NOT be widened:
+ * `planCuratedPack` needs both maps, so either one missing means measuring
+ * would fetch. Its failure direction is the safe one — it declines to measure
+ * rather than declining to protect.
+ *
+ * Same shape as `isLocaleArtReady`: a synchronous predicate over this module's
+ * own resolved state, doubling as the caller's "do I need to load?" gate.
+ */
+export function isCardDataResident(): boolean {
+  return scryfallDataResolved !== null && printingsDataResolved !== null;
+}
+
 function loadTokenImagesData(): Promise<TokenImagesDataMap | null> {
   if (!tokenImagesDataPromise) {
     tokenImagesDataPromise = fetch(__SCRYFALL_TOKEN_IMAGES_URL__)

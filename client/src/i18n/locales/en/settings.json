@@ -229,6 +229,11 @@
       "printing": "English set printings",
       "locale": "Localized set printings",
       "complete": "All current English card images",
+      "curated": "One image per card",
+      "curatedNote": "One image per card, chosen by your Card Art Preferences on the Visual tab. Change them there and this selection follows.",
+      "curatedDefaultNote": "One image per card. You have no card art rules, so this downloads each card's default art — add rules under Card Art Preferences on the Visual tab to pick different printings.",
+      "driftNone": "Your installed images already match these settings.",
+      "driftSummary": "Your installed images are out of date: {{add}} to add, {{remove}} to remove, {{refresh}} to refresh.",
       "setCode": "Set code",
       "setPlaceholder": "e.g. fin",
       "language": "Image language",
@@ -238,7 +243,10 @@
     "actions": {
       "estimate": "Scan catalog and estimate",
       "estimating": "Scanning Scryfall catalog…",
+      "estimateCurated": "Recalculate size",
+      "estimatingCurated": "Working out the size…",
       "install": "Install selection",
+      "sync": "Sync images",
       "cancel": "Cancel operation",
       "resume": "Resume operation",
       "retry": "Try again",
@@ -251,9 +259,18 @@
       "removeComplete": "Remove complete catalog",
       "removeAll": "Remove all offline visuals"
     },
-    "estimate": { "title": "Scryfall snapshot scan" },
+    "estimate": {
+      "title": "Scryfall snapshot scan",
+      "progressTitle": "Catalog scan progress",
+      "curatedTitle": "Download estimate",
+      "headroomWarning": "This is larger than the free space this browser reports. You can still install it — if space runs out the download can be resumed, and it keeps everything already saved.",
+      "evictionWarning": "This browser has not granted persistent storage, so it may delete these images when the device runs low on space.",
+      "progress": "{{downloaded}} MB of {{total}} MB read · {{records}} cards scanned · {{images}} images found"
+    },
     "metrics": {
       "assetRecords": "Image records",
+      "estimatedImageBytes": "Estimated download size",
+      "availableBytes": "Free space available",
       "uniqueObjects": "Images to download",
       "logicalImageBytes": "Image bytes (known after download)",
       "uniqueImageBytes": "Unique image bytes (known after download)",
@@ -267,6 +284,7 @@
         "cancel_requested": "Cancellation requested",
         "finalizing": "Finalizing",
         "failed": "Failed — ready to resume",
+        "terminated": "Stopped — this operation cannot be resumed",
         "completed": "Completed",
         "cancelled": "Cancelled"
       },
@@ -275,6 +293,7 @@
       "packs": "Packs: {{current}} of {{total}}",
       "objects": "Images: {{current}} of {{total}}",
       "scanNote": "The total grows as the Scryfall snapshot is scanned. Completed images are stored locally and skipped when you resume.",
+      "estimateNote": "The total was fixed when this download started. Completed images are stored locally and skipped when you resume.",
       "finalizing": "Finalizing offline image installation"
     },
     "status": {
@@ -287,7 +306,15 @@
       "installed": "Installed packs",
       "noneInstalled": "No visual packs are installed.",
       "upgradeAvailable": "Upgrade available"
-      ,"receiptRoot": "Installed from snapshot: {{root}}"
+      ,"receiptRoot": "Installed from snapshot: {{root}}",
+      "membershipDigest": "Membership fingerprint: {{digest}}",
+      "storageUsage": "Storage used by this site",
+      "persistence": "Eviction protection",
+      "persistenceState": {
+        "persisted": "Granted — this browser will keep these images",
+        "best_effort": "Not granted — this browser may delete these images when the device runs low on space",
+        "unsupported": "This browser will not say"
+      }
     },
     "verification": {
       "revision": "Verified installed revision {{revision}}.",
@@ -312,15 +339,23 @@
       "remove_failed": "A cache file could not be removed",
       "catalog_state": "Historical catalog state could not be reclaimed"
     },
+    "packs": {
+      "core": "Card back",
+      "complete": "All current English card images",
+      "curated": "One image per card",
+      "printing": "{{set}} printings",
+      "locale": "{{set}} printings ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "This app version does not support offline visual catalogs.",
       "unauthorized": "This window is not allowed to manage offline visual catalogs.",
       "unavailable": "Offline image downloads are unavailable in this browser.",
       "invalid_input": "The requested catalog selection is invalid.",
-      "conflict": "Installed packs depend on this selection.",
+      "conflict": "This selection is out of date: the catalog or your art preferences changed after it was made. Estimate it again, then retry.",
       "cancelled": "The operation was cancelled.",
       "network": "The Scryfall catalog or image download failed.",
       "storage": "The catalog could not be written to device storage.",
+      "insufficient_storage": "Not enough free space: this download needs at least {{required}}, and only {{available}} is free.",
       "trust": "The downloaded image could not be verified locally.",
       "emit": "The app could not report catalog progress.",
       "internal": "The catalog operation could not be completed."

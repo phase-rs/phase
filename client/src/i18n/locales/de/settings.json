@@ -225,6 +225,11 @@
       "printing": "Englische Satzdrucke",
       "locale": "Lokalisierte Satzdrucke",
       "complete": "Kompletter aktueller Katalog",
+      "curated": "Ein Bild pro Karte",
+      "curatedNote": "Ein Bild pro Karte, ausgewählt durch deine Karten-Artwork-Einstellungen im Reiter „Grafik“. Änderst du sie dort, folgt diese Auswahl.",
+      "curatedDefaultNote": "Ein Bild pro Karte. Du hast keine Artwork-Regeln festgelegt, daher wird das Standardbild jeder Karte geladen — füge unter „Karten-Artwork-Einstellungen“ im Reiter „Grafik“ Regeln hinzu, um andere Drucke zu wählen.",
+      "driftNone": "Deine installierten Bilder entsprechen bereits diesen Einstellungen.",
+      "driftSummary": "Deine installierten Bilder sind veraltet: {{add}} hinzuzufügen, {{remove}} zu entfernen, {{refresh}} zu erneuern.",
       "setCode": "Code festlegen",
       "setPlaceholder": "z. B. fin",
       "language": "Bildsprache",
@@ -234,7 +239,10 @@
     "actions": {
       "estimate": "Geschätzter Download",
       "estimating": "Scryfall-Katalog wird durchsucht…",
+      "estimateCurated": "Größe neu berechnen",
+      "estimatingCurated": "Größe wird ermittelt…",
       "install": "Auswahl installieren",
+      "sync": "Bilder synchronisieren",
       "cancel": "Vorgang abbrechen",
       "resume": "Betrieb wieder aufnehmen",
       "retry": "Versuchen Sie es erneut",
@@ -248,11 +256,18 @@
       "removeAll": "Entfernen Sie alle Offline-Visuals"
     },
     "estimate": {
-      "title": "Backend-Schätzung und Abhängigkeitsschließung"
+      "title": "Backend-Schätzung und Abhängigkeitsschließung",
+      "progressTitle": "Fortschritt des Katalog-Scans",
+      "curatedTitle": "Geschätzter Download",
+      "headroomWarning": "Das ist größer als der freie Speicher, den dieser Browser meldet. Du kannst trotzdem installieren — geht der Platz aus, lässt sich der Download fortsetzen und behält alles bereits Gespeicherte.",
+      "evictionWarning": "Dieser Browser hat keinen dauerhaften Speicher gewährt und kann diese Bilder löschen, wenn der Gerätespeicher knapp wird.",
+      "progress": "{{downloaded}} MB von {{total}} MB gelesen · {{records}} Karten durchsucht · {{images}} Bilder gefunden"
     },
     "metrics": {
       "assetRecords": "Vermögensaufzeichnungen",
-      "uniqueObjects": "Einzigartige Objekte",
+      "estimatedImageBytes": "Geschätzte Downloadgröße",
+      "availableBytes": "Verfügbarer freier Speicher",
+      "uniqueObjects": "Herunterzuladende Bilder",
       "logicalImageBytes": "Logische Bildbytes",
       "uniqueImageBytes": "Eindeutige Bildbytes",
       "shardCount": "Scherben",
@@ -265,6 +280,7 @@
         "cancel_requested": "Stornierung beantragt",
         "finalizing": "Finalisierung",
         "failed": "Fehlgeschlagen – bereit zur Fortsetzung",
+        "terminated": "Gestoppt – dieser Vorgang kann nicht fortgesetzt werden",
         "completed": "Abgeschlossen",
         "cancelled": "Abgesagt"
       },
@@ -273,6 +289,7 @@
       "packs": "Pakete: {{current}} von {{total}}",
       "objects": "Bilder: {{current}} von {{total}}",
       "scanNote": "Die Gesamtzahl wächst beim Durchsuchen des Scryfall-Snapshots. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
+      "estimateNote": "Die Gesamtzahl stand beim Start dieses Downloads fest. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "finalizing": "Die Installation des Katalogs wird abgeschlossen"
     },
     "status": {
@@ -285,7 +302,15 @@
       "installed": "Installierte Pakete",
       "noneInstalled": "Es sind keine visuellen Pakete installiert.",
       "upgradeAvailable": "Upgrade verfügbar",
-      "receiptRoot": "Empfangsstamm: {{root}}"
+      "receiptRoot": "Installiert aus Snapshot: {{root}}",
+      "membershipDigest": "Zusammenstellungs-Fingerabdruck: {{digest}}",
+      "storageUsage": "Von dieser Website belegter Speicher",
+      "persistence": "Schutz vor Löschung",
+      "persistenceState": {
+        "persisted": "Gewährt – dieser Browser behält diese Bilder",
+        "best_effort": "Nicht gewährt – dieser Browser kann diese Bilder löschen, wenn der Speicher knapp wird",
+        "unsupported": "Dieser Browser macht dazu keine Angabe"
+      }
     },
     "verification": {
       "revision": "Verifizierte installierte Revision {{revision}}.",
@@ -312,15 +337,23 @@
       "remove_failed": "Eine Cache-Datei konnte nicht entfernt werden",
       "catalog_state": "Der historische Katalogstatus konnte nicht wiederhergestellt werden"
     },
+    "packs": {
+      "core": "Kernvisualisierungen",
+      "complete": "Kompletter aktueller Katalog",
+      "curated": "Ein Bild pro Karte",
+      "printing": "{{set}}-Drucke",
+      "locale": "{{set}}-Drucke ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "Diese App-Version unterstützt keine visuellen Offline-Kataloge.",
       "unauthorized": "In diesem Fenster dürfen keine Offline-Visualkataloge verwaltet werden.",
       "unavailable": "Die Offline-Verwaltung des visuellen Katalogs ist vorübergehend nicht verfügbar.",
       "invalid_input": "Die angeforderte Katalogauswahl ist ungültig.",
-      "conflict": "Installierte Pakete hängen von dieser Auswahl ab.",
+      "conflict": "Diese Auswahl ist veraltet: Der Katalog oder deine Artwork-Einstellungen haben sich seitdem geändert. Berechne sie erneut und versuche es noch einmal.",
       "cancelled": "Der Vorgang wurde abgebrochen.",
       "network": "Die Katalognetzwerkanforderung ist fehlgeschlagen.",
       "storage": "Der Katalog konnte nicht in den Gerätespeicher geschrieben werden.",
+      "insufficient_storage": "Nicht genügend freier Speicherplatz: Dieser Download benötigt mindestens {{required}}, aber nur {{available}} sind frei.",
       "trust": "Der Katalogantwort konnte nicht vertraut werden.",
       "emit": "Die App konnte den Katalogfortschritt nicht melden.",
       "internal": "Der Katalogvorgang konnte nicht abgeschlossen werden."

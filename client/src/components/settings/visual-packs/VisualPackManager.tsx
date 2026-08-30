@@ -1,11 +1,14 @@
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type {
   RemovalSelector,
   VisualPackErrorKind,
 } from "../../../services/visualPacks/types.ts";
+import { formatByteSize } from "../../../utils/byteSize.ts";
 import { ConfirmDialog } from "../../ui/ConfirmDialog.tsx";
 import { OperationProgress } from "./OperationProgress.tsx";
+import { packLabel, shortDigest } from "./packLabels.ts";
 import { PackSelector } from "./PackSelector.tsx";
 import { PackStatus } from "./PackStatus.tsx";
 import {
@@ -23,16 +26,20 @@ function errorKey(kind: VisualPackErrorKind): string {
     case "cancelled": return "visualPacks.errors.cancelled";
     case "network": return "visualPacks.errors.network";
     case "storage": return "visualPacks.errors.storage";
+    case "insufficient_storage": return "visualPacks.errors.insufficient_storage";
     case "trust": return "visualPacks.errors.trust";
     case "emit": return "visualPacks.errors.emit";
     case "internal": return "visualPacks.errors.internal";
   }
 }
 
-function selectorLabel(selector: RemovalSelector): string {
+/** What the confirmation sentence names, in the words the rest of the panel
+ *  uses for the same packs — a removal prompt is the last place to quote wire
+ *  identities at somebody. */
+function selectorLabel(selector: RemovalSelector, t: TFunction<"settings">): string {
   switch (selector.kind) {
-    case "packs": return selector.packIds.join(", ");
-    case "complete": return selector.rootSha256;
+    case "packs": return selector.packIds.map((id) => packLabel(id, t)).join(", ");
+    case "complete": return shortDigest(selector.rootSha256);
     case "all_installed": return "";
   }
 }
@@ -61,9 +68,21 @@ function confirmationKeys(confirmation: FrozenConfirmation): { title: string; me
 }
 
 export function VisualPackManager() {
-  const { t } = useTranslation("settings");
+  const { t, i18n } = useTranslation("settings");
   const manager = useVisualPackManager();
   const confirmationCopy = manager.confirmation ? confirmationKeys(manager.confirmation) : null;
+  const refusal = manager.actionErrorRefusal;
+  // One message for both places the panel reports a failed action. The figures
+  // are the backend's own — the ones its pre-flight gate compared — and only
+  // their unit and separators are decided here.
+  const actionErrorMessage = manager.actionError
+    ? t(errorKey(manager.actionError) as never, refusal
+      ? {
+          required: formatByteSize(refusal.requiredBytes, i18n.language),
+          available: formatByteSize(refusal.availableBytes, i18n.language),
+        }
+      : {})
+    : null;
 
   return (
     <section className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.18)] backdrop-blur-md sm:p-5">
@@ -118,7 +137,7 @@ export function VisualPackManager() {
             )}
             {manager.actionError && (
               <div role="alert" className="rounded-[12px] border border-rose-400/25 bg-rose-400/[0.08] px-3 py-2 text-sm text-rose-100">
-                <p>{t(errorKey(manager.actionError) as never)}</p>
+                <p>{actionErrorMessage}</p>
                 {manager.actionErrorDetail && (
                   <code className="mt-1 block select-text break-words font-mono text-xs text-rose-100/90">
                     {manager.actionErrorDetail}
@@ -128,14 +147,19 @@ export function VisualPackManager() {
             )}
             <PackSelector
               summary={manager.summary}
+              curatedSelector={manager.curatedSelector}
+              curatedDrift={manager.curatedDrift}
               estimate={manager.estimate}
+              estimateProgress={manager.estimateProgress}
               pendingActions={manager.pendingActions}
               durableMutationActive={manager.durableMutationActive}
+              onSelectCurated={manager.resolveCuratedSelector}
               onEstimate={manager.estimateInstall}
               onInstall={manager.install}
             />
             <PackStatus
               summary={manager.summary}
+              curatedDrift={manager.curatedDrift}
               verification={manager.verification?.value ?? null}
               removal={manager.removal}
               pendingActions={manager.pendingActions}
@@ -150,7 +174,7 @@ export function VisualPackManager() {
         )}
         {manager.actionError && manager.availability.kind !== "ready" && (
           <div role="alert" className="text-sm text-rose-200">
-            <p>{t(errorKey(manager.actionError) as never)}</p>
+            <p>{actionErrorMessage}</p>
             {manager.actionErrorDetail && (
               <code className="mt-1 block select-text break-words font-mono text-xs text-rose-100/90">
                 {manager.actionErrorDetail}
@@ -163,7 +187,7 @@ export function VisualPackManager() {
         open={manager.confirmation != null}
         title={confirmationCopy ? t(confirmationCopy.title as never) : ""}
         message={manager.confirmation && confirmationCopy
-          ? t(confirmationCopy.message as never, { selection: selectorLabel(manager.confirmation.selector) })
+          ? t(confirmationCopy.message as never, { selection: selectorLabel(manager.confirmation.selector, t) })
           : ""}
         confirmLabel={confirmationCopy ? t(confirmationCopy.action as never) : ""}
         onConfirm={manager.confirmRemoval}

@@ -1,24 +1,52 @@
-import { useMemo, useState } from "react";
+import type { TFunction } from "i18next";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useSetCatalog } from "../../../hooks/useSetSymbols.ts";
 import {
   packId,
   type CatalogSummary,
+  type CatalogScanProgress,
+  type CuratedDrift,
+  type CuratedInstallSelector,
   type InstallEstimate,
   type InstallSelector,
 } from "../../../services/visualPacks/types.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { formatByteSize } from "../../../utils/byteSize.ts";
+import { packLabel } from "./packLabels.ts";
+import { curatedDriftState } from "./useVisualPackManager.ts";
 
 const IMAGE_LOCALES = ["de", "es", "fr", "it", "pt"] as const;
 const MUTATION_ACTIONS = new Set(["install", "cancel", "resume", "repair", "remove"]);
 type ImageLocale = (typeof IMAGE_LOCALES)[number];
-type SelectorKind = "core" | "printing" | "locale" | "complete";
+type SelectorKind = "core" | "printing" | "locale" | "complete" | "curated";
+
+const SELECTOR_KINDS = ["curated", "core", "printing", "locale", "complete"] as const;
+
+const CURATED = packId("curated");
+
+/**
+ * How long a curated selection settles before its estimate is requested.
+ *
+ * Curated is the one selector estimated without a click, so a user flicking
+ * through the radios would otherwise start a membership plan for every one
+ * they pass through. Short enough that a deliberate choice reads as immediate.
+ */
+const CURATED_ESTIMATE_DEBOUNCE_MS = 200;
+
+/** The catalog-scan figures, which only a bulk selector has. */
+const BULK_METRICS = ["assetRecords", "uniqueObjects", "logicalImageBytes", "uniqueImageBytes", "shardCount", "shardBytes"] as const;
 
 interface PackSelectorProps {
   summary: CatalogSummary;
+  curatedSelector: CuratedInstallSelector | null;
+  curatedDrift: CuratedDrift | null;
   estimate: { selector: InstallSelector; value: InstallEstimate } | null;
+  estimateProgress: CatalogScanProgress | null;
   pendingActions: ReadonlySet<string>;
   durableMutationActive: boolean;
+  onSelectCurated(): void;
   onEstimate(selector: InstallSelector): void;
   onInstall(selector: InstallSelector): void;
 }
@@ -27,7 +55,13 @@ function normalizedSet(value: string): string {
   return value.trim().normalize("NFC").toLowerCase();
 }
 
-function validSelector(kind: SelectorKind, setInput: string, language: ImageLocale, summary: CatalogSummary): InstallSelector | null {
+function validSelector(
+  kind: SelectorKind,
+  setInput: string,
+  language: ImageLocale,
+  summary: CatalogSummary,
+  curated: CuratedInstallSelector | null,
+): InstallSelector | null {
   const set = normalizedSet(setInput);
   try {
     switch (kind) {
@@ -41,10 +75,65 @@ function validSelector(kind: SelectorKind, setInput: string, language: ImageLoca
         return { kind: "locale", language, set };
       case "complete":
         return { kind: "complete", rootSha256: summary.catalogRoot };
+      case "curated":
+        // Not composed here. The digest names a membership only the planner
+        // can compute, so the backend resolves it and this option merely
+        // reports what came back — null until it has.
+        return curated;
     }
   } catch {
     return null;
   }
+}
+
+/** A `shardBytes` figure, which is a byte count when it is a number at all and
+ *  the literal `"unknown"` when the selector reads no shard. */
+function formatCatalogSize(value: string, locale: string): string {
+  const bytes = Number(value);
+  return Number.isFinite(bytes) ? formatByteSize(bytes, locale) : value;
+}
+
+/**
+ * The figures worth showing for the selector this estimate was taken for.
+ *
+ * The list is selector-aware because the bulk figures are not merely
+ * uninteresting for a curated pack, they are FALSE about it: it reads no shard
+ * of the Scryfall archive, so "Metadata files: 0" and "Compressed Scryfall
+ * catalog: unknown" describe an archive it never opens. Its own two record
+ * counts are the same number by construction, so one of them is shown.
+ *
+ * The download size and the free space the browser reports are common to every
+ * selector — they are the two numbers the Install decision is actually made on.
+ */
+function estimateRows(
+  estimate: InstallEstimate,
+  curated: boolean,
+  locale: string,
+  t: TFunction<"settings">,
+): Array<{ key: string; label: string; value: string }> {
+  const count = new Intl.NumberFormat(locale);
+  const rows = curated
+    ? [{ key: "uniqueObjects", label: t("visualPacks.metrics.uniqueObjects"), value: count.format(Number(estimate.uniqueObjects)) }]
+    : BULK_METRICS.map((metric) => ({
+      key: metric,
+      label: t(`visualPacks.metrics.${metric}`),
+      value: metric === "shardBytes" ? formatCatalogSize(estimate[metric], locale) : estimate[metric],
+    }));
+  rows.push({
+    key: "estimatedImageBytes",
+    label: t("visualPacks.metrics.estimatedImageBytes"),
+    value: formatByteSize(estimate.estimatedImageBytes, locale),
+  });
+  // Omitted rather than shown as zero when the browser will not say: `null`
+  // means unknown, and rendering it as a figure would read as "no space left".
+  if (estimate.storage.availableBytes !== null) {
+    rows.push({
+      key: "availableBytes",
+      label: t("visualPacks.metrics.availableBytes"),
+      value: formatByteSize(estimate.storage.availableBytes, locale),
+    });
+  }
+  return rows;
 }
 
 function sameSelector(left: InstallSelector, right: InstallSelector): boolean {
@@ -58,30 +147,111 @@ function sameSelector(left: InstallSelector, right: InstallSelector): boolean {
       return right.kind === "locale" && left.language === right.language && left.set === right.set;
     case "complete":
       return right.kind === "complete" && left.rootSha256 === right.rootSha256;
+    case "curated":
+      return right.kind === "curated" && left.membershipDigest === right.membershipDigest;
   }
 }
 
-export function PackSelector({ summary, estimate, pendingActions, durableMutationActive, onEstimate, onInstall }: PackSelectorProps) {
-  const { t } = useTranslation("settings");
+export function PackSelector({ summary, curatedSelector, curatedDrift, estimate, estimateProgress, pendingActions, durableMutationActive, onSelectCurated, onEstimate, onInstall }: PackSelectorProps) {
+  const { t, i18n } = useTranslation("settings");
   const { catalog } = useSetCatalog();
+  const artChain = usePreferencesStore((state) => state.artChain);
   const [kind, setKind] = useState<SelectorKind>("core");
   const [setInput, setSetInput] = useState("");
   const [language, setLanguage] = useState<ImageLocale>("de");
+  const curated = kind === "curated";
   const selector = useMemo(
-    () => validSelector(kind, setInput, language, summary),
-    [kind, language, setInput, summary],
+    () => validSelector(kind, setInput, language, summary, curatedSelector),
+    [curatedSelector, kind, language, setInput, summary],
   );
   const matchingEstimate = selector && estimate && sameSelector(selector, estimate.selector)
     && estimate.value.catalogRoot === summary.catalogRoot
     && estimate.value.installedRevision === summary.installedRevision
     ? estimate.value
     : null;
+  // Built on the panel's own language rather than the runtime default, like
+  // every other figure this component renders.
+  const number = new Intl.NumberFormat(i18n.language);
+  const estimatePending = pendingActions.has("estimate");
+  /** Curated chosen, but the backend has not (or could not) say what it means. */
+  const curatedUnresolved = curated && !curatedSelector;
+  /**
+   * What may be said about the installed curated pack, from the one predicate
+   * that decides it for the badge as well.
+   *
+   * `unknown` is "say nothing" and covers every case with nothing measured
+   * behind it: nothing installed, the read not finished, the read failed, or
+   * the card data not resident so the backend declined to load 76 MB to answer.
+   */
+  const driftState = curatedDriftState(summary, curatedDrift);
+  /**
+   * Whether there is a curated pack on disk — which is what makes the primary
+   * action a sync rather than an install.
+   *
+   * Read from the SUMMARY, never from whether drift has been measured. Those
+   * are different questions with a reachable, permanent gap between them: with
+   * a curated pack installed and the card data not resident, a
+   * `curatedSelector()` that rejects (the card-data fetch failing makes
+   * `planMembership` throw `network`) leaves both the selector and the drift
+   * null for the life of the tab — and the button would have offered to
+   * "install" a pack already installed, for ever. The summary answers it for
+   * free and cannot fail.
+   */
+  const curatedInstalled = summary.installedPacks.some((entry) => entry.packId === CURATED);
+  const autoEstimatedRef = useRef<string | null>(null);
+
+  // Ask what "curated" means the moment it is chosen, and not before: the
+  // answer costs a membership plan, and every other option is composed from
+  // what is already on screen.
+  useEffect(() => {
+    if (curated && !curatedSelector) onSelectCurated();
+  }, [curated, curatedSelector, onSelectCurated]);
+
+  // Estimate on selection, for curated only. Curated opens no bulk stream, so
+  // there is nothing for a user to consent to before it runs and no reason to
+  // make them press a button whose label promises a catalog scan; every other
+  // selector reads the multi-gigabyte archive and must stay a deliberate act.
+  //
+  // Keyed on the digest AND the catalog the estimate would be bound to,
+  // because the hook discards an estimate taken against a superseded one — so
+  // a summary change has to be able to ask again, while a re-render must not.
+  useEffect(() => {
+    if (!curated || !curatedSelector) return;
+    // Already on screen: nothing to ask for. The key is deliberately NOT
+    // cleared here — leaving the option does that, and doing it in both places
+    // was measured to be redundant (no probe could kill this line).
+    if (matchingEstimate) return;
+    // The estimate slot is single-occupancy: `estimateInstall` refuses a
+    // second request outright. Asking now would be dropped silently and leave
+    // Install disabled with no estimate and no error, so wait for the slot
+    // instead — `estimatePending` is a dependency, so freeing it re-runs this.
+    if (estimatePending) return;
+    const key = `${curatedSelector.membershipDigest}:${summary.catalogRoot}:${summary.installedRevision}`;
+    // Asked for exactly this and got nothing back, so the request failed
+    // rather than raced. Retrying on a timer would hammer a failing backend at
+    // five requests a second; the user retries with the button, or by
+    // reselecting the option, which clears this below.
+    if (autoEstimatedRef.current === key) return;
+    const timer = setTimeout(() => {
+      autoEstimatedRef.current = key;
+      onEstimate(curatedSelector);
+    }, CURATED_ESTIMATE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [curated, curatedSelector, estimatePending, matchingEstimate, onEstimate, summary]);
+
+  // Leaving the option forgets that we asked. A bulk estimate taken in the
+  // meantime displaces the curated one from `estimate`, so coming back finds
+  // no matching estimate and must be free to ask again — and re-asking is
+  // nearly free, because the membership plan behind it is memoized.
+  useEffect(() => {
+    if (!curated) autoEstimatedRef.current = null;
+  }, [curated]);
 
   return (
     <fieldset className="flex flex-col gap-4 rounded-[16px] border border-white/10 bg-slate-950/20 p-3 sm:p-4">
       <legend className="px-1 text-sm font-semibold text-slate-100">{t("visualPacks.selector.title")}</legend>
       <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={t("visualPacks.selector.title")}>
-        {(["core", "printing", "locale", "complete"] as const).map((option) => (
+        {SELECTOR_KINDS.map((option) => (
           <label
             key={option}
             className={`flex min-h-14 cursor-pointer items-center gap-3 rounded-[14px] border px-3 py-3 text-sm transition-colors focus-within:ring-2 focus-within:ring-sky-300 ${
@@ -133,33 +303,110 @@ export function PackSelector({ summary, estimate, pendingActions, durableMutatio
       {kind === "complete" && (
         <p className="break-all text-xs text-slate-400">{t("visualPacks.selector.currentRoot", { root: summary.catalogRoot })}</p>
       )}
+      {curated && (
+        // Two sentences, because the honest one depends on whether the user
+        // has actually made the setting this pack follows. An empty art chain
+        // is the DEFAULT, and it selects each card's canonical art — copy that
+        // said "your configured set priority" would credit the user with a
+        // choice they have not made.
+        <p className="text-xs text-slate-400">
+          {t(artChain.length === 0 ? "visualPacks.selector.curatedDefaultNote" : "visualPacks.selector.curatedNote")}
+        </p>
+      )}
+      {/* What a Sync would change, in the three categories the backend counts.
+          THREE, not two: a Scryfall re-scan moves a `sourceUrl` under an
+          unchanged asset key, so the membership differs while both key sets are
+          identical — an add/remove-only report would say "0 to add, 0 to
+          remove" beside a live Sync button and read as a bug. Nothing here
+          starts a download; only pressing Sync does. */}
+      {/* `curatedDrift &&` is the type narrowing, not a second condition:
+          `driftState` is `unknown` whenever it is null. */}
+      {curated && driftState !== "unknown" && curatedDrift && (
+        <p className={`text-xs ${driftState === "current" ? "text-slate-400" : "text-amber-200"}`}>
+          {driftState === "current"
+            ? t("visualPacks.selector.driftNone")
+            : t("visualPacks.selector.driftSummary", {
+              add: number.format(curatedDrift.add),
+              remove: number.format(curatedDrift.remove),
+              refresh: number.format(curatedDrift.refresh),
+            })}
+        </p>
+      )}
       {!selector && (kind === "printing" || kind === "locale") && (
         <p role="alert" className="text-xs text-rose-300">{t("visualPacks.selector.invalidSet")}</p>
       )}
       {matchingEstimate && (
-        <section aria-label={t("visualPacks.estimate.title")} className="rounded-[14px] border border-sky-400/20 bg-sky-400/[0.06] p-3 text-xs text-sky-100">
-          <h4 className="mb-2 font-semibold text-slate-100">{t("visualPacks.estimate.title")}</h4>
+        <section
+          aria-label={t(curated ? "visualPacks.estimate.curatedTitle" : "visualPacks.estimate.title")}
+          className="rounded-[14px] border border-sky-400/20 bg-sky-400/[0.06] p-3 text-xs text-sky-100"
+        >
+          <h4 className="mb-2 font-semibold text-slate-100">
+            {t(curated ? "visualPacks.estimate.curatedTitle" : "visualPacks.estimate.title")}
+          </h4>
           <ol className="mb-3 list-decimal space-y-1 pl-5">
-            {matchingEstimate.packIds.map((id) => <li key={id} className="break-all">{id}</li>)}
+            {matchingEstimate.packIds.map((id) => <li key={id} className="break-all">{packLabel(id, t)}</li>)}
           </ol>
           <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 tabular-nums">
-            {(["assetRecords", "uniqueObjects", "logicalImageBytes", "uniqueImageBytes", "shardCount", "shardBytes"] as const).map((metric) => (
-              <div className="contents" key={metric}>
-                <dt>{t(`visualPacks.metrics.${metric}`)}</dt>
-                <dd className="break-all font-mono text-slate-100">{matchingEstimate[metric]}</dd>
+            {estimateRows(matchingEstimate, curated, i18n.language, t).map((row) => (
+              <div className="contents" key={row.key}>
+                <dt>{row.label}</dt>
+                <dd className="break-all font-mono text-slate-100">{row.value}</dd>
               </div>
             ))}
           </dl>
+          {/* A warning, never a veto: the projection behind it is an
+              order-of-magnitude figure from six samples per rung, and running
+              out of quota mid-download is the milder failure — it classifies
+              as `storage`, which is retryable, and a resume skips everything
+              already cached. See `InstallEstimate.headroom`. */}
+          {matchingEstimate.headroom === "insufficient" && (
+            <p className="mt-3 text-amber-200">{t("visualPacks.estimate.headroomWarning")}</p>
+          )}
+          {matchingEstimate.storage.persistence === "best_effort" && (
+            <p className="mt-2 text-amber-200">{t("visualPacks.estimate.evictionWarning")}</p>
+          )}
+        </section>
+      )}
+      {estimateProgress && (
+        <section aria-label={t("visualPacks.estimate.progressTitle")} className="rounded-[14px] border border-sky-400/20 bg-sky-400/[0.06] p-3 text-xs text-sky-100">
+          <h4 className="mb-2 font-semibold text-slate-100">{t("visualPacks.estimate.progressTitle")}</h4>
+          <progress
+            value={estimateProgress.compressedBytesRead}
+            max={estimateProgress.compressedBytesTotal}
+            className="h-2 w-full overflow-hidden rounded-full accent-sky-400"
+          />
+          <p className="mt-2 tabular-nums text-sky-100/80">
+            {t("visualPacks.estimate.progress", {
+              downloaded: number.format(Math.floor(estimateProgress.compressedBytesRead / (1024 * 1024))),
+              total: number.format(Math.ceil(estimateProgress.compressedBytesTotal / (1024 * 1024))),
+              records: number.format(estimateProgress.recordsScanned),
+              images: number.format(estimateProgress.assetRecords),
+            })}
+          </p>
         </section>
       )}
       <div className="flex flex-wrap gap-2 border-t border-white/8 pt-3">
         <button
           type="button"
-          disabled={!selector || pendingActions.has("estimate")}
-          onClick={() => selector && onEstimate(selector)}
+          // Enabled with no selector when curated's resolution FAILED, because
+          // that is the only state in which the panel has an error on screen
+          // and every control beneath it dead: the selector is null, so both
+          // buttons would be disabled and the only undiscoverable way out is
+          // to pick another option and come back. Here it retries the thing
+          // that failed.
+          disabled={(!selector && !curatedUnresolved) || estimatePending || pendingActions.has("curated")}
+          onClick={() => {
+            if (curatedUnresolved) onSelectCurated();
+            else if (selector) onEstimate(selector);
+          }}
           className="min-h-11 rounded-[12px] border border-sky-400/50 bg-sky-400/10 px-4 py-2 text-sm font-medium text-sky-50 transition-colors hover:bg-sky-400/18 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-sky-300"
         >
-          {pendingActions.has("estimate") ? t("visualPacks.actions.estimating") : t("visualPacks.actions.estimate")}
+          {/* Curated scans no catalog, so it says neither "Scan catalog" nor
+              "Scanning": the estimate has already run on selection and this is
+              only the way back to it. */}
+          {curated
+            ? t(estimatePending ? "visualPacks.actions.estimatingCurated" : "visualPacks.actions.estimateCurated")
+            : t(estimatePending ? "visualPacks.actions.estimating" : "visualPacks.actions.estimate")}
         </button>
         <button
           type="button"
@@ -167,7 +414,11 @@ export function PackSelector({ summary, estimate, pendingActions, durableMutatio
           onClick={() => selector && onInstall(selector)}
           className="min-h-11 rounded-[12px] border border-emerald-400/50 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-50 transition-colors hover:bg-emerald-400/18 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-emerald-300"
         >
-          {t("visualPacks.actions.install")}
+          {/* "Sync" once a curated pack is on disk: the same request, but the
+              act is bringing an existing pack up to date rather than adding one.
+              `driftState` says by HOW MUCH and may be `unknown`; whether there
+              is anything to sync at all is a question the summary answers. */}
+          {t(curated && curatedInstalled ? "visualPacks.actions.sync" : "visualPacks.actions.install")}
         </button>
       </div>
     </fieldset>

@@ -1,16 +1,50 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type {
-  CatalogSummary,
-  PackId,
-  RemovalResponse,
-  VerificationResponse,
+import {
+  packId,
+  type CatalogSummary,
+  type CuratedDrift,
+  type InstalledPack,
+  type PackId,
+  type RemovalResponse,
+  type VerificationResponse,
 } from "../../../services/visualPacks/types.ts";
-import { hasPendingVisualPackMutation } from "./useVisualPackManager.ts";
+import { formatByteSize } from "../../../utils/byteSize.ts";
+import { packLabel, shortDigest } from "./packLabels.ts";
+import { curatedDriftState, hasPendingVisualPackMutation } from "./useVisualPackManager.ts";
+
+const CURATED = packId("curated");
+
+/**
+ * Whether an installed pack is behind what the panel could install now.
+ *
+ * For every bulk pack that is a catalog-identity question, and the comparison
+ * below answers it: the pack was installed from a Scryfall snapshot, and a
+ * newer snapshot means a newer pack.
+ *
+ * The curated pack is not in that namespace at all. Its `catalogRoot` IS its
+ * membership digest, so `entry.catalogRoot !== summary.catalogRoot` compares a
+ * membership fingerprint against a snapshot hash. Those are sha256s of two
+ * different things, so short of a collision they differ for every curated
+ * install, always: the badge it lit was a constant, and a constant badge tells
+ * a user nothing except to distrust the badge.
+ *
+ * The question that means the same thing for curated is drift, and it is asked
+ * through the ONE predicate every surface asks it through — a badge and a
+ * selector that spelled it out separately had already disagreed about
+ * `installedDigest: null`, which means nothing is installed rather than
+ * everything has changed. `unknown` shows nothing: an unmeasured claim here
+ * would be a claim that a multi-gigabyte download is outstanding.
+ */
+function upgradeAvailable(entry: InstalledPack, summary: CatalogSummary, drift: CuratedDrift | null): boolean {
+  if (entry.packId !== CURATED) return entry.catalogRoot !== summary.catalogRoot;
+  return curatedDriftState(summary, drift) === "drifted";
+}
 
 interface PackStatusProps {
   summary: CatalogSummary;
+  curatedDrift: CuratedDrift | null;
   verification: VerificationResponse | null;
   removal: RemovalResponse | null;
   pendingActions: ReadonlySet<string>;
@@ -24,6 +58,7 @@ interface PackStatusProps {
 
 export function PackStatus({
   summary,
+  curatedDrift,
   verification,
   removal,
   pendingActions,
@@ -34,7 +69,7 @@ export function PackStatus({
   onRemoveComplete,
   onRemoveAll,
 }: PackStatusProps) {
-  const { t } = useTranslation("settings");
+  const { t, i18n } = useTranslation("settings");
   const [selected, setSelected] = useState<Set<PackId>>(new Set());
   const selectedIds = summary.installedPacks.map((entry) => entry.packId).filter((id) => selected.has(id));
   const mutationPending = hasPendingVisualPackMutation(pendingActions);
@@ -42,8 +77,30 @@ export function PackStatus({
     <section className="flex flex-col gap-3 rounded-[16px] border border-white/10 p-3">
       <h4 className="text-sm font-semibold text-slate-100">{t("visualPacks.status.title")}</h4>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs text-slate-300">
-        <dt>{t("visualPacks.status.root")}</dt><dd className="break-all font-mono">{summary.catalogRoot}</dd>
+        <dt>{t("visualPacks.status.root")}</dt><dd className="break-all font-mono">{shortDigest(summary.catalogRoot)}</dd>
         <dt>{t("visualPacks.status.revision")}</dt><dd className="break-all font-mono">{summary.installedRevision}</dd>
+        {/* Omitted rather than shown as zero when the browser will not say —
+            `null` means unknown, and a "0 B" here would read as "nothing
+            stored". Same rule PackSelector applies to `availableBytes`.
+
+            The figure is the ORIGIN's usage, not this feature's: it counts
+            every byte this site keeps, offline images among them. The label
+            says site, and must keep saying site — attributing all of it to the
+            visual packs would be the display layer inventing a breakdown the
+            engine never measured. */}
+        {summary.storage.usageBytes !== null && (
+          <>
+            <dt>{t("visualPacks.status.storageUsage")}</dt>
+            <dd className="tabular-nums">{formatByteSize(summary.storage.usageBytes, i18n.language)}</dd>
+          </>
+        )}
+        {/* Rendered for all three arms, `unsupported` included: "this browser
+            will not say" is an answer a user managing offline downloads needs,
+            and dropping the row would let silence read as a grant. */}
+        <dt>{t("visualPacks.status.persistence")}</dt>
+        <dd className={summary.storage.persistence === "best_effort" ? "text-amber-300" : undefined}>
+          {t(`visualPacks.status.persistenceState.${summary.storage.persistence}`)}
+        </dd>
       </dl>
       <fieldset className="flex flex-col gap-2">
         <legend className="text-xs font-semibold text-slate-300">{t("visualPacks.status.installed")}</legend>
@@ -60,10 +117,15 @@ export function PackStatus({
               })}
             />
             <span className="min-w-0 break-all">
-              {entry.packId}
-              {entry.catalogRoot !== summary.catalogRoot && <span className="ml-2 text-amber-300">{t("visualPacks.status.upgradeAvailable")}</span>}
+              {packLabel(entry.packId, t)}
+              {upgradeAvailable(entry, summary, curatedDrift) && <span className="ml-2 text-amber-300">{t("visualPacks.status.upgradeAvailable")}</span>}
               <span className="mt-1 block text-slate-500">
-                {t("visualPacks.status.receiptRoot", { root: entry.catalogRoot })}
+                {/* Curated is stored under its own membership digest, so
+                    "installed from snapshot" would name a Scryfall snapshot it
+                    was never built from. */}
+                {entry.packId === CURATED
+                  ? t("visualPacks.status.membershipDigest", { digest: shortDigest(entry.catalogRoot) })
+                  : t("visualPacks.status.receiptRoot", { root: shortDigest(entry.catalogRoot) })}
               </span>
             </span>
           </label>

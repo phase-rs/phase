@@ -225,6 +225,11 @@
       "printing": "Nadruki zestawów angielskich",
       "locale": "Zlokalizowane wydruki setów",
       "complete": "Uzupełnij aktualny katalog",
+      "curated": "Jeden obraz na kartę",
+      "curatedNote": "Jeden obraz na kartę, wybrany według twoich Preferencji grafiki kart w zakładce Grafika. Zmień je tam, a ten wybór podąży za nimi.",
+      "curatedDefaultNote": "Jeden obraz na kartę. Nie masz żadnych reguł grafiki, więc pobierana jest domyślna grafika każdej karty — dodaj reguły w Preferencjach grafiki kart w zakładce Grafika, aby wybrać inne wydania.",
+      "driftNone": "Zainstalowane obrazy już odpowiadają tym ustawieniom.",
+      "driftSummary": "Zainstalowane obrazy są nieaktualne: {{add}} do dodania, {{remove}} do usunięcia, {{refresh}} do odświeżenia.",
       "setCode": "Ustaw kod",
       "setPlaceholder": "np. płetwa",
       "language": "Język obrazu",
@@ -234,7 +239,10 @@
     "actions": {
       "estimate": "Oszacuj pobranie",
       "estimating": "Skanowanie katalogu Scryfall…",
+      "estimateCurated": "Przelicz rozmiar",
+      "estimatingCurated": "Obliczanie rozmiaru…",
       "install": "Zainstaluj wybór",
+      "sync": "Synchronizuj obrazy",
       "cancel": "Anuluj operację",
       "resume": "Wznów działanie",
       "retry": "Spróbuj ponownie",
@@ -248,11 +256,18 @@
       "removeAll": "Usuń wszystkie wizualizacje offline"
     },
     "estimate": {
-      "title": "Oszacowanie zaplecza i zamknięcie zależności"
+      "title": "Oszacowanie zaplecza i zamknięcie zależności",
+      "progressTitle": "Postęp skanowania katalogu",
+      "curatedTitle": "Szacowane pobieranie",
+      "headroomWarning": "To więcej niż wolne miejsce zgłaszane przez tę przeglądarkę. Nadal możesz zainstalować — jeśli miejsca zabraknie, pobieranie można wznowić i zachowuje wszystko, co już zapisano.",
+      "evictionWarning": "Ta przeglądarka nie przyznała trwałego magazynu, więc może usunąć te obrazy, gdy na urządzeniu zabraknie miejsca.",
+      "progress": "Odczytano {{downloaded}} MB z {{total}} MB · przeskanowano {{records}} kart · znaleziono {{images}} obrazów"
     },
     "metrics": {
       "assetRecords": "Zapisy majątku",
-      "uniqueObjects": "Unikalne obiekty",
+      "estimatedImageBytes": "Szacowany rozmiar pobierania",
+      "availableBytes": "Dostępne wolne miejsce",
+      "uniqueObjects": "Obrazy do pobrania",
       "logicalImageBytes": "Bajty obrazu logicznego",
       "uniqueImageBytes": "Unikalne bajty obrazu",
       "shardCount": "Odłamki",
@@ -265,6 +280,7 @@
         "cancel_requested": "Zażądano anulowania",
         "finalizing": "Finalizowanie",
         "failed": "Niepowodzenie — można wznowić",
+        "terminated": "Zatrzymano — tej operacji nie można wznowić",
         "completed": "Ukończono",
         "cancelled": "Anulowano"
       },
@@ -273,6 +289,7 @@
       "packs": "Pakiety: {{current}} z {{total}}",
       "objects": "Obrazy: {{current}} z {{total}}",
       "scanNote": "Łączna liczba rośnie podczas skanowania migawki Scryfall. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
+      "estimateNote": "Łączna liczba została ustalona przy starcie tego pobierania. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
       "finalizing": "Kończenie instalacji katalogu"
     },
     "status": {
@@ -285,7 +302,15 @@
       "installed": "Zainstalowane pakiety",
       "noneInstalled": "Nie są zainstalowane żadne pakiety wizualne.",
       "upgradeAvailable": "Dostępna aktualizacja",
-      "receiptRoot": "Katalog główny paragonu: {{root}}"
+      "receiptRoot": "Zainstalowano z migawki: {{root}}",
+      "membershipDigest": "Odcisk zestawu: {{digest}}",
+      "storageUsage": "Pamięć zajęta przez tę witrynę",
+      "persistence": "Ochrona przed usunięciem",
+      "persistenceState": {
+        "persisted": "Przyznana — ta przeglądarka zachowa te obrazy",
+        "best_effort": "Nieprzyznana — ta przeglądarka może usunąć te obrazy, gdy zabraknie miejsca",
+        "unsupported": "Ta przeglądarka tego nie podaje"
+      }
     },
     "verification": {
       "revision": "Zweryfikowano zainstalowaną wersję {{revision}}.",
@@ -312,15 +337,23 @@
       "remove_failed": "Nie można usunąć pliku pamięci podręcznej",
       "catalog_state": "Nie udało się odzyskać historycznego stanu katalogu"
     },
+    "packs": {
+      "core": "Podstawowe wizualizacje",
+      "complete": "Uzupełnij aktualny katalog",
+      "curated": "Jeden obraz na kartę",
+      "printing": "Wydania {{set}}",
+      "locale": "Wydania {{set}} ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "Ta wersja aplikacji nie obsługuje katalogów wizualnych offline.",
       "unauthorized": "W tym oknie nie można zarządzać katalogami wizualnymi offline.",
       "unavailable": "Wizualne zarządzanie katalogiem w trybie offline jest tymczasowo niedostępne.",
       "invalid_input": "Żądany wybór katalogu jest nieprawidłowy.",
-      "conflict": "Zainstalowane pakiety zależą od tego wyboru.",
+      "conflict": "Ten wybór jest nieaktualny: katalog lub twoje preferencje grafiki zmieniły się od jego dokonania. Oblicz go ponownie i spróbuj jeszcze raz.",
       "cancelled": "Operację odwołano.",
       "network": "Żądanie sieciowe katalogu nie powiodło się.",
       "storage": "Nie można zapisać katalogu w pamięci urządzenia.",
+      "insufficient_storage": "Za mało wolnego miejsca: to pobieranie wymaga co najmniej {{required}}, a wolne jest tylko {{available}}.",
       "trust": "Nie można ufać odpowiedzi katalogu.",
       "emit": "Aplikacja nie mogła zgłosić postępu katalogu.",
       "internal": "Nie można ukończyć operacji na katalogu."

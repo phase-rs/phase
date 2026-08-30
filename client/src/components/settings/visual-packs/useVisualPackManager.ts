@@ -3,11 +3,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { loadVisualPackBackend } from "../../../services/platform.ts";
 import {
   VisualPackBackendError,
+  VisualPackStorageRefusalError,
   type VisualPackBackend,
 } from "../../../services/visualPacks/backend.ts";
 import {
   compareRevisions,
+  packId,
   type CatalogSummary,
+  type CatalogScanProgress,
+  type CuratedDrift,
+  type CuratedInstallSelector,
   type InstallEstimate,
   type InstallSelector,
   type OperationStatus,
@@ -17,10 +22,12 @@ import {
   type RemovalResponse,
   type RemovalSelector,
   type RevisionEvent,
+  type StorageRefusal,
   type VerificationMode,
   type VerificationResponse,
   type VisualPackErrorKind,
 } from "../../../services/visualPacks/types.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 
 export type ManagerAvailability =
   | { kind: "loading" }
@@ -50,24 +57,61 @@ interface BoundVerification {
 interface ProgressOutcome {
   identity: string | null;
   failed: boolean;
+  /**
+   * A cancellation this panel WITNESSED — a `cancelled` progress event, or its
+   * own `cancel()` call returning a cancelled status.
+   *
+   * Deliberately not the same fact as a `cancelled` operation RECORD, which is
+   * what `terminal` below is set from. `run()` writes `state: "cancelled"` for
+   * a non-retryable failure as well as for a user cancel, so a record read back
+   * through `operationStatus()` says the operation ended and nothing about why.
+   * This one is only ever set where the ending is known to be the user's.
+   */
+  cancelled: boolean;
   terminal: boolean;
 }
 
 export interface VisualPackManagerState {
   availability: ManagerAvailability;
   summary: CatalogSummary | null;
+  /**
+   * The curated selector as the backend resolved it, or null until the user
+   * picks that option.
+   *
+   * Resolved on demand rather than alongside the summary because it costs a
+   * membership plan, and most sessions never open this panel to install the
+   * curated pack.
+   */
+  curatedSelector: CuratedInstallSelector | null;
+  /**
+   * How far the installed curated pack has drifted from what the stored
+   * preferences name now, or null when there is nothing to say.
+   *
+   * Null covers three different situations and the panel must treat all three
+   * the same way — say nothing: no curated pack is installed, the read has not
+   * finished, or it failed. A drift claim the panel has not measured is a
+   * claim about a multi-gigabyte download, so it is never guessed.
+   */
+  curatedDrift: CuratedDrift | null;
   estimate: BoundEstimate | null;
+  estimateProgress: CatalogScanProgress | null;
   operation: OperationStatus | null;
   progress: ProgressEvent | null;
   verification: BoundVerification | null;
   removal: RemovalResponse | null;
   actionError: VisualPackErrorKind | null;
+  /** Verbatim diagnostic text from the platform, for the `<code>` line. Null
+   *  when the failure carries structured state instead — see `errorDetail`. */
   actionErrorDetail: string | null;
+  /** The figures behind an `insufficient_storage` refusal, for the panel to
+   *  format. Null for every other kind. */
+  actionErrorRefusal: StorageRefusal | null;
   pendingActions: ReadonlySet<string>;
   durableMutationActive: boolean;
   confirmation: FrozenConfirmation | null;
   retry(): void;
   refresh(): void;
+  resolveCuratedSelector(): void;
   estimateInstall(selector: InstallSelector): void;
   install(selector: InstallSelector): void;
   cancel(): void;
@@ -83,18 +127,71 @@ export interface VisualPackManagerState {
 
 const MUTATION_ACTIONS: ReadonlySet<string> = new Set(["install", "cancel", "resume", "repair", "remove"]);
 const MAX_BUFFERED_START_OPERATIONS = 8;
+const CURATED = packId("curated");
 
 export function hasPendingVisualPackMutation(pending: ReadonlySet<string>): boolean {
   return [...pending].some((entry) => MUTATION_ACTIONS.has(entry));
+}
+
+/**
+ * What the panel may say about the installed curated pack.
+ *
+ * `unknown` is "say nothing", and it covers three states the display must treat
+ * identically: no curated pack is installed, the drift has not been measured,
+ * or measuring it failed. It is NEVER "no drift" — that is a measurement, and
+ * this is its absence.
+ */
+export type CuratedDriftState = "unknown" | "current" | "drifted";
+
+/**
+ * The single authority on what curated drift means, for every surface.
+ *
+ * Three sites spelled this comparison out independently and had already
+ * diverged: the badge read `installedDigest !== membershipDigest`, which is
+ * TRUE for `installedDigest: null` — the backend's way of saying nothing is
+ * installed — while the selector read that same null as "nothing to report".
+ * `InstallEstimate.headroom` lives on the engine so that a verdict has one
+ * definition; this is the same discipline one layer down, and three hand-written
+ * copies are what produced the disagreement.
+ *
+ * Compared against the digest the SUMMARY reports installed, not against
+ * `drift.installedDigest`. For a curated pack the installed pack's
+ * `catalogRoot` IS its membership digest, and the summary is the authority on
+ * what is on disk right now, while a drift is a measurement that may have been
+ * taken before an install or a removal moved it.
+ */
+export function curatedDriftState(summary: CatalogSummary, drift: CuratedDrift | null): CuratedDriftState {
+  const installed = summary.installedPacks.find((entry) => entry.packId === CURATED);
+  if (!drift || !installed) return "unknown";
+  return installed.catalogRoot === drift.membershipDigest ? "current" : "drifted";
 }
 
 function errorKind(error: unknown): VisualPackErrorKind {
   return error instanceof VisualPackBackendError ? error.kind : "internal";
 }
 
+/**
+ * The verbatim line shown beneath the translated sentence.
+ *
+ * A `VisualPackBackendError` is asked for its `detail` rather than its
+ * `message`, because those answer different questions: `message` falls back to
+ * a developer-facing default so a stack trace is never blank, and rendering
+ * that default would put untranslated English underneath a translated sentence
+ * in a seven-language panel. Every kind already HAS a translated sentence, so
+ * an error that supplied no detail has nothing further to say.
+ *
+ * That covers a storage refusal, whose figures ride on `refusal` instead, and
+ * the curated planner's `network` — but as a rule rather than as a list, so a
+ * kind added later cannot leak English by forgetting to join it.
+ */
 function errorDetail(error: unknown): string | null {
+  if (error instanceof VisualPackBackendError) return error.detail;
   if (error instanceof Error) return error.message || null;
   return typeof error === "string" && error ? error : null;
+}
+
+function errorRefusal(error: unknown): StorageRefusal | null {
+  return error instanceof VisualPackStorageRefusalError ? error.refusal : null;
 }
 
 function selectorIdentity(selector: InstallSelector): string {
@@ -107,11 +204,20 @@ function selectorIdentity(selector: InstallSelector): string {
       return `locale:${selector.language}:${selector.set}`;
     case "complete":
       return `complete:${selector.rootSha256}`;
+    case "curated":
+      return `curated:${selector.membershipDigest}`;
   }
 }
 
+/**
+ * The name the backend stamps on `InstallEstimate.selector` — its pack id.
+ *
+ * For most selectors that is the identity string, but the two root-bearing
+ * kinds carry a root the pack id does not, so their identity would never match
+ * and their estimate would be discarded as stale rather than rendered.
+ */
 function signedSelectorName(selector: InstallSelector): string {
-  return selector.kind === "complete" ? "complete" : selectorIdentity(selector);
+  return selector.kind === "complete" || selector.kind === "curated" ? selector.kind : selectorIdentity(selector);
 }
 
 function operationIsTerminal(status: OperationStatus): boolean {
@@ -149,32 +255,38 @@ export function useVisualPackManager(): VisualPackManagerState {
   const summaryRef = useRef<CatalogSummary | null>(null);
   const operationRef = useRef<OperationStatus | null>(null);
   const progressRef = useRef<ProgressEvent | null>(null);
-  const progressOutcomeRef = useRef<ProgressOutcome>({ identity: null, failed: false, terminal: false });
+  const progressOutcomeRef = useRef<ProgressOutcome>({ identity: null, failed: false, cancelled: false, terminal: false });
   const startEventBufferRef = useRef({ active: false, events: new Map<string, ProgressEvent>() });
   const pendingRef = useRef(new Set<string>());
   const listenersRef = useRef<Array<() => void>>([]);
   const initializedRef = useRef(false);
-  const requestRef = useRef({ initialize: 0, summary: 0, estimate: 0, verify: 0 });
+  const requestRef = useRef({ initialize: 0, summary: 0, estimate: 0, verify: 0, curated: 0, drift: 0 });
 
   const [availability, setAvailability] = useState<ManagerAvailability>({ kind: "loading" });
   const [summary, setSummary] = useState<CatalogSummary | null>(null);
+  const [curatedSelector, setCuratedSelector] = useState<CuratedInstallSelector | null>(null);
+  const [curatedDrift, setCuratedDrift] = useState<CuratedDrift | null>(null);
   const [estimate, setEstimate] = useState<BoundEstimate | null>(null);
+  const [estimateProgress, setEstimateProgress] = useState<CatalogScanProgress | null>(null);
   const [operation, setOperation] = useState<OperationStatus | null>(null);
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [verification, setVerification] = useState<BoundVerification | null>(null);
   const [removal, setRemoval] = useState<RemovalResponse | null>(null);
   const [actionError, setActionError] = useState<VisualPackErrorKind | null>(null);
   const [actionErrorDetail, setActionErrorDetail] = useState<string | null>(null);
+  const [actionErrorRefusal, setActionErrorRefusal] = useState<StorageRefusal | null>(null);
   const [pendingActions, setPendingActions] = useState<ReadonlySet<string>>(new Set());
   const [confirmation, setConfirmation] = useState<FrozenConfirmation | null>(null);
 
   const clearActionError = useCallback(() => {
     setActionError(null);
     setActionErrorDetail(null);
+    setActionErrorRefusal(null);
   }, []);
   const reportActionError = useCallback((error: unknown) => {
     setActionError(errorKind(error));
     setActionErrorDetail(errorDetail(error));
+    setActionErrorRefusal(errorRefusal(error));
   }, []);
 
   const beginPending = useCallback((value: string): boolean => {
@@ -255,11 +367,27 @@ export function useVisualPackManager(): VisualPackManagerState {
     if (outcome.identity !== identity) {
       outcome.identity = identity;
       outcome.failed = false;
+      outcome.cancelled = false;
       outcome.terminal = false;
     }
-    if (outcome.failed || outcome.terminal) return;
+    // An ending this panel WITNESSED is final. A merely terminal status is not,
+    // and the difference decides whether a stopped operation reads as the
+    // user's cancel or as the failure it was: `run()` writes
+    // `state: "cancelled"` for a non-retryable failure too, so a record read
+    // back through `operationStatus()` cannot say which happened. The `failed`
+    // event is the sole carrier of WHY, and on the resume path it arrives AFTER
+    // `trackStarted` has read the terminated record and set `terminal` —
+    // dropping it there rendered a conflict as a deliberate cancel, with no
+    // diagnostic anywhere on screen.
+    //
+    // `completed` is excluded from the reopening because that ending is
+    // unambiguous: `run()`'s catch leaves an already-completed record alone, so
+    // it can emit `failed` carrying one, and a finished install must not flip.
+    if (outcome.failed || outcome.cancelled) return;
+    if (outcome.terminal && (event.phase !== "failed" || event.operation.state === "completed")) return;
     if (operationRank(event.operation) < operationRank(selected)) return;
     if (event.phase === "failed") outcome.failed = true;
+    if (event.phase === "cancelled") outcome.cancelled = true;
     if (progressIsTerminal(event)) outcome.terminal = true;
     operationRef.current = event.operation;
     progressRef.current = event;
@@ -268,7 +396,12 @@ export function useVisualPackManager(): VisualPackManagerState {
     if (event.phase === "failed") {
       if (event.error) {
         setActionError(event.error);
+        // All three move together or the kind and the payload describe
+        // different failures: `actionErrorRefusal`'s contract is "null for
+        // every other kind", and a progress event carries a kind with no error
+        // object to source a payload from.
         setActionErrorDetail(null);
+        setActionErrorRefusal(null);
       }
     } else {
       clearActionError();
@@ -301,6 +434,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       packTotal: 0,
       packsPromoted: 0,
       objectTotal: 0,
+      objectEstimate: null,
       objectsPromoted: 0,
       completedRevision: null,
     };
@@ -311,7 +445,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     buffer.events.clear();
     operationRef.current = pending;
     progressRef.current = null;
-    progressOutcomeRef.current = { identity, failed: false, terminal: false };
+    progressOutcomeRef.current = { identity, failed: false, cancelled: false, terminal: false };
     setOperation(pending);
     setProgress(null);
     if (buffered) handleProgress(buffered);
@@ -395,6 +529,8 @@ export function useVisualPackManager(): VisualPackManagerState {
       requests.summary += 1;
       requests.estimate += 1;
       requests.verify += 1;
+      requests.curated += 1;
+      requests.drift += 1;
       for (const unlisten of listeners.splice(0)) unlisten();
     };
   }, [initialize]);
@@ -402,6 +538,85 @@ export function useVisualPackManager(): VisualPackManagerState {
   const retry = useCallback(() => {
     if (!initializedRef.current) void initialize();
   }, [initialize]);
+
+  // Two of the three values `planCuratedPack()` memoizes on, read as VALUES
+  // rather than through `getState()` so a change re-runs the effect below.
+  //
+  // NOT for an art rule edited on the Visual tab: that tab and this one are
+  // mutually exclusive branches of the same modal, so editing a rule there has
+  // already unmounted this panel. What earns the dependency is
+  // `ResetAllFooter` -> `resetAllPreferences`, which renders on EVERY tab and
+  // replaces both of these references while this panel is mounted — without the
+  // dependency the panel would go on reporting drift against art rules the user
+  // has just cleared.
+  const artChain = usePreferencesStore((state) => state.artChain);
+  const artOverrides = usePreferencesStore((state) => state.artOverrides);
+  const curatedInstalled = summary?.installedPacks.some((entry) => entry.packId === CURATED) ?? false;
+  const installedRevisionValue = summary?.installedRevision;
+
+  /**
+   * Recompute curated drift whenever the membership it compares against moves.
+   *
+   * Gated on a curated pack BEING INSTALLED, and that gate is what makes it
+   * affordable: `curatedDrift()` plans the whole membership from the card data
+   * and then reads every installed curated row, and a session that never
+   * installed one is buying an answer it has no question for. A user who HAS
+   * installed one has already committed to a multi-gigabyte download, so
+   * telling them it has gone stale is worth a plan they effectively already
+   * paid for. `planCuratedPack()` memoizes on THREE values — these two plus a
+   * serialization of every saved deck's stored text — so a hit is cheap but not
+   * free: the third component is a `localStorage` read and a `JSON.stringify`
+   * on every call, hit or miss.
+   *
+   * It RECOMPUTES; it never downloads. A preference toggle producing a delta is
+   * the whole point, and the delta is what the user then presses Sync on.
+   *
+   * THIS READ NEVER FETCHES. `curatedDrift()` answers `null` rather than loading
+   * the card data behind a membership plan — 76 MB across two files — and a
+   * null renders as "say nothing".
+   *
+   * Scoped to this read, and not a claim about mounting: mounting DOES reach
+   * `loadVisualPackBackend()` -> `create()`, whose pending loop calls `run()`
+   * for every `downloading` or `finalizing` record, which resumes an interrupted
+   * download and plans a membership on the way. That is a user-initiated
+   * operation continuing, which is correct, and it is why the sentence has to
+   * be about the effect rather than about the mount.
+   * `curatedSelector` is a dependency for that reason: resolving a selector is
+   * a user-initiated action that goes through the same planner and therefore
+   * loads that data, so its arrival is the moment a previously unmeasurable
+   * drift becomes free to measure. The panel asks again; the backend, which
+   * owns the question, decides again.
+   *
+   * A failure leaves the drift null and reports NOTHING. Nobody asked for this
+   * read, and an alert beside the install controls would be attributed to
+   * whatever the user did last; the same failure is surfaced WITH an error on
+   * the path a user does ask for, `resolveCuratedSelector`.
+   *
+   * The saved decks are the third input `planCuratedPack()` keys on and are not
+   * watched, and that costs nothing reachable: they are edited in the deck
+   * builder, which is not interactive behind this modal, so a deck cannot
+   * change while this panel is mounted. `savedDeckText()` reads `localStorage`
+   * directly and there is no deck store in `src/stores/` to subscribe to
+   * anyway. Were one to change, the digest the backend installs would still be
+   * right — `start()` replans — so the worst case is a stale display, not a
+   * divergence.
+   */
+  useEffect(() => {
+    const backend = backendRef.current;
+    if (!backend || !curatedInstalled) {
+      setCuratedDrift(null);
+      return;
+    }
+    const generation = ++requestRef.current.drift;
+    void backend.curatedDrift().then(
+      (drift) => {
+        if (mountedRef.current && generation === requestRef.current.drift) setCuratedDrift(drift);
+      },
+      () => {
+        if (mountedRef.current && generation === requestRef.current.drift) setCuratedDrift(null);
+      },
+    );
+  }, [artChain, artOverrides, curatedInstalled, curatedSelector, installedRevisionValue]);
 
   const refresh = useCallback(async () => {
     const backend = backendRef.current;
@@ -418,17 +633,47 @@ export function useVisualPackManager(): VisualPackManagerState {
     }
   }, [acceptSummary, beginPending, clearActionError, endPending, reportActionError]);
 
+  /**
+   * Ask the backend what "curated" currently means.
+   *
+   * Its own pending key, deliberately not one of `MUTATION_ACTIONS`: resolving
+   * a digest reads preferences and card data and writes nothing, so it must
+   * not disable Install or Remove while it runs.
+   */
+  const resolveCuratedSelector = useCallback(async () => {
+    const backend = backendRef.current;
+    if (!backend || !beginPending("curated")) return;
+    clearActionError();
+    const generation = ++requestRef.current.curated;
+    try {
+      const selector = await backend.curatedSelector();
+      if (mountedRef.current && generation === requestRef.current.curated) setCuratedSelector(selector);
+    } catch (error) {
+      if (mountedRef.current && generation === requestRef.current.curated) reportActionError(error);
+    } finally {
+      if (mountedRef.current) endPending("curated");
+    }
+  }, [beginPending, clearActionError, endPending, reportActionError]);
+
   const estimateInstall = useCallback(async (selector: InstallSelector) => {
     const backend = backendRef.current;
     const current = summaryRef.current;
     if (!backend || !current) return;
+    // The generation bump follows the slot check, and the order is load-bearing:
+    // bumping first would let a request this function then REFUSES invalidate
+    // the one already running, so the in-flight estimate's own `finally` would
+    // no longer recognise itself and would leave the scan-progress section on
+    // screen for ever. A refused request must change nothing.
+    if (!beginPending("estimate")) return;
     const generation = ++requestRef.current.estimate;
     const root = current.catalogRoot;
     const revision = current.installedRevision;
-    if (!beginPending("estimate")) return;
     clearActionError();
+    setEstimateProgress(null);
     try {
-      const value = await backend.estimateInstall(selector);
+      const value = await backend.estimateInstall(selector, (progress) => {
+        if (mountedRef.current && generation === requestRef.current.estimate) setEstimateProgress(progress);
+      });
       const latest = summaryRef.current;
       if (
         !mountedRef.current
@@ -444,6 +689,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     } catch (error) {
       if (mountedRef.current && generation === requestRef.current.estimate) reportActionError(error);
     } finally {
+      if (mountedRef.current && generation === requestRef.current.estimate) setEstimateProgress(null);
       if (mountedRef.current) endPending("estimate");
     }
   }, [beginPending, clearActionError, endPending, reportActionError]);
@@ -466,6 +712,11 @@ export function useVisualPackManager(): VisualPackManagerState {
         progressOutcomeRef.current = {
           identity: `${status.operationId}:${status.catalogRoot}`,
           failed: false,
+          // A status READ BACK, so the ending is not witnessed: a `cancelled`
+          // record here is equally a user cancel and a terminated failure, and
+          // claiming the former would suppress the `failed` event that is
+          // about to say which.
+          cancelled: false,
           terminal: true,
         };
       }
@@ -497,7 +748,11 @@ export function useVisualPackManager(): VisualPackManagerState {
     clearActionError();
     beginStartEventBuffer();
     try {
-      const result = await backend.start({ kind: "install", selector });
+      const result = await backend.start({
+        kind: "install",
+        selector,
+        objectEstimate: Number(bound.value.assetRecords),
+      });
       if (!mountedRef.current) return;
       if (result.status === "healthy") {
         clearStartEventBuffer();
@@ -535,6 +790,10 @@ export function useVisualPackManager(): VisualPackManagerState {
           progressOutcomeRef.current = {
             identity: `${status.operationId}:${status.catalogRoot}`,
             failed: false,
+            // Witnessed: this branch only runs because THIS panel asked for the
+            // cancellation and the backend confirmed it. Nothing arriving
+            // afterwards may re-report it as a failure.
+            cancelled: true,
             terminal: true,
           };
         }
@@ -559,8 +818,12 @@ export function useVisualPackManager(): VisualPackManagerState {
     const selectedProgress = progressRef.current;
     if (
       !backend
+      // `finalizing` too: a failure there leaves a record `create()` re-runs on
+      // the next launch, so it is resumable and OperationProgress offers the
+      // button. A guard that admitted only `downloading` would render a live
+      // control that silently did nothing.
       || !selected
-      || selected.state !== "downloading"
+      || (selected.state !== "downloading" && selected.state !== "finalizing")
       || progressRef.current?.phase !== "failed"
       || !beginPending("resume")
     ) return;
@@ -569,6 +832,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     progressOutcomeRef.current = {
       identity: `${selected.operationId}:${selected.catalogRoot}`,
       failed: false,
+      cancelled: false,
       terminal: false,
     };
     try {
@@ -577,7 +841,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       if (result.status === "healthy") {
         operationRef.current = null;
         progressRef.current = null;
-        progressOutcomeRef.current = { identity: null, failed: false, terminal: false };
+        progressOutcomeRef.current = { identity: null, failed: false, cancelled: false, terminal: false };
         setOperation(null);
         setProgress(null);
         await refreshSummary();
@@ -625,6 +889,40 @@ export function useVisualPackManager(): VisualPackManagerState {
     }
   }, [beginPending, clearActionError, endPending, reportActionError]);
 
+  /**
+   * Repair the named packs. DELIBERATELY NOT GATED ON STORAGE, unlike install.
+   *
+   * `install` sends an `objectEstimate` the user has seen, and `reserveStorage`
+   * refuses the request when even the cheapest reading of that figure cannot
+   * fit. A repair reaches none of that: `reserveStorage`'s size branch is
+   * gated on `request.kind === "install"`, and `StartRequest`'s repair arm
+   * carries pack ids only.
+   *
+   * Producing a figure for it is not free, and it is not uniformly expensive
+   * either — the honest shape is per selector. `reserveStorage` substitutes its
+   * own count for CURATED alone (`curatedFetchCount`, no catalog scan); every
+   * other selector keeps the caller's `objectEstimate`, and the only way to
+   * produce one for them is `countScryfallAssets` reading the whole compressed
+   * Scryfall archive. So a curated repair could in principle be gated cheaply —
+   * except that `start()` filters it out entirely, leaving nothing to gate —
+   * while a bulk repair could be gated only by putting a multi-gigabyte scan
+   * behind a button labelled Repair.
+   *
+   * And a repair is not free of new bytes, so "it downloads nothing an install
+   * did not account for" is NOT available as a reason: `start()` re-derives a
+   * repair's selector from the root the pack was INSTALLED at, then drops any
+   * selector already installed at the root it resolves to — so repairing a
+   * current pack is a no-op, while repairing one whose catalog root has moved
+   * re-fetches it at the new root, which for `complete` is the entire catalog.
+   *
+   * What it rests on is the asymmetry `reserveStorage` documents, which holds
+   * whatever a count would have cost. Running out of quota mid-download is
+   * classified `storage`, `storage` is retryable, so the operation record stays
+   * `downloading`, the panel offers Resume, and the resume skips every object
+   * already cached. A wrong refusal has no override anywhere. Given a choice
+   * between a recoverable failure and an unappealable one, the repair path takes
+   * the recoverable one.
+   */
   const runStart = useCallback(async (packIds: PackId[]) => {
     const backend = backendRef.current;
     if (
@@ -701,18 +999,23 @@ export function useVisualPackManager(): VisualPackManagerState {
   return {
     availability,
     summary,
+    curatedSelector,
+    curatedDrift,
     estimate,
+    estimateProgress,
     operation,
     progress,
     verification,
     removal,
     actionError,
     actionErrorDetail,
+    actionErrorRefusal,
     pendingActions,
     durableMutationActive: operationIsDurableMutation(operation),
     confirmation,
     retry,
     refresh,
+    resolveCuratedSelector,
     estimateInstall,
     install,
     cancel,

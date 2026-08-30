@@ -225,6 +225,11 @@
       "printing": "Impressões de conjuntos em inglês",
       "locale": "Impressões de conjuntos localizados",
       "complete": "Catálogo atual completo",
+      "curated": "Uma imagem por carta",
+      "curatedNote": "Uma imagem por carta, escolhida pelas suas Preferências de Arte das Cartas na aba Visual. Altere-as lá e esta seleção acompanha.",
+      "curatedDefaultNote": "Uma imagem por carta. Você não tem regras de arte, então a arte padrão de cada carta é baixada — adicione regras em Preferências de Arte das Cartas, na aba Visual, para escolher outras edições.",
+      "driftNone": "As suas imagens instaladas já correspondem a estas definições.",
+      "driftSummary": "As suas imagens instaladas estão desatualizadas: {{add}} a adicionar, {{remove}} a remover, {{refresh}} a atualizar.",
       "setCode": "Definir código",
       "setPlaceholder": "por exemplo barbatana",
       "language": "Linguagem da imagem",
@@ -234,7 +239,10 @@
     "actions": {
       "estimate": "Estimativa de download",
       "estimating": "Analisando o catálogo do Scryfall…",
+      "estimateCurated": "Recalcular tamanho",
+      "estimatingCurated": "Calculando o tamanho…",
       "install": "Seleção de instalação",
+      "sync": "Sincronizar imagens",
       "cancel": "Cancelar operação",
       "resume": "Retomar operação",
       "retry": "Tente novamente",
@@ -248,11 +256,18 @@
       "removeAll": "Remova todos os recursos visuais off-line"
     },
     "estimate": {
-      "title": "Estimativa de back-end e fechamento de dependência"
+      "title": "Estimativa de back-end e fechamento de dependência",
+      "progressTitle": "Progresso da análise do catálogo",
+      "curatedTitle": "Download estimado",
+      "headroomWarning": "Isso é maior que o espaço livre que este navegador informa. Você ainda pode instalar: se o espaço acabar, o download pode ser retomado e mantém tudo o que já foi salvo.",
+      "evictionWarning": "Este navegador não concedeu armazenamento persistente, portanto pode apagar estas imagens quando o dispositivo ficar sem espaço.",
+      "progress": "{{downloaded}} MB de {{total}} MB lidos · {{records}} cartas analisadas · {{images}} imagens encontradas"
     },
     "metrics": {
       "assetRecords": "Registros de ativos",
-      "uniqueObjects": "Objetos únicos",
+      "estimatedImageBytes": "Tamanho estimado do download",
+      "availableBytes": "Espaço livre disponível",
+      "uniqueObjects": "Imagens a transferir",
       "logicalImageBytes": "Bytes de imagem lógica",
       "uniqueImageBytes": "Bytes de imagem exclusivos",
       "shardCount": "Fragmentos",
@@ -265,6 +280,7 @@
         "cancel_requested": "Cancelamento solicitado",
         "finalizing": "Finalizando",
         "failed": "Falha – pronto para retomar",
+        "terminated": "Parado – esta operação não pode ser retomada",
         "completed": "Concluído",
         "cancelled": "Cancelado"
       },
@@ -273,6 +289,7 @@
       "packs": "Pacotes: {{current}} de {{total}}",
       "objects": "Imagens: {{current}} de {{total}}",
       "scanNote": "O total cresce enquanto a captura do Scryfall é analisada. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
+      "estimateNote": "O total foi fixado no início desta transferência. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
       "finalizing": "Finalizando a instalação do catálogo"
     },
     "status": {
@@ -285,7 +302,15 @@
       "installed": "Pacotes instalados",
       "noneInstalled": "Nenhum pacote visual está instalado.",
       "upgradeAvailable": "Atualização disponível",
-      "receiptRoot": "Raiz do recibo: {{root}}"
+      "receiptRoot": "Instalado a partir do instantâneo: {{root}}",
+      "membershipDigest": "Impressão digital da seleção: {{digest}}",
+      "storageUsage": "Armazenamento usado por este site",
+      "persistence": "Proteção contra remoção",
+      "persistenceState": {
+        "persisted": "Concedida — este navegador manterá estas imagens",
+        "best_effort": "Não concedida — este navegador pode apagar estas imagens quando faltar espaço",
+        "unsupported": "Este navegador não informa"
+      }
     },
     "verification": {
       "revision": "Revisão instalada verificada {{revision}}.",
@@ -312,15 +337,23 @@
       "remove_failed": "Não foi possível remover um arquivo de cache",
       "catalog_state": "O estado do catálogo histórico não pôde ser recuperado"
     },
+    "packs": {
+      "core": "Visuais principais",
+      "complete": "Catálogo atual completo",
+      "curated": "Uma imagem por carta",
+      "printing": "Impressões {{set}}",
+      "locale": "Impressões {{set}} ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "Esta versão do aplicativo não oferece suporte a catálogos visuais offline.",
       "unauthorized": "Esta janela não tem permissão para gerenciar catálogos visuais offline.",
       "unavailable": "O gerenciamento offline do catálogo visual está temporariamente indisponível.",
       "invalid_input": "A seleção de catálogo solicitada é inválida.",
-      "conflict": "Os pacotes instalados dependem desta seleção.",
+      "conflict": "Esta seleção está desatualizada: o catálogo ou as suas preferências de arte mudaram depois de ela ser feita. Calcule novamente e tente outra vez.",
       "cancelled": "A operação foi cancelada.",
       "network": "A solicitação de rede do catálogo falhou.",
       "storage": "Não foi possível gravar o catálogo no armazenamento do dispositivo.",
+      "insufficient_storage": "Espaço livre insuficiente: este download precisa de pelo menos {{required}}, mas há apenas {{available}} livres.",
       "trust": "A resposta do catálogo não era confiável.",
       "emit": "O aplicativo não pôde relatar o progresso do catálogo.",
       "internal": "A operação de catálogo não pôde ser concluída."

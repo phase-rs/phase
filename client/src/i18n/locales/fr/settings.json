@@ -225,6 +225,11 @@
       "printing": "Impressions de décors anglais",
       "locale": "Impressions de décors localisées",
       "complete": "Catalogue actuel complet",
+      "curated": "Une image par carte",
+      "curatedNote": "Une image par carte, choisie par vos Préférences d'illustration des cartes dans l'onglet Visuel. Modifiez-les là-bas et cette sélection suit.",
+      "curatedDefaultNote": "Une image par carte. Vous n'avez aucune règle d'illustration, donc l'illustration par défaut de chaque carte est téléchargée — ajoutez des règles dans Préférences d'illustration des cartes, onglet Visuel, pour choisir d'autres éditions.",
+      "driftNone": "Vos images installées correspondent déjà à ces réglages.",
+      "driftSummary": "Vos images installées ne sont plus à jour : {{add}} à ajouter, {{remove}} à retirer, {{refresh}} à actualiser.",
       "setCode": "Définir le code",
       "setPlaceholder": "par ex. aileron",
       "language": "Langage des images",
@@ -234,7 +239,10 @@
     "actions": {
       "estimate": "Téléchargement de devis",
       "estimating": "Analyse du catalogue Scryfall…",
+      "estimateCurated": "Recalculer la taille",
+      "estimatingCurated": "Calcul de la taille…",
       "install": "Sélection d'installation",
+      "sync": "Synchroniser les images",
       "cancel": "Annuler l'opération",
       "resume": "Reprendre l'opération",
       "retry": "Réessayez",
@@ -248,11 +256,18 @@
       "removeAll": "Supprimer tous les visuels hors ligne"
     },
     "estimate": {
-      "title": "Estimation backend et fermeture des dépendances"
+      "title": "Estimation backend et fermeture des dépendances",
+      "progressTitle": "Progression de l’analyse du catalogue",
+      "curatedTitle": "Téléchargement estimé",
+      "headroomWarning": "C'est plus que l'espace libre annoncé par ce navigateur. Vous pouvez tout de même installer : si l'espace vient à manquer, le téléchargement peut reprendre et conserve tout ce qui est déjà enregistré.",
+      "evictionWarning": "Ce navigateur n'a pas accordé de stockage persistant : il peut supprimer ces images lorsque l'appareil manque d'espace.",
+      "progress": "{{downloaded}} Mo sur {{total}} Mo lus · {{records}} cartes analysées · {{images}} images trouvées"
     },
     "metrics": {
       "assetRecords": "Enregistrements d'actifs",
-      "uniqueObjects": "Objets uniques",
+      "estimatedImageBytes": "Taille estimée du téléchargement",
+      "availableBytes": "Espace libre disponible",
+      "uniqueObjects": "Images à télécharger",
       "logicalImageBytes": "Octets d'image logique",
       "uniqueImageBytes": "Octets d'image uniques",
       "shardCount": "Éclats",
@@ -265,6 +280,7 @@
         "cancel_requested": "Annulation demandée",
         "finalizing": "Finalisation",
         "failed": "Échec – prêt à reprendre",
+        "terminated": "Arrêté – cette opération ne peut pas reprendre",
         "completed": "Terminé",
         "cancelled": "Annulé"
       },
@@ -273,6 +289,7 @@
       "packs": "Packs : {{current}} sur {{total}}",
       "objects": "Images : {{current}} sur {{total}}",
       "scanNote": "Le total augmente pendant l’analyse de l’instantané Scryfall. Les images déjà téléchargées restent locales et sont ignorées à la reprise.",
+      "estimateNote": "Le total a été fixé au démarrage de ce téléchargement. Les images déjà téléchargées restent locales et sont ignorées à la reprise.",
       "finalizing": "Finalisation de l'installation du catalogue"
     },
     "status": {
@@ -285,7 +302,15 @@
       "installed": "Packs installés",
       "noneInstalled": "Aucun pack visuel n’est installé.",
       "upgradeAvailable": "Mise à niveau disponible",
-      "receiptRoot": "Racine du reçu : {{root}}"
+      "receiptRoot": "Installé depuis l'instantané : {{root}}",
+      "membershipDigest": "Empreinte de la sélection : {{digest}}",
+      "storageUsage": "Stockage utilisé par ce site",
+      "persistence": "Protection contre l'effacement",
+      "persistenceState": {
+        "persisted": "Accordée – ce navigateur conservera ces images",
+        "best_effort": "Non accordée – ce navigateur peut supprimer ces images lorsque l'espace vient à manquer",
+        "unsupported": "Ce navigateur ne le précise pas"
+      }
     },
     "verification": {
       "revision": "Révision installée vérifiée {{revision}}.",
@@ -312,15 +337,23 @@
       "remove_failed": "Un fichier cache n'a pas pu être supprimé",
       "catalog_state": "L'état du catalogue historique n'a pas pu être récupéré"
     },
+    "packs": {
+      "core": "Visuels de base",
+      "complete": "Catalogue actuel complet",
+      "curated": "Une image par carte",
+      "printing": "Éditions {{set}}",
+      "locale": "Éditions {{set}} ({{language}})"
+    },
     "errors": {
       "unsupported_shell": "Cette version de l'application ne prend pas en charge les catalogues visuels hors ligne.",
       "unauthorized": "Cette fenêtre n'est pas autorisée à gérer les catalogues visuels hors ligne.",
       "unavailable": "La gestion visuelle du catalogue hors ligne est temporairement indisponible.",
       "invalid_input": "La sélection de catalogue demandée n'est pas valide.",
-      "conflict": "Les packs installés dépendent de cette sélection.",
+      "conflict": "Cette sélection n'est plus à jour : le catalogue ou vos préférences d'illustration ont changé depuis. Refaites l'estimation, puis réessayez.",
       "cancelled": "L'opération a été annulée.",
       "network": "La demande de réseau de catalogue a échoué.",
       "storage": "Le catalogue n'a pas pu être écrit sur le stockage de l'appareil.",
+      "insufficient_storage": "Espace libre insuffisant : ce téléchargement nécessite au moins {{required}}, mais il ne reste que {{available}}.",
       "trust": "La réponse du catalogue n'était pas fiable.",
       "emit": "L'application n'a pas pu signaler la progression du catalogue.",
       "internal": "L'opération de catalogue n'a pas pu être terminée."
