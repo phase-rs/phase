@@ -2407,6 +2407,52 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         &lower,
         parse_combat_rule_static_predicate_with_defended_nom,
     )?;
+    // CR 509.1b + CR 604.1 (#7454): "<subject> can't block or be blocked by
+    // <object>" is a CONJUNCTION of two opposite-direction restrictions sharing
+    // ONE printed object, so it needs one definition per direction and belongs to
+    // `parse_symmetric_block_conjunction_static` on the multi-static path. This
+    // production returns ONE definition, so it is never the owner — decline the
+    // shape here, BEFORE the object is attempted, so an object this grammar
+    // cannot yet express declines too. Without this the object parse fails, the
+    // clause reaches the trailing-`unless` branch at the bottom of this function,
+    // and the whole line lowers to the INVERSE blanket `CantBlock` with the rider
+    // attached: it invents a restriction the card lacks (the subject could never
+    // block anything) and drops the one it prints, while the coverage anchor for
+    // `CantBlock` passes vacuously on the same "can't block" substring.
+    //
+    // The shared marker is applied POSITIONALLY — at the offset where THIS
+    // production's own predicate matched, `subject_lower` being the text before
+    // it — never scanned across the whole line. That distinction is load-bearing,
+    // and the two kinds of line that merely CONTAIN the phrase in a different
+    // clause are protected by DIFFERENT mechanisms:
+    //
+    //  * a quoted granted ability ("Spirits you control have \"This creature
+    //    can't block or be blocked by non-Spirit creatures.\"") is owned by
+    //    `anthem::parse_subject_continuous_static`, dispatched at
+    //    `dispatch.rs:1818` — well before this production at `dispatch.rs:2261` —
+    //    so it has already returned and nothing at THIS seam can reach it. Only a
+    //    line-wide gate hoisted to the TOP of `parse_static_line_inner` would
+    //    endanger it.
+    //  * a sibling `can't attack` sentence is owned by THIS VERY PRODUCTION, not
+    //    by some other arm: "Beasts can't attack unless you control a Wall. Beasts
+    //    can't block or be blocked by Walls." lowers HERE to mode `CantAttack` with
+    //    `affected: Typed(Beast)` plus the rider (measured) — a subject scope the
+    //    SelfRef-only terminal `can't attack` arm cannot produce. It
+    //    survives because `scan_preceded` matches this function's predicate at the
+    //    FIRST word boundary that parses, the `can't attack` offset, and the marker
+    //    check at THAT offset does not match. A line-wide gate here would decline
+    //    the line and destroy this production's own correct output; that, measured,
+    //    is why the check is positional.
+    //
+    // Sibling guard: the terminal blanket `can't block` arm in `dispatch.rs`,
+    // which is inside that arm and so may scan the line — with the one residual
+    // its line-wide scan implies (reversed sentence order, no card impact)
+    // recorded on `parse_cant_block_or_be_blocked_by_marker`'s doc comment.
+    if super::shared::parse_cant_block_or_be_blocked_by_marker(&lower[subject_lower.len()..])
+        .is_ok()
+    {
+        return None;
+    }
     // CR 509.1b: the optional OBJECT of a blocking prohibition — "<subject>
     // can't block <object>" (Gornog, the Red Reaper; Bower Passage; Hinterland
     // Drake). The blocker-side mirror of `defended` (CR 508.1b) on the attack

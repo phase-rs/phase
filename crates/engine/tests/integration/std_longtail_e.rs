@@ -53,7 +53,7 @@ use engine::types::ability::TargetFilter;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{DelayedTrigger, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
@@ -338,11 +338,14 @@ fn ojer_taq_token_triplication_full_card_parses() {
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::layers::evaluate_layers;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ManaProduction,
-    PlayerScope, QuantityExpr, StaticCondition,
+    AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, ContinuousModification,
+    DelayedTriggerCondition, DelayedTriggerLifetime, Duration, Effect, ManaProduction, PlayerScope,
+    QuantityExpr, StaticCondition, TriggerDefinition,
 };
 use engine::types::card_type::{CoreType, Supertype};
+use engine::types::counter::CounterType;
 use engine::types::keywords::Keyword;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const VRASKA_ORACLE: &str = "Deathtouch\nWhenever a nontoken creature an opponent controls dies, you may pay {1}. If you do, return that card to the battlefield tapped under your control. It's a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other card types.";
@@ -1942,6 +1945,727 @@ fn princess_yue_dies_filter_and_returned_object_transformation_execute() {
         negative.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
+}
+
+fn assert_princess_yue_commander_recast_remains_printed(
+    death_spell_name: &str,
+    death_spell_oracle: &str,
+    targets_yue: bool,
+) {
+    let parsed = parse(
+        PRINCESS_YUE_ORACLE,
+        "Princess Yue",
+        &[],
+        &["Legendary", "Creature"],
+        &["Human", "Noble", "Ally"],
+    );
+    assert_zero_unimplemented(&parsed, "Princess Yue");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let yue = scenario
+        .add_creature_from_oracle(P0, "Princess Yue", 2, 2, PRINCESS_YUE_ORACLE)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Noble", "Ally"])
+        .commander()
+        .id();
+    let death_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, death_spell_name, true, death_spell_oracle)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    let mut cast = if targets_yue {
+        runner.cast(death_spell).target_object(yue).commit()
+    } else {
+        runner.cast(death_spell).commit()
+    };
+
+    // CR 903.9a: after Yue dies, the command-zone choice is offered before her
+    // zone-change trigger can resolve.
+    for _ in 0..4 {
+        if matches!(
+            cast.state().waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ) {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("death spell priority pass must be accepted");
+    }
+    assert!(
+        matches!(
+            cast.state().waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Graveyard,
+                ..
+            } if commander_id == yue
+        ),
+        "Yue's graveyard commander choice must surface before her dies trigger resolves; waiting_for = {:?}",
+        cast.state().waiting_for
+    );
+
+    cast.act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting Yue's commander-zone choice must be accepted");
+    assert_eq!(
+        cast.state().objects[&yue].zone,
+        Zone::Command,
+        "accepted commander choice must move Yue to the command zone"
+    );
+
+    let old_yue_trigger_on_stack = cast.state().stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == yue
+        )
+    });
+    assert!(
+        old_yue_trigger_on_stack,
+        "reach guard: Yue's old dies trigger must be on the stack after the command-zone move; stack = {:#?}",
+        cast.state().stack
+    );
+
+    // CR 603.6c: Yue's leaves-the-battlefield trigger can find her only in the
+    // first zone she went to. Resolve it normally after the command-zone move.
+    for _ in 0..4 {
+        if cast.state().stack.is_empty() {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("Yue's old trigger priority pass must be accepted");
+    }
+    assert!(
+        cast.state().stack.is_empty(),
+        "Yue's old dies trigger must resolve before her command-zone recast"
+    );
+
+    let card_id = cast.state().objects[&yue].card_id;
+    cast.act(GameAction::CastSpell {
+        object_id: yue,
+        card_id,
+        targets: vec![],
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    })
+    .expect("Yue must be castable from the command zone");
+    for _ in 0..4 {
+        if cast.state().stack.is_empty() {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("Yue recast priority pass must be accepted");
+    }
+
+    let yue = &cast.state().objects[&yue];
+    assert_eq!(
+        yue.zone,
+        Zone::Battlefield,
+        "Yue must resolve from the command zone"
+    );
+    assert_eq!(
+        yue.name, "Princess Yue",
+        "a recast Yue must not retain the old dies trigger's Moon name"
+    );
+    assert!(
+        yue.card_types.core_types.contains(&CoreType::Creature),
+        "a recast Yue must retain her printed creature type"
+    );
+    assert!(
+        !yue.card_types.core_types.contains(&CoreType::Land),
+        "a recast Yue must not retain the old dies trigger's land type"
+    );
+    assert!(
+        yue.abilities.iter().any(|definition| {
+            matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::Scry {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                )
+        }),
+        "reach guard: Yue's printed tap-to-scry ability must be present after recast"
+    );
+    assert!(
+        !yue.abilities.iter().any(|definition| {
+            matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 }
+                        },
+                        ..
+                    }
+                )
+        }),
+        "Yue must not retain the old dies trigger's granted colorless mana ability"
+    );
+}
+
+#[test]
+fn princess_yue_commander_destroyed_then_recast_does_not_keep_moon_effects() {
+    assert_princess_yue_commander_recast_remains_printed(
+        "Murder",
+        "Destroy target creature.",
+        true,
+    );
+}
+
+#[test]
+fn princess_yue_commander_zero_toughness_then_recast_does_not_keep_moon_effects() {
+    assert_princess_yue_commander_recast_remains_printed(
+        "Languish",
+        "All creatures get -4/-4 until end of turn.",
+        false,
+    );
+}
+
+fn dies_draw_trigger() -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ))
+}
+
+fn commander_return_draw_trigger(commander: ObjectId) -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Graveyard)
+        .destination(Zone::Command)
+        .valid_card(TargetFilter::SpecificObject { id: commander })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ))
+}
+
+fn commander_return_event_matcher(commander: ObjectId) -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Graveyard)
+        .destination(Zone::Command)
+        .valid_card(TargetFilter::SpecificObject { id: commander })
+}
+
+/// CR 104.2a + CR 603.3b + CR 704.5a + CR 800.4a: a player-loss SBA that ends
+/// the game can emit zone changes while the losing player's objects leave the
+/// game. Once elimination has terminalized the game and cleared trigger
+/// scaffolding, the outer priority pipeline must not collect those events into a
+/// new deferred batch.
+#[test]
+fn sba_game_over_does_not_repopulate_terminal_trigger_scaffolding() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let observer = scenario
+        .add_creature(P0, "Surviving exile observer", 2, 2)
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Exile)
+                .valid_card(TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::creature(),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+        )
+        .id();
+    let departing = scenario.add_creature(P1, "Departing creature", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.state_mut().players[P1.0 as usize].life = 0;
+
+    let result = runner
+        .act(GameAction::PassPriority)
+        .expect("the priority pass that discovers the player-loss SBA must be accepted");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert_eq!(runner.state().objects[&observer].zone, Zone::Battlefield);
+    assert!(
+        result.events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == departing
+            )
+        }),
+        "reach guard: player elimination must emit the observed battlefield-to-exile event"
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "terminal GameOver cleanup must not be repopulated from SBA events"
+    );
+    assert!(runner.state().pending_trigger_order.is_none());
+    assert!(runner.state().pending_trigger.is_none());
+    assert!(runner.state().stack.is_empty());
+}
+
+/// An SBA batch that opens the commander-zone return choice must collect both
+/// ordinary and delayed dies triggers before yielding the prompt. The two
+/// trigger controllers make the APNAP stack order observable through draws.
+#[test]
+fn sba_commander_choice_defers_ordinary_and_delayed_dies_triggers() {
+    let mut scenario = GameScenario::new_n_player(3, 91);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["P0 delayed draw"]);
+    scenario.with_library_top(P1, &["P1 SBA draw", "P1 commander-answer draw"]);
+    let yue = scenario
+        .add_creature_from_oracle(P0, "Princess Yue", 2, 2, PRINCESS_YUE_ORACLE)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Noble", "Ally"])
+        .commander()
+        .id();
+    let p1_fodder = scenario
+        .add_creature(P1, "P1 dies observer", 1, 1)
+        .with_trigger_definition(dies_draw_trigger())
+        .id();
+    let answer_observer = scenario
+        .add_creature(P1, "Commander return observer", 5, 5)
+        .with_trigger_definition(commander_return_draw_trigger(yue))
+        .id();
+    let languish = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Languish",
+            true,
+            "All creatures get -4/-4 until end of turn.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::SpecificObject { id: p1_fodder },
+            },
+            Box::new(engine::types::ability::ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                yue,
+                P0,
+            )),
+            P0,
+            yue,
+            true,
+        ));
+    let mut answer_delayed_ability = engine::types::ability::ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        yue,
+        P0,
+    );
+    answer_delayed_ability.trigger_source =
+        Some(engine::game::triggers::trigger_source_context_for_latch(
+            runner.state(),
+            &runner.state().objects[&yue],
+        ));
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(commander_return_event_matcher(yue)),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Persistent,
+            },
+            Box::new(answer_delayed_ability),
+            P0,
+            yue,
+            true,
+        ));
+
+    let mut cast = runner.cast(languish).commit();
+    for _ in 0..4 {
+        if matches!(
+            cast.state().waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ) {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("Languish priority pass must be accepted");
+    }
+    assert!(matches!(
+        cast.state().waiting_for,
+        WaitingFor::CommanderZoneChoice { commander_id, .. } if commander_id == yue
+    ));
+    assert!(
+        cast.state().stack.is_empty(),
+        "the completed SBA batch must defer its triggers while the commander prompt is open"
+    );
+    assert_eq!(
+        cast.state().deferred_triggers.len(),
+        3,
+        "the paused SBA batch must retain Yue's trigger plus P0's delayed and P1's ordinary dies trigger"
+    );
+
+    cast.act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("commander choice must be accepted");
+    assert_eq!(cast.state().objects[&yue].zone, Zone::Command);
+    match &cast.state().waiting_for {
+        WaitingFor::OrderTriggers {
+            player, triggers, ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(
+                triggers.len(),
+                3,
+                "Yue's dies trigger, the SBA-generated delayed trigger, and the \
+                 commander-answer delayed trigger must be ordered as one P0 batch"
+            );
+        }
+        waiting_for => panic!(
+            "the combined pre-prompt and answer-generated trigger batch must reach one \
+             ordering prompt, got {waiting_for:?}"
+        ),
+    }
+    assert!(
+        cast.state().stack.is_empty(),
+        "answer-generated ordinary triggers must not be dispatched ahead of the parked SBA batch"
+    );
+    assert!(
+        cast.state().deferred_triggers.is_empty(),
+        "the SBA-owned batch and commander-answer events must be consumed by this one APNAP ordering step"
+    );
+    for _ in 0..4 {
+        if !cast.state().stack.is_empty() {
+            break;
+        }
+        match cast.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => cast
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("same-controller deferred trigger ordering must be accepted"),
+            WaitingFor::Priority { .. } => cast
+                .act(GameAction::PassPriority)
+                .expect("priority pass must drain the deferred SBA trigger batch"),
+            waiting_for => panic!(
+                "deferred SBA trigger batch must settle through ordering or priority, got {waiting_for:?}"
+            ),
+        };
+    }
+    assert_eq!(
+        cast.state().stack.len(),
+        5,
+        "answering the prompt must put the parked and answer-generated triggers on the stack together"
+    );
+    assert!(cast
+        .state()
+        .stack
+        .iter()
+        .rev()
+        .take(2)
+        .all(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. }
+                if *source_id == p1_fodder || *source_id == answer_observer
+        )));
+
+    for _ in 0..20 {
+        if cast.state().stack.is_empty() {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("deferred dies-trigger priority pass must be accepted");
+    }
+    assert_eq!(cast.state().players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(cast.state().players[P0.0 as usize].life, 21);
+    assert_eq!(cast.state().players[P1.0 as usize].hand.len(), 2);
+}
+
+/// CR 603.2c + CR 730.3 + CR 903.9c: a merged commander dying in an SBA
+/// produces one logical zone-change delivery containing the survivor and its
+/// absorbed component. The logical owner collects the two graveyard-observer
+/// occurrences before the commander prompt; the outer raw SBA scan must not
+/// collect either occurrence a second time.
+#[test]
+fn sba_merged_commander_prompt_does_not_duplicate_logical_zone_observers() {
+    let mut scenario = GameScenario::new_n_player(3, 94);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["first component draw", "second component draw"]);
+    let commander = scenario
+        .add_creature(P0, "Merged Commander Host", 2, 2)
+        .commander()
+        .id();
+    let rider = scenario.add_creature(P0, "Zero-Toughness Rider", 0, 0).id();
+    let observer = scenario
+        .add_creature(P1, "Merged graveyard observer", 5, 5)
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Graveyard)
+                .valid_card(TargetFilter::Any)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut merge_events = Vec::new();
+    engine::game::merge::merge_object_onto(
+        runner.state_mut(),
+        rider,
+        commander,
+        engine::game::merge::MergeSide::Top,
+        &mut merge_events,
+    );
+    assert_eq!(runner.state().objects[&commander].toughness, Some(0));
+    assert!(runner.state().objects[&commander]
+        .merged_components
+        .contains(&rider));
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority pass must run the merged-permanent SBA");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Graveyard,
+            ..
+        } if commander_id == commander
+    ));
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        2,
+        "the observer must trigger once for each component card put into the graveyard, not twice per component"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the commander return must be accepted");
+    if let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for {
+        assert_eq!(triggers.len(), 2);
+        runner
+            .act(GameAction::OrderTriggers { order: vec![0, 1] })
+            .expect("the two legitimate component observers must be orderable");
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == observer
+            ))
+            .count(),
+        2,
+        "exactly the two logical component occurrences must reach the stack"
+    );
+}
+
+/// A completed SBA pass may find both a legend-rule choice and independent
+/// deaths. The production priority pipeline must park those trigger records
+/// until the legend choice is answered.
+#[test]
+fn sba_legend_choice_defers_ordinary_and_delayed_dies_triggers() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 92);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["P0 delayed draw"]);
+    scenario.with_library_top(P1, &["P1 ordinary draw"]);
+    let first = scenario
+        .add_creature(P0, "Duplicate Legend", 2, 2)
+        .as_legendary()
+        .id();
+    let _second = scenario
+        .add_creature(P0, "Duplicate Legend", 2, 2)
+        .as_legendary()
+        .id();
+    let p1_fodder = scenario
+        .add_creature(P1, "P1 dies observer", 0, 0)
+        .with_trigger_definition(dies_draw_trigger())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::SpecificObject { id: p1_fodder },
+            },
+            Box::new(engine::types::ability::ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                first,
+                P0,
+            )),
+            P0,
+            first,
+            true,
+        ));
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("production priority pass must run the SBA loop");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseLegend { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().deferred_triggers.len(), 2);
+
+    runner
+        .act(GameAction::ChooseLegend { keep: first })
+        .expect("legend choice must be accepted");
+    for _ in 0..4 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("deferred dies trigger batch must drain after legend choice"),
+            waiting_for => panic!("unexpected wait after legend choice: {waiting_for:?}"),
+        };
+    }
+    assert_eq!(runner.state().stack.len(), 2);
+    assert!(matches!(
+        runner.state().stack.last().map(|entry| &entry.kind),
+        Some(StackEntryKind::TriggeredAbility { source_id, .. }) if *source_id == p1_fodder
+    ));
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("dies-trigger priority pass must be accepted");
+    }
+    assert_eq!(runner.state().players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(runner.state().players[P1.0 as usize].hand.len(), 1);
+    assert!(runner.state().players[p2.0 as usize].hand.is_empty());
+}
+
+/// Like the legend-rule case, an illegal Siege protector pauses a completed SBA
+/// batch. Its independent deaths must be retained until the protector answer.
+#[test]
+fn sba_battle_protector_choice_defers_ordinary_and_delayed_dies_triggers() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 93);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["P0 delayed draw"]);
+    scenario.with_library_top(P1, &["P1 ordinary draw"]);
+    let battle = scenario.add_creature(P0, "Illegal Siege", 1, 1).id();
+    let p1_fodder = scenario
+        .add_creature(P1, "P1 dies observer", 0, 0)
+        .with_trigger_definition(dies_draw_trigger())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let battle_object = runner.state_mut().objects.get_mut(&battle).unwrap();
+        battle_object.card_types.core_types = vec![CoreType::Battle];
+        battle_object.card_types.subtypes = vec!["Siege".to_string()];
+        battle_object.base_card_types = battle_object.card_types.clone();
+        battle_object.power = None;
+        battle_object.toughness = None;
+        battle_object.base_power = None;
+        battle_object.base_toughness = None;
+        battle_object.defense = Some(3);
+        battle_object.base_defense = Some(3);
+        battle_object.counters.insert(CounterType::Defense, 3);
+        battle_object
+            .chosen_attributes
+            .push(ChosenAttribute::Player(P0));
+    }
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::SpecificObject { id: p1_fodder },
+            },
+            Box::new(engine::types::ability::ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                battle,
+                P0,
+            )),
+            P0,
+            battle,
+            true,
+        ));
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("production priority pass must run the SBA loop");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BattleProtectorChoice { battle_id, .. } if battle_id == battle
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().deferred_triggers.len(), 2);
+
+    runner
+        .act(GameAction::ChooseBattleProtector { protector: p2 })
+        .expect("legal Siege protector choice must be accepted");
+    assert_eq!(runner.state().objects[&battle].protector(), Some(p2));
+    for _ in 0..4 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("deferred dies trigger batch must drain after protector choice"),
+            waiting_for => panic!("unexpected wait after protector choice: {waiting_for:?}"),
+        };
+    }
+    assert_eq!(runner.state().stack.len(), 2);
+    assert!(matches!(
+        runner.state().stack.last().map(|entry| &entry.kind),
+        Some(StackEntryKind::TriggeredAbility { source_id, .. }) if *source_id == p1_fodder
+    ));
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("dies-trigger priority pass must be accepted");
+    }
+    assert_eq!(runner.state().players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(runner.state().players[P1.0 as usize].hand.len(), 1);
 }
 
 #[test]

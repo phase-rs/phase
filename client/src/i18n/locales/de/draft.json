@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "So funktioniert es",
     "startDrafting": "Mit dem Draften beginnen",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} Booster",
+      "packsOpened_few": "{{count, number}} Booster",
+      "packsOpened_many": "{{count, number}} Booster",
+      "packsOpened_other": "{{count, number}} Booster",
+      "cardsContained_one": "{{count, number}} Karte",
+      "cardsContained_few": "{{count, number}} Karten",
+      "cardsContained_many": "{{count, number}} Karten",
+      "cardsContained_other": "{{count, number}} Karten",
+      "packSizeEntry_one": "{{count, number}} Karte",
+      "packSizeEntry_few": "{{count, number}} Karten",
+      "packSizeEntry_many": "{{count, number}} Karten",
+      "packSizeEntry_other": "{{count, number}} Karten",
+      "minimumDeckCards_one": "{{count, number}} Karte",
+      "minimumDeckCards_few": "{{count, number}} Karten",
+      "minimumDeckCards_many": "{{count, number}} Karten",
+      "minimumDeckCards_other": "{{count, number}} Karten"
+    },
+    "packPassing_one": "Dieser Draft hat nur eine Boosterrunde, daher wechselt die Weitergaberichtung nicht",
+    "packPassing_few": "Die Weitergaberichtung wechselt in jeder Runde",
+    "packPassing_many": "Die Weitergaberichtung wechselt in jeder Runde",
+    "packPassing_other": "Die Weitergaberichtung wechselt in jeder Runde",
     "quick": {
-      "step1": "Du öffnest 3 Booster mit je 14 Karten",
+      "step1": "Du öffnest {{packs}}; jeder Booster enthält {{cardsPerPack}}",
       "step2": "Wähle pro Booster eine Karte und gib den Rest an KI-Drafter weiter",
-      "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
-      "step4": "Baue nach allen Picks ein 40-Karten-Deck und spiele eine Partie",
-      "step1Mixed": "Du öffnest {{packCount}} Booster unterschiedlicher Größe — {{packSizes}} Karten, in dieser Reihenfolge"
+      "step4": "Baue nach allen Picks ein Deck mit mindestens {{minimumDeckCards}} und spiele eine Partie",
+      "step1Mixed": "Du öffnest {{packs}} unterschiedlicher Größe, in dieser Reihenfolge: {{packSizes, list}}"
     },
     "pod": {
       "step1": "Du draftest mit {{count}} Spielern in einem Pod",
-      "step2": "Öffne 3 Booster mit 14 Karten — wähle eine, gib den Rest weiter",
-      "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
-      "step4": "Baue nach dem Draften ein 40-Karten-Deck und spiele Turnierpartien"
+      "step2": "Öffne {{packs}}; jeder Booster enthält {{cardsPerPack}} — wähle eine Karte, gib den Rest weiter",
+      "step2Mixed": "Öffne {{packs}} unterschiedlicher Größe, in dieser Reihenfolge: {{packSizes, list}} — wähle eine Karte, gib den Rest weiter",
+      "step4": "Baue nach dem Draften ein Deck mit mindestens {{minimumDeckCards}} und spiele Turnierpartien"
     },
     "commander": {
-      "step2": "Wähle zwei Karten aus jedem Booster und gib den Rest weiter",
-      "step4": "Baue nach dem Draften ein Commander-Deck mit 60 Karten und spiele eine Mehrspielerpartie"
+      "step2": "Öffne {{packs}}; jeder Booster enthält {{cardsPerPack}} — wähle zwei Karten, gib den Rest weiter",
+      "step2Mixed": "Öffne {{packs}} unterschiedlicher Größe, in dieser Reihenfolge: {{packSizes, list}} — wähle zwei Karten, gib den Rest weiter",
+      "step4": "Baue nach dem Draften ein Commander-Deck mit mindestens {{minimumDeckCards}} und spiele eine Mehrspielerpartie"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Öffne deinen Sealed-Pool",
-    "subtitle": "Öffne sechs Booster, einen nach dem anderen.",
+    "subtitle_one": "Öffne {{count}} Booster.",
+    "subtitle_few": "Öffne {{count}} Booster, einen nach dem anderen.",
+    "subtitle_many": "Öffne {{count}} Booster, einen nach dem anderen.",
+    "subtitle_other": "Öffne {{count}} Booster, einen nach dem anderen.",
     "packProgress": "Booster {{current}} von {{total}}",
     "openPack": "Booster öffnen",
     "openPackArt": "Booster-Artwork öffnen",

@@ -398,8 +398,18 @@ fn register_transient_effect(
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
     // sub-abilities with `target: SelfRef` don't inherit the parent's targets
     // via chain propagation in `effects::mod.rs::resolve_ability_chain`.
+    //
+    // Classify through `generic_effect_application_filter`, the single authority
+    // that gives an inherited-reference `affected` precedence over the outer
+    // targeting descriptor (`generic_effect_affected_uses_inherited_targets`:
+    // `TriggeringSource`, `ParentTarget`, `CostPaidObject`, `AmassedArmy`).
+    // Enumerating a subset here would pin those to `ability.source_id` and skip
+    // their resolution-local binding arms in the `match application_filter`
+    // below, and would let this install path drift from the prune path in
+    // `effects::mod.rs::generic_effect_depends_on_missing_forward_result`, which
+    // already classifies with the same helper.
     if matches!(
-        target_filter.or(static_def.affected.as_ref()),
+        generic_effect_application_filter(target_filter, static_def.affected.as_ref()),
         Some(TargetFilter::SelfRef)
     ) {
         install_transient(
@@ -442,7 +452,7 @@ fn register_transient_effect(
     // TriggeringSource` (the GenericEffect `target` parameter); a SequentialSibling
     // continuous grant on a non-targeted trigger ("put a +1/+1 counter on it. It
     // gains haste until end of turn" — Surrak and Goreclaw, issue #2378) instead
-    // carries `affected: TriggeringSource` with `target: None`. Both name the
+    // carries `affected: TriggeringSource`. Both name the
     // triggering object directly, so when there is no chosen target to inherit
     // (`ability.targets.is_empty()`), resolve via `resolve_event_context_target`
     // here. We must NOT short-circuit when targets exist: `affected:
@@ -453,7 +463,7 @@ fn register_transient_effect(
         .as_ref()
         .is_some_and(|filter| matches!(filter, TargetFilter::TriggeringSource));
     if matches!(target_filter, Some(TargetFilter::TriggeringSource))
-        || (target_filter.is_none() && affected_is_triggering_source && ability.targets.is_empty())
+        || (affected_is_triggering_source && ability.targets.is_empty())
     {
         if let Some(TargetRef::Object(obj_id)) =
             crate::game::targeting::resolve_event_context_target(

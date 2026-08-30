@@ -917,13 +917,19 @@ function DraftingPhaseContent({
     // so `view` is genuinely nullable here. In that window the seat count is unknown
     // and nothing is rendered: an intro sentence stating a confident wrong number is
     // worse than a frame with no intro, and the following `viewUpdated` supplies it.
-    return view ? (
+    if (!view) return null;
+
+    return (
       <DraftIntro
         mode={view.kind === "CommanderDraft" ? "commander" : "pod"}
         podSize={view.seats.length}
+        packCount={view.pack_count}
+        cardsPerPack={view.cards_per_pack}
+        packSizes={view.pack_sizes}
+        minDeckSize={view.min_deck_size}
         onContinue={() => setIntroDismissed(true)}
       />
-    ) : null;
+    );
   }
 
   // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the

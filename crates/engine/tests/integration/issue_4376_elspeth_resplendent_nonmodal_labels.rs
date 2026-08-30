@@ -5,7 +5,7 @@
 //! new display field doesn't replace an ordinary activated ability description.
 //! It does not validate modal-label propagation.
 
-use engine::game::derived_views::{ClientGameState, ClientGameStateRef};
+use engine::game::derived_views::{ClientGameStateRef, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -20,7 +20,13 @@ use crate::support::shared_card_db;
 const ELSPETH_MINUS_SEVEN_DESCRIPTION: &str =
     "[−7]: Create five 3/3 white Angel creature tokens with flying.";
 
-fn client_state(runner: &GameRunner) -> ClientGameState {
+/// The `derived` half of P0's client wire.
+///
+/// A `wrap_filtered` payload is a viewer projection, which
+/// `reject_viewer_projection_as_authority` refuses at decode, so the whole
+/// `ClientGameState` is no longer decodable here. This test reads `.derived`
+/// only, so decode exactly that.
+fn client_derived_views(runner: &GameRunner) -> DerivedViews {
     let filtered = filter_state_for_viewer(runner.state(), P0);
     let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
         runner.state(),
@@ -28,7 +34,10 @@ fn client_state(runner: &GameRunner) -> ClientGameState {
         Some(P0),
     ))
     .expect("serialize Elspeth stack display");
-    serde_json::from_str(&json).expect("deserialize Elspeth stack display")
+    let wire: serde_json::Value =
+        serde_json::from_str(&json).expect("inspect Elspeth stack display wire");
+    serde_json::from_value(wire["derived"].clone())
+        .expect("deserialize Elspeth stack display derived views")
 }
 
 #[test]
@@ -79,9 +88,8 @@ fn elspeth_resplendent_minus_seven_keeps_description_without_mode_labels() {
         .back()
         .expect("Elspeth's activated ability remains on the stack")
         .id;
-    let client_state = client_state(&runner);
-    let stack_entry = client_state
-        .derived
+    let derived = client_derived_views(&runner);
+    let stack_entry = derived
         .stack_entry_details
         .get(&stack_entry_id)
         .expect("Elspeth's activated ability is publicly displayed on the stack");

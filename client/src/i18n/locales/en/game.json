@@ -1999,6 +1999,7 @@
     "title": "Cast a spell for free",
     "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
     "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "remainingAny": "any number",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "done": "Done",

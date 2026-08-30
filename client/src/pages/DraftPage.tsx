@@ -684,12 +684,14 @@ export function DraftPage() {
           </div>
         )}
 
-        {phase === "drafting" && !introDismissed && (
+        {phase === "drafting" && !introDismissed && draftView && (
           <DraftIntro
             mode="quick"
-            packCount={draftView?.pack_count}
-            cardsPerPack={draftView?.cards_per_pack}
-            packSizes={draftView?.pack_sizes}
+            podSize={draftView.seats.length}
+            packCount={draftView.pack_count}
+            cardsPerPack={draftView.cards_per_pack}
+            packSizes={draftView.pack_sizes}
+            minDeckSize={draftView.min_deck_size}
             onContinue={() => setIntroDismissed(true)}
           />
         )}

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-29T00:00:00Z",
+  "updated": "2026-08-30T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -582,153 +582,6 @@
       ]
     },
     {
-      "name": "Dimir Excruciator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 9,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 3,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 4,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 3,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 4,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 2,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 2,
-          "name": "Superior Spider-Man"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 2,
-          "name": "Superior Spider-Man"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 3,
-          "name": "Preacher of the Schism"
-        },
-        {
-          "count": 1,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 2,
-          "name": "Malcolm, Alluring Scoundrel"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
-        }
-      ]
-    },
-    {
       "name": "Lifegain",
       "author": "MTGGoldfish",
       "colors": [
@@ -872,28 +725,167 @@
       ]
     },
     {
-      "name": "Mardu Discard",
+      "name": "Dimir Excruciator",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "B",
-        "R"
+        "U",
+        "B"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Godless Shrine"
+          "count": 1,
+          "name": "Insatiable Avarice"
         },
         {
           "count": 2,
-          "name": "Tersa Lightshatter"
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Winternight Stories"
         },
         {
           "count": 3,
-          "name": "Carnage, Crimson Chaos"
+          "name": "Stock Up"
+        },
+        {
+          "count": 3,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 4,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 3,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Deceit"
+        },
+        {
+          "count": 10,
+          "name": "Swamp"
+        },
+        {
+          "count": 3,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 4,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 1,
+          "name": "Harvester of Misery"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Qarsi Revenant"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "The End"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 2,
+          "name": "Oildeep Gearhulk"
+        },
+        {
+          "count": 1,
+          "name": "Harvester of Misery"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        }
+      ]
+    },
+    {
+      "name": "Mardu Discard",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Moonshadow"
+        },
+        {
+          "count": 3,
+          "name": "Godless Shrine"
         },
         {
           "count": 3,
@@ -908,20 +900,20 @@
           "name": "Erode"
         },
         {
-          "count": 1,
-          "name": "Mountain"
+          "count": 3,
+          "name": "Carnage, Crimson Chaos"
         },
         {
           "count": 4,
           "name": "Hardened Academic"
         },
         {
-          "count": 2,
-          "name": "Inspiring Vantage"
+          "count": 1,
+          "name": "Mountain"
         },
         {
-          "count": 4,
-          "name": "Sacred Foundry"
+          "count": 2,
+          "name": "Inti, Seneschal of the Sun"
         },
         {
           "count": 4,
@@ -932,8 +924,12 @@
           "name": "Marauding Mako"
         },
         {
+          "count": 4,
+          "name": "Bloodghast"
+        },
+        {
           "count": 1,
-          "name": "Swamp"
+          "name": "Inspiring Vantage"
         },
         {
           "count": 3,
@@ -945,44 +941,44 @@
         },
         {
           "count": 4,
-          "name": "Moonshadow"
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
           "name": "Starting Town"
         },
         {
-          "count": 4,
-          "name": "Blood Crypt"
+          "count": 1,
+          "name": "Inspiring Vantage"
         },
         {
           "count": 2,
-          "name": "Inti, Seneschal of the Sun"
+          "name": "Tersa Lightshatter"
         },
         {
-          "count": 4,
-          "name": "Bloodghast"
+          "count": 1,
+          "name": "Swamp"
         }
       ],
       "sideboard": [
         {
           "count": 2,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
           "name": "Avatar's Wrath"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
         },
         {
           "count": 2,
           "name": "Monument to Endurance"
         },
         {
-          "count": 2,
-          "name": "Abrade"
-        },
-        {
           "count": 1,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
           "name": "Duress"
         },
         {
@@ -996,6 +992,10 @@
         {
           "count": 2,
           "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         }
       ]
     },

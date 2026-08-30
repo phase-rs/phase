@@ -243,7 +243,7 @@ fn autofilled_binder_survives_into_the_fanout_target_vector() {
         } => {
             // Reach guard first: a pool that is empty because the trigger was
             // dropped fails here before the pool assertion can pass vacuously.
-            assert_eq!(remaining_casts, 2, "both pairs reached resolution");
+            assert_eq!(remaining_casts, Some(2), "both pairs reached resolution");
             assert_eq!(
                 member_pool,
                 vec![p1_selected, p2_selected],

@@ -3358,7 +3358,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             zones,
             graveyard_replacement,
         } => {
-            d.push(("count".into(), count.to_string()));
+            // `None` is the unbounded "any number of spells" form.
+            d.push((
+                "count".into(),
+                count.map_or_else(|| "any".to_string(), |n| n.to_string()),
+            ));
             if let Some(mv) = max_total_mv {
                 d.push(("total mana value".into(), mv.to_string()));
             }

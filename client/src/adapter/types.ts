@@ -1796,7 +1796,10 @@ export type CastOfferKind =
   | {
       type: "FreeCastWindow";
       candidates: ObjectId[];
-      remaining_casts: number;
+      // CR 601.2: absent for the UNBOUNDED "any number of spells" window — the
+      // engine field is `Option<u8>` with `skip_serializing_if = "is_none"`, so
+      // `None` omits the key rather than sending a sentinel cap.
+      remaining_casts?: number;
       remaining_mv_budget?: number;
       filter: TargetFilter;
       zones: Zone[];

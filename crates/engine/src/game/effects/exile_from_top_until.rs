@@ -987,7 +987,7 @@ mod tests {
         // with "other" rewritten to `Not(InTrackedSet 0)` over the chosen set.
         let cast_sub = ResolvedAbility::new(
             Effect::FreeCastFromZones {
-                count: 2,
+                count: Some(2),
                 max_total_mv: None,
                 filter: TargetFilter::And {
                     filters: vec![
@@ -1152,7 +1152,8 @@ mod tests {
                     "the free-cast window belongs to Plargg's controller"
                 );
                 assert_eq!(
-                    *remaining_casts, 2,
+                    *remaining_casts,
+                    Some(2),
                     "'up to two spells' — the window is capped at two casts"
                 );
                 let mut pool = candidates.clone();
@@ -1193,7 +1194,7 @@ mod tests {
         let build_chain = |source: ObjectId| -> ResolvedAbility {
             let cast_sub = ResolvedAbility::new(
                 Effect::FreeCastFromZones {
-                    count: 2,
+                    count: Some(2),
                     max_total_mv: None,
                     filter: TargetFilter::And {
                         filters: vec![

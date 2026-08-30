@@ -129,8 +129,21 @@ fn run_post_action_pipeline_from_with_policy(
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
+    // Only a batch parked by an SBA-owned player choice joins the answer's
+    // trigger events. Other deferred queues are construction tails whose
+    // ordinary drains must neither absorb later events nor rescan delayed
+    // triggers.
+    let deferred_trigger_batch_was_sba_choice_parked =
+        triggers::has_sba_choice_trigger_batch(state);
+    // CR 603.3b: the queue boundary between contexts that predate this pass and
+    // the ones its own collectors are about to append. `take_sba_choice_trigger_batch`
+    // needs it because an answer-generated trigger is collected as `Ordinary`
+    // too — origin alone cannot tell it apart from a construction tail that was
+    // already queued when the choice opened.
+    let deferred_triggers_before_answer = state.deferred_triggers.len();
     let mut consumed_trigger_events =
         std::mem::take(&mut state.consumed_before_priority_trigger_events);
+    let mut delayed_trigger_events = Vec::new();
 
     // CR 603.2: Triggered abilities trigger at the moment the event occurs.
     // Scan for triggers BEFORE SBAs so that objects still on the battlefield
@@ -208,8 +221,18 @@ fn run_post_action_pipeline_from_with_policy(
             })
             .cloned()
             .collect();
+        delayed_trigger_events = events[event_start..]
+            .iter()
+            .filter(|event| {
+                !matches!(event, GameEvent::PhaseChanged { .. })
+                    && !state.deferred_entry_events.contains(event)
+                    && !retained_logical_zone_events.contains(event)
+            })
+            .cloned()
+            .collect();
         if skip_trigger_scan {
             filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+            delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
         }
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
@@ -257,6 +280,7 @@ fn run_post_action_pipeline_from_with_policy(
         if super::engine_resolution_choices::handles(&state.waiting_for)
             || state.pending_replacement.is_some()
             || state.pending_resolution_completion.is_some()
+            || deferred_trigger_batch_was_sba_choice_parked
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
         } else {
@@ -298,10 +322,57 @@ fn run_post_action_pipeline_from_with_policy(
         let events_before = events.len();
         sba::check_state_based_actions(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            // CR 603.3b + CR 903.9a: an SBA batch can open a resumable
+            // non-priority choice (for example, a commander-zone return choice)
+            // before the ordinary priority-path collector runs. Preserve every
+            // trigger from the completed SBA batch until that choice is
+            // answered; otherwise its ZoneChanged events are never scanned.
+            // CR 104.1: GameOver is terminal, so elimination's cleanup must not
+            // be repopulated from the events that ended the game.
+            if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
+                && events.len() > events_before
+            {
+                consumed_trigger_events.extend(std::mem::take(
+                    &mut state.consumed_before_priority_trigger_events,
+                ));
+                let raw_sba_events: Vec<_> = events[events_before..].to_vec();
+                let sba_events = triggers::filter_already_collected_trigger_events_from(
+                    state,
+                    events,
+                    events_before,
+                    &consumed_trigger_events,
+                );
+                let sba_choice_batch =
+                    sba_choice_requires_combined_trigger_batch(&state.waiting_for);
+                if sba_choice_batch {
+                    triggers::collect_sba_choice_triggers_into_deferred(state, &sba_events);
+                } else {
+                    triggers::collect_triggers_into_deferred(state, &sba_events);
+                }
+                // Logical zone-change owners collect ordinary observers only.
+                // Delayed triggers remain entitled to the raw occurrences; the
+                // ordinary queued-context witness must not suppress them.
+                if sba_choice_batch {
+                    triggers::collect_sba_choice_delayed_triggers_into_deferred(
+                        state,
+                        &raw_sba_events,
+                    );
+                } else {
+                    triggers::collect_delayed_triggers_into_deferred(state, &raw_sba_events);
+                }
+            }
             break;
         }
         if events.len() > events_before {
-            let sba_events: Vec<_> = events[events_before..].to_vec();
+            consumed_trigger_events.extend(std::mem::take(
+                &mut state.consumed_before_priority_trigger_events,
+            ));
+            let sba_events = triggers::filter_already_collected_trigger_events_from(
+                state,
+                events,
+                events_before,
+                &consumed_trigger_events,
+            );
             // CR 603.3b: SBA-generated triggers join the terminal batch rather
             // than being ordered before its final cast trigger is collected.
             if state.pending_resolution_completion.is_some() {
@@ -388,7 +459,45 @@ fn run_post_action_pipeline_from_with_policy(
     } else if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {
-        if let Some(wf) =
+        if deferred_trigger_batch_was_sba_choice_parked && !delayed_trigger_events.is_empty() {
+            // This is the one post-answer CR 603.3b ordering attempt owned by
+            // the completed SBA choice. Consuming the marker before dispatch
+            // ensures a trigger that pauses again re-parks as ordinary work.
+            // This branch intentionally combines the answer's delayed events
+            // before ordinary drain-policy routing; changing that order would
+            // split one SBA/answer trigger batch across two ordering windows.
+            // The converse also has to hold: only the SBA-marked partition may
+            // join those delayed events. `take_sba_choice_trigger_batch` leaves
+            // every ordinary context queued for the drain below, so a
+            // construction tail sitting beside the batch is never merged into
+            // the answer's ordering window.
+            let pending =
+                triggers::take_sba_choice_trigger_batch(state, deferred_triggers_before_answer);
+            let outcome = triggers::process_collected_triggers_with_delayed_events(
+                state,
+                pending,
+                &delayed_trigger_events,
+                events,
+            );
+            if let Some(wf) = outcome.prompt {
+                state.waiting_for = wf;
+            }
+            // CR 603.3b: `take_sba_choice_trigger_batch` partitions, so any
+            // ordinary context queued beside the SBA batch is still here. It
+            // belongs to its own ordering window, not the answer's, but it must
+            // not be stranded either — hand it to the regular drain, which
+            // self-gates on `can_drain_deferred_triggers` and simply declines
+            // when this pass is not an eligible drain point.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && !state.deferred_triggers.is_empty()
+            {
+                if let Some(wf) =
+                    triggers::drain_deferred_trigger_queue_with_policy(state, events, drain_policy)
+                {
+                    state.waiting_for = wf;
+                }
+            }
+        } else if let Some(wf) =
             triggers::drain_deferred_trigger_queue_with_policy(state, events, drain_policy)
         {
             state.waiting_for = wf;
@@ -462,6 +571,19 @@ fn run_post_action_pipeline_from_with_policy(
         default_wf.clone(),
         default_wf.acting_player(),
     ))
+}
+
+/// CR 903.9a + CR 704.5j + CR 310.11: SBA-owned commander, legend, and
+/// battle-protector choices park a trigger batch that must merge with answer
+/// events before CR 603.3b ordering. Replacement choices are instead owned by
+/// `pending_replacement`'s resolution path and must not join this batch.
+fn sba_choice_requires_combined_trigger_batch(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::CommanderZoneChoice { .. }
+            | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::BattleProtectorChoice { .. }
+    )
 }
 
 /// CR 117.3c + CR 117.5: persist a carried priority recipient across any

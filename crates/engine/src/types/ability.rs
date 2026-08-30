@@ -1683,22 +1683,285 @@ pub enum CastFromZoneDriver {
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
     /// upkeep is not blocked by the sorcery-speed gate (issue #1520).
     DuringResolution,
+    /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
+    /// cards the same resolution just produced ("… from among them") — the
+    /// controller casts up to `bounds.max_casts` of them, one at a time, while
+    /// the granting spell/ability is still resolving, and the window closes when
+    /// that resolution finishes. CR 608.2g is explicit that the currently
+    /// resolving object "continues to resolve, which may include casting other
+    /// spells this way" and that "no other spells can normally be cast … during
+    /// resolution": there is no later priority window in which to exercise this
+    /// permission, which is why the WotC rulings for every card in this class
+    /// say "you can't wait to cast them later in the turn" (Villainous Wealth,
+    /// Hazoret's Undying Fury, Kotis the Fangkeeper, Collected Conjuring,
+    /// Improvisation Capstone, Jace's Mindseeker).
+    ///
+    /// This PARAMETERIZES the during-resolution mechanism rather than
+    /// duplicating it: `DuringResolution` casts exactly the one resolved target,
+    /// while this variant casts a bounded selection from a batch and therefore
+    /// carries the two bounds the batch form needs (CR 608.2c printed cast
+    /// count, CR 202.3 running-total mana-value budget). Both are "cast as the granting
+    /// ability resolves"; neither is a lingering `CastingPermission`.
+    ///
+    /// A stated durational scope (CR 611.2a — Apex of Power's "Until end of
+    /// turn, you may cast spells from among them") is a DIFFERENT class: it
+    /// really does grant a permission exercised at a later priority window, so
+    /// `with_lingering_duration` degrades this variant back to
+    /// `LingeringPermission` when the parser stamps a duration on the grant —
+    /// but only when `bounds` are unbounded. A window that printed a cast cap or
+    /// a running-total budget has no faithful lingering form, so that degrade
+    /// REFUSES (`None`) and the clause becomes an honest gap instead.
+    ResolutionWindow { bounds: ResolutionCastWindow },
+}
+
+/// CR 608.2c + CR 202.3: The two bounds a resolution-scoped free-cast window
+/// (`CastFromZoneDriver::ResolutionWindow`) enforces on the batch it offers.
+///
+/// Both axes are `Option` because Oracle text states them independently:
+/// "you may cast ANY NUMBER of spells" leaves `max_casts` unbounded, "you may
+/// cast UP TO TWO sorcery spells" bounds it at 2, and a singular "you may cast
+/// AN instant or sorcery spell" bounds it at 1. `max_total_mv` is the CR 202.3
+/// cross-selection running total ("with TOTAL mana value 10 or less" — Primeval
+/// Spawn), which is a different axis from the PER-SPELL ceiling ("with mana
+/// value 5 or less" — Hazoret's Undying Fury); the per-spell ceiling stays on
+/// `Effect::CastFromZone::constraint`, where every other cast permission already
+/// carries it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResolutionCastWindow {
+    /// CR 608.2c: Maximum number of spells castable this way, as printed; `None`
+    /// is the "any number of spells" form (bounded in practice only by the batch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_casts: Option<u8>,
+    /// CR 202.3: Running-total mana-value budget shared across every spell cast
+    /// this way; `None` when the clause states no total cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_mv: Option<u32>,
+}
+
+impl ResolutionCastWindow {
+    /// The batch-wide bounds of a clause that prints NO cast cap and no
+    /// running-total budget ("you may cast any number of spells from among
+    /// them"). Every mechanism can represent this faithfully, because there is
+    /// nothing to represent.
+    pub const UNBOUNDED: Self = Self {
+        max_casts: None,
+        max_total_mv: None,
+    };
+
+    /// CR 608.2c + CR 202.3: `true` when the clause printed no batch-wide bound
+    /// at all. The single predicate `CastFromZoneDriver::for_batch_bounds` uses
+    /// to decide whether a countless mechanism may carry these bounds, so a new
+    /// bound axis added to this struct is a compile-time-visible change to that
+    /// decision rather than a silent widening.
+    pub fn is_unbounded(&self) -> bool {
+        let Self {
+            max_casts,
+            max_total_mv,
+        } = self;
+        max_casts.is_none() && max_total_mv.is_none()
+    }
+
+    /// CR 608.2c: `true` when the clause printed a cap of exactly one cast and
+    /// no other bound — the ONLY bound a single-card during-resolution
+    /// mechanism can enforce, because that mechanism casts exactly one card.
+    pub fn is_exactly_one_cast(&self) -> bool {
+        let Self {
+            max_casts,
+            max_total_mv,
+        } = self;
+        *max_casts == Some(1) && max_total_mv.is_none()
+    }
+
+    /// A human-readable rendering of the printed bounds, used as the description
+    /// of the honest gap node a refusing caller emits. Diagnostic only.
+    pub fn describe_bound(&self) -> String {
+        match (self.max_casts, self.max_total_mv) {
+            (Some(casts), Some(mv)) => {
+                format!("up to {casts} casts with total mana value {mv} or less")
+            }
+            (Some(casts), None) => format!("up to {casts} casts"),
+            (None, Some(mv)) => format!("total mana value {mv} or less"),
+            (None, None) => "no printed bound".to_string(),
+        }
+    }
+}
+
+/// CR 608.2g vs CR 611.2a: the casting MECHANISM a cast-from-zone lowering wants,
+/// stated independently of the batch-wide bounds it must then enforce.
+///
+/// This exists so that "which mechanism does this Oracle grammar describe?" and
+/// "can that mechanism actually enforce the bound the card prints?" are two
+/// separate decisions, joined at exactly one place
+/// ([`CastFromZoneDriver::for_batch_bounds`]). A call site names the mechanism
+/// its grammar implies and is then *told* whether that mechanism is legal for
+/// these bounds; it never gets to decide that for itself, and it cannot
+/// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CastMechanism {
+    /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
+    /// priority window. Chosen for paid batch casts (the free-cast window
+    /// primitive models no mana payment), CR 305.1 land plays (no
+    /// during-resolution mechanism exists), and any clause that states a
+    /// durational scope.
+    LingeringPermission,
+    /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
+    /// self-library-peek form ("look at the top four cards of your library. You
+    /// may cast a spell from among them …"), whose private-library selection
+    /// also owns the "put the rest on the bottom" cleanup.
+    SingleCardDuringResolution,
+    /// CR 608.2g: exactly one card, chosen from a PRIVATE zone the resolution
+    /// just revealed — the hand-bound `from among those cards` anaphor
+    /// (Silent-Blade Oni, Mindclaw Shaman, Mindleech Mass: "look at that
+    /// player's hand. You may cast a spell from among those cards …"). The cards
+    /// never leave that hand, so there is no exiled batch for a
+    /// resolution-scoped window to offer.
+    ///
+    /// Its `CastFromZoneDriver` value is the `LingeringPermission` default
+    /// because the router does not dispatch this form on the driver at all: it
+    /// reaches `open_private_zone_cast_selection` through the empty-target
+    /// private-zone tail in `game/effects/cast_from_zone.rs`, which opens
+    /// `WaitingFor::EffectZoneChoice { count: 1, min_count: 0, up_to: true }`.
+    /// THAT is what enforces the printed cap of one, which is why this is a
+    /// distinct mechanism from `LingeringPermission` and not an alias for it:
+    /// the two share a driver value but not a counting capability, and this enum
+    /// records the capability.
+    ResolutionTimePrivateZonePick,
+    /// CR 608.2g: a resolution-scoped free-cast window over the batch, bounded
+    /// by `ResolutionCastWindow`.
+    ResolutionWindow,
 }
 
 impl CastFromZoneDriver {
+    /// CR 608.2c + CR 202.3 + CR 608.2g: **the single authority pairing a
+    /// casting mechanism with the batch-wide bounds it must enforce.** Returns
+    /// `None` when no driver of `mechanism` can enforce `bounds` — the caller
+    /// MUST then refuse the clause (an honest `Effect::Unimplemented` gap), and
+    /// must NOT substitute a different mechanism, because every substitution
+    /// available here is strictly more permissive than the printed instruction.
+    ///
+    /// # Why this function exists
+    ///
+    /// A printed cast bound is only meaningful if the mechanism that ends up
+    /// running can count. The capacity table is a property of the *runtime*, not
+    /// of any one parser branch:
+    ///
+    /// | mechanism | bounds it can enforce | why |
+    /// |---|---|---|
+    /// | [`CastMechanism::LingeringPermission`] | unbounded only | `record_lingering_permissions` writes an INDEPENDENT `CastingPermission` per object (`game/effects/cast_from_zone.rs`). There is no grant-scoped ledger, so `N` of a batch of `M > N` cannot be enforced — the controller may cast all `M`. |
+    /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
+    /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
+    /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
+    ///
+    /// Every previous defect in this family was a call site that knew the bound
+    /// and then chose a mechanism that had nowhere to put it. Routing the choice
+    /// through one function makes the drop impossible to express: a call site
+    /// states its mechanism and receives either a driver that provably carries
+    /// the bound, or a refusal.
+    pub fn for_batch_bounds(
+        mechanism: CastMechanism,
+        bounds: ResolutionCastWindow,
+    ) -> Option<Self> {
+        match mechanism {
+            // CR 118.9: per-object permissions with no shared budget. Only a
+            // clause that prints no bound at all is represented faithfully.
+            CastMechanism::LingeringPermission => {
+                bounds.is_unbounded().then_some(Self::LingeringPermission)
+            }
+            // CR 608.2g: exactly one card reaches the stack, so this mechanism
+            // is honest for an exact single-card cap and for nothing else — not
+            // for `N > 1` (under-permissive), and not for an unbounded clause.
+            CastMechanism::SingleCardDuringResolution => bounds
+                .is_exactly_one_cast()
+                .then_some(Self::DuringResolution),
+            // CR 608.2g: the private-zone pick is likewise a one-card ceiling.
+            // Its DRIVER value is the `LingeringPermission` default (the router
+            // reaches this form through the empty-target private-zone tail, not
+            // through the driver), but its counting CAPABILITY is one — so it is
+            // matched separately here and must not be folded into the
+            // `LingeringPermission` arm above, which accepts only unbounded.
+            CastMechanism::ResolutionTimePrivateZonePick => bounds
+                .is_exactly_one_cast()
+                .then_some(Self::LingeringPermission),
+            // CR 608.2c + CR 202.3: the window is the one mechanism with count
+            // and running-total channels, so it carries every bound.
+            CastMechanism::ResolutionWindow => Some(Self::ResolutionWindow { bounds }),
+        }
+    }
+
+    /// Serde skip predicate — the `LingeringPermission` default is the common
     /// Serde skip predicate — the `LingeringPermission` default is the common
     /// case and is elided from serialized `Effect::CastFromZone` bodies.
     pub fn is_default(&self) -> bool {
         matches!(self, CastFromZoneDriver::LingeringPermission)
     }
 
-    /// CR 608.2g: true iff this effect casts the card as the granting ability
-    /// resolves (Suspend's last-counter cast), rather than granting a lingering
-    /// permission.
+    /// CR 608.2g: true iff this effect casts the SINGLE resolved target as the
+    /// granting ability resolves (Suspend's last-counter cast), rather than
+    /// granting a lingering permission.
+    ///
+    /// Deliberately false for `ResolutionWindow`: that variant is also a
+    /// during-resolution cast, but it drives the bounded multi-cast window
+    /// (`window_bounds`) instead of the single-target routes this predicate
+    /// gates, and every existing caller of this predicate assumes exactly one
+    /// resolved target.
     pub fn is_during_resolution(&self) -> bool {
         matches!(self, CastFromZoneDriver::DuringResolution)
     }
+
+    /// CR 608.2g + CR 608.2c + CR 202.3: The bounds of the resolution-scoped
+    /// free-cast window this driver opens, or `None` for the two single-card
+    /// mechanisms. The single authority the `cast_from_zone` router reads to
+    /// decide whether to convert the grant into an `Effect::FreeCastFromZones`
+    /// window over the batch.
+    pub fn window_bounds(&self) -> Option<ResolutionCastWindow> {
+        match self {
+            CastFromZoneDriver::ResolutionWindow { bounds } => Some(*bounds),
+            _ => None,
+        }
+    }
+
+    /// CR 611.2a: Reconcile this driver with a durational scope the parser
+    /// stamped on the grant AFTER the clause body was lowered (a leading
+    /// "Until end of turn, …" via `with_clause_duration`, or a stripped trailing
+    /// "… this turn"). A stated duration means the controller casts at a LATER
+    /// priority window, which is the defining property of a lingering
+    /// permission — so a resolution-scoped window degrades to one. The two
+    /// single-card mechanisms are unchanged here; the paid-cast downgrade has
+    /// its own narrower guard at the clause seam.
+    ///
+    /// `None` is a REFUSAL, and the fallible return type is the point: the
+    /// degrade is expressed as `for_batch_bounds(LingeringPermission, …)`, so a
+    /// window that printed a cast cap or a CR 202.3 running-total budget cannot
+    /// be silently downgraded into a per-object permission that has nowhere to
+    /// put it. Callers must turn `None` into an honest gap
+    /// (`CAST_BOUND_LOST_TO_DURATION_GAP`), never into a driver. This is the
+    /// reconciliation half of the same choke point `for_batch_bounds` is the
+    /// selection half of; making it `Option` is what forces every present and
+    /// future downgrade site to face the question at compile time.
+    pub fn with_lingering_duration(self) -> Option<Self> {
+        match self {
+            CastFromZoneDriver::ResolutionWindow { bounds } => {
+                Self::for_batch_bounds(CastMechanism::LingeringPermission, bounds)
+            }
+            // CR 608.2g: the two single-card mechanisms carry no batch bound to
+            // lose, so a stated duration leaves them untouched (the paid
+            // `DuringResolution` → lingering move for a chosen single target
+            // — Emry, Lurker in the Loch — has its own narrower guard at the
+            // trailing-duration seam, which runs before this call).
+            other => Some(other),
+        }
+    }
 }
+
+/// CR 608.2c + CR 611.2a: The parser gap name for a cast clause whose printed
+/// batch bound is lost when a stated duration forces the grant onto the
+/// per-object lingering mechanism. A single constant so the parser, the
+/// regression suite, and any later coverage audit all name the same gap, and so
+/// it stays distinguishable from `unrepresentable_cast_cap` (a bound the
+/// representation cannot express *at all*) — here the bound is perfectly
+/// representable and the *mechanism the duration selects* is what cannot hold
+/// it.
+pub const CAST_BOUND_LOST_TO_DURATION_GAP: &str = "duration_scoped_cast_bound";
 
 /// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
 /// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
@@ -4043,7 +4306,12 @@ pub enum ResolutionCastSuccessAction {
     /// recomputed from the controller's current graveyard/hand.
     FreeCastOfferRemaining {
         controller: PlayerId,
-        remaining_casts: u8,
+        /// CR 608.2c: Casts still available in the window, or `None` for the
+        /// unbounded "any number of spells" form — the same encoding as
+        /// `Effect::FreeCastFromZones::count`, carried unchanged through every
+        /// re-offer so an unbounded window never acquires an artificial cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_casts: Option<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_mv_budget: Option<u32>,
         filter: TargetFilter,
@@ -14953,7 +15221,8 @@ pub enum Effect {
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive "free-cast window"
     /// during this spell/ability's resolution: the controller may cast up to
-    /// `count` spells matching `filter` from any of `zones` (their own
+    /// `count` spells (or ANY NUMBER when `count` is `None`) matching `filter`
+    /// from any of `zones` (their own
     /// graveyard and/or hand), each without paying its mana cost, casting them
     /// one at a time during resolution (CR 608.2g — "casting other spells this
     /// way"). When `max_total_mv` is `Some(n)`, the *running total* mana value
@@ -14971,8 +15240,23 @@ pub enum Effect {
     /// is no target slot; candidates are gathered by `filter` across `zones` at
     /// resolution time. Invoke Calamity is the type specimen.
     FreeCastFromZones {
-        /// CR 601.2: Maximum number of spells the controller may cast this way.
-        count: u8,
+        /// CR 608.2c: Maximum number of spells the controller may cast this way,
+        /// as printed, or `None` for the UNBOUNDED "any number of spells" form.
+        ///
+        /// The encoding is deliberately identical to
+        /// `ResolutionCastWindow::max_casts`, the parsed bound this field is
+        /// populated from: `None` there already means "any number of spells",
+        /// so carrying `Option<u8>` end-to-end makes the conversion a
+        /// pass-through instead of a lossy `unwrap_or(pool.len() as u8)`. The
+        /// previous `u8` had no unbounded value, so an unbounded window over a
+        /// pool larger than 255 silently truncated to 255 casts and stranded
+        /// every eligible card past the cap — a cap no printed instruction states.
+        ///
+        /// Serde: a bare number still deserializes as `Some(n)` (`Option`'s
+        /// `visit_some`), so pre-existing serialized `"count": 2` bodies and
+        /// generated card data keep their meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u8>,
         /// CR 202.3: Optional running-total mana-value budget shared across all
         /// spells cast this way. `None` means no MV cap.
         #[serde(default, skip_serializing_if = "Option::is_none")]

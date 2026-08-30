@@ -46,6 +46,17 @@ pub struct PerfCounterSnapshot {
     pub sba_empty_battlefield_short_circuits: u64,
 }
 
+/// Test-only cache-use counters for the homogeneous target-selection walk.
+///
+/// Kept separate from [`PerfCounterSnapshot`], whose serialized field set powers
+/// the AI performance baseline rather than integration-test instrumentation.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HomogeneousTargetWalkCacheCounters {
+    pub initializations: u64,
+    pub advances: u64,
+}
+
 thread_local! {
     /// Per-thread (NOT process-global) so parallel `cargo test` runs do not
     /// cross-pollute counters between a test's `reset()` and `snapshot()`.
@@ -102,6 +113,13 @@ thread_local! {
         sba_battlefield_snapshot_builds: 0,
         sba_empty_battlefield_short_circuits: 0,
     }) };
+    #[cfg(feature = "test-support")]
+    static HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS: Cell<HomogeneousTargetWalkCacheCounters> = const {
+        Cell::new(HomogeneousTargetWalkCacheCounters {
+            initializations: 0,
+            advances: 0,
+        })
+    };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
 }
 
@@ -141,6 +159,24 @@ fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
 
 pub fn record_state_clone_for_legality() {
     with_mut(|s| s.state_clone_for_legality += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_homogeneous_target_walk_cache_initialization() {
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.initializations += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_homogeneous_target_walk_cache_advance() {
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.advances += 1;
+        cell.set(counters);
+    });
 }
 
 fn record_phase_owned_state_clone_for(
@@ -364,6 +400,14 @@ pub fn snapshot() -> PerfCounterSnapshot {
     COUNTERS.with(|c| c.get())
 }
 
+#[cfg(feature = "test-support")]
+pub fn homogeneous_target_walk_cache_snapshot() -> HomogeneousTargetWalkCacheCounters {
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(Cell::get)
+}
+
 pub fn reset() {
     COUNTERS.with(|c| c.set(PerfCounterSnapshot::default()));
+    #[cfg(feature = "test-support")]
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS
+        .with(|counters| counters.set(HomogeneousTargetWalkCacheCounters::default()));
 }

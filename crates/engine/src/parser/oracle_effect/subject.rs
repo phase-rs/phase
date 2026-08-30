@@ -1002,7 +1002,7 @@ fn parse_base_pt_axes(input: &str) -> OracleResult<'_, BasePtSetAxes> {
     ))
 }
 
-/// CR 208.1 + CR 613.4b: The dynamic-or-fixed value side of a "base power …
+/// CR 208.4a + CR 613.4b: The dynamic-or-fixed value side of a "base power …
 /// become[s] <value>" clause, resolved into per-axis layer-7b modifications.
 enum BasePtSetValue {
     /// Fixed "N/M" — `SetPower`/`SetToughness`.
@@ -1017,19 +1017,22 @@ enum BasePtSetValue {
     },
 }
 
-/// CR 208.1: Parse the value following the "become[s] " copula of a base-P/T-set
+/// CR 208.4a + CR 613.4b: Parse the value following the "become[s] " copula of a base-P/T-set
 /// clause. Tries the fixed "N/M" form first (so "6/6" is not mis-routed through
-/// the quantity grammar), then the dynamic "[each] equal to <quantity>" form,
-/// which routes through the shared CDA quantity grammar so every recognized
-/// count/aggregate/possessive-power phrase composes ("the number of Towns you
-/// control", "~'s power", …).
+/// the quantity grammar), then a paired "<X>'s power and toughness" referent
+/// (splitting into independent per-axis quantities reading the same object —
+/// Galion, Elvenking's Butler: "Its base power and toughness become equal to
+/// ~'s power and toughness"), then the single-quantity dynamic "[each] equal to
+/// <quantity>" form, which routes through the shared CDA quantity grammar so
+/// every recognized count/aggregate/possessive-power phrase composes ("the
+/// number of Towns you control", "~'s power", …).
 fn parse_base_pt_set_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
     if let Some((power, toughness, after_pt)) =
         super::animation::parse_fixed_become_pt_prefix(remainder)
     {
         return Some((BasePtSetValue::Fixed { power, toughness }, after_pt));
     }
-    // CR 208.1: "[each] equal to <quantity>" dynamic value. "each equal to" and
+    // CR 208.4a + CR 613.4b: "[each] equal to <quantity>" dynamic value. "each equal to" and
     // "equal to" are the two surface forms (each/each-not are not independent
     // axes here — the optional "each " is the only variation).
     let lower = remainder.to_lowercase();
@@ -1041,12 +1044,20 @@ fn parse_base_pt_set_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
         value((), tag::<_, _, OracleError<'_>>("equal to ")).parse(i)
     })?;
     let tail = after_copula.trim().trim_end_matches('.').trim();
+    // CR 208.4a + CR 613.4b: a paired referent ("<X>'s power and toughness" / "the power and
+    // toughness of <X>") splits into independent per-axis quantities reading
+    // the same object — shares the transitive "change ... to" frame's building
+    // block (`parse_pt_pair_referent`) rather than re-deriving the
+    // possessive/inverted-genitive referent grammar for the copula frame.
+    if let Some((power, toughness)) = parse_pt_pair_referent(tail) {
+        return Some((BasePtSetValue::SplitDynamic { power, toughness }, ""));
+    }
     let expr = oracle_quantity::parse_cda_quantity(tail)
         .or_else(|| oracle_quantity::parse_event_context_quantity(tail))?;
     Some((BasePtSetValue::Dynamic(expr), ""))
 }
 
-/// CR 208.1 + CR 613.4b: Parse the copula that separates a base-P/T subject from
+/// CR 208.4a + CR 613.4b: Parse the copula that separates a base-P/T subject from
 /// its value. The intransitive "become[s] " form and the transitive
 /// "change … to " form (Riptide Mangler, Shape Stealer, Halfdane) share one
 /// downstream value/emission path; `is_change` selects the token so the two
@@ -1059,7 +1070,7 @@ fn parse_base_pt_copula(input: &str, is_change: bool) -> OracleResult<'_, ()> {
     }
 }
 
-/// CR 208.1 + CR 613.4b: value side of the transitive "change <subject>'s base
+/// CR 208.4a + CR 613.4b: value side of the transitive "change <subject>'s base
 /// power [and toughness] to <value>" frame. Unlike the "become[s] equal to"
 /// copula, the "change … to" frame introduces the value with a bare " to ", so
 /// the value is a fixed "N/M" (Brine Hag), a paired "<X>'s power and toughness"
@@ -1080,7 +1091,7 @@ fn parse_change_base_pt_value(remainder: &str) -> Option<(BasePtSetValue, &str)>
     Some((BasePtSetValue::Dynamic(expr), ""))
 }
 
-/// CR 208.1: Resolve a paired "<X>'s power and toughness" / "the power and
+/// CR 208.4a + CR 613.4b: Resolve a paired "<X>'s power and toughness" / "the power and
 /// toughness of <X>" referent into its two single-axis quantities, both reading
 /// the same object `X` (its power feeds base power, its toughness feeds base
 /// toughness). Rather than duplicate the referent-scope grammar (event-context
@@ -1156,7 +1167,7 @@ fn parse_base_pt_axis_quantity(tail: &str) -> Option<QuantityExpr> {
     })
 }
 
-/// CR 208.1 + CR 608.2c: "<power-expr> and its base toughness becomes <toughness-expr>"
+/// CR 208.4a + CR 613.4b + CR 608.2c: "<power-expr> and its base toughness becomes <toughness-expr>"
 /// when power and toughness each carry independent dynamic quantities (Amplifire).
 fn parse_split_base_pt_dynamic_values(
     remainder: &str,
@@ -1324,11 +1335,30 @@ fn try_parse_subject_base_pt_set_clause_ast(
                     parse_base_pt_axes,
                 )
                     .map(|(subject, _, axes)| (subject, axes)),
+                // CR 608.2c: bare possessive pronoun "its base power [and
+                // toughness]" (Galion, Elvenking's Butler: "Its base power and
+                // toughness become equal to ~'s power and toughness"). Unlike
+                // the named-possessor forms above, "its" already IS the
+                // possessive marker — there is no separate "'s" suffix to
+                // anchor on — so it needs its own arm rather than a
+                // `take_until("'s base ")` scan. The synthetic subject text
+                // "it" is handed to the shared bare-pronoun resolver in
+                // `parse_subject_application`, which already threads
+                // `ParentTarget` (a referent introduced earlier in the same
+                // effect chain, e.g. a preceding "choose ... target creature")
+                // vs. `TriggeringSource`/`SelfRef` — the same resolution "it
+                // connives" and "it gets +1/+1 until end of turn" use
+                // elsewhere.
+                preceded(tag::<_, _, VE>("its "), parse_base_pt_axes).map(|axes| ("it", axes)),
             ))
             .parse(parse_lower)
             .ok()?;
             let (rest_lower, ()) = parse_base_pt_copula(rest_lower, is_change).ok()?;
-            let subject = parse_body[..subject_lower.len()].trim();
+            let subject = if subject_lower == "it" {
+                "it"
+            } else {
+                parse_body[..subject_lower.len()].trim()
+            };
             let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
             (subject, axes, remainder, None)
         };
@@ -1352,7 +1382,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
     let application = target_application.or_else(|| parse_subject_application(subject, ctx))?;
     let affected = static_affected_for_application(&application);
 
-    // CR 208.1 + CR 613.4b: emit per-axis layer-7b set modifications. Fixed
+    // CR 208.4a + CR 613.4b: emit per-axis layer-7b set modifications. Fixed
     // values stay `SetPower`/`SetToughness`; dynamic values use the
     // `SetPowerDynamic`/`SetToughnessDynamic` variants the layer system
     // re-evaluates each tick.
@@ -1417,6 +1447,52 @@ fn try_parse_subject_base_pt_set_clause_ast(
             sub_ability: None,
         }),
     })
+}
+
+/// CR 613.4b + CR 608.2c: Does this chunk's text open with the bare
+/// possessive-pronoun base-P/T-set grammar ("its base power [and toughness]
+/// become[s] ..." or the transitive "[you may] change its base power [and
+/// toughness] to ...") — the class Galion, Elvenking's Butler's "Its base
+/// power and toughness become equal to ~'s power and toughness" belongs to?
+///
+/// This mirrors ONLY the bare-pronoun arm of `try_parse_subject_base_pt_set_clause_ast`
+/// (`preceded(tag("its "), parse_base_pt_axes)` + `parse_base_pt_copula`), reusing
+/// those exact combinators so the gate can never drift from the grammar it exists
+/// to scope. It deliberately does NOT match the named-possessor ("~'s base
+/// power ...") or inverted-genitive ("the base power ... of ~") forms — those
+/// bind a *named* subject, not the bare pronoun "it", so they never reach the
+/// `parse_subject_application` bare-"it" branch this gate exists to constrain.
+///
+/// Call site: `parse_effect_chain_ir`'s `prior_typed_referent` chunk-subject
+/// rebind (oracle_effect/mod.rs) must fire ONLY for this class of clause — an
+/// earlier sibling's chosen typed target outranking a trigger's watched-source
+/// default is correct here because CR 608.2c reads "its" as referring to
+/// the target just chosen two words earlier, but the same rebind applied to an
+/// unrelated clause shape (`DealDamage`, `CantUntap`, `Discard`, `GiveControl`,
+/// `Shuffle`, ...) would silently reassign THEIR bare "it"/"its" subject too,
+/// with no card-by-card proof that rebinding is correct for those classes.
+pub(super) fn is_bare_pronoun_base_pt_possessive_clause(text: &str) -> bool {
+    type VE<'a> = OracleError<'a>;
+    let (body, _) = strip_leading_duration(text);
+    let lower = body.to_lowercase();
+    let parse_lower = match alt((
+        tag::<_, _, VE>("you may change "),
+        tag::<_, _, VE>("change "),
+    ))
+    .parse(lower.as_str())
+    {
+        Ok((rest, _)) => rest,
+        Err(_) => lower.as_str(),
+    };
+    let Ok((rest, _axes)) =
+        preceded(tag::<_, _, VE>("its "), parse_base_pt_axes).parse(parse_lower)
+    else {
+        return false;
+    };
+    // Either copula surface form (intransitive "become[s]" or transitive " to ")
+    // counts — the gate only needs to recognize the subject/axes shape, not
+    // which verb frame introduced it.
+    parse_base_pt_copula(rest, false).is_ok() || parse_base_pt_copula(rest, true).is_ok()
 }
 
 /// Strip a leading duration phrase ("Until end of turn, " / "This turn, ") off a
@@ -3201,6 +3277,19 @@ pub(super) fn parse_subject_application(
     // `parent_target_available` records that a previous chunk introduced a real
     // typed object referent. Standalone clause parsing leaves it false, so
     // "it connives" remains self-referential instead of inventing ParentTarget.
+    //
+    // `ctx.subject` is deliberately authoritative over `parent_target_available`
+    // here: the chunk-loop caller (`oracle_effect/mod.rs`) already resolves the
+    // precedence between a sibling clause's chosen typed target and the
+    // trigger's own watched subject BEFORE this function is reached — it clears
+    // `ctx.subject` to `None` for exactly the case where a sibling clause's
+    // target should win (Galion, Elvenking's Butler's "choose ... target
+    // creature ... Its base power ..."), while leaving `ctx.subject` populated
+    // (e.g. via an "if you do" anchor to the source) when that anchor is
+    // itself the correct nearest antecedent (The Irencrag's "you may have ~
+    // become ... . If you do, it gains ..." — "it" must stay bound to ~, not
+    // be reinterpreted as some unrelated typed referent). See
+    // `chunk_subject`/`prior_typed_referent` in `parse_effect_chain_ir`.
     if lower == "it" {
         if ctx.subject.is_none() && ctx.parent_target_available {
             return Some(SubjectApplication {
@@ -10098,6 +10187,94 @@ mod tests {
         assert!(!mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
+    }
+
+    #[test]
+    fn base_pt_set_clause_pronoun_its_subject_resolves_to_parent_target() {
+        // Galion, Elvenking's Butler: "Its base power and toughness become
+        // equal to ~'s power and toughness" — the bare possessive pronoun
+        // "Its" (as opposed to a named possessor like "~'s base power...")
+        // must resolve through the shared bare-pronoun anaphor to the object
+        // introduced earlier in the same effect chain (CR 608.2c: "choose up
+        // to one other target creature you control"), not fall back to
+        // SelfRef.
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..Default::default()
+        };
+        let ast = try_parse_subject_base_pt_set_clause_ast(
+            "Its base power and toughness become equal to ~'s power and toughness",
+            &mut ctx,
+        )
+        .unwrap_or_else(|| panic!("pronoun-subject clause did not parse"));
+        let ClauseAst::SubjectPredicate { subject, predicate } = ast else {
+            panic!("expected SubjectPredicate");
+        };
+        assert_eq!(
+            subject.affected,
+            Some(TargetFilter::ParentTarget),
+            "'Its' must resolve to ParentTarget when a prior clause introduced \
+             a typed referent, got {:?}",
+            subject.affected
+        );
+        let PredicateAst::Continuous { effect, .. } = *predicate else {
+            panic!("expected Continuous predicate");
+        };
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected GenericEffect");
+        };
+        let mods = &static_abilities[0].modifications;
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "expected SetPowerDynamic(Power{{Source}}), got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "expected SetToughnessDynamic(Toughness{{Source}}), got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn base_pt_set_clause_copula_paired_referent_dual_axis() {
+        // The intransitive "become[s] equal to <X>'s power and toughness"
+        // paired referent (as opposed to the transitive "change ... to" frame
+        // already covered by `change_base_pt_to_paired_referent_dual_axis`)
+        // splits into independent per-axis quantities reading the same
+        // object.
+        let (mods, _) = base_pt_set_mods(
+            "~'s base power and toughness become equal to that creature's power and toughness",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPowerDynamic { .. })),
+            "expected SetPowerDynamic, got {mods:?}",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { .. })),
+            "expected SetToughnessDynamic, got {mods:?}",
+        );
     }
 
     // -----------------------------------------------------------------------

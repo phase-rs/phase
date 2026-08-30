@@ -5,14 +5,17 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
+use engine::types::ability::Duration;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
-    ContinuousModification, ControllerRef, DelayedTriggerCondition, Effect, FilterProp,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, TargetChoiceTiming,
-    TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, Effect, EffectScope,
+    FilterProp, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -328,6 +331,642 @@ fn emperor_of_bones_adapt_without_linked_exile_has_no_riders_to_apply() {
         Zone::Battlefield,
         "Emperor must remain on the battlefield when no linked creature was exiled"
     );
+}
+
+/// Build a spell-shaped forward-result chain and drive it through the public
+/// cast/apply pipeline. Its optional graveyard move selects nothing, exercising
+/// the same empty-forward-result branch as an illegal target at resolution.
+fn empty_forward_result_generic_spell(
+    static_abilities: Vec<StaticDefinition>,
+    target: Option<TargetFilter>,
+) -> AbilityDefinition {
+    let mut independent_draw = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    independent_draw.sub_link = SubAbilityLink::SequentialSibling;
+    let dependent_continuation = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .sub_ability(independent_draw);
+    let generic = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            target,
+            end_cost: None,
+        },
+    )
+    .sub_ability(dependent_continuation);
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            }),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: Some(ControllerRef::You),
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: true,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(generic);
+    root.forward_result = true;
+    root.target_choice_timing = TargetChoiceTiming::Resolution;
+    root
+}
+
+fn resolve_empty_forward_result_generic_spell(
+    static_abilities: Vec<StaticDefinition>,
+    target: Option<TargetFilter>,
+) -> engine::types::game_state::GameState {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["independent sibling draw"]);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Empty Forward Generic", false)
+        .with_ability_definition(empty_forward_result_generic_spell(static_abilities, target))
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("synthetic spell announcement must be accepted");
+    runner.advance_until_stack_empty();
+    runner.state().clone()
+}
+
+/// The exact Princess Yue regression shape: a no-op forwarded move followed by
+/// an all-effective-SelfRef GenericEffect must skip that grant while preserving
+/// an independent sequential sibling in the normal cast/apply pipeline.
+#[test]
+fn empty_forward_result_skips_all_self_ref_generic_effect_but_runs_independent_sibling() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        None,
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(state.players[P0.0 as usize].life, 20);
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "the missing forwarded object must suppress the all-SelfRef grant"
+    );
+}
+
+/// `affected: TriggeringSource` overrides an outer SelfRef descriptor. The
+/// GenericEffect must remain executable after an empty forwarded move, so its
+/// dependent continuation runs before the independent sibling.
+#[test]
+fn empty_forward_result_preserves_triggering_source_generic_effect() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::SelfRef),
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(state.players[P0.0 as usize].life, 21);
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "the inner TriggeringSource application filter must override the outer SelfRef; \
+         without an event-context source, no transient may bind to the spell source"
+    );
+}
+
+/// `affected: CostPaidObject` likewise overrides outer SelfRef. It must not be
+/// pruned merely because the outer descriptor is SelfRef.
+#[test]
+fn empty_forward_result_preserves_cost_paid_object_generic_effect() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::CostPaidObject)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::SelfRef),
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(state.players[P0.0 as usize].life, 21);
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "the inner CostPaidObject application filter must override the outer SelfRef; \
+         without a cost-paid object, no transient may bind to the spell source"
+    );
+}
+
+/// `affected: ParentTarget` is the third inherited-target reference and behaves
+/// exactly like its `TriggeringSource` / `CostPaidObject` siblings: the outer
+/// SelfRef descriptor must not pin the grant to the spell source. With no
+/// chosen target, no cost-paid object, and an empty tracked set, the dedicated
+/// resolution-local arm binds nothing at all.
+#[test]
+fn empty_forward_result_preserves_parent_target_generic_effect() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::SelfRef),
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(state.players[P0.0 as usize].life, 21);
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "the inner ParentTarget application filter must override the outer SelfRef; \
+         without a parent binding, no transient may bind to the spell source"
+    );
+}
+
+/// `affected: AmassedArmy` is the fourth inherited-target reference (CR 701.47c)
+/// and must reach its `amassed_army_object` arm rather than the outer SelfRef
+/// short-circuit. With no Army stamped on the resolution, nothing binds.
+#[test]
+fn empty_forward_result_preserves_amassed_army_generic_effect() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::AmassedArmy)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::SelfRef),
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(state.players[P0.0 as usize].life, 21);
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "the inner AmassedArmy application filter must override the outer SelfRef; \
+         without an amassed Army, no transient may bind to the spell source"
+    );
+}
+
+/// Creature filter used as the innocuous second member of the combinator cases
+/// below — present only so the combinator has something to combine `SelfRef`
+/// with.
+fn any_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Creature],
+        controller: None,
+        properties: vec![],
+    })
+}
+
+/// CR 608.2c: `And` is satisfied only when EVERY member matches, so an effective
+/// `And { [SelfRef, ...] }` still names the object the preceding instruction
+/// failed to produce. It must prune exactly like a bare `SelfRef`: the grant is
+/// dropped, the dependent continuation is skipped, and only the independent
+/// sequential sibling runs.
+#[test]
+fn empty_forward_result_prunes_conjunctive_self_ref_static() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, any_creature_filter()],
+            })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        None,
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].hand.len(),
+        1,
+        "the independent sequential sibling must still run"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 20,
+        "a conjunctive SelfRef static cannot be satisfied without the forwarded \
+         object, so its dependent continuation must be skipped"
+    );
+    assert!(
+        state.transient_continuous_effects.is_empty(),
+        "no transient may bind for a static that requires the absent object"
+    );
+}
+
+/// The other half of the conjunctive rule: `Or` and `Not` must NOT be pruned.
+/// `Or { [SelfRef, X] }` is still satisfiable through `X`, and `Not { SelfRef }`
+/// is satisfied by everything the anaphor is not — neither requires the absent
+/// object, so pruning either would drop a grant the game still owes.
+///
+/// This guards against a later over-broadening of
+/// `filter_requires_missing_forward_result` into the remaining combinators.
+#[test]
+fn empty_forward_result_keeps_disjunctive_and_negated_self_ref_statics() {
+    let cases = vec![
+        (
+            "or",
+            TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, any_creature_filter()],
+            },
+        ),
+        (
+            "not",
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ),
+    ];
+
+    for (label, affected) in cases {
+        let state = resolve_empty_forward_result_generic_spell(
+            vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            None,
+        );
+        assert_eq!(
+            state.players[P0.0 as usize].life, 21,
+            "{label} does not require the forwarded object, so the node and its \
+             dependent continuation must survive"
+        );
+    }
+}
+
+/// The arm where the retain pass and the dependency check must agree: an outer
+/// `ParentTarget` node carrying BOTH a dependent `SelfRef` static and an
+/// independent `TriggeringSource` one. The pruner must drop only the first and
+/// keep the node alive for the second, which then binds the event-context object.
+///
+/// This is the case that would regress if the two predicates ever stopped
+/// sharing `generic_static_depends_on_missing_forward_result`.
+#[test]
+fn empty_forward_result_prunes_only_the_dependent_static_under_outer_parent_target() {
+    let (state, trigger_source) = resolve_empty_forward_result_with_trigger_source(
+        vec![
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance,
+                }]),
+            StaticDefinition::continuous()
+                .affected(TargetFilter::TriggeringSource)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }]),
+        ],
+        Some(TargetFilter::ParentTarget),
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "exactly the independent TriggeringSource static may survive"
+    );
+    assert_eq!(
+        state.transient_continuous_effects[0].affected,
+        TargetFilter::SpecificObject { id: trigger_source },
+        "the surviving static must bind the triggering source"
+    );
+    assert!(
+        state.transient_continuous_effects[0]
+            .modifications
+            .iter()
+            .any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                }
+            )),
+        "the SelfRef static (vigilance) must have been pruned, not the TriggeringSource one"
+    );
+}
+
+/// Same empty-forward-result spell as `resolve_empty_forward_result_generic_spell`,
+/// but with a real event-context source staged so an `affected: TriggeringSource`
+/// static has a referent to bind. `PermanentUntapped` is the smallest event
+/// `targeting::extract_source_from_event` accepts. Returns the resolved state
+/// and the staged source.
+fn resolve_empty_forward_result_with_trigger_source(
+    static_abilities: Vec<StaticDefinition>,
+    target: Option<TargetFilter>,
+) -> (engine::types::game_state::GameState, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["independent sibling draw"]);
+    let trigger_source = scenario.add_vanilla(P0, 2, 2);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Empty Forward Generic", false)
+        .with_ability_definition(empty_forward_result_generic_spell(static_abilities, target))
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().current_trigger_event = Some(GameEvent::PermanentUntapped {
+        object_id: trigger_source,
+    });
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: runner.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("synthetic spell announcement must be accepted");
+    runner.advance_until_stack_empty();
+    (runner.state().clone(), trigger_source)
+}
+
+/// CR 608.2c: an outer `target: ParentTarget` must not condemn a static whose
+/// effective application filter is the resolution-local `TriggeringSource`.
+/// `generic_effect_application_filter` makes the inner `affected` the authority,
+/// so the static is independent of the absent forwarded object and the node —
+/// and its dependent continuation — must survive the pruner.
+///
+/// Pre-fix, `effect_chain_depends_on_missing_forward_result` re-read the raw
+/// outer slot after `without_missing_forward_result_dependencies` had already
+/// retained this static, and discarded the whole node: life stopped at 20.
+#[test]
+fn empty_forward_result_keeps_triggering_source_static_under_outer_parent_target() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::ParentTarget),
+    );
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(
+        state.players[P0.0 as usize].life, 21,
+        "the retained TriggeringSource static is independent of the missing forward \
+         result, so the node and its dependent continuation must both survive"
+    );
+}
+
+/// The positive half: with a real event context staged, the static the pruner
+/// retained must actually install its transient, bound to the triggering source.
+/// Asserting `SpecificObject` identity means a regression that drops the static
+/// fails on a MISSING transient and one that mis-binds fails on the WRONG object.
+#[test]
+fn empty_forward_result_binds_retained_triggering_source_static_under_outer_parent_target() {
+    let (state, trigger_source) = resolve_empty_forward_result_with_trigger_source(
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])],
+        Some(TargetFilter::ParentTarget),
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the retained TriggeringSource static must install its transient; the pruner \
+         must not have discarded the node that carries it"
+    );
+    assert_eq!(
+        state.transient_continuous_effects[0].affected,
+        TargetFilter::SpecificObject { id: trigger_source },
+        "the event-context transient must bind the triggering source"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 21,
+        "the node carrying the independent static must survive the pruner"
+    );
+    assert!(creature_has_haste_from_transient_effects(
+        &state,
+        trigger_source
+    ));
+}
+
+/// The `GenericEffect` continuation both positive pairings share: it declares
+/// `target: SelfRef` but binds through an inherited-reference `affected`, which
+/// `generic_effect_application_filter` gives precedence (CR 608.2c).
+fn self_ref_generic_grant(affected: TargetFilter) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::SelfRef),
+            end_cost: None,
+        },
+    )
+}
+
+/// Find the single Army token the `Effect::Amass` parent created (CR 701.47a).
+fn amassed_army_on_battlefield(state: &engine::types::game_state::GameState) -> ObjectId {
+    let armies: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects[id]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("Army"))
+        })
+        .collect();
+    assert_eq!(armies.len(), 1, "amass must have produced exactly one Army");
+    armies[0]
+}
+
+/// Positive pairing for `empty_forward_result_preserves_parent_target_generic_effect`.
+///
+/// The negative case above only proves nothing bound to the spell. This one
+/// proves the `ParentTarget` binding path actually executes: a targeted parent
+/// (`SetTapState`) propagates its chosen creature into the continuation's
+/// `targets`, and the continuation must bind the transient to THAT creature.
+/// Reverting the shared-classifier fix pins it to the spell's own id instead,
+/// so the `SpecificObject` identity assertion — not just a count — fails.
+#[test]
+fn parent_target_generic_effect_binds_the_chosen_object_under_outer_self_ref() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chosen = scenario.add_vanilla(P0, 2, 2);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Parent Target Generic", false)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![],
+                    }),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            )
+            .sub_ability(self_ref_generic_grant(TargetFilter::ParentTarget)),
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[chosen]).resolve();
+    let state = outcome.state();
+
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the ParentTarget continuation must install exactly one transient"
+    );
+    assert_eq!(
+        state.transient_continuous_effects[0].affected,
+        TargetFilter::SpecificObject { id: chosen },
+        "the inner ParentTarget must bind the chosen creature, not the spell source \
+         ({chosen:?} expected, spell source is {spell:?})"
+    );
+    assert!(creature_has_haste_from_transient_effects(state, chosen));
+}
+
+/// Positive pairing for `empty_forward_result_preserves_amassed_army_generic_effect`.
+///
+/// CR 701.47c: "the amassed Army" names the creature amass chose. `Effect::Amass`
+/// stamps `amassed_army_object` recursively onto its chain, so the continuation
+/// must bind that Army rather than the spell that amassed it.
+#[test]
+fn amassed_army_generic_effect_binds_the_stamped_army_under_outer_self_ref() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Amass Generic", false)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Amass {
+                    subtype: "Zombie".to_string(),
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+            )
+            .sub_ability(self_ref_generic_grant(TargetFilter::AmassedArmy)),
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).resolve();
+    let state = outcome.state();
+    let army = amassed_army_on_battlefield(state);
+
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the AmassedArmy continuation must install exactly one transient"
+    );
+    assert_eq!(
+        state.transient_continuous_effects[0].affected,
+        TargetFilter::SpecificObject { id: army },
+        "the inner AmassedArmy must bind the stamped Army, not the spell source \
+         ({army:?} expected, spell source is {spell:?})"
+    );
+    assert!(creature_has_haste_from_transient_effects(state, army));
+}
+
+/// A mixed GenericEffect is retained after an empty forwarded move, but its
+/// individual SelfRef definition still depends on the missing object. Prune
+/// that definition while preserving the independent player-bound definition
+/// and the node's continuation edges.
+#[test]
+fn empty_forward_result_prunes_self_ref_static_from_mixed_generic_effect() {
+    let state = resolve_empty_forward_result_generic_spell(
+        vec![
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }]),
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Controller)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance,
+                }]),
+        ],
+        None,
+    );
+
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 1);
+    assert_eq!(
+        state.players[P0.0 as usize].life, 21,
+        "retaining the mixed node must preserve its dependent continuation"
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "only the independent static definition may survive the missing forward result"
+    );
+    let effect = &state.transient_continuous_effects[0];
+    assert_eq!(
+        effect.affected,
+        TargetFilter::SpecificPlayer { id: P0 },
+        "the surviving Controller definition must bind to the ability controller"
+    );
+    assert!(effect.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance
+        }
+    )));
+}
+
+/// Only an all-effective-SelfRef GenericEffect depends on the missing result.
+/// Mixed, broadcast, empty, and no-application-filter forms keep both their
+/// continuation and independent sibling in the production cast/apply path.
+#[test]
+fn empty_forward_result_preserves_non_self_ref_generic_effect_forms() {
+    let cases = vec![
+        (
+            "broadcast",
+            vec![StaticDefinition::continuous().affected(TargetFilter::Controller)],
+            None,
+        ),
+        ("empty", vec![], Some(TargetFilter::SelfRef)),
+        ("none", vec![StaticDefinition::continuous()], None),
+        // A statics-less node has nothing that can need the forwarded object,
+        // whatever the outer descriptor says, so it stays executable exactly
+        // like the `SelfRef` row above.
+        (
+            "empty-outer-parent-target",
+            vec![],
+            Some(TargetFilter::ParentTarget),
+        ),
+    ];
+
+    for (label, static_abilities, target) in cases {
+        let state = resolve_empty_forward_result_generic_spell(static_abilities, target);
+        assert_eq!(
+            state.players[P0.0 as usize].life, 21,
+            "{label} GenericEffect must remain executable after an empty forward result"
+        );
+    }
 }
 
 #[test]

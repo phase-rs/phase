@@ -164,6 +164,23 @@ fn pending_trigger_dispatch_origin_is_normal(origin: &PendingTriggerDispatchOrig
     matches!(origin, PendingTriggerDispatchOrigin::Normal)
 }
 
+/// Why a collected trigger batch remains parked across a non-priority window.
+///
+/// Most deferred queues are ordinary construction tails and must drain at their
+/// normal boundary. A completed SBA pass is different when it opens one of its
+/// own player choices: its already-triggered batch must join the answer's
+/// events before APNAP ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DeferredTriggerBatchOrigin {
+    #[default]
+    Ordinary,
+    StateBasedActionChoice,
+}
+
+fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
+    matches!(origin, DeferredTriggerBatchOrigin::Ordinary)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsumedTriggerEventOccurrence {
     pub event: GameEvent,
@@ -362,6 +379,14 @@ pub struct PendingTriggerContext {
         skip_serializing_if = "pending_trigger_dispatch_origin_is_normal"
     )]
     pub dispatch_origin: PendingTriggerDispatchOrigin,
+    /// Private scheduling ownership for a queue that must survive an SBA
+    /// choice and join the answer's CR 603.3b batch. `default` preserves saved
+    /// queues created before this discriminator existed.
+    #[serde(
+        default,
+        skip_serializing_if = "deferred_trigger_batch_origin_is_ordinary"
+    )]
+    pub(crate) batch_origin: DeferredTriggerBatchOrigin,
     /// Private CR 603.7 firing identity. It lives on the scheduler carrier,
     /// not `PendingTrigger`, so existing public `PendingTrigger` literals
     /// remain source-compatible.
@@ -384,6 +409,7 @@ impl PendingTriggerContext {
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
+            batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing: TriggerFiring::Ordinary,
         }
     }
@@ -394,6 +420,7 @@ impl PendingTriggerContext {
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
+            batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing: TriggerFiring::Ordinary,
         }
     }
@@ -405,6 +432,7 @@ impl PendingTriggerContext {
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
+            batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing: identity.firing(),
         }
     }
@@ -7293,6 +7321,109 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// Collect a completed SBA batch that paused on an SBA-owned player choice.
+///
+/// The marker is a narrow scheduling ownership record, not a general queue
+/// heuristic: only the priority pipeline calls this after it has observed the
+/// closed set of commander-zone, legend, and battle-protector SBA choices.
+pub(crate) fn collect_sba_choice_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    let first_new_context = state.deferred_triggers.len();
+    collect_triggers_into_deferred(state, events);
+    for context in &mut state.deferred_triggers[first_new_context..] {
+        context.batch_origin = DeferredTriggerBatchOrigin::StateBasedActionChoice;
+    }
+}
+
+/// True when this pipeline entry resumes a completed SBA batch that was parked
+/// specifically for an SBA-owned player choice.
+pub(crate) fn has_sba_choice_trigger_batch(state: &GameState) -> bool {
+    state.deferred_triggers.iter().any(|context| {
+        matches!(
+            context.batch_origin,
+            DeferredTriggerBatchOrigin::StateBasedActionChoice
+        )
+    })
+}
+
+/// Take the batch that an SBA-owned choice parked and consume its ownership.
+///
+/// The ownership exists only until the first post-answer CR 603.3b ordering
+/// attempt. If dispatch pauses again, its remainder is an ordinary deferred
+/// queue and must follow the regular drain policy on the next pipeline pass.
+///
+/// CR 603.3b: this PARTITIONS; it must never `mem::take` the whole queue.
+/// `batch_origin` is a per-context discriminator and the SBA collectors mark
+/// only the contexts they append, so an ordinary construction / terminal /
+/// cost-trigger context can already be sitting in `deferred_triggers` beside
+/// the marked ones. Handing those to
+/// `process_collected_triggers_with_delayed_events` would combine them with the
+/// answer's delayed triggers before ordering, merging two windows that
+/// `engine_priority::run_post_action_pipeline_from_with_policy` documents as
+/// separate.
+///
+/// `preexisting_len` is the queue length captured at the TOP of this pipeline
+/// pass, before the answer's own collectors ran. It is load-bearing, and origin
+/// alone cannot replace it: a trigger the ANSWER generates (a commander-return
+/// observer, say) is collected by the ordinary collector and so is also
+/// `Ordinary`, yet it belongs to the answer's window. Collection only ever
+/// appends within a pass, so the prefix below that boundary is exactly the set
+/// of contexts that predate the answer — the ones this partition holds back.
+/// Everything at or past it was produced by the answer and joins the batch.
+///
+/// Ordering within each partition is preserved, so neither queue's APNAP
+/// normalization is disturbed.
+pub(crate) fn take_sba_choice_trigger_batch(
+    state: &mut GameState,
+    preexisting_len: usize,
+) -> Vec<PendingTriggerContext> {
+    // The boundary is only meaningful while the pre-answer prefix is still
+    // intact. It is, for two structural reasons, both of which a future edit
+    // could silently break:
+    //   * the only other drain in this pipeline pass
+    //     (`drain_deferred_triggers_after_stack_object_announcement`) sits in
+    //     the `if` arm whose `else if` contains this call, so the two are
+    //     mutually exclusive; and
+    //   * the exile-return `split_off` removes a SUFFIX, from an index captured
+    //     later in the pass than this boundary, so it cannot touch the prefix.
+    // Assert rather than trust: a shrunk queue means indices no longer identify
+    // the pre-answer contexts, and misclassifying an answer-generated context as
+    // pre-existing would strand it (the regression this signature exists to
+    // prevent). Clamp in release so the worst case is the pre-fix grouping
+    // rather than a panic or an out-of-range split.
+    debug_assert!(
+        state.deferred_triggers.len() >= preexisting_len,
+        "deferred queue shrank from {preexisting_len} to {} between the pipeline-top          boundary capture and the SBA-choice take; the positional prefix no longer          identifies the pre-answer contexts",
+        state.deferred_triggers.len(),
+    );
+    let preexisting_len = preexisting_len.min(state.deferred_triggers.len());
+
+    let mut sba_choice = Vec::new();
+    let mut preexisting_ordinary = Vec::new();
+    for (index, mut context) in std::mem::take(&mut state.deferred_triggers)
+        .into_iter()
+        .enumerate()
+    {
+        let joins_answer_batch = index >= preexisting_len
+            || matches!(
+                context.batch_origin,
+                DeferredTriggerBatchOrigin::StateBasedActionChoice
+            );
+        if joins_answer_batch {
+            // Consume the ownership marker: a trigger that pauses again re-parks
+            // as ordinary work rather than claiming a second answer-joined window.
+            context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
+            sba_choice.push(context);
+        } else {
+            preexisting_ordinary.push(context);
+        }
+    }
+    state.deferred_triggers = preexisting_ordinary;
+    sba_choice
+}
+
 /// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time
 /// player choice that pauses on another prompt before the action settles.
 /// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
@@ -10158,6 +10289,18 @@ pub(crate) fn collect_delayed_triggers_into_deferred(state: &mut GameState, even
     state
         .consumed_before_priority_trigger_events
         .extend(consumed_events);
+}
+
+/// Delayed counterpart to [`collect_sba_choice_triggers_into_deferred`].
+pub(crate) fn collect_sba_choice_delayed_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    let first_new_context = state.deferred_triggers.len();
+    collect_delayed_triggers_into_deferred(state, events);
+    for context in &mut state.deferred_triggers[first_new_context..] {
+        context.batch_origin = DeferredTriggerBatchOrigin::StateBasedActionChoice;
+    }
 }
 
 pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize) -> usize {
@@ -46110,6 +46253,12 @@ pub mod tests {
 #[cfg(test)]
 #[path = "triggers_dedup_regression_tests.rs"]
 mod dedup_regression_tests;
+
+/// CR 603.3b: an SBA-owned choice parks its own trigger batch; an ordinary
+/// deferred context queued beside it must not join the answer's ordering window.
+#[cfg(test)]
+#[path = "sba_choice_batch_isolation_tests.rs"]
+mod sba_choice_batch_isolation_tests;
 
 // CR 603.3b: PR-6.75 trigger-ordering conflict-gate tests — the corpus parity
 // sweep (C0-full allowlist parity) + the C1/C0-full discriminators (N-A..N-F).

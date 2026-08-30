@@ -1324,6 +1324,18 @@ pub fn choose_target_for_ability(
         return Ok(TargetSelectionAdvance::Complete(selected_slots));
     }
 
+    if let Some(next_progress) = homogeneous_required_target_walk_progress(
+        ability,
+        target_slots,
+        constraints,
+        progress,
+        &specs,
+        next_slot,
+        &selected_slots,
+    ) {
+        return Ok(TargetSelectionAdvance::InProgress(next_progress));
+    }
+
     let next_progress = build_target_selection_progress_for_ability(
         state,
         ability,
@@ -6229,6 +6241,26 @@ fn build_target_selection_progress_for_ability(
     }
 
     let specs = target_slot_specs(state, ability);
+    if current_slot == 0 && selected_slots.is_empty() {
+        if let Some(first_spec) =
+            homogeneous_required_target_walk_spec(ability, target_slots, constraints, &specs)
+        {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_homogeneous_target_walk_cache_initialization();
+            let current_legal_targets =
+                legal_targets_for_selected_slot(state, ability, first_spec, &[], &[]);
+            if current_legal_targets.len() < target_slots.len() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal target combinations available".to_string(),
+                ));
+            }
+            return Ok(TargetSelectionProgress {
+                current_slot,
+                selected_slots,
+                current_legal_targets,
+            });
+        }
+    }
     let current_legal_targets = legal_targets_for_slot_with_specs(
         state,
         ability,
@@ -6323,6 +6355,73 @@ fn build_target_selection_progress_for_ability(
         selected_slots,
         current_legal_targets,
     })
+}
+
+/// Reuses the already-proven legal target set for one homogeneous required
+/// multi-target instance. CR 601.2c / 115.3 only require each target in that
+/// instance to be different; every shape whose later target legality can
+/// depend on earlier choices deliberately returns `None` and recomputes.
+fn homogeneous_required_target_walk_progress(
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    progress: &TargetSelectionProgress,
+    specs: &[TargetSlotSpec],
+    next_slot: usize,
+    selected_slots: &[Option<TargetRef>],
+) -> Option<TargetSelectionProgress> {
+    homogeneous_required_target_walk_spec(ability, target_slots, constraints, specs)?;
+    if next_slot >= target_slots.len()
+        || progress.current_slot + 1 != next_slot
+        || selected_slots.len() != next_slot
+    {
+        return None;
+    }
+
+    let chosen = selected_slots.last()?.as_ref()?;
+    let mut cached_targets = progress.current_legal_targets.clone();
+    let index = cached_targets.iter().position(|target| target == chosen)?;
+    cached_targets.remove(index);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_homogeneous_target_walk_cache_advance();
+    Some(TargetSelectionProgress {
+        current_slot: next_slot,
+        selected_slots: selected_slots.to_vec(),
+        current_legal_targets: cached_targets,
+    })
+}
+
+/// Proves that each slot in this target run has the same independent legal set.
+/// The caller may then consume the exact cached set one target at a time.
+fn homogeneous_required_target_walk_spec<'a>(
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    specs: &'a [TargetSlotSpec],
+) -> Option<&'a TargetSlotSpec> {
+    let first = specs.first()?;
+    if !constraints.is_empty()
+        || specs.len() != target_slots.len()
+        || target_slots
+            .iter()
+            .any(|slot| slot.optional || slot.chooser.is_some())
+        || specs.iter().any(|spec| {
+            spec.instance != first.instance
+                || spec.filter != first.filter
+                || target_filter_has_another_target_marker(&spec.filter)
+                || relative_controller_kind(&spec.filter).is_some()
+                || target_filter_needs_ability_context(&spec.filter)
+        })
+        || ability_needs_companion_target_player_slot(ability)
+        || is_per_opponent_target_fanout(ability)
+        || matches!(
+            ability.effect,
+            Effect::Attach { .. } | Effect::PairWith { .. }
+        )
+    {
+        return None;
+    }
+    Some(first)
 }
 
 fn legal_targets_for_slot(

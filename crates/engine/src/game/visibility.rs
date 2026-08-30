@@ -779,6 +779,15 @@ pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> Gam
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // This clone is a display snapshot, never rules authority: the ~20 private
+    // carriers blanked below are dropped while the public `waiting_for` that
+    // stands over them is preserved. Record that here so the fact survives
+    // serialization — `reject_viewer_projection_as_authority` refuses it at the
+    // PERSISTENCE ingress, so a projection can never be restored as a saved game.
+    // It is deliberately NOT refused on the transport decode path: the multiplayer
+    // protocol ships projections to viewers on purpose. Last-writer-wins:
+    // re-projecting a projection for another viewer re-latches to that viewer.
+    filtered.viewer_projection = Some(viewer);
     // Analysis provenance is meaningful only to the clone executing a preview;
     // never carry it into a viewer projection.
     filtered.life_safety_probe = Box::default();
@@ -6273,7 +6282,7 @@ mod tests {
             player: PlayerId(0),
             kind: CastOfferKind::FreeCastWindow {
                 candidates: vec![hand_candidate],
-                remaining_casts: 2,
+                remaining_casts: Some(2),
                 remaining_mv_budget: Some(6),
                 filter: crate::types::ability::TargetFilter::Any,
                 zones: vec![Zone::Graveyard, Zone::Hand],
@@ -6299,7 +6308,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(candidates, vec![hand_candidate]);
-                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_casts, Some(2));
                 assert_eq!(remaining_mv_budget, Some(6));
             }
             other => panic!("expected FreeCastWindow for controller, got {other:?}"),
@@ -6333,7 +6342,7 @@ mod tests {
                     "opponent must not see the controller's hand id via the member pool"
                 );
                 assert_eq!(member_pool, vec![ObjectId(0)]);
-                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_casts, Some(2));
                 assert_eq!(remaining_mv_budget, Some(6));
                 assert_eq!(
                     graveyard_replacement.as_ref(),

@@ -26,13 +26,18 @@ export function FreeCastWindowModal() {
   if (kind.type !== "FreeCastWindow") return null;
   if (!canActForWaitingState) return null;
 
+  // CR 601.2: an absent `remaining_casts` is the engine's UNBOUNDED "any number
+  // of spells" window (serde omits the `None`), not a zero. Substituting a
+  // localized word into the existing `{{remaining}}` slot keeps one sentence
+  // shape per locale instead of forking the subtitle strings.
+  const remaining = kind.remaining_casts ?? t("freeCastWindow.remainingAny");
   const subtitle =
     kind.remaining_mv_budget !== undefined && kind.remaining_mv_budget !== null
       ? t("freeCastWindow.subtitle", {
-          remaining: kind.remaining_casts,
+          remaining,
           budget: kind.remaining_mv_budget,
         })
-      : t("freeCastWindow.subtitleNoBudget", { remaining: kind.remaining_casts });
+      : t("freeCastWindow.subtitleNoBudget", { remaining });
 
   return (
     <DialogShell

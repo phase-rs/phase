@@ -5,22 +5,44 @@
     "commanderTitle": "Commander Draft",
     "subtitle": "Así funciona",
     "startDrafting": "Empezar a draftear",
+    "quantity": {
+      "packsOpened_one": "{{count, number}} sobre",
+      "packsOpened_few": "{{count, number}} sobres",
+      "packsOpened_many": "{{count, number}} sobres",
+      "packsOpened_other": "{{count, number}} sobres",
+      "cardsContained_one": "{{count, number}} carta",
+      "cardsContained_few": "{{count, number}} cartas",
+      "cardsContained_many": "{{count, number}} cartas",
+      "cardsContained_other": "{{count, number}} cartas",
+      "packSizeEntry_one": "{{count, number}} carta",
+      "packSizeEntry_few": "{{count, number}} cartas",
+      "packSizeEntry_many": "{{count, number}} cartas",
+      "packSizeEntry_other": "{{count, number}} cartas",
+      "minimumDeckCards_one": "{{count, number}} carta",
+      "minimumDeckCards_few": "{{count, number}} cartas",
+      "minimumDeckCards_many": "{{count, number}} cartas",
+      "minimumDeckCards_other": "{{count, number}} cartas"
+    },
+    "packPassing_one": "Este draft tiene una sola ronda de sobres, por lo que la dirección de pase no cambia",
+    "packPassing_few": "La dirección de pase cambia en cada ronda",
+    "packPassing_many": "La dirección de pase cambia en cada ronda",
+    "packPassing_other": "La dirección de pase cambia en cada ronda",
     "quick": {
-      "step1": "Abrirás 3 sobres de 14 cartas cada uno",
+      "step1": "Abrirás {{packs}}; cada sobre contiene {{cardsPerPack}}",
       "step2": "Elige una carta por sobre y luego pasa el resto a los drafters de IA",
-      "step3": "Los sobres alternan de dirección en cada ronda — izquierda, derecha, izquierda",
-      "step4": "Tras todas las elecciones, construye un mazo de 40 cartas y juega una partida",
-      "step1Mixed": "Abrirás {{packCount}} sobres de tamaños distintos: {{packSizes}} cartas, en ese orden"
+      "step4": "Tras todas las elecciones, construye un mazo de al menos {{minimumDeckCards}} y juega una partida",
+      "step1Mixed": "Abrirás {{packs}} de tamaños distintos, en este orden: {{packSizes, list}}"
     },
     "pod": {
       "step1": "Estás haciendo draft con {{count}} jugadores en un pod",
-      "step2": "Abre 3 sobres de 14 cartas — elige una, pasa el resto",
-      "step3": "Los sobres alternan de dirección en cada ronda — izquierda, derecha, izquierda",
-      "step4": "Tras el draft, construye un mazo de 40 cartas y juega partidas de torneo"
+      "step2": "Abre {{packs}}; cada sobre contiene {{cardsPerPack}} — elige una carta y pasa el resto",
+      "step2Mixed": "Abre {{packs}} de tamaños distintos, en este orden: {{packSizes, list}} — elige una carta y pasa el resto",
+      "step4": "Tras el draft, construye un mazo de al menos {{minimumDeckCards}} y juega partidas de torneo"
     },
     "commander": {
-      "step2": "Elige dos cartas de cada sobre y pasa el resto",
-      "step4": "Tras el draft, construye un mazo Commander de 60 cartas y juega una partida multijugador"
+      "step2": "Abre {{packs}}; cada sobre contiene {{cardsPerPack}} — elige dos cartas y pasa el resto",
+      "step2Mixed": "Abre {{packs}} de tamaños distintos, en este orden: {{packSizes, list}} — elige dos cartas y pasa el resto",
+      "step4": "Tras el draft, construye un mazo Commander de al menos {{minimumDeckCards}} y juega una partida multijugador"
     }
   },
   "steps": {
@@ -122,7 +144,10 @@
   },
   "sealedOpening": {
     "title": "Abre tu pool de sellado",
-    "subtitle": "Abre seis sobres, uno a la vez.",
+    "subtitle_one": "Abre {{count}} sobre.",
+    "subtitle_few": "Abre {{count}} sobres, uno a la vez.",
+    "subtitle_many": "Abre {{count}} sobres, uno a la vez.",
+    "subtitle_other": "Abre {{count}} sobres, uno a la vez.",
     "packProgress": "Sobre {{current}} de {{total}}",
     "openPack": "Abrir sobre",
     "openPackArt": "Abrir ilustración del sobre",

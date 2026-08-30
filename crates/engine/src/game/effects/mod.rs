@@ -15,8 +15,8 @@ use crate::types::ability::{
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
     ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SubAbilityLink,
-    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
+    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -13307,15 +13307,16 @@ fn resolve_chain_body(
             }
         } else if ability.forward_result
             && forwarded_objects.is_empty()
-            && ability_chain_refs_parent_target(sub)
+            && ability_chain_depends_on_missing_forward_result(sub)
         {
             // CR 608.2c: A forward-result continuation is anchored to the object
-            // moved by the preceding instruction. If no object moved, that
-            // instruction has no referent for dependent riders such as "it gains
-            // haste" or "sacrifice it"; do not let ParentTarget fall back to the
-            // original ability source. Walk past dependent sequential siblings
-            // and resume at the first independent sibling instead of terminating
-            // the entire printed instruction chain.
+            // moved by the preceding instruction. If no object moved, an
+            // instruction that needs that moved object — either a ParentTarget
+            // rider or an all-SelfRef GenericEffect — has no referent. Do not
+            // let it fall back to the original ability source. Walk past
+            // dependent sequential siblings and resume at the first independent
+            // sibling instead of terminating the entire printed instruction
+            // chain.
             if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
                 apply_parent_chain_context(
                     &mut remaining,
@@ -13661,21 +13662,20 @@ fn resolve_chain_body(
     Ok(())
 }
 
-/// CR 608.2c + CR 603.7c: Detect a ParentTarget dependency anywhere in a
-/// continuation, including a delayed-trigger payload whose AbilityDefinition
-/// is nested inside the current effect. This keeps a missing forward-result
-/// object from rebinding an inner rider to the original source while allowing
-/// independent sequential siblings to continue.
-fn ability_chain_refs_parent_target(ability: &ResolvedAbility) -> bool {
-    effect_chain_refs_parent_target(&ability.effect)
+/// CR 608.2c + CR 603.7c: Detect a dependency on a missing forward-result
+/// object anywhere in a continuation. `CreateDelayedTrigger` payloads retain
+/// their ParentTarget walk, but a SelfRef GenericEffect nested inside one still
+/// names the creating source rather than the forwarded object.
+fn ability_chain_depends_on_missing_forward_result(ability: &ResolvedAbility) -> bool {
+    effect_chain_depends_on_missing_forward_result(&ability.effect)
         || ability
             .sub_ability
             .as_deref()
-            .is_some_and(ability_chain_refs_parent_target)
+            .is_some_and(ability_chain_depends_on_missing_forward_result)
         || ability
             .else_ability
             .as_deref()
-            .is_some_and(ability_chain_refs_parent_target)
+            .is_some_and(ability_chain_depends_on_missing_forward_result)
 }
 
 fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -> bool {
@@ -13690,6 +13690,8 @@ fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -
             .is_some_and(ability_definition_chain_refs_parent_target)
 }
 
+/// Delayed-trigger payloads preserve their original source, so their recursive
+/// dependency scan remains limited to ParentTarget anaphora.
 fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
     effect_refs_parent_target(effect)
         || matches!(
@@ -13697,6 +13699,91 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
             Effect::CreateDelayedTrigger { effect: definition, .. }
                 if ability_definition_chain_refs_parent_target(definition)
         )
+}
+
+fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
+    // CR 608.2c: A `GenericEffect`'s dependency is decided PER STATIC by
+    // `generic_effect_depends_on_missing_forward_result`, which routes through
+    // `generic_effect_application_filter`. Consulting the raw outer `target`
+    // via `effect_refs_parent_target` here as well would re-introduce the
+    // mismatch this function exists to avoid: an outer `ParentTarget` paired
+    // with an `affected: TriggeringSource` static is independent of the
+    // forwarded move, but the raw check sees only the outer slot and would
+    // discard the whole node — including the static
+    // `without_missing_forward_result_dependencies` just deliberately retained.
+    if matches!(effect, Effect::GenericEffect { .. }) {
+        return generic_effect_depends_on_missing_forward_result(effect);
+    }
+    effect_refs_parent_target(effect)
+        || matches!(
+            effect,
+            Effect::CreateDelayedTrigger { effect: definition, .. }
+                if ability_definition_chain_refs_parent_target(definition)
+        )
+}
+
+/// CR 608.2c: Does this ONE `GenericEffect` static require the absent forwarded
+/// object? Ask `generic_effect_application_filter` — the shared authority for
+/// which filter governs where a static's modifications land — never the outer
+/// `target` slot, because an inherited-reference `affected` overrides that slot.
+///
+/// Dependency is decided by [`filter_requires_missing_forward_result`]. Every
+/// other effective filter is independent here — the resolution-local inherited
+/// references (`TriggeringSource`, `CostPaidObject`, `AmassedArmy`) bind from
+/// the ability's own event / cost / amass context, and a `ParentTarget` that
+/// finds no referent binds nothing at install time rather than falling back to
+/// the ability source (see the dedicated arms in
+/// `effect.rs::resolve_generic_static`). Pruning those would silently drop
+/// grants the game still owes.
+fn generic_static_depends_on_missing_forward_result(
+    target: Option<&TargetFilter>,
+    static_def: &StaticDefinition,
+) -> bool {
+    effect::generic_effect_application_filter(target, static_def.affected.as_ref())
+        .is_some_and(filter_requires_missing_forward_result)
+}
+
+/// CR 608.2c: Does this application filter *require* the object the preceding
+/// forward-result instruction failed to produce?
+///
+/// `SelfRef` is the printed-name anaphor, which in a forward-result
+/// continuation can only mean that object. A conjunction inherits the
+/// dependency of any member: `And` is satisfied only when EVERY member matches,
+/// so a `SelfRef` member leaves the whole filter unsatisfiable without the
+/// forwarded object. Nesting falls out of the recursion.
+///
+/// Deliberately NOT extended to the other combinators:
+///   * `Or { [SelfRef, X] }` is still satisfiable through `X`, so it does not
+///     require the absent object;
+///   * `Not { SelfRef }` is satisfied by everything the anaphor is *not*, which
+///     is the opposite of requiring it.
+///
+/// Recursing into either would prune grants the game still owes — the same
+/// over-pruning this function's `_ => false` arm exists to prevent.
+fn filter_requires_missing_forward_result(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef => true,
+        TargetFilter::And { filters } => filters.iter().any(filter_requires_missing_forward_result),
+        _ => false,
+    }
+}
+
+/// A GenericEffect depends on the forwarded object when ANY static it installs
+/// does — that gates entry into `without_missing_forward_result_dependencies`,
+/// which then prunes exactly the dependent statics and keeps the rest.
+fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+
+    static_abilities.iter().any(|static_def| {
+        generic_static_depends_on_missing_forward_result(target.as_ref(), static_def)
+    })
 }
 
 /// CR 608.2c: Remove only continuation nodes whose effects require the absent
@@ -13707,11 +13794,25 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
-    if effect_chain_refs_parent_target(&ability.effect) {
+    let mut remaining = ability.clone();
+    if let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &mut remaining.effect
+    {
+        static_abilities.retain(|static_def| {
+            !generic_static_depends_on_missing_forward_result(target.as_ref(), static_def)
+        });
+        if static_abilities.is_empty() {
+            return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+        }
+    }
+
+    if effect_chain_depends_on_missing_forward_result(&remaining.effect) {
         return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
     }
 
-    let mut remaining = ability.clone();
     remaining.sub_ability = ability
         .sub_ability
         .as_deref()

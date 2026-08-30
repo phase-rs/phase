@@ -2385,6 +2385,30 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 ..
             }
         );
+        // CR 608.2g + CR 608.2c: the resolution-scoped BATCH window
+        // (`CastFromZoneDriver::ResolutionWindow` — "you may cast any number
+        // of spells … from among them without paying their mana costs")
+        // becomes a `CastOfferKind::FreeCastWindow` at resolution
+        // (`cast_from_zone::resolve`). That offer's own accept/decline —
+        // including declining every cast — IS the printed "may", so wrapping
+        // it in a generic `OptionalEffectChoice` prompts the controller twice
+        // for one choice. This mirrors the chunk-level reconciliation in
+        // `oracle_effect/mod.rs`; it is repeated here because a subject-phrase
+        // "may" ("… then THEY MAY cast a spell from among those cards" —
+        // Itazura, Lingering Wick) reaches `def.optional` through
+        // `clause_ir.parsed.optional` below, not through the chunk-level flag.
+        // Unlike `is_lingering_cast_from_zone` this needs no `duration`/
+        // `constraint`/`alt_ability_cost` guard: a `ResolutionWindow` driver is
+        // only assigned to the durationless free-cast batch grammar, and its
+        // frozen CR 608.2h per-spell ceiling is carried by the window's own
+        // bounds rather than by an immediate accept/decline branch.
+        let is_resolution_window_cast_from_zone = matches!(
+            &clause_ir.parsed.effect,
+            Effect::CastFromZone {
+                driver: CastFromZoneDriver::ResolutionWindow { .. },
+                ..
+            }
+        );
         // CR 107.1b/c + CR 117.1d: Join Forces' "each player may pay any
         // amount of mana" is NOT an OptionalEffectChoice — the "may" only
         // means each player may pay zero. PayAmountChoice (min=0) handles
@@ -2420,6 +2444,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 Effect::GrantCastingPermission { .. }
             )
             && !is_lingering_cast_from_zone
+            && !is_resolution_window_cast_from_zone
             && !is_join_forces_pay_any_amount_mana_cost
             && !is_pay_to_end_effect_termination
         {
@@ -2433,6 +2458,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 Effect::GrantCastingPermission { .. }
             )
             && !is_lingering_cast_from_zone
+            && !is_resolution_window_cast_from_zone
             && !is_join_forces_pay_any_amount_mana_cost
             && !is_pay_to_end_effect_termination
         {

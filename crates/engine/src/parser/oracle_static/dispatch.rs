@@ -945,6 +945,31 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
+            // CR 509.1b + CR 604.1 (#7454): the symmetric conjunction "<subject>
+            // can't block or be blocked by <object>" under a LEADING gate. ONE
+            // printed object serves TWO opposite-direction restrictions, which one
+            // `StaticDefinition` cannot carry, so the shape is owned by
+            // `parse_symmetric_block_conjunction_static` on the multi-static path
+            // (it binds one condition-gated definition per direction) and this
+            // single-return path must DECLINE. Reaching the generic fallback below
+            // instead produced mode `Continuous`, `modifications: []`, `affected:
+            // SelfRef` and only the gate — every printed semantic dropped, yet
+            // indistinguishable from a supported line to any consumer that counts
+            // statics, so a card in this class could allow illegal blocks while
+            // reading as parsed.
+            //
+            // Scoped to the SPLIT EFFECT CLAUSE via the shared marker, never to the
+            // whole line: the other printed lines that legitimately reach this
+            // fallback do not carry the marker in their effect clause, so their
+            // exact prior lowering is untouched.
+            if nom_primitives::scan_preceded(
+                &split.effect_text.to_lowercase(),
+                parse_cant_block_or_be_blocked_by_marker,
+            )
+            .is_some()
+            {
+                return None;
+            }
             // Rewrite succeeded (we cleanly separated condition from effect), but the
             // recursed parser could not model the effect clause. Produce a generic
             // Continuous static whose condition is typed via `parse_static_condition`
@@ -2359,6 +2384,29 @@ pub(crate) fn parse_static_line_inner(
     if nom_primitives::scan_contains(tp.lower, "can't block")
         && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
     {
+        // CR 509.1b: the symmetric conjunction "<subject> can't block or be
+        // blocked by <object>" is TWO opposite-direction restrictions sharing one
+        // printed object; a single `StaticDefinition` cannot carry both. It is
+        // owned by `parse_symmetric_block_conjunction_static` on the multi-static
+        // path (`shared.rs`). Decline here — on the PHRASE alone, via the shared
+        // marker, so an object that grammar cannot yet express ALSO declines —
+        // rather than lowering the inverse blanket restriction, which both invents
+        // a restriction the card lacks and drops the one it has. Mirrors the
+        // subject-scoped defer in the "can't attack" arm below.
+        //
+        // This guard covers only the lines that REACH this arm. The other
+        // single-return production that consumes a bare `can't block` as its own
+        // predicate — `parse_subject_combat_rule_static`, dispatched above at the
+        // combat-rule family — carries its own positional copy of this decline,
+        // because its trailing-`unless` fallback accepts a failed object parse and
+        // would emit the inverse restriction before ever reaching here (#7454
+        // round 2). Both guards are load-bearing; see the marker's doc comment for
+        // why this one may scan the whole line and that one may not.
+        if nom_primitives::scan_preceded(tp.lower, parse_cant_block_or_be_blocked_by_marker)
+            .is_some()
+        {
+            return None;
+        }
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());

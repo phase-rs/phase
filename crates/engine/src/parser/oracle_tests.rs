@@ -3816,7 +3816,7 @@ fn free_cast_window_clause_chains_rider_and_self_exile() {
             zones,
             graveyard_replacement,
         } => {
-            assert_eq!(*count, 2);
+            assert_eq!(*count, Some(2));
             assert_eq!(*max_total_mv, Some(6));
             assert_eq!(
                 graveyard_replacement.as_ref(),
@@ -3884,7 +3884,7 @@ fn free_cast_window_parses_single_zone_non_invoke_variant() {
         );
     };
 
-    assert_eq!(*count, 1);
+    assert_eq!(*count, Some(1));
     assert_eq!(*max_total_mv, None);
     assert_eq!(
         *filter,
@@ -27894,5 +27894,106 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
         !json.contains(GRANTING_SELF_PLACEHOLDER),
         "no production parse shape may plant a marker on the excluded \
          `AbilityCost` axis: {json}"
+    );
+}
+
+/// CR 603.2 + CR 608.2c: Cyclops Gladiator (verbatim MTGJSON Oracle text) —
+/// the "if you do" continuation's damage-back amount must keep reading the
+/// TARGET creature's power (`ObjectScope::EventSource`, the "that creature"
+/// established by the first sentence), never the attacking Cyclops's own
+/// power.
+///
+/// Regression guard for a `parse_effect_chain_ir` chunk-subject bug: a
+/// `prior_typed_referent` rebind (added for Galion, Elvenking's Butler's bare
+/// possessive-pronoun base-P/T grammar, "Its base power and toughness become
+/// equal to ~'s power and toughness") originally cleared `chunk_subject` for
+/// EVERY later chunk following any prior sibling clause with a typed target —
+/// not just the base-P/T-set clause shape it was built for. Cyclops
+/// Gladiator's first sentence ("you may have it deal damage ... to target
+/// creature defending player controls") introduces exactly such a typed
+/// target, so its second sentence ("If you do, that creature deals damage
+/// equal to its power to this creature") fell into the same over-broad
+/// rebind: `if_you_do_object_anchor` only recognizes a `GenericEffect`
+/// predecessor (Galion's shape), not `Effect::DealDamage`, so it returns
+/// `None` here and control reached the (then-unconstrained) rebind, clearing
+/// `ctx.subject` to `None` and silently flipping the damage-back amount's
+/// possessive "its power" from the target's power (`EventSource`) to the
+/// Cyclops's own power (`Source`) — a real rules regression, not just a
+/// cosmetic parse-tree diff. The fix scopes the rebind to the bare
+/// possessive-pronoun base-P/T-set clause shape only
+/// (`subject::is_bare_pronoun_base_pt_possessive_clause`), so this unrelated
+/// `DealDamage` chunk now falls through to the original `ctx.subject.clone()`
+/// path unchanged.
+#[test]
+fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
+    let result = parse(
+        "Whenever this creature attacks, you may have it deal damage equal to its power to target creature defending player controls. If you do, that creature deals damage equal to its power to this creature.",
+        "Cyclops Gladiator",
+        &[],
+        &["Creature"],
+        &["Cyclops", "Warrior"],
+    );
+
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Cyclops Gladiator must parse with zero Unimplemented effects: {result:#?}"
+    );
+    assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+    let attack = &result.triggers[0];
+    assert_eq!(attack.mode, TriggerMode::Attacks);
+
+    let first = attack
+        .execute
+        .as_ref()
+        .expect("attack trigger must have an execute body");
+    let Effect::DealDamage {
+        amount: first_amount,
+        target: first_target,
+        ..
+    } = first.effect.as_ref()
+    else {
+        panic!(
+            "expected the first sentence to be DealDamage, got {:?}",
+            first.effect
+        );
+    };
+    assert_eq!(
+        *first_amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        },
+        "the first sentence's 'its power' is the attacking Cyclops's OWN power"
+    );
+    assert!(
+        matches!(first_target, TargetFilter::Typed(_)),
+        "the first sentence targets a creature the defending player controls, got {first_target:?}"
+    );
+
+    let if_you_do = first
+        .sub_ability
+        .as_ref()
+        .expect("the 'if you do' continuation must chain after the optional damage clause");
+    let Effect::DealDamage {
+        amount: back_amount,
+        ..
+    } = if_you_do.effect.as_ref()
+    else {
+        panic!(
+            "expected the 'if you do' continuation to be DealDamage, got {:?}",
+            if_you_do.effect
+        );
+    };
+    assert_eq!(
+        *back_amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        },
+        "the damage-back amount must read the TARGET creature's ('that \
+         creature', the first sentence's chosen recipient) power, not the \
+         attacking Cyclops's own power — got {back_amount:?}"
     );
 }

@@ -6561,7 +6561,7 @@ mod tests {
         let free_cast =
             |zones: Vec<Zone>, graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
                 Effect::FreeCastFromZones {
-                    count: 1,
+                    count: Some(1),
                     max_total_mv: None,
                     filter: TargetFilter::Any,
                     zones,

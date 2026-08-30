@@ -598,6 +598,42 @@ pub fn resolve(
         );
     }
 
+    // CR 608.2g + CR 202.3: the "… from among them" BATCH form. The
+    // referent set was produced by an earlier instruction of this same
+    // resolution and the casts happen inside it — "the currently resolving spell
+    // or ability continues to resolve, which may include casting other spells
+    // this way", and "no other spells can normally be cast … during resolution"
+    // (CR 608.2g). There is therefore no later priority window in which a
+    // lingering permission could be exercised, which is exactly what every
+    // published ruling for this class says ("you can't wait to cast them later
+    // in the turn"). Route it to the interactive free-cast window instead of
+    // `grant_lingering_permissions`.
+    //
+    // Placed ABOVE `driver_free_cast` / `immediate_graveyard_free_cast`: those
+    // gates fire on a SINGLE resolved target with no driver requirement, so a
+    // batch that happens to have exactly one legal member would otherwise be
+    // cast unconditionally instead of being offered through the window (and the
+    // window's cast-count/budget bounds would be skipped).
+    //
+    // An EMPTY batch is deliberately excluded: the instruction produced nothing
+    // to cast, and the established empty-target tail below (the hand /
+    // `LastRevealed` selection fallbacks and the "No targets resolved" exit,
+    // which emits `EffectKind::CastFromZone`) stays the single authority for
+    // that case.
+    if let Some(bounds) = driver.window_bounds() {
+        if without_paying && alt_ability_cost.is_none() && !target_ids.is_empty() {
+            return open_resolution_cast_window(
+                state,
+                ability,
+                target_filter,
+                constraint.as_ref(),
+                bounds,
+                target_ids,
+                events,
+            );
+        }
+    }
+
     // CR 310.12b + CR 608.2c: "exile it, then you may cast it transformed" —
     // the SelfRef filter resolves to the source object itself. When
     // `ability.targets` is empty (no pre-selected target, as is typical for
@@ -804,7 +840,15 @@ pub fn resolve(
     {
         let mut window = ability.clone();
         window.effect = Effect::FreeCastFromZones {
-            count: target_ids.len().try_into().unwrap_or(u8::MAX),
+            // CR 608.2c: one cast per surviving pair, as printed ("for each
+            // opponent, you may cast up to one target instant or sorcery card
+            // from that player's graveyard"). `u8::try_from(..).ok()`
+            // is not a lossy truncation here: a pool that does not fit a `u8`
+            // maps to `None`, the unbounded form, whose only bound is the pool
+            // itself — exactly the intended "cast one from each opponent"
+            // semantics. The old `unwrap_or(u8::MAX)` would instead have capped
+            // such a fanout at 255 casts.
+            count: u8::try_from(target_ids.len()).ok(),
             max_total_mv: None,
             filter: target_filter.clone(),
             zones: vec![Zone::Graveyard],
@@ -857,6 +901,120 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// CR 400.1 + CR 601.2a: The zones a resolution-scoped batch window may cast
+/// from. CR 601.2a moves the card "from where it is to the stack", and a batch
+/// produced by an exile / mill / reveal step lands in one of these four (exile
+/// and the stack-adjacent private zones of CR 400.1). A batch member that has
+/// already left one of them contributes no candidate, so the window's zone set
+/// is derived from the surviving members rather than assumed.
+const RESOLUTION_WINDOW_ORIGIN_ZONES: [Zone; 4] =
+    [Zone::Exile, Zone::Graveyard, Zone::Library, Zone::Hand];
+
+/// CR 608.2g + CR 202.3 + CR 608.2h: Convert a resolution-scoped
+/// `CastFromZone` batch grant into the interactive free-cast window
+/// (`Effect::FreeCastFromZones`) over exactly `pool`.
+///
+/// `pool` is THIS resolution's batch: the ids the chain seam forwarded from the
+/// exile/mill/reveal step, already narrowed by the clause's own type gate in the
+/// caller. Handing them to the window as its `member_pool` is what confines the
+/// offer to the current resolution (CR 607.2a) — `TargetFilter::ExiledBySource`
+/// alone reads the source's cumulative live linked-exile ledger, so a card a
+/// PREVIOUS resolution of the same source left in exile would otherwise be
+/// re-offered. For the same reason the anaphor leg is DISCHARGED from the
+/// window's filter: it has already been satisfied by the pool, and re-evaluating
+/// it inside a triggered ability reads the trigger's pre-exile
+/// `linked_exile_snapshot` and would drop every member (the identical hazard the
+/// caller's type-gate pass documents).
+///
+/// CR 608.2h: the per-spell mana-value ceiling ("mana value X or less" — Kotis,
+/// Epic Experiment, Villainous Wealth) is information the effect requires, so it
+/// is resolved ONCE here, while the trigger context that supplies X is still
+/// live, and applied to the pool. It cannot ride on the window as a live
+/// predicate: the window re-offers after each cast, by which time the trigger
+/// context is gone and a dynamic `X` would re-resolve to 0. Evaluation goes
+/// through `cast_permission_constraint_allows_cast`, the same authority the
+/// lingering-permission path uses, so the two never diverge.
+fn open_resolution_cast_window(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    constraint: Option<&CastPermissionConstraint>,
+    bounds: crate::types::ability::ResolutionCastWindow,
+    pool: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 608.2h: freeze the dynamic per-spell ceiling now, then apply it.
+    let frozen = freeze_cast_permission_constraint(state, ability, constraint.cloned());
+    let mut pool: Vec<ObjectId> = pool
+        .into_iter()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                RESOLUTION_WINDOW_ORIGIN_ZONES.contains(&obj.zone)
+                    && crate::game::casting::cast_permission_constraint_allows_cast(
+                        state, obj, &frozen, None,
+                    )
+            })
+        })
+        .collect();
+    // CR 607.2a: `publish`-style forwarding can repeat an id; a duplicated pool
+    // member would offer the same card twice and consume two casts of the bound.
+    let mut seen = HashSet::new();
+    pool.retain(|id| seen.insert(*id));
+
+    let zones: Vec<Zone> = RESOLUTION_WINDOW_ORIGIN_ZONES
+        .into_iter()
+        .filter(|zone| {
+            pool.iter()
+                .any(|id| state.objects.get(id).is_some_and(|obj| obj.zone == *zone))
+        })
+        .collect();
+
+    // CR 608.2c: the controller follows the instruction as printed. "any number
+    // of spells" states no cap, so the batch itself is the bound; "up to two" /
+    // a singular "a spell" carry their own. Both forms share
+    // `Effect::FreeCastFromZones::count`'s encoding (`None` = unbounded), so the
+    // parsed bound passes straight through.
+    //
+    // This used to substitute `pool.len()` for the unbounded case and clamp it
+    // with `unwrap_or(u8::MAX)`, which silently capped an unbounded window over
+    // a 256+ card pool at 255 casts. No printed instruction states such a cap,
+    // and CR 608.2g supplies none either; the window's real bound is candidate
+    // exhaustion, which `eligible_candidates` enforces on every re-offer.
+    let count = bounds.max_casts;
+
+    // The anaphor leg is discharged (see the doc comment); what remains is the
+    // clause's own type gate, which `eligible_candidates` re-applies to the pool.
+    let window_filter = if target_filter.references_exiled_by_source() {
+        target_filter
+            .without_exile_anaphor()
+            .unwrap_or(TargetFilter::Any)
+    } else {
+        target_filter.clone()
+    };
+
+    let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    let mut window = ability.clone();
+    window.effect = Effect::FreeCastFromZones {
+        count,
+        max_total_mv: bounds.max_total_mv,
+        filter: window_filter,
+        zones,
+        graveyard_replacement: graveyard_replacement.clone(),
+    };
+    // CR 614.1a: the stack-to-graveyard redirect rider is stored as a sequential
+    // `ParentTarget` sub-ability but is consumed as per-cast window metadata.
+    // Retaining it would run a second destination move after the window. Every
+    // OTHER sub-ability is a real trailing instruction of the same resolution
+    // (Epic Experiment's "then put all cards exiled this way that weren't cast
+    // into your graveyard", Collected Conjuring's bottom-the-rest) and must
+    // survive — `resolve_ability_chain` parks it as the window's continuation.
+    if graveyard_replacement.is_some() {
+        window.sub_ability = None;
+    }
+    window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    super::free_cast_from_zones::resolve(state, &window, events)
 }
 
 /// CR 608.2g + CR 601.2a: After a resolution-time hand pick for a free

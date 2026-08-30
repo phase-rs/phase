@@ -439,6 +439,27 @@ pub(crate) fn drain_active_per_category_zone_choice(
             ..
         }
     ) {
+        // CR 607.2a + CR 601.3: A per-category exile is an ordinary
+        // linked-exile producer. When a LATER instruction of the same source or
+        // chain consumes "the exiled cards" (`TargetFilter::ExiledBySource` and
+        // the rest of `LINKED_EXILE_CONSUMER_TAGS`), these picks must be
+        // recorded as exiled WITH the source, exactly as the general
+        // `ChangeZone`/`ChangeZoneAll` exile path already does via the same
+        // `should_track_exiled_by_source` authority. Without the link the
+        // consumer resolves against an empty ledger: Portent of Calamity's
+        // printed "You may cast a spell from among the exiled cards" found no
+        // batch and silently never presented its cast window.
+        //
+        // Routed through the shared predicate rather than an unconditional
+        // link so unrelated per-category exiles (no linked-exile consumer
+        // anywhere on the source or in the resolving chain) keep contributing
+        // nothing to the source's exile pile — the same containment
+        // `change_zone` relies on.
+        let track_exiled_by_source = crate::game::exile_links::should_track_exiled_by_source(
+            state,
+            ability.source_id,
+            &ability,
+        );
         // CR 701.13a + CR 614.1 + CR 616.1: Each chosen card's exile is an
         // effect-owned zone-change event. Keep the tracked-set extension and
         // next-member prompt on the batch tail so neither can run before a
@@ -446,11 +467,16 @@ pub(crate) fn drain_active_per_category_zone_choice(
         let requests = chosen
             .iter()
             .map(|&card_id| {
-                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                let request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
                     card_id,
                     Zone::Exile,
                     ability.source_id,
-                )
+                );
+                if track_exiled_by_source {
+                    request.track_exiled_by_source()
+                } else {
+                    request
+                }
             })
             .collect();
         return crate::game::zone_pipeline::move_objects_simultaneously_then(
