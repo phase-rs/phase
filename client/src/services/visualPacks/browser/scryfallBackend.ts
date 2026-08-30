@@ -405,7 +405,9 @@ async function storeVerifiedObject(cache: Cache, path: string, media: VisualPack
 export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   private readonly progressListeners = new Set<(event: ProgressEvent) => void>();
   private readonly revisionListeners = new Set<(event: RevisionEvent) => void>();
-  private readonly workers = new Map<OperationId, AbortController>();
+  /** Each running worker's abort handle AND the promise that settles when it
+   *  has finished writing, so `cancel()` can wait for it. */
+  private readonly workers = new Map<OperationId, { controller: AbortController; settled: Promise<void> }>();
   private work = Promise.resolve();
 
   private constructor(private readonly database: IDBPDatabase<ScryfallVisualPackSchema>) {}
@@ -434,10 +436,9 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   private run(selectedOperation: OperationId): void {
     if (this.workers.has(selectedOperation)) return;
     const controller = new AbortController();
-    this.workers.set(selectedOperation, controller);
     const task = this.work.then(async () => this.resume(selectedOperation, controller.signal));
     this.work = task.catch(() => undefined);
-    void task.catch(async (error) => {
+    const settled = task.catch(async (error) => {
       if (controller.signal.aborted) return;
       const kind = errorKind(error);
       // A retryable failure leaves the record `downloading`, which is exactly
@@ -451,7 +452,12 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         : await this.updateOperation(selectedOperation, (current) =>
             current.state === "completed" ? current : { ...current, state: "cancelled" }).catch(() => undefined);
       if (operation) this.emit({ phase: "failed", operation: operationStatus(operation), error: kind });
-    }).finally(() => this.workers.delete(selectedOperation));
+    }).catch(() => undefined).finally(() => this.workers.delete(selectedOperation));
+    void settled;
+    // Registered AFTER the chain is built so `settled` can be handed out, and
+    // safe to do so: `run()` returns before any microtask, so the `has` guard
+    // above still sees a worker that a synchronous caller registered first.
+    this.workers.set(selectedOperation, { controller, settled });
   }
 
   private async updateOperation(
@@ -1276,7 +1282,16 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     try {
       const requested = await this.updateOperation(selectedOperation, (current) =>
         current.state === "completed" || current.state === "cancelled" ? current : { ...current, state: "cancel_requested" });
-      this.workers.get(selectedOperation)?.abort();
+      const worker = this.workers.get(selectedOperation);
+      worker?.controller.abort();
+      // Let the worker put its downloads down before this record goes terminal.
+      // `installObject` consults `signal` only inside `fetchImage` — the
+      // donor-reuse and cache-hit paths never do — so a task already past the
+      // guard finishes into `markComplete` whatever the abort says, writing an
+      // `objects` row at `root` and incrementing `objectsPromoted`. Waiting
+      // here puts those writes BEFORE the terminal state rather than after
+      // `cancel()` has returned and the panel has published the outcome.
+      await worker?.settled;
       if (requested.state === "cancel_requested") {
         await this.updateOperation(selectedOperation, (current) => ({ ...current, state: "cancelled" }));
       }
