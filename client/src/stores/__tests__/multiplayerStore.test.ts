@@ -40,6 +40,7 @@ import {
   PROTOCOL_VERSION,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   clearWsSession,
@@ -575,6 +576,32 @@ describe("multiplayerStore", () => {
         },
       },
     });
+  });
+
+  it("shows a retryable adapter-initialization failure while creating a P2P lobby", async () => {
+    p2pMocks.initialize.mockRejectedValueOnce(
+      new AdapterError(
+        AdapterErrorCode.NOT_INITIALIZED,
+        "Adapter initialization was canceled. Please try again.",
+        true,
+      ),
+    );
+
+    await expect(
+      useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { useBroker: false },
+      ),
+    ).resolves.toBe(false);
+
+    expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+      "Adapter initialization was canceled. Please try again.",
+    );
   });
 
   it("does not apply setup-time AI seats when starting a team-based P2P host session", async () => {

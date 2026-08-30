@@ -46,6 +46,8 @@ function isMemoryConstrainedDevice(): boolean {
   return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
 }
 
+const INITIALIZATION_CANCELED_MESSAGE = "Adapter initialization was canceled. Please try again.";
+
 // Parallel scoring is optional. Bound its queued restore-and-score work so a
 // stalled score worker cannot make a healthy local game appear hung.
 const AI_POOL_SCORE_TIMEOUT_MS = 5_000;
@@ -272,20 +274,35 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         candidateEngine = new EngineWorkerClient();
         await candidateEngine.initialize();
         if (this.lifecycleGeneration !== generation) {
-          candidateEngine.dispose();
-          return;
+          throw new AdapterError(
+            AdapterErrorCode.NOT_INITIALIZED,
+            INITIALIZATION_CANCELED_MESSAGE,
+            true,
+          );
         }
         this.engine = candidateEngine;
       } catch (error) {
         candidateEngine?.dispose();
-        if (this.lifecycleGeneration !== generation) return;
+        if (this.lifecycleGeneration !== generation) {
+          throw new AdapterError(
+            AdapterErrorCode.NOT_INITIALIZED,
+            INITIALIZATION_CANCELED_MESSAGE,
+            true,
+          );
+        }
         // Worker creation or initialization failed — fall back to main-thread WASM
         console.warn(
           "Web Worker initialization failed, falling back to main-thread WASM",
           error,
         );
         const candidateFallback = await createMainThreadFallback();
-        if (this.lifecycleGeneration !== generation) return;
+        if (this.lifecycleGeneration !== generation) {
+          throw new AdapterError(
+            AdapterErrorCode.NOT_INITIALIZED,
+            INITIALIZATION_CANCELED_MESSAGE,
+            true,
+          );
+        }
         this.fallback = candidateFallback;
       }
       this.initialized = true;
