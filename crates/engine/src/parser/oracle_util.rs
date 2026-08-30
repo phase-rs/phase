@@ -195,7 +195,12 @@ impl<'a> TextPair<'a> {
     /// odd-quote body refuses the split outright rather than scanning on to a
     /// later separator that may lie outside the quotes
     /// (`has "X as long as Y" as long as Z`). No corpus line has that shape
-    /// today (3 odd-quote static lines total), and both incumbent guards already
+    /// today. Measured over the distinct oracle lines in MTGJSON AtomicCards:
+    /// 7 lines have an odd-quote FIRST `" as long as "` and 24 have an odd-quote
+    /// first `" unless "`, and for BOTH separators ZERO of those lines carry a
+    /// LATER outside-quotes occurrence — which is the claim that actually
+    /// matters, since it is what makes the first-occurrence refusal lossless.
+    /// Both incumbent guards already
     /// behave this way, so this is a documented property rather than a
     /// deviation.
     ///

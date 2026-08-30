@@ -3344,7 +3344,7 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// anaphoric "it" indicates is fixed by the static's subject: in a self-modifying
 /// static (`TargetFilter::SelfRef`) "it" names the source permanent, so
 /// `it's <state>` is normalized to `~ is <state>` (CR 301.5a "equipped creature";
-/// CR 303.4 Auras). In an attached-subject static ("Enchanted creature has shroud
+/// CR 303.4b "enchanted"). In an attached-subject static ("Enchanted creature has shroud
 /// as long as it's untapped" — Spectral Cloak) "it" names the enchanted/equipped
 /// RECIPIENT and is left for the recipient grammar; binding it to the
 /// Aura/Equipment would gate on a permanent that is never itself tapped or
@@ -3354,22 +3354,34 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// no affected set (`MaxUntapPerType`) is categorically not SelfRef and must not
 /// be coerced into a literal it does not carry.
 ///
-/// Authority for that binding decision on every AFFECTED-BEARING static gate
-/// ("as long as" / "unless" / "if"): those route through here and no call site
+/// Authority for that binding decision within the three static-gate helpers
+/// `parse_unless_static_condition`, `parse_as_long_as_static_condition` and
+/// `parse_if_static_condition`: those route through here and no call site
 /// re-decides it. Replaces the ternary formerly duplicated in
 /// `parse_continuous_gets_has` (anthem.rs, both the as-long-as and unless arms).
 ///
-/// ONE DELIBERATE EXCEPTION, and it is the same static named above:
-/// `parse_max_untap_per_type_static` (dispatch.rs) calls
-/// `rewrite_self_pronoun_subject` directly and ALWAYS applies it. That is not an
-/// oversight and must not be "fixed" by routing it through here. The two
-/// statements are reconciled by scope, not by precedence: this helper decides
-/// binding from `affected`, and a `None` affected set carries no SelfRef literal
-/// to read — so it correctly declines. `MaxUntapPerType` has no attached-subject
-/// variant at all (CR 611.3a), so its gate is always a state check on the cap's
-/// own source and the rewrite is unconditionally right there. A caller with that
-/// proof out-of-band may rewrite before calling; a caller without one may not.
-/// These are the only two production callers of `rewrite_self_pronoun_subject`.
+/// The claim is deliberately NOT "every affected-bearing static gate". Other
+/// arms build a SelfRef static and parse its gate with a bare
+/// `parse_static_condition` — `evasion.rs`'s `CanAttackWithDefender` subject arm
+/// and two `dispatch.rs` arms (the `~ has <kw> as long as <cond>` and
+/// self-referential type-removal branches). They decide the binding by omission,
+/// the opposite of what this helper decides. Whether any of them is REACHABLE
+/// with a pronoun gate is unmeasured; they are named here so the next change
+/// starts from the real list rather than from a false universal.
+///
+/// PRE-REWRITING CALLERS ARE ENUMERATED, not permitted by predicate.
+/// `parse_max_untap_per_type_static` (dispatch.rs) is the ONLY caller allowed to
+/// call `rewrite_self_pronoun_subject` before/instead of routing through here,
+/// and it always applies the rewrite. That is not an oversight and must not be
+/// "fixed" by routing it through this helper. The two are reconciled by scope,
+/// not precedence: this helper reads binding off `affected`, and
+/// `MaxUntapPerType` never sets `affected` (`StaticDefinition::new` defaults it
+/// to `None`), so the helper correctly declines — while that same structural
+/// fact, not any rule, is why the static has no attached-subject variant and why
+/// its gate is always a state check on the cap's own source.
+/// Adding a second pre-rewriting caller requires re-running the census of
+/// SelfRef-affected statics first. These are the only two production callers of
+/// `rewrite_self_pronoun_subject`.
 ///
 /// NORMALIZATION IS PART OF THE CONTRACT, not the caller's job.
 /// `rewrite_self_pronoun_subject` matches an EXACT closed list, so a trailing

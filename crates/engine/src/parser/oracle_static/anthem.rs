@@ -928,7 +928,7 @@ pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
         // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
         // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
         // for "it's modified" (Obstinate Gargoyle, Skyward Spider). CR 301.5a:
-        // "equipped"; CR 303.4: "enchanted" — self-state predicates for SelfRef
+        // "equipped"; CR 303.4b: "enchanted" — self-state predicates for SelfRef
         // statics (Merry "as long as it's equipped"; Fledgling Osprey "as long as
         // it's enchanted"). Exact-match only — "attacking alone" keeps its trailing
         // word and is left for SourceAttackingAlone; "modified creature" and
