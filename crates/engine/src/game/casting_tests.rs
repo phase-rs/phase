@@ -47239,7 +47239,13 @@ fn exiled_land_entry_rider_uses_the_elected_permission_only() {
     );
     let CastingPermission::PlayFromExile {
         land_enter_tapped, ..
-    } = state.objects.get_mut(&land).unwrap().casting_permissions[1]
+    } = state
+        .objects
+        .get_mut(&land)
+        .unwrap()
+        .casting_permissions
+        .get_mut(1)
+        .unwrap()
     else {
         unreachable!("test helper attaches PlayFromExile")
     };
