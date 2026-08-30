@@ -990,13 +990,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         }
 
         if (version < 9) {
-          const lng = (migrated as { language?: unknown }).language;
           migrated = {
             ...migrated,
-            language:
-              typeof lng === "string" && (SUPPORTED_LNGS as readonly string[]).includes(lng)
-                ? lng
-                : detectInitialLanguage(),
+            language: normalizeSupportedLng(migrated.language, detectInitialLanguage()),
           };
         }
 
