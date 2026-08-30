@@ -1016,7 +1016,7 @@ describe("draft workspace shell", () => {
     expect(tinyCardHeight).toBeLessThanOrEqual(1);
   });
 
-  it("keeps_only_live_width_breakpoints_and_cleans_them_up", async () => {
+  it("keeps_the_desktop_board_visible_across_width_changes_and_cleans_them_up", async () => {
     const harness = installBrowserHarness({ width: 1023 });
     const windowAdd = vi.spyOn(window, "addEventListener");
     const windowRemove = vi.spyOn(window, "removeEventListener");
@@ -1033,7 +1033,7 @@ describe("draft workspace shell", () => {
 
     expect(screen.queryByRole("group", { name: "Workspace view" })).not.toBeInTheDocument();
     expect(screen.queryByText("Build your deck")).not.toBeInTheDocument();
-    expect(screen.queryByRole("toolbar", { name: "Board layout" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Show sideboard (0 cards)" })).toBeInTheDocument();
     expect(container.querySelector('[data-safe-area-probe="true"]')).not.toBeInTheDocument();
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
@@ -1043,10 +1043,10 @@ describe("draft workspace shell", () => {
 
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
     harness.mediaQueries.get("(min-width: 1024px)")!.dispatchEvent(new Event("change"));
-    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" }).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1));
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1023 });
     harness.mediaQueries.get("(min-width: 1024px)")!.dispatchEvent(new Event("change"));
-    await waitFor(() => expect(screen.queryAllByRole("toolbar", { name: "Board layout" })).toHaveLength(0));
+    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1));
 
     const resizeRegistration = windowAdd.mock.calls.find(([type]) => type === "resize")!;
     unmount();
@@ -1160,10 +1160,12 @@ describe("draft workspace shell", () => {
     );
 
     const first = container.querySelector<HTMLElement>('[data-instance-id="shared-a"]')!;
-    fireEvent.click(within(first).getByRole("button", { name: "Move Shared Name to Sideboard" }));
+    fireEvent.keyDown(within(first).getByRole("button", { name: "Inspect Shared Name" }), {
+      key: "ArrowDown",
+      ctrlKey: true,
+      shiftKey: true,
+    });
     expect(screen.getByText("Deck (1 card)")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Compact sideboard" }))
-      .getByText("Sideboard (1 card)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sideboard (1 card)" })).toBeInTheDocument();
     expect(lastWorkspaceChange(workspaceChanges).placements["shared-a"].zone).toBe("sideboard");
     expect(lastWorkspaceChange(workspaceChanges).placements["shared-b"].zone).toBe("deck");
@@ -1251,7 +1253,7 @@ describe("draft workspace shell", () => {
     expect(within(summary).getByLabelText("1 Creature")).toBeInTheDocument();
   });
 
-  it("preserves_compact_deck_and_board_deck_while_expanded_sideboard_stays_complete", () => {
+  it("keeps_the_desktop_board_visible_when_a_compact_preference_is_restored", () => {
     const cards = [card("one")];
     const workspaceChanges = vi.fn();
     const workspace = state({ one: { zone: "deck", row: 0, column: 0, order: 0 } });
@@ -1270,7 +1272,7 @@ describe("draft workspace shell", () => {
     );
 
     expect(screen.queryByRole("group", { name: "Workspace view" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1);
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
     rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "board" })} />);
     expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
     expect(workspaceChanges).not.toHaveBeenCalled();
@@ -1316,9 +1318,8 @@ describe("draft workspace shell", () => {
       responsiveLayout="desktop"
       preferences={preferences({ explicitView: "compact" })}
     />);
-    expect(screen.getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-8");
-    fireEvent.click(screen.getByRole("button", { name: "Visual builder" }));
-    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "board" }));
+    expect(screen.queryByRole("button", { name: "Visual builder" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
 
     rerender(<DraftWorkspace
       {...props}
@@ -1466,8 +1467,9 @@ describe("draft workspace shell", () => {
           { basic: { zone: "sideboard", row: 0, column: 0, order: 0 } },
           [{ instanceId: "basic", name: "Island" }],
         )}
-        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: true })}
+        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: false })}
         workspaceChanges={workspaceChanges}
+        responsiveLayout="phone-landscape"
         preferenceChanges={vi.fn()}
       />,
     );
@@ -1629,8 +1631,9 @@ describe("draft workspace shell", () => {
       <StatefulWorkspace
         cards={cards}
         initialWorkspace={state({ moving: { zone: "deck", row: 0, column: 0, order: 0 } })}
-        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: true })}
+        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: false })}
         workspaceChanges={workspaceChanges}
+        responsiveLayout="phone-landscape"
       />,
     );
 

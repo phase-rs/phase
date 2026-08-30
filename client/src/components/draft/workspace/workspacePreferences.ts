@@ -275,8 +275,9 @@ export function resolveDraftWorkspaceView(
   viewportWidth: number,
   responsiveLayout?: ResponsiveDraftLayout,
 ): DraftWorkspaceView {
+  if (responsiveLayout === "desktop") return "board";
   if (explicitView !== null) return explicitView;
-  if (responsiveLayout !== undefined && responsiveLayout !== "desktop") return "compact";
+  if (responsiveLayout !== undefined) return "compact";
   return viewportWidth >= DRAFT_WORKSPACE_BOARD_BREAKPOINT_PX ? "board" : "compact";
 }
 

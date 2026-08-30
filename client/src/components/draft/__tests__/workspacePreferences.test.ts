@@ -66,6 +66,9 @@ describe("workspace preferences", () => {
       expect(resolveDraftWorkspaceView(null, 1024, layout)).toBe("compact");
     }
     expect(resolveDraftWorkspaceView(null, 1440, "desktop")).toBe("board");
+    expect(resolveDraftWorkspaceView("compact", 1440, "desktop")).toBe("board");
+    expect(resolveDraftWorkspaceView("board", 390, "phone-portrait")).toBe("board");
+    expect(resolveDraftWorkspaceView("compact", 390, "phone-portrait")).toBe("compact");
     expect(resolveDraftWorkspaceView("compact", 1440)).toBe("compact");
     expect(resolveDraftWorkspaceView("board", 390)).toBe("board");
   });
