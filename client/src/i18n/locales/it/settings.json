@@ -264,7 +264,7 @@
       "progress": "{{downloaded}} MB di {{total}} MB letti · {{records}} carte analizzate · {{images}} immagini trovate"
     },
     "metrics": {
-      "assetRecords": "Registri patrimoniali",
+      "assetRecords": "Record di immagini",
       "estimatedImageBytes": "Dimensione stimata del download",
       "availableBytes": "Spazio libero disponibile",
       "uniqueObjects": "Immagini da scaricare",

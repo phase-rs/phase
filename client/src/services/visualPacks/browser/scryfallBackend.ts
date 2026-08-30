@@ -810,6 +810,12 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         if (failure) throw failure;
         const task: Promise<void> = (async () => {
           const current = await this.database.get("operations", selectedOperation);
+          // `cancel_requested` is the only terminal state this needs to name.
+          // The other writer of a terminal state while a task is live is
+          // `cancel()`, and it calls `.abort()` BEFORE writing `cancelled` —
+          // so a task that could see `cancelled` has already seen
+          // `signal.aborted`. `run()`'s `cancelled` write cannot race at all:
+          // the `finally` below holds it until every task here has settled.
           if (!current || current.state === "cancel_requested" || signal.aborted) return;
           await this.installObject(current, descriptor, root, signal, cache, donors);
           reportProgress();
@@ -819,8 +825,18 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         inFlight.add(task);
         return inFlight.size >= DOWNLOAD_CONCURRENCY ? Promise.race(inFlight) : undefined;
       };
-      await forEachScryfallAsset(operation.catalog, selector, signal, schedule);
-      await Promise.all(inFlight);
+      try {
+        await forEachScryfallAsset(operation.catalog, selector, signal, schedule);
+      } finally {
+        // `schedule` re-throws a recorded `failure` synchronously on its next
+        // call, and that throw unwinds through `forEachScryfallAsset`. Without
+        // this `finally` it would skip the settle below and leave the remaining
+        // tasks running detached, each holding a live `cache` and IDB handle
+        // and still writing rows at `root` — against a record `run()` is about
+        // to terminate, and past the `collectCuratedGarbage` that would have
+        // reclaimed them. Settling here makes the batch quiet on EVERY exit.
+        await Promise.allSettled(inFlight);
+      }
       // Every `installObject` for this selector has settled, so the reuse
       // snapshot has no reader left. Dropping the reference here rather than at
       // the end of the iteration keeps it from overlapping the sweep below,

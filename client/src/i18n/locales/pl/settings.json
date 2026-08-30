@@ -256,7 +256,7 @@
       "removeAll": "Usuń wszystkie wizualizacje offline"
     },
     "estimate": {
-      "title": "Oszacowanie zaplecza i zamknięcie zależności",
+      "title": "Skanowanie migawki Scryfall",
       "progressTitle": "Postęp skanowania katalogu",
       "curatedTitle": "Szacowane pobieranie",
       "headroomWarning": "To więcej niż wolne miejsce zgłaszane przez tę przeglądarkę. Nadal możesz zainstalować — jeśli miejsca zabraknie, pobieranie można wznowić i zachowuje wszystko, co już zapisano.",
@@ -264,7 +264,7 @@
       "progress": "Odczytano {{downloaded}} MB z {{total}} MB · przeskanowano {{records}} kart · znaleziono {{images}} obrazów"
     },
     "metrics": {
-      "assetRecords": "Zapisy majątku",
+      "assetRecords": "Rekordy obrazów",
       "estimatedImageBytes": "Szacowany rozmiar pobierania",
       "availableBytes": "Dostępne wolne miejsce",
       "uniqueObjects": "Obrazy do pobrania",

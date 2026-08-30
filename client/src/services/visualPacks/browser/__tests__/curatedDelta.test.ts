@@ -1063,4 +1063,41 @@ describe("curated delta install", () => {
       }
     });
   });
+
+  it("settles the in-flight downloads before a failure leaves the selector", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const failed = await failures(backend);
+
+    // Park the SECOND image fetch, whatever it turns out to be, and starve
+    // every one after it: the first is served, the second waits at the gate,
+    // and the rest 503. That records a `failure`, which `schedule` re-throws
+    // on its next call — the unwind this test is about, with a task provably
+    // still running. Counting fetches rather than naming a card keeps the
+    // setup independent of the order descriptors happen to be visited in.
+    let seen = 0;
+    const release = holdImages(() => (seen += 1) === 2);
+    imagesServed = 0;
+    imageBudget = 1;
+    const started = await startCurated(backend);
+
+    // Reach guard: the membership must be big enough to have a third fetch to
+    // fail on, or nothing is ever in flight at the unwind and the assertion
+    // below would hold for the wrong reason.
+    expect(started.descriptors.length).toBeGreaterThanOrEqual(3);
+    await vi.waitFor(() => { expect(imageRequests().length).toBeGreaterThan(2); }, { timeout: 5000 });
+
+    // THE INVARIANT. A failure must not surface while a download is still in
+    // flight. `run()` terminates the record the moment it does, and a task
+    // that outlives that write goes on to `markComplete` anyway — adding an
+    // `objects` row at this root and incrementing `objectsPromoted` on an
+    // operation the worker has already finished with, past the
+    // `collectCuratedGarbage` that would have reclaimed it.
+    await new Promise((resolve) => { setTimeout(resolve, 250); });
+    expect(failed).toHaveLength(0);
+
+    // Releasing the parked task is what lets the failure through.
+    imageBudget = Number.POSITIVE_INFINITY;
+    release();
+    await vi.waitFor(() => { expect(failed).toHaveLength(1); }, { timeout: 5000 });
+  });
 });

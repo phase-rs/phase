@@ -256,7 +256,7 @@
       "removeAll": "Supprimer tous les visuels hors ligne"
     },
     "estimate": {
-      "title": "Estimation backend et fermeture des dépendances",
+      "title": "Analyse de l'instantané Scryfall",
       "progressTitle": "Progression de l’analyse du catalogue",
       "curatedTitle": "Téléchargement estimé",
       "headroomWarning": "C'est plus que l'espace libre annoncé par ce navigateur. Vous pouvez tout de même installer : si l'espace vient à manquer, le téléchargement peut reprendre et conserve tout ce qui est déjà enregistré.",
@@ -264,7 +264,7 @@
       "progress": "{{downloaded}} Mo sur {{total}} Mo lus · {{records}} cartes analysées · {{images}} images trouvées"
     },
     "metrics": {
-      "assetRecords": "Enregistrements d'actifs",
+      "assetRecords": "Enregistrements d'images",
       "estimatedImageBytes": "Taille estimée du téléchargement",
       "availableBytes": "Espace libre disponible",
       "uniqueObjects": "Images à télécharger",

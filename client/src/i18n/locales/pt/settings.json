@@ -256,7 +256,7 @@
       "removeAll": "Remova todos os recursos visuais off-line"
     },
     "estimate": {
-      "title": "Estimativa de back-end e fechamento de dependência",
+      "title": "Análise do instantâneo do Scryfall",
       "progressTitle": "Progresso da análise do catálogo",
       "curatedTitle": "Download estimado",
       "headroomWarning": "Isso é maior que o espaço livre que este navegador informa. Você ainda pode instalar: se o espaço acabar, o download pode ser retomado e mantém tudo o que já foi salvo.",
@@ -264,7 +264,7 @@
       "progress": "{{downloaded}} MB de {{total}} MB lidos · {{records}} cartas analisadas · {{images}} imagens encontradas"
     },
     "metrics": {
-      "assetRecords": "Registros de ativos",
+      "assetRecords": "Registros de imagens",
       "estimatedImageBytes": "Tamanho estimado do download",
       "availableBytes": "Espaço livre disponível",
       "uniqueObjects": "Imagens a transferir",
