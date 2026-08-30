@@ -3360,14 +3360,19 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// re-decides it. Replaces the ternary formerly duplicated in
 /// `parse_continuous_gets_has` (anthem.rs, both the as-long-as and unless arms).
 ///
-/// The claim is deliberately NOT "every affected-bearing static gate". Other
-/// arms build a SelfRef static and parse its gate with a bare
-/// `parse_static_condition` — `evasion.rs`'s `CanAttackWithDefender` subject arm
-/// and two `dispatch.rs` arms (the `~ has <kw> as long as <cond>` and
-/// self-referential type-removal branches). They decide the binding by omission,
-/// the opposite of what this helper decides. Whether any of them is REACHABLE
-/// with a pronoun gate is unmeasured; they are named here so the next change
-/// starts from the real list rather than from a false universal.
+/// The claim is deliberately NOT "every affected-bearing static gate", and NOT a
+/// complete enumeration of the arms that fall outside it. Review found three
+/// that build a SelfRef static and parse its gate with a bare
+/// `parse_static_condition`, deciding the binding by omission — `evasion.rs`'s
+/// `CanAttackWithDefender` subject arm, and `dispatch.rs`'s
+/// `~ has <kw> as long as <cond>` and self-referential type-removal branches.
+/// A proximity scan (a `SelfRef` assignment within ~45 lines of a
+/// `parse_static_condition` call) flags substantially more than three, but that
+/// instrument over-reports across sibling branches, so neither three nor its own
+/// figure is a defensible count. THE COMPLETE SET IS UNMEASURED, as is whether
+/// any such arm is REACHABLE with a pronoun gate. Named here so the next change
+/// starts from a known-incomplete list it can extend, rather than from a
+/// universal that is false.
 ///
 /// PRE-REWRITING CALLERS ARE ENUMERATED, not permitted by predicate.
 /// `parse_max_untap_per_type_static` (dispatch.rs) is the ONLY caller allowed to
