@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { detectInitialLanguage, resources, SUPPORTED_LNGS } from "./resources";
+import {
+  detectInitialLanguage,
+  normalizeSupportedLng,
+  resources,
+  SUPPORTED_LNGS,
+} from "./resources";
 
 const LOCALES_DIR = join(dirname(fileURLToPath(import.meta.url)), "locales");
 
@@ -67,6 +72,13 @@ describe("i18n resources", () => {
 
   it("detects a supported language or falls back to en", () => {
     expect(SUPPORTED_LNGS as readonly string[]).toContain(detectInitialLanguage());
+  });
+
+  it("normalizes browser and persisted locale tags to a supported app locale", () => {
+    expect(normalizeSupportedLng("PT-br", "en")).toBe("pt");
+    expect(normalizeSupportedLng(" de-CH ", "en")).toBe("de");
+    expect(normalizeSupportedLng("zh-Hans", "fr")).toBe("fr");
+    expect(normalizeSupportedLng(null, "it")).toBe("it");
   });
 });
 

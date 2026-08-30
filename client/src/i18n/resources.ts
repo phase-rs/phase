@@ -12,6 +12,22 @@ const modules = import.meta.glob("./locales/*/*.json", {
 export const SUPPORTED_LNGS = ["en", "es", "fr", "de", "it", "pt", "pl"] as const;
 export type SupportedLng = (typeof SUPPORTED_LNGS)[number];
 
+function isSupportedLng(value: string): value is SupportedLng {
+  return (SUPPORTED_LNGS as readonly string[]).includes(value);
+}
+
+/**
+ * Reduces a browser or persisted language tag to the app's closed locale set.
+ * Content sidecars and card-art maps are named by their two-letter app locale,
+ * so allowing an otherwise-valid tag such as `pt-BR` through would make chrome
+ * i18next fall back while those consumers request nonexistent assets.
+ */
+export function normalizeSupportedLng(value: unknown, fallback: SupportedLng): SupportedLng {
+  if (typeof value !== "string") return fallback;
+  const prefix = value.trim().split("-", 1)[0]?.toLowerCase() ?? "";
+  return isSupportedLng(prefix) ? prefix : fallback;
+}
+
 /** `{ en: { common: {...}, ... }, es: {...}, ... }` reshaped from the flat glob
  *  keyed by `./locales/<lng>/<ns>.json`. */
 export const resources: Record<string, Record<string, Record<string, unknown>>> =
@@ -29,8 +45,5 @@ export const resources: Record<string, Record<string, Record<string, unknown>>> 
  *  preferences store calls this for the cold-start default (no detector needed). */
 export function detectInitialLanguage(): SupportedLng {
   if (typeof navigator === "undefined") return "en";
-  const prefix = navigator.language.split("-")[0]?.toLowerCase() ?? "";
-  return (SUPPORTED_LNGS as readonly string[]).includes(prefix)
-    ? (prefix as SupportedLng)
-    : "en";
+  return normalizeSupportedLng(navigator.language, "en");
 }

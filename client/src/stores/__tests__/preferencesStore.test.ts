@@ -294,6 +294,30 @@ describe("preferencesStore", () => {
     expect(parsed.state.draftDoubleClickConfirmPick).toBe(false);
   });
 
+  it("normalizes a current-version persisted locale before consumers can use it", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "pt-BR" }, version: 32 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().language).toBe("pt");
+  });
+
+  it("falls back from an unsupported current-version persisted locale", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "zh-Hans" }, version: 32 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(["en", "es", "fr", "de", "it", "pt", "pl"]).toContain(
+      usePreferencesStore.getState().language,
+    );
+  });
+
   it("migrates v1 enum animationSpeed='instant' to multiplier 0", () => {
     localStorage.setItem(
       "phase-preferences",
