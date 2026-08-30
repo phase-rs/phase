@@ -163,19 +163,19 @@ pub fn record_state_clone_for_legality() {
 
 #[cfg(feature = "test-support")]
 pub fn record_homogeneous_target_walk_cache_initialization() {
-    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|counters| {
-        let mut counters = counters.get();
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
         counters.initializations += 1;
-        counters.set(counters);
+        cell.set(counters);
     });
 }
 
 #[cfg(feature = "test-support")]
 pub fn record_homogeneous_target_walk_cache_advance() {
-    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|counters| {
-        let mut counters = counters.get();
+    HOMOGENEOUS_TARGET_WALK_CACHE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
         counters.advances += 1;
-        counters.set(counters);
+        cell.set(counters);
     });
 }
 
