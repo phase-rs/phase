@@ -108,7 +108,7 @@ fn main() {
         returned_legal_actions += actions.len();
         runner
             .act(GameAction::ChooseTarget {
-                target: Some(targets[0]),
+                target: Some(TargetRef::Object(targets[0])),
             })
             .expect("the engine-enumerated target must be accepted");
     }
