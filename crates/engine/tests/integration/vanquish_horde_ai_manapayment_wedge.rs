@@ -45,6 +45,7 @@ use engine::types::player::PlayerId;
 /// `ManaPayment` subject are all seat 2.
 const STUCK: PlayerId = PlayerId(2);
 
+/// Inflate a gzipped capture fixture to its UTF-8 JSON text.
 fn gunzip(gz: &[u8]) -> String {
     use std::io::Read;
     let mut json = String::new();

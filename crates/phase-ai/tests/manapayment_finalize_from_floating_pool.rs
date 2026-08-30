@@ -61,6 +61,7 @@ use std::io::Read;
 /// `ManaPayment` subject.
 const STUCK: PlayerId = PlayerId(1);
 
+/// Inflate a gzipped capture fixture to its UTF-8 JSON text.
 fn gunzip_fixture(gz: &[u8]) -> String {
     let mut json = String::new();
     flate2::read::GzDecoder::new(gz)
