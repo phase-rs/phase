@@ -14,6 +14,7 @@ import type { TFunction } from "i18next";
 import type {
   CompanionRevealChoice,
   DeckCardCount,
+  FormatConfig,
   GameFormat,
   MatchConfig,
   ObjectId,
@@ -255,7 +256,9 @@ export function GamePage() {
   // Without this gate, refreshing `/game/<id>?mode=p2p-host` against a
   // Full-mode server would attempt `openBrokerClient` and surface an
   // "Expected LobbyOnly server, got Full" error to the user.
-  const locationState = location.state as { useBroker?: boolean } | null;
+  const locationState = location.state as
+    | { useBroker?: boolean; formatConfig?: FormatConfig }
+    | null;
   const cachedServerMode = useMultiplayerStore((s) => s.serverInfo?.mode);
   const useBroker = locationState?.useBroker ?? (cachedServerMode === "LobbyOnly");
   const rawMode = searchParams.get("mode");
@@ -278,6 +281,12 @@ export function GamePage() {
     activeGameMeta && activeGameMeta.id === gameId
       ? activeGameMeta.formatConfig
       : undefined;
+  // The setup screen's edited config (starting life), handed over on the
+  // navigation that started this game. `GameSetupPage`'s native-engine route
+  // writes no resume pointer, so router state is the only channel that
+  // reaches both engine routes; `savedFormatConfig` still wins because it
+  // survives a hard refresh, and the two agree whenever both are present.
+  const setupFormatConfig = locationState?.formatConfig;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
   // `useMemo`, each render constructs a fresh object reference from
@@ -290,10 +299,10 @@ export function GamePage() {
       if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
         return savedFormatConfig;
       }
-      return directSetupFormatConfig(formatParam);
+      return setupFormatConfig ?? directSetupFormatConfig(formatParam);
     }
     return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
-  }, [formatParam, rawMode, savedFormatConfig]);
+  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig]);
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
@@ -2890,7 +2899,14 @@ function GameOverScreen({
     params.delete("roomName");
     if (mode) params.set("mode", mode);
     params.set("difficulty", difficulty);
-    navigate(`/game/${newId}?${params.toString()}`);
+    // `format` names the format but carries none of its edited knobs, and the
+    // saved active-game record is keyed to the game id we are leaving — so a
+    // custom starting life would revert to the format default here. Hand over
+    // the config the engine actually played with, on the same router-state
+    // channel `GameSetupPage` uses to start a game.
+    navigate(`/game/${newId}?${params.toString()}`, {
+      state: { formatConfig: gameState?.format_config },
+    });
   };
 
   const handleBackToDraft = () => {

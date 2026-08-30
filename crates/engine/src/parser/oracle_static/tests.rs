@@ -10986,6 +10986,39 @@ fn unrecognized_lure_conjunct_surfaces_unimplemented_residual() {
     );
 }
 
+/// CR 303.4 + CR 613.1g: Timber Paladin's tiered gates, driven through the
+/// PRODUCTION entry point. `parse_static_condition` lowercases before handing
+/// off to `parse_inner_condition`, so a capitalized `tag("Aura")` in the
+/// combinator makes the whole arm unreachable in a real parse even while the
+/// combinator's own mixed-case unit tests stay green. That is exactly how
+/// Timber Paladin regressed after #2418: all three tiers landed as
+/// `StaticCondition::Unrecognized`, which `game/layers.rs` evaluates as
+/// always-true, so the 10/10 tier applied with zero Auras attached.
+///
+/// Discriminating (fail-on-revert): re-capitalize either `tag` and every case
+/// below returns `Unrecognized`.
+#[test]
+fn aura_count_gates_parse_from_printed_oracle_casing() {
+    for (text, comparator, value) in [
+        ("~ is enchanted by exactly one Aura", Comparator::EQ, 1),
+        ("~ is enchanted by exactly two Auras", Comparator::EQ, 2),
+        ("~ is enchanted by three or more Auras", Comparator::GE, 3),
+    ] {
+        let cond = parse_static_condition(text)
+            .unwrap_or_else(|| panic!("{text} must parse to a typed condition"));
+        let StaticCondition::QuantityComparison {
+            comparator: got_cmp,
+            rhs,
+            ..
+        } = cond
+        else {
+            panic!("{text} must parse to QuantityComparison, got {cond:?}");
+        };
+        assert_eq!(got_cmp, comparator, "{text}");
+        assert_eq!(rhs, QuantityExpr::Fixed { value }, "{text}");
+    }
+}
+
 /// Building-block (Step 3 backstop): `parse_static_condition` for combat state
 /// must no longer collapse an ATTACHED subject into a `Source*` condition, while
 /// the genuine source-referential forms are preserved unchanged.

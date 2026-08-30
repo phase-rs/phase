@@ -191,4 +191,46 @@ describe("HostSetup", () => {
     expect(difficultyButton).toHaveTextContent("Very Hard");
     expect(screen.queryByText("VeryHard")).not.toBeInTheDocument();
   });
+
+  it("hosts with the starting life the user typed after clearing the field", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    // Commander's 40 is already in the box, so entering a non-standard value
+    // means emptying it first. A per-keystroke clamp used to refill the box
+    // with a fallback, and the typed digits landed after it (25 became 125).
+    const life = screen.getByLabelText("Starting Life");
+    await user.clear(life);
+    await user.type(life, "25");
+
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ starting_life: 25 }),
+      }),
+    );
+  });
+
+  it("keeps the last valid starting life when the field is left empty", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    const life = screen.getByLabelText("Starting Life");
+    await user.clear(life);
+
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({
+          starting_life: FORMAT_DEFAULTS.Commander.starting_life,
+        }),
+      }),
+    );
+  });
 });

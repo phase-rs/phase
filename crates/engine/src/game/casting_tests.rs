@@ -16730,16 +16730,21 @@ fn granted_blitz_offers_blitz_variant() {
     );
 }
 
-/// CR 702.152a + CR 604.1 + CR 118.9: Henzie "Toolbox" Torre — "Each creature
-/// spell you cast with mana value 4 or greater has blitz. The blitz cost is
-/// equal to its mana cost." The grant carries `Blitz(ManaCost::SelfManaCost)`, so
-/// the offered Blitz option must surface the self-referential cost (resolved to
-/// the spell's own mana cost at payment time by the shared `SelfManaCost` path,
-/// the same one the granted-flashback cost uses). This pins that a granted
-/// alternative cost equal to the card's mana cost flows intact through the
-/// casting-variant choice set rather than being dropped or fixed to a constant.
+/// CR 702.152a + CR 604.1 + CR 118.9 + CR 601.2f: Henzie "Toolbox" Torre —
+/// "Each creature spell you cast with mana value 4 or greater has blitz. The
+/// blitz cost is equal to its mana cost." The grant carries
+/// `Blitz(ManaCost::SelfManaCost)`, but that placeholder must be concretized
+/// against the recipient spell's own mana cost at the grant-collector exit
+/// (`resolve_self_cost_spell_keyword`, called from `granted_spell_keywords_for`
+/// / `granted_spell_keyword_instances_for`) — BEFORE cost modifiers and
+/// affordability are evaluated — not left unresolved to be "resolved at
+/// payment time" (issue #5435: an unresolved `SelfManaCost` has mana value 0
+/// but is not "without paying mana", so it silently acted as a real {0}
+/// alternative cost, letting AI blitz-cast unaffordable creatures for free).
+/// This pins that the offered Blitz option carries the spell's concrete mana
+/// cost, not the raw placeholder.
 #[test]
-fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
+fn granted_blitz_self_mana_cost_resolves_to_spell_mana_cost() {
     use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
     use crate::types::keywords::Keyword;
     use crate::types::statics::StaticMode;
@@ -16797,14 +16802,80 @@ fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
         .find(|o| o.variant == CastingVariant::Blitz)
         .expect("granted Blitz must surface the Blitz option");
     assert_eq!(
-        blitz.mana_cost,
-        ManaCost::SelfManaCost,
-        "granted Blitz must carry the self-referential cost (resolved to the \
-         spell's own mana cost at payment time), got {:?}",
+        blitz.mana_cost, spell_cost,
+        "granted Blitz must carry the concretized cost (the spell's own mana \
+         cost), not the unresolved SelfManaCost placeholder, got {:?}",
         blitz.mana_cost
     );
     // The recipient really is MV >= 4, so the grant's filter admits it.
     assert_eq!(state.objects.get(&spell).unwrap().mana_cost, spell_cost);
+}
+
+/// CR 702.137a + CR 604.1 + CR 118.9: Building-block sibling of the granted-Blitz
+/// test above. `resolve_self_cost_spell_keyword` is a shared mapper over the whole
+/// cast-time alternative-cost family, so pin a SECOND keyword through it —
+/// otherwise every test of that helper is Blitz-shaped and a Blitz-only special
+/// case would pass unnoticed. Spectacle is the discriminating pick: unlike Blitz
+/// it is gated on an opponent having lost life this turn (CR 702.137a), so the
+/// concretized cost has to survive a different candidate-enumeration path.
+#[test]
+fn granted_spectacle_self_mana_cost_resolves_to_spell_mana_cost() {
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    // CR 702.137a: Spectacle only functions while an opponent lost life this turn.
+    state.players[1].life_lost_this_turn = 2;
+
+    let grantor = create_object(
+        &mut state,
+        CardId(9120),
+        PlayerId(0),
+        "Spectacle Grantor".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&grantor).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Spectacle(ManaCost::SelfManaCost),
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+        obj.static_definitions = vec![def].into();
+    }
+
+    // Recipient: a {3} instant in hand with no printed Spectacle.
+    let spell_cost = ManaCost::generic(3);
+    let spell = create_object(
+        &mut state,
+        CardId(9121),
+        PlayerId(0),
+        "Some Instant".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.base_card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = spell_cost.clone();
+        obj.base_mana_cost = spell_cost.clone();
+    }
+
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
+    let spectacle = choices
+        .options
+        .iter()
+        .find(|o| o.variant == CastingVariant::Spectacle)
+        .expect("granted Spectacle must surface the Spectacle option");
+    assert_eq!(
+        spectacle.mana_cost, spell_cost,
+        "granted Spectacle must carry the concretized cost (the spell's own mana \
+         cost), not the unresolved SelfManaCost placeholder, got {:?}",
+        spectacle.mana_cost
+    );
 }
 
 /// CR 702.141a + CR 604.1 (seam 4: activated-ability-on-grant): Encore
@@ -39211,6 +39282,174 @@ mod alt_cost_reduction_509 {
             1,
             "without the emerge cost paid, the ETB parent branch creates a \
                  single Alien token"
+        );
+    }
+
+    /// CR 702.119a + CR 604.1 + CR 118.9: Building-block sibling of
+    /// `granted_blitz_self_mana_cost_resolves_to_spell_mana_cost` /
+    /// `granted_spectacle_self_mana_cost_resolves_to_spell_mana_cost` — pins
+    /// that `resolve_self_cost_spell_keyword` also concretizes a GRANTED
+    /// `Keyword::Emerge(EmergeCost { mana_cost: SelfManaCost, .. })`, not just
+    /// keywords whose cost is a bare `ManaCost`. Emerge's cost lives inside a
+    /// struct field (`EmergeCost.mana_cost`), which is exactly why the arm was
+    /// originally missed and fell through the mapper's `other => other.clone()`
+    /// wildcard (issue #5435 follow-up).
+    ///
+    /// This is a full `CastWithKeyword` runtime regression, not just a
+    /// choice-set shape check: it proves the caster (a) cannot emerge for
+    /// free, and (b) actually pays the concretized, sacrifice-reduced mana
+    /// cost end to end (mirrors
+    /// `emerge_only_affordable_after_sacrifice_reduction_casts_and_sacrifices_creature`
+    /// above).
+    #[test]
+    fn granted_emerge_self_mana_cost_resolves_to_spell_mana_cost_and_is_paid() {
+        // Grantor: "creatures you control have emerge. The emerge cost is
+        // equal to its mana cost." — modeled directly as the CastWithKeyword
+        // static the parser emits for such a grant (same shape as the Henzie
+        // Blitz grantor above), carrying `Emerge(EmergeCost::creature(SelfManaCost))`.
+        let mut state = setup_game_at_main_phase();
+        let grantor = create_object(
+            &mut state,
+            CardId(9200),
+            PlayerId(0),
+            "Emerge Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Emerge(EmergeCost::creature(ManaCost::SelfManaCost)),
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            obj.static_definitions = vec![def].into();
+        }
+
+        // Recipient: a {6} creature in hand with NO printed Emerge — the
+        // option must come entirely from the grant.
+        let spell_cost = ManaCost::generic(6);
+        let spell = create_object(
+            &mut state,
+            CardId(9201),
+            PlayerId(0),
+            "Big Vanilla Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = spell_cost.clone();
+            obj.base_mana_cost = spell_cost.clone();
+        }
+        assert!(
+            !state
+                .objects
+                .get(&spell)
+                .unwrap()
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Emerge(_))),
+            "recipient must have no printed Emerge — the option must come from the grant"
+        );
+
+        // A mana-value-4 creature to sacrifice: CR 702.119a reduces the {6}
+        // emerge cost by 4, to a payable-but-nonzero {2}.
+        let sacrifice =
+            create_sacrifice_creature(&mut state, PlayerId(0), 9202, ManaCost::generic(4));
+
+        // 1) Affordability: with NO mana at all, the caster must NOT be able
+        //    to emerge for free. An unresolved SelfManaCost has mana value 0
+        //    and is not flagged `is_without_paying_mana`, so it silently acts
+        //    as a real {0} alternative cost — this is exactly the issue
+        //    #5435 regression. Even after the best available sacrifice
+        //    reduction ({6} - MV4 = {2}), the cost is still nonzero, so
+        //    zero mana must remain unaffordable. This must be checked BEFORE
+        //    any mana is funded, since `can_cast_object_now` filters candidate
+        //    options by affordability — a starved probe is the only way to
+        //    observe "free" behavior distinctly from "unaffordable" behavior.
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell),
+            "granted Emerge must not be castable for free with zero mana available"
+        );
+
+        // 2) Fund exactly the post-reduction {2}, no more.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell),
+            "granted Emerge must become affordable once the post-reduction {{2}} is funded"
+        );
+
+        // 3) The offered Emerge option must carry the spell's own concrete
+        //    mana cost (pre-sacrifice-reduction, matching the granted-Blitz/
+        //    granted-Spectacle sibling tests' `mana_cost` shape), not the raw
+        //    SelfManaCost placeholder and not zero.
+        let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
+        let emerge_option = choices
+            .options
+            .iter()
+            .find(|o| o.variant == CastingVariant::Emerge)
+            .expect("granted Emerge must surface the Emerge option");
+        assert_eq!(
+            emerge_option.mana_cost, spell_cost,
+            "granted Emerge must carry the concretized cost (the spell's own \
+             mana cost), not the unresolved SelfManaCost placeholder, got {:?}",
+            emerge_option.mana_cost
+        );
+        assert_ne!(
+            emerge_option.mana_cost,
+            ManaCost::zero(),
+            "the concretized Emerge cost must not silently be a free {{0}} cost"
+        );
+
+        let card_id = state.objects[&spell].card_id;
+        let mut events = Vec::new();
+        let wf = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut events)
+            .expect("granted-Emerge-only cast should enter sacrifice payment");
+        match &wf {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                resume:
+                    CostResume::SpellCost {
+                        source: SpellCostSource::Emerge,
+                        ..
+                    },
+                ..
+            } => {
+                assert!(
+                    choices.contains(&sacrifice),
+                    "granted-Emerge sacrifice prompt must include the controlled creature"
+                );
+            }
+            other => panic!("expected granted-Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        state.waiting_for = wf;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![sacrifice],
+            },
+        )
+        .expect("sacrificing the creature should complete the granted-Emerge cast");
+
+        assert_eq!(
+            state.objects[&sacrifice].zone,
+            Zone::Graveyard,
+            "the emerge sacrifice must move the creature to the graveyard"
+        );
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Stack,
+            "the granted-Emerge cast spell must be on the stack"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "granted Emerge must charge the concretized, reduced {{2}} cost, \
+             consuming exactly the two mana funded above"
         );
     }
 }

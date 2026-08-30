@@ -3500,6 +3500,42 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
     }
 }
 
+/// Whether a condition reads a graveyard-card count. During an interactive
+/// discard, that count is not final until the player has selected and moved the
+/// card; see the resolution-choice deferral gate above.
+fn condition_depends_on_graveyard_size(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_any_ref(lhs, &mut quantity_ref_reads_graveyard_card_count)
+                || quantity_expr_any_ref(rhs, &mut quantity_ref_reads_graveyard_card_count)
+        }
+        AbilityCondition::Not { condition } => condition_depends_on_graveyard_size(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_depends_on_graveyard_size)
+        }
+        _ => false,
+    }
+}
+
+/// Whether this quantity reads any player's graveyard-card population.
+///
+/// `GraveyardSize` is the direct player scalar, while `TargetZoneCardCount`
+/// and `ZoneCardCount` are the generalized zone-count forms. All three are
+/// stale until the selected discard has moved.
+fn quantity_ref_reads_graveyard_card_count(qty: &QuantityRef) -> bool {
+    matches!(
+        qty,
+        QuantityRef::GraveyardSize { .. }
+            | QuantityRef::TargetZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+            }
+            | QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+                ..
+            }
+    )
+}
+
 /// CR 608.2c + CR 111.1: Whether a condition reads the resolution-local
 /// `last_created_token_ids` ledger — the "the token created this way" / "it"
 /// anaphor a token-creating instruction publishes when it COMPLETES
@@ -12804,6 +12840,11 @@ fn resolve_chain_body(
             if waits_for_resolution_choice(&state.waiting_for)
                 && (condition_depends_on_effect_performed(condition)
                     || condition_depends_on_zone_change_this_way(condition)
+                    // CR 608.2c + CR 404.1: a discard choice has not moved its
+                    // selected card yet, so a following graveyard-size condition
+                    // must wait for that move before it is evaluated.
+                    || (matches!(ability.effect, Effect::Discard { .. } | Effect::DiscardCard { .. })
+                        && condition_depends_on_graveyard_size(condition))
                     || condition_depends_on_last_created(condition)
                     || matches!(condition, AbilityCondition::WhenYouDo)
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
@@ -33873,6 +33914,39 @@ mod tests {
         }));
         assert!(!counts(QuantityRef::HandSize {
             player: PlayerScope::Controller,
+        }));
+    }
+
+    /// CR 608.2c: a conditional tail after an interactive discard has to read
+    /// the graveyard after the selected card moves, regardless of which
+    /// equivalent quantity spelling the parser produced.
+    #[test]
+    fn graveyard_count_predicate_covers_each_quantity_spelling() {
+        let reads_graveyard = |qty: QuantityRef| {
+            condition_depends_on_graveyard_size(&AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        };
+
+        assert!(reads_graveyard(QuantityRef::GraveyardSize {
+            player: PlayerScope::Controller,
+        }));
+        assert!(reads_graveyard(QuantityRef::TargetZoneCardCount {
+            zone: crate::types::ability::ZoneRef::Graveyard,
+        }));
+        assert!(reads_graveyard(QuantityRef::ZoneCardCount {
+            zone: crate::types::ability::ZoneRef::Graveyard,
+            card_types: vec![],
+            filter: None,
+            scope: crate::types::ability::CountScope::Controller,
+        }));
+        assert!(!reads_graveyard(QuantityRef::ZoneCardCount {
+            zone: crate::types::ability::ZoneRef::Hand,
+            card_types: vec![],
+            filter: None,
+            scope: crate::types::ability::CountScope::Controller,
         }));
     }
 

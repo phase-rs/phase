@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use engine::ai_support::{candidate_actions, legal_actions_for_viewer, AiDecisionContract};
+use engine::ai_support::{
+    candidate_actions, legal_actions_for_viewer, stuck_decision_diagnostic, AiDecisionContract,
+};
 use engine::game::elimination::eliminate_player;
 use engine::game::engine::{
     apply, apply_verified_ai_priority_pass, classify_restored_stack_automation,
@@ -1744,6 +1746,105 @@ fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
     );
     assert!(state.auto_pass.is_empty());
 }
+
+/// The reporter's shape: P0 proposes Resolve All, P1's consent is queued, and
+/// the private run is gone while the public prompt still stands.
+fn pending_consent_without_its_run() -> GameState {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE2);
+    state.stack.push_back(no_op_entry(1, P0));
+    let epoch = begin(&mut state);
+    // Not an arbitrary mutation: this is exactly what a viewer projection of a
+    // pending consent carries, so any state reconstructed from one has it.
+    let projected = filter_state_for_viewer(&state, P0);
+    assert_eq!(projected.waiting_for, state.waiting_for);
+    assert!(projected.resolve_all_consent_run.is_none());
+    state.resolve_all_consent_run = None;
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { epoch: e, representative: P1 } if e == epoch
+    ));
+    state
+}
+
+#[test]
+fn a_consent_prompt_with_no_run_issues_no_response_and_reports_a_wedge() {
+    let mut state = pending_consent_without_its_run();
+    let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {
+        unreachable!("the fixture asserts its own prompt")
+    };
+
+    assert!(
+        !candidate_actions(&state).iter().any(|candidate| matches!(
+            candidate.action,
+            GameAction::RespondResolveAllConsent { .. }
+        )),
+        "a response the reducer can only reject must never enter the issued domain"
+    );
+    assert!(
+        AiDecisionContract::issue(&state, P1).candidates.is_empty(),
+        "this prompt's contract is issued without reducer simulation, so an \
+         unanswerable candidate would reach an AI submission unchecked"
+    );
+    for decision in [
+        ResolveAllConsentDecision::Grant,
+        ResolveAllConsentDecision::Decline,
+    ] {
+        assert!(
+            apply(
+                &mut state,
+                P1,
+                GameAction::RespondResolveAllConsent { epoch, decision },
+            )
+            .is_err(),
+            "the empty domain is correct rather than over-strict: {decision:?} is refused"
+        );
+    }
+
+    let diagnostic = stuck_decision_diagnostic(&state)
+        .expect("a decision nobody can answer must surface as a wedge");
+    assert_eq!(diagnostic.waiting_for_kind, "ResolveAllConsent");
+    assert_eq!(diagnostic.stuck_players, vec![P1]);
+    assert!(
+        legal_actions_for_viewer(&state, P1).0.is_empty(),
+        "the representative's own viewer set was already empty; the issued \
+         domain is what disagreed with it"
+    );
+}
+
+#[test]
+fn a_consent_prompt_with_no_run_repairs_to_priority_without_resolving() {
+    let mut coherent = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE3);
+    coherent.stack.push_back(no_op_entry(1, P0));
+    begin(&mut coherent);
+    assert_eq!(
+        classify_restored_stack_automation(&coherent),
+        RestoredStackAutomation::None,
+        "a live consent prompt is a decision to answer, not automation to resume"
+    );
+
+    let mut state = pending_consent_without_its_run();
+    assert_eq!(
+        classify_restored_stack_automation(&state),
+        RestoredStackAutomation::Repair,
+        "an unanswerable saved authorization is a repair, like a run-less Ready latch"
+    );
+
+    let resumed = resume_restored_stack_automation(&mut state);
+
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair
+    );
+    assert_eq!(resumed.presentation.automated_resolution_count, 0);
+    assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the repair must restore ordinary priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.resolve_all_consent_run.is_none());
+}
+
 /// Generic restore classification is inert on the overwhelming majority of
 /// states, which carry no stack automation at all.
 #[test]

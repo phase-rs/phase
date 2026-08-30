@@ -12,7 +12,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
-    EmbalmCost, EternalizeCost, FlashbackCost, GiftKind, Keyword, KeywordKind, ProtectionTarget,
+    BestowCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost, GiftKind,
+    Keyword, KeywordKind, ProtectionTarget,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -470,6 +471,84 @@ pub fn resolve_self_cost_graveyard_activated_keyword(
         Keyword::Eternalize(EternalizeCost::Mana(cost)) => Keyword::Eternalize(
             EternalizeCost::Mana(resolve_keyword_mana_cost(state, object_id, cost)),
         ),
+        other => other.clone(),
+    }
+}
+
+/// CR 118.9 + CR 601.2f + CR 604.1: Resolve a `ManaCost::SelfManaCost` /
+/// `SelfManaValue` / `SelfManaCostReduced` payload carried by a *cast-time*
+/// alternative-cost keyword (CR 702.152a Blitz, CR 702.137a Spectacle, CR
+/// 702.119a Emerge, and the rest of the cast-from-hand alt-cost family) to the
+/// recipient spell's own concrete mana cost, before that keyword's cost is
+/// offered or paid. A `CastWithKeyword` static (CR 604.1) can grant one of
+/// these keywords with a bare `SelfManaCost` placeholder payload ("The blitz
+/// cost is equal to its mana cost" — Henzie, "Toolbox" Torre); left
+/// unresolved, `ManaCost::SelfManaCost` has mana value 0 but is not flagged
+/// "without paying mana", so it silently acts as a real {0} alternative cost.
+/// This mirrors [`resolve_self_cost_graveyard_activated_keyword`] but covers
+/// the disjoint keyword family whose cost is paid on the stack as a spell's
+/// total cost (CR 601.2f) rather than as an `AbilityCost::Mana` sub-cost.
+///
+/// Inclusion criterion: every keyword here is (a) a cast-time alternative or
+/// additional cost that substitutes for or accompanies a spell's mana cost,
+/// and (b) carries a bare `ManaCost` (or a `Mana(ManaCost)` variant of its
+/// cost enum, or a struct payload with a `mana_cost` field such as
+/// `EmergeCost`) that a `CastWithKeyword` grant could plausibly bind to a
+/// self-referential placeholder. Battlefield/activated-only keywords (Equip,
+/// Fortify, Reconfigure, Outlast, Unearth, Ninjutsu, Morph/Megamorph, Kicker)
+/// are not granted through this spell-cast seam and are intentionally
+/// excluded — they resolve their own placeholders (if any) at their own
+/// activation seam. Non-self-referential keywords pass through unchanged.
+pub(crate) fn resolve_self_cost_spell_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Keyword {
+    match keyword {
+        Keyword::Blitz(cost) => Keyword::Blitz(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Spectacle(cost) => {
+            Keyword::Spectacle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Dash(cost) => Keyword::Dash(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Prowl(cost) => Keyword::Prowl(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Surge(cost) => Keyword::Surge(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Freerunning(cost) => {
+            Keyword::Freerunning(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Evoke(EvokeCost::Mana(cost)) => Keyword::Evoke(EvokeCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Bestow(BestowCost::Mana(cost)) => Keyword::Bestow(BestowCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
+        Keyword::Madness(cost) => {
+            Keyword::Madness(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Miracle(cost) => {
+            Keyword::Miracle(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Overload(cost) => {
+            Keyword::Overload(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Mutate(cost) => Keyword::Mutate(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Mayhem(cost) => Keyword::Mayhem(resolve_keyword_mana_cost(state, object_id, cost)),
+        // CR 702.119a: Emerge's mana cost is a struct field (`EmergeCost.mana_cost`),
+        // not a bare `ManaCost`, so it needs its own arm; `sacrifice_filter` is
+        // untouched (it has no self-referential mana placeholder).
+        Keyword::Emerge(EmergeCost {
+            mana_cost,
+            sacrifice_filter,
+        }) => Keyword::Emerge(EmergeCost {
+            mana_cost: resolve_keyword_mana_cost(state, object_id, mana_cost),
+            sacrifice_filter: sacrifice_filter.clone(),
+        }),
+        Keyword::WebSlinging(cost) => {
+            Keyword::WebSlinging(resolve_keyword_mana_cost(state, object_id, cost))
+        }
+        Keyword::Plot(cost) => Keyword::Plot(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Offspring(cost) => {
+            Keyword::Offspring(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         other => other.clone(),
     }
 }

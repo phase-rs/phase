@@ -1,5 +1,11 @@
 import { AnimatePresence, motion, useDragControls, useReducedMotion } from "framer-motion";
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
@@ -42,6 +48,7 @@ export function DialogShell({
   previewObjectId,
 }: DialogShellProps) {
   const { t } = useTranslation("game");
+  const titleId = useId();
   const peek = useOptionalDialogPeek();
   const isNarrow = useIsNarrowViewport();
   const inspectHoverProps = useInspectHoverProps();
@@ -103,6 +110,8 @@ export function DialogShell({
 
         <motion.div
           className={wrapperClass}
+          role="dialog"
+          aria-labelledby={titleId}
           initial={{ scale: 0.95, opacity: 0, y: 10 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
@@ -119,6 +128,7 @@ export function DialogShell({
               eyebrow={resolvedEyebrow}
               eyebrowClassName={eyebrowClassName}
               title={title}
+              titleId={titleId}
               subtitle={subtitle}
               onHandlePointerDown={startHeaderDrag}
             />
@@ -146,6 +156,7 @@ interface DialogHeaderProps {
   eyebrow: ReactNode;
   eyebrowClassName?: string;
   title: ReactNode;
+  titleId: string;
   subtitle?: ReactNode;
   /** When provided, the header acts as the dialog's drag handle: pointer-down
    * starts a drag via the shell's `dragControls`. Absent → static header. */
@@ -156,6 +167,7 @@ export function DialogHeader({
   eyebrow,
   eyebrowClassName,
   title,
+  titleId,
   subtitle,
   onHandlePointerDown,
 }: DialogHeaderProps) {
@@ -176,7 +188,7 @@ export function DialogHeader({
       className={`relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5 ${handleClass}`}
     >
       <div className={eyebrowClass}>{eyebrow}</div>
-      <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
+      <h2 id={titleId} className="mt-1 text-base font-semibold text-white lg:text-xl">
         {title}
       </h2>
       {subtitle ? (

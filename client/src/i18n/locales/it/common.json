@@ -295,7 +295,15 @@
     "back": "Indietro",
     "settings": "Impostazioni",
     "languageSettings": "Lingua ({{lang}}) — apri impostazioni",
-    "languageTitle": "Lingua: {{lang}}"
+    "languageTitle": "Lingua: {{lang}}",
+    "statusBanner": {
+      "dismiss": "Ignora questo messaggio",
+      "severity": {
+        "info": "Avviso",
+        "warning": "Attenzione",
+        "critical": "Importante"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Qualcosa è andato storto",

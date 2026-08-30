@@ -315,7 +315,38 @@ pub fn resolve(
             up_to: false,
             source_id: ability.source_id,
             effect_kind: EffectKind::PutAtLibraryPosition,
-            zone: Zone::Library,
+            // PART 2 of a two-part fix — this half PREVENTS FUTURE WEDGES; the
+            // guard half in `engine_resolution_choices.rs` RESCUES SAVES ALREADY
+            // WEDGED by the hardcoded `Zone::Library` this replaces. Neither is
+            // redundant: a persisted prompt is restored verbatim by
+            // `into_game_state`, so no producer fix can reach a save written
+            // before it.
+            //
+            // Report the zone the members are ACTUALLY in. The `ExiledBySource`
+            // scan above collects `obj.zone == Zone::Exile` members (Codie,
+            // Vociferous Codex's "put each other card exiled this way on the
+            // bottom"), and `TargetFilter::extract_in_zone` answers
+            // `Some(Zone::Exile)` for those filters. Claiming `Library` made the
+            // prompt contradict its own frozen members, and the delivery guard
+            // then refused every candidate — 0 legal actions, permanent wedge.
+            //
+            // Bounded by the SAME predicate the guard admits on, so the producer
+            // can never emit a zone the guard would refuse. The bound is load
+            // bearing: `extract_in_zone` answers `Some(Zone::Stack)` for
+            // stack-spell filters, which an unbounded `unwrap_or` would emit and
+            // re-wedge on the spot.
+            //
+            // The `Zone::Library` fallback is LOAD BEARING, NOT DECORATIVE:
+            // `TrackedSet`/`TrackedSetFiltered` filters have no `extract_in_zone`
+            // arm and answer `None`, while the tracked-set branch above filters
+            // their members to `obj.zone == Zone::Library`. Dropping the fallback
+            // would hide Expressive Iteration's candidates from
+            // `visibility::effect_zone_library_visible`, which keys literally on
+            // `zone: Zone::Library`.
+            zone: target_filter
+                .extract_in_zone()
+                .filter(|z| z.is_library_relocation_origin())
+                .unwrap_or(Zone::Library),
             destination: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
@@ -412,8 +443,11 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::ability::{
+        Effect, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    };
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1261,6 +1295,198 @@ mod tests {
                 assert!(
                     !cards.contains(&creature),
                     "creature must not be offered for instant-only filter"
+                );
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+    /// **Part 2 producer — the discriminating row.**
+    ///
+    /// The prompt must advertise the zone its frozen members are ACTUALLY in.
+    /// Codie, Vociferous Codex's tail ("Put each other card exiled this way on
+    /// the bottom of your library in a random order") parses to
+    /// `And [ Typed{Card,[Another]}, ExiledBySource ]`, and the resolver
+    /// collects its members by scanning `Zone::Exile`. The producer used to
+    /// hardcode `zone: Zone::Library`, so the prompt contradicted its own frozen
+    /// members and the delivery guard in `engine_resolution_choices.rs` refused
+    /// every candidate — 0 legal actions, permanent wedge.
+    ///
+    /// Revert-failing assertion: `assert_eq!(*zone, Zone::Exile, ..)`. Restoring
+    /// `zone: Zone::Library` in the producer reds this row. This is the ONLY row
+    /// in the tree that discriminates on Part 2 — the integration rows in
+    /// `codie_turn14_effect_zone_wedge.rs` all exercise the guard instead, either
+    /// from a persisted prompt or from a hand-parked one.
+    #[test]
+    fn producer_reports_exile_for_an_exiled_by_source_composed_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Codie, Vociferous Codex".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled This Way A".to_string(),
+            Zone::Exile,
+        );
+        let exiled_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Exiled This Way B".to_string(),
+            Zone::Exile,
+        );
+        // CR 607.2a: the exile-link ledger is what makes `ExiledBySource` match.
+        for exiled_id in [exiled_a, exiled_b] {
+            state.exile_links.push(ExileLink {
+                exiled_id,
+                source_id: source,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Card],
+                            controller: None,
+                            properties: vec![FilterProp::Another],
+                        }),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                effect_kind,
+                cards,
+                count,
+                zone,
+                ..
+            } => {
+                // Reach-guard: the over-collection branch really was taken —
+                // BOTH exiled cards were collected against a count of 1. Without
+                // this the `zone` assertion could pass on a prompt produced by
+                // some other branch, or on no prompt at all.
+                assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "both Exile-resident members must be collected, got {cards:?}",
+                );
+                assert!(
+                    cards.contains(&exiled_a) && cards.contains(&exiled_b),
+                    "the collected members must be the two exiled cards, got {cards:?}",
+                );
+                assert_eq!(*count, 1, "count 1 over 2 candidates is what prompts");
+
+                assert_eq!(
+                    *zone,
+                    Zone::Exile,
+                    "the prompt must report the zone its members are actually in; \
+                     claiming Library is what wedged the board",
+                );
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// **Part 2 producer — fallback regression guard. NOT REVERT-DISCRIMINATING.**
+    ///
+    /// Read this label before trusting this row: it does **not** fail if Part 2
+    /// is reverted to `zone: Zone::Library`, because for a tracked-set filter the
+    /// fixed and the reverted producer agree on `Library`. It is not coverage for
+    /// the wedge fix, and the row above is the only one that is.
+    ///
+    /// What it does guard is a DIFFERENT failure mode: the `.unwrap_or(Zone::Library)`
+    /// fallback being deleted as dead decoration by a later "simplification".
+    /// `TrackedSet`/`TrackedSetFiltered` have no `extract_in_zone` arm and answer
+    /// `None`, while the tracked-set branch above filters their members to
+    /// `obj.zone == Zone::Library`. Dropping the fallback would leave the prompt
+    /// reporting something other than `Library`, hiding Expressive Iteration's
+    /// candidates from `visibility::effect_zone_library_visible`, which keys
+    /// literally on `zone: Zone::Library`.
+    #[test]
+    fn producer_falls_back_to_library_for_a_tracked_set_filter() {
+        let mut state = GameState::new_two_player(42);
+        let member_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tracked A".to_string(),
+            Zone::Library,
+        );
+        let member_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Tracked B".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = vec![member_a, member_b].into();
+
+        let set_id = TrackedSetId(11);
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![member_a, member_b]);
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::TrackedSet { id: set_id },
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                effect_kind,
+                cards,
+                count,
+                zone,
+                ..
+            } => {
+                // Reach-guard: the over-collection branch really was taken, over
+                // both library members, against a count of 1.
+                assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "both library members must be collected, got {cards:?}",
+                );
+                assert!(
+                    cards.contains(&member_a) && cards.contains(&member_b),
+                    "the collected members must be the two tracked cards, got {cards:?}",
+                );
+                assert_eq!(*count, 1, "count 1 over 2 candidates is what prompts");
+
+                assert_eq!(
+                    *zone,
+                    Zone::Library,
+                    "a tracked-set filter has no extract_in_zone arm, so the \
+                     load-bearing Library fallback must supply the zone",
                 );
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),

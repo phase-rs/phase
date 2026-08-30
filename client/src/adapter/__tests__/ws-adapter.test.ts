@@ -6,7 +6,7 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
-import type { GameState } from "../types";
+import type { FormatConfig, GameState } from "../types";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
@@ -514,6 +514,64 @@ describe("WebSocketAdapter", () => {
     // `reconnectFailed` before the `reconnecting` emit at all. The sidecar
     // runs `--single-user`, so its reconnect window is effectively unbounded
     // and the session is still there to reconnect to.
+    // The desktop (Tauri) solo route hands the setup screen's edited config to
+    // the sidecar through this frame and nowhere else: that route deliberately
+    // writes no resume pointer, so if `format_config` were dropped here the
+    // native server would fall back to Standard's 20 life with no other copy of
+    // the user's choice anywhere in the session.
+    it("carries a custom starting life to the native engine", async () => {
+      MockWebSocket.last = null;
+      const socketFactory = vi.fn(
+        () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+      );
+      const formatConfig: FormatConfig = {
+        format: "Commander",
+        starting_life: 25,
+        min_players: 2,
+        max_players: 4,
+        deck_size: { type: "Exactly", data: 100 },
+        singleton: true,
+        command_zone: true,
+        commander_damage_threshold: 21,
+        range_of_influence: null,
+        team_based: false,
+        sideboard_policy: { type: "Forbidden" },
+        uses_commander: true,
+        allow_debug_actions: false,
+      };
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        {
+          nativeAi: {
+            ...nativeAiOptions(socketFactory).nativeAi,
+            formatConfig,
+          },
+        },
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      const calls = nativeSocket.send.mock.calls;
+      const frame = JSON.parse(calls[calls.length - 1]![0] as string);
+      expect(frame.type).toBe("CreateGameWithSettings");
+      expect(frame.data.format_config).toEqual(formatConfig);
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+    });
+
     it("retries a dropped native-ai socket instead of failing on first drop", async () => {
       MockWebSocket.last = null;
       const nativeAdapter = new WebSocketAdapter(
@@ -577,6 +635,70 @@ describe("WebSocketAdapter", () => {
     // Scope guard: this asserts a property of the DIFF (the change was scoped
     // to `nativeAi` and did not widen to both options), not that 0 is the
     // right answer for pregame — that path is explicitly not analysed.
+    // Desktop hosting from the multiplayer screen: `P2PHostAdapter` builds a
+    // `NativeP2PBridge`, which creates the sidecar game through this pregame
+    // frame rather than the `nativeAi` one. `HostSetup`'s edited starting life
+    // reaches the engine only if it survives here too.
+    it("carries a custom starting life to the native pregame host", async () => {
+      MockWebSocket.last = null;
+      const formatConfig: FormatConfig = {
+        format: "Commander",
+        starting_life: 25,
+        min_players: 2,
+        max_players: 4,
+        deck_size: { type: "Exactly", data: 100 },
+        singleton: true,
+        command_zone: true,
+        commander_damage_threshold: 21,
+        range_of_influence: null,
+        team_based: false,
+        sideboard_policy: { type: "Forbidden" },
+        uses_commander: true,
+        allow_debug_actions: false,
+      };
+      const pregameAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () =>
+              new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 4,
+            aiSeats: [],
+            formatConfig,
+          },
+        },
+      );
+
+      const attached = pregameAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(pregameAdapter);
+      const calls = nativeSocket.send.mock.calls;
+      const frame = JSON.parse(calls[calls.length - 1]![0] as string);
+      expect(frame.type).toBe("CreateGameWithSettings");
+      expect(frame.data.format_config).toEqual(formatConfig);
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: {
+            game_code: "WXYZ",
+            player_id: 0,
+            player_token: "tok",
+            full_key: { game_code: "WXYZ", generation: 1 },
+          },
+        }),
+      );
+      await attached;
+      pregameAdapter.dispose();
+    });
+
     it("leaves the native pregame transport failing on first drop", async () => {
       MockWebSocket.last = null;
       const pregameAdapter = new WebSocketAdapter(

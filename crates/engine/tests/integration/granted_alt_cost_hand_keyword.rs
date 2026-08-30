@@ -1,14 +1,16 @@
-//! Runtime pipeline tests for granting foretell/miracle to cards IN HAND with an
-//! MV-derived cost (Dream Devourer, Aminatou Veil Piercer).
+//! Runtime pipeline tests for granting foretell/miracle/blitz to cards IN HAND
+//! with an MV-derived cost (Dream Devourer, Aminatou Veil Piercer, Henzie
+//! "Toolbox" Torre).
 //!
-//! CR 702.143a (Foretell) / CR 702.94a (Miracle) / CR 601.2f (generic reduction
-//! floors at {0}) / CR 113.6b (keyword functions from its stated zone).
+//! CR 702.143a (Foretell) / CR 702.94a (Miracle) / CR 702.152a (Blitz) /
+//! CR 601.2f (generic reduction floors at {0}) / CR 113.6b (keyword functions
+//! from its stated zone) / CR 118.9 (alternative costs).
 //!
 //! These drive the real engine (`apply()` via `GameRunner`), not helper-only
 //! parse assertions: each test would fail if the reduction/zone/resolution fix
 //! were reverted.
 
-use engine::game::casting::can_foretell_card;
+use engine::game::casting::{can_foretell_card, current_casting_variant_choice_options};
 use engine::game::effects::draw::resolve as resolve_draw;
 use engine::game::keywords::effective_foretell_cost;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
@@ -16,15 +18,27 @@ use engine::types::ability::{
     CastingPermission, ContinuousModification, Effect, QuantityExpr, ResolvedAbility,
     StaticDefinition, TargetFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const DREAM_DEVOURER: &str = "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.";
 const AMINATOU: &str = "Each enchantment card in your hand has miracle. Its miracle cost is equal to its mana cost reduced by {4}.";
+// CR 702.152a: Henzie "Toolbox" Torre's blitz-granting line. The dynamic
+// "costs you pay {1} less" second line (a commander-cast-count reduction) is
+// explicitly out of scope for this fix — see issue #5435 — so only the
+// self-referential-cost grant line is modeled here.
+const HENZIE_BLITZ_GRANT: &str = "Each creature spell you cast with mana value 4 or greater has blitz. The blitz cost is equal to its mana cost.";
+
+/// `n` colorless mana units, for pre-funding a player's mana pool in a scenario.
+fn colorless_pool(n: usize) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect()
+}
 
 fn generic(n: u32) -> ManaCost {
     ManaCost::Cost {
@@ -702,4 +716,184 @@ fn printed_foretell_removed_off_zone_is_not_foretellable() {
             "a card whose printed foretell was removed off-zone must not be foretellable"
         );
     }
+}
+
+// --------------------------------------------------------------------------
+// Blitz (Henzie "Toolbox" Torre) — self-referential granted alt cost from
+// hand. Issue #5435: an unresolved `ManaCost::SelfManaCost` has mana value 0
+// but is not "without paying mana", so it silently acted as a real {0}
+// alternative cost — letting the granted Blitz be offered (and auto-routed
+// to) for free regardless of the recipient's actual mana value.
+// --------------------------------------------------------------------------
+
+/// CR 702.152a + CR 604.1 + CR 118.9: a creature spell with mana value 4 or
+/// greater in hand under Henzie's grant must be offered Blitz at the spell's
+/// own concrete mana cost — never the raw `SelfManaCost` placeholder and
+/// never a free {0} cost.
+///
+/// Revert-failing: pre-fix, `blitz.mana_cost` is `ManaCost::SelfManaCost`
+/// (mana value 0), not `generic(6)`.
+#[test]
+fn henzie_granted_blitz_surfaces_concrete_spell_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Henzie \"Toolbox\" Torre", 3, 3)
+        .from_oracle_text(HENZIE_BLITZ_GRANT);
+    let spell = scenario
+        .add_spell_to_hand(P0, "SixMVCreature", false)
+        .as_creature()
+        .with_mana_cost(generic(6))
+        .id();
+    // Fund both the printed {6} and a concretized {6} blitz cost so the option
+    // is offered (affordability is a separate gate from the cost it displays).
+    scenario.with_mana_pool(P0, colorless_pool(6));
+
+    let runner = scenario.build();
+    let options = current_casting_variant_choice_options(runner.state(), P0, spell);
+    let blitz = options
+        .iter()
+        .find(|o| o.variant == CastingVariant::Blitz)
+        .expect("granted Blitz must be offered for an MV>=4 creature spell in hand");
+    assert_eq!(
+        blitz.mana_cost,
+        generic(6),
+        "granted Blitz must surface the spell's own concrete mana cost ({{6}}), not \
+         the unresolved SelfManaCost placeholder and not a free {{0}} cost, got {:?}",
+        blitz.mana_cost
+    );
+    assert_ne!(
+        blitz.mana_cost,
+        ManaCost::SelfManaCost,
+        "granted Blitz must not surface the raw self-referential placeholder"
+    );
+}
+
+/// CR 702.152a + CR 118.9 + CR 601.2f: with only {5} available and the
+/// concretized blitz cost at {6} (equal to the spell's mana value), Blitz
+/// must NOT be offered as an affordable option — this is the exact Discord
+/// report (AI blitz-casting MV6/7 creatures with only 6 mana available).
+///
+/// Revert-failing: pre-fix, the raw `SelfManaCost` placeholder has mana value
+/// 0, so it is affordable with ANY amount of mana (including zero), and the
+/// Blitz option is always offered/auto-routable regardless of the printed
+/// cost's actual affordability.
+#[test]
+fn henzie_granted_blitz_not_offered_when_unaffordable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Henzie \"Toolbox\" Torre", 3, 3)
+        .from_oracle_text(HENZIE_BLITZ_GRANT);
+    let spell = scenario
+        .add_spell_to_hand(P0, "SixMVCreature", false)
+        .as_creature()
+        .with_mana_cost(generic(6))
+        .id();
+    // Only {5} available — insufficient for either the printed {6} or the
+    // concretized {6} blitz cost.
+    scenario.with_mana_pool(P0, colorless_pool(5));
+
+    let runner = scenario.build();
+    let options = current_casting_variant_choice_options(runner.state(), P0, spell);
+    assert!(
+        !options.iter().any(|o| o.variant == CastingVariant::Blitz),
+        "granted Blitz must not be offered when its concretized {{6}} cost is \
+         unaffordable at {{5}} available mana, got {:?}",
+        options
+    );
+}
+
+/// CR 702.152a + CR 601.2f: actually casting via the granted Blitz variant
+/// must drain the spell's own concrete mana cost from the pool — proving real
+/// payment, not just a displayed cost. A {6} creature under Henzie's grant
+/// pays exactly {6} (both the printed and blitz costs happen to coincide
+/// here; the discriminating fact is that {6}, not {0}, leaves the pool).
+///
+/// Revert-failing: pre-fix, the unresolved `SelfManaCost` placeholder pays
+/// nothing, so the pool would still hold {6} after a blitz cast.
+#[test]
+fn henzie_granted_blitz_cast_pays_concrete_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Henzie \"Toolbox\" Torre", 3, 3)
+        .from_oracle_text(HENZIE_BLITZ_GRANT);
+    let spell = scenario
+        .add_spell_to_hand(P0, "SixMVCreature", false)
+        .as_creature()
+        .with_mana_cost(generic(6))
+        .id();
+    scenario.with_mana_pool(P0, colorless_pool(6));
+
+    let mut runner = scenario.build();
+    // CR 601.2b + CR 118.9: a single granted alternative cost is offered through
+    // the two-slot `AlternativeCastChoice` modal (normal vs alternative), not the
+    // N-way `CastingVariantChoice` prompt — so the blitz election is declared
+    // with `.alternative_cast(..)`. Reaching that modal at all is itself
+    // meaningful: it proves the concretized {6} blitz cost was affordable
+    // alongside the printed {6}, so the engine had a real choice to offer.
+    let outcome = runner
+        .cast(spell)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .resolve();
+
+    assert_eq!(
+        outcome.zone_of(spell),
+        engine::types::zones::Zone::Battlefield,
+        "the blitz-cast creature must resolve onto the battlefield"
+    );
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "casting via the granted Blitz option must drain the full concrete {{6}} \
+         cost from the pool, not leave it untouched (unresolved placeholder = \
+         free), got {} floating",
+        outcome.mana_pool_total(P0)
+    );
+}
+
+/// Negative control: a creature spell BELOW Henzie's mana-value-4 filter gets
+/// no Blitz option at all — the `Cmc GE 4` `affected` filter on the grant must
+/// still gate the grant correctly after the cost-concretization fix.
+#[test]
+fn henzie_grant_excludes_creature_below_mana_value_filter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Henzie \"Toolbox\" Torre", 3, 3)
+        .from_oracle_text(HENZIE_BLITZ_GRANT);
+    let spell = scenario
+        .add_spell_to_hand(P0, "ThreeMVCreature", false)
+        .as_creature()
+        .with_mana_cost(generic(3))
+        .id();
+    scenario.with_mana_pool(P0, colorless_pool(3));
+
+    let mut runner = scenario.build();
+    let options = current_casting_variant_choice_options(runner.state(), P0, spell);
+    assert!(
+        !options.iter().any(|o| o.variant == CastingVariant::Blitz),
+        "a creature spell below Henzie's mana value 4 filter must not be \
+         offered Blitz, got {:?}",
+        options
+    );
+
+    // The spell must still cast normally at its printed {3}. Declaring NO
+    // `.alternative_cast(..)` is the load-bearing part: the harness panics if an
+    // `AlternativeCastChoice` modal is ever reached, so a completed cast proves
+    // no blitz alternative was offered for this below-threshold creature — and
+    // draining exactly {3} proves the grant didn't silently zero the cost.
+    let outcome = runner.cast(spell).resolve();
+    assert_eq!(
+        outcome.zone_of(spell),
+        engine::types::zones::Zone::Battlefield,
+        "the below-threshold creature must still cast normally"
+    );
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "the normal cast must pay the printed {{3}}, got {} floating",
+        outcome.mana_pool_total(P0)
+    );
 }

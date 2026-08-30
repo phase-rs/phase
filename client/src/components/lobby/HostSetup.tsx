@@ -9,6 +9,7 @@ import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStor
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
 
 export type { AiSeatConfig };
@@ -479,17 +480,13 @@ export function HostSetup({
             </Field>
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
-              <input
+              <IntegerField
                 id="host-setup-life"
-                type="number"
                 value={formatConfig.starting_life}
-                onChange={(e) =>
-                  setLocalFormatConfig((prev) => ({
-                    ...prev,
-                    starting_life: Math.max(1, parseInt(e.target.value) || 1),
-                  }))
-                }
                 min={1}
+                onCommit={(starting_life) =>
+                  setLocalFormatConfig((prev) => ({ ...prev, starting_life }))
+                }
                 className={inp}
               />
             </Field>
@@ -576,17 +573,16 @@ export function HostSetup({
           {/* Commander damage threshold (Commander only) */}
           {formatConfig.commander_damage_threshold != null && (
             <Field label={t("hostSetup.commanderDamage")} htmlFor="host-setup-cmd-dmg">
-              <input
+              <IntegerField
                 id="host-setup-cmd-dmg"
-                type="number"
                 value={formatConfig.commander_damage_threshold ?? 21}
-                onChange={(e) =>
+                min={1}
+                onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,
-                    commander_damage_threshold: Math.max(1, parseInt(e.target.value) || 21),
+                    commander_damage_threshold: threshold,
                   }))
                 }
-                min={1}
                 className={inp}
               />
             </Field>

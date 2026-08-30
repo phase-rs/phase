@@ -295,7 +295,15 @@
     "back": "Retour",
     "settings": "Paramètres",
     "languageSettings": "Langue ({{lang}}) — ouvrir les paramètres",
-    "languageTitle": "Langue : {{lang}}"
+    "languageTitle": "Langue : {{lang}}",
+    "statusBanner": {
+      "dismiss": "Ignorer ce message",
+      "severity": {
+        "info": "Information",
+        "warning": "Attention",
+        "critical": "Important"
+      }
+    }
   },
   "errorBoundary": {
     "heading": "Une erreur est survenue",

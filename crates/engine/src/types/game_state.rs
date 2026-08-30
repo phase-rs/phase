@@ -2121,6 +2121,21 @@ impl ResolveAllConsentRun {
             .find(|participant| !participant.granted)
             .map(|participant| participant.representative)
     }
+
+    /// The single authority for whether a `RespondResolveAllConsent` naming
+    /// `epoch` and `representative` is still answerable.
+    ///
+    /// The public `WaitingFor::ResolveAllConsent` prompt and this private run
+    /// are separate fields, and a run can be absent behind a standing prompt —
+    /// a viewer projection redacts the run (`visibility.rs`) while retaining
+    /// the prompt, so any state reconstructed from one carries the prompt with
+    /// no run behind it. Every producer of the prompt's action domain must ask
+    /// this before offering Grant or Decline: an offer the reducer can only
+    /// reject leaves the representative hammering an unanswerable prompt with
+    /// no other legal action, which no later boundary can undo.
+    pub fn accepts_response_from(&self, epoch: u64, representative: PlayerId) -> bool {
+        self.epoch == epoch && self.next_pending_representative() == Some(representative)
+    }
 }
 
 /// CR 609.7a: A source of damage chosen while creating a prevention or
@@ -17731,6 +17746,24 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
+    /// CR 702.122a: Vehicles whose `KeywordAction::Crew` stack entry has
+    /// RESOLVED this turn — the explicit successful-crew provenance behind the
+    /// AI crew-repeat guard's payoff-in-force predicate
+    /// ([`crate::game::engine::crew_resolved_this_turn_contains`]). Recorded at
+    /// stack RESOLUTION (never at announcement — a countered crew never resolves
+    /// and never sets this, CR 701.6a) in the same arm that installs the UEOT
+    /// `AddType(Creature)` transient, so the marker and the payoff cannot drift.
+    /// Deliberately NOT derivable from `transient_continuous_effects`: a generic
+    /// SelfRef self-animation (Kylox, Voltstrider-class) installs the same
+    /// transient shape with no Crew resolution behind it. Cleared at turn start.
+    ///
+    /// Legacy saves default to an empty set: a save created after a crew already
+    /// resolved restores the UEOT transient without the marker, so the guard may
+    /// permit one bounded redundant crew before the first re-crew writes the
+    /// marker (mirrors the accepted `crew_activated_this_turn` legacy default).
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub crew_resolved_this_turn: HashSet<ObjectIncarnationRef>,
     /// CR 606.1 + CR 606.3 + CR 603.4: Per-player count of loyalty-ability
     /// activations this turn. Incremented in
     /// `planeswalker::finalize_loyalty_activation` whenever any loyalty ability
@@ -22978,6 +23011,7 @@ impl GameState {
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
+            crew_resolved_this_turn: HashSet::new(),
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
@@ -25002,6 +25036,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
         crew_activated_this_turn: _,
+        crew_resolved_this_turn: _,
         loyalty_abilities_activated_this_turn: _,
         extra_loyalty_activations_this_turn: _,
         exerted_this_turn: _,
@@ -25329,6 +25364,7 @@ impl PartialEq for GameState {
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
+            && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.loyalty_abilities_activated_this_turn
                 == other.loyalty_abilities_activated_this_turn
             && self.extra_loyalty_activations_this_turn == other.extra_loyalty_activations_this_turn

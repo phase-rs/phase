@@ -2791,6 +2791,15 @@ fn resolve_keyword_action(
                         }],
                         None,
                     );
+                    // CR 702.122a: the crew RESOLVED — the payoff is now in
+                    // force. Record the resolved-crew marker exactly here (single
+                    // write authority: `engine::record_crew_resolution`) so the
+                    // AI crew-repeat guard's payoff-in-force predicate keys on
+                    // explicit successful-Crew provenance rather than a
+                    // transient-effect shape match. Only installed payoffs and
+                    // only battlefield Vehicles record; a countered or otherwise
+                    // unresolved entry never reaches this arm.
+                    crate::game::engine::record_crew_resolution(state, vehicle_id);
                 }
             }
             events.push(GameEvent::VehicleCrewed {

@@ -1,6 +1,22 @@
 {
   "entries": [
     {
+      "id": 200,
+      "date": "2026-08-29",
+      "title": "Multi-set draft, and X spells stop freezing",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "multiplayer",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Multi-set draft: choose which set fills each booster, so a pod can draft across sets\n• Spells that ask you to pay partway through resolving now prompt properly — decline, or choose between branches (K'un-Lun Warrior, Bullseye, Death Dealer, and the wider \"sacrifice a creature or…\" family)\n• Call Forth the Tempest and Rootha, Mastering the Moment read the turn's cast history correctly\n• New cards: Bombur, Gentle Dreamer; The Notary Hobbits; Part in Friendship; and Goblin Plate Mail, which amasses Goblins and then equips the Army it just made\n\n🛠️ Cards That Now Work Right\n• 14 cards with X in an additional cost no longer hang the game — Toxic Deluge, Hatred, Fire Covenant, Necrologia and Thieving Skydiver cast normally again instead of hitting \"Engine took too long\"\n• Hundred-Battle Veteran was silently always 6/6; its +2/+4 now checks the counter census it's supposed to\n• Toggo's Rock told you to sacrifice Toggo instead of the Rock\n• Kotis, the Fangkeeper, \"Name Sticker\" Goblin, and Security Bypass now do what they say\n• Evoke and Bestow can no longer ride along on a \"cast this without paying its mana cost\" effect — two alternative costs on one spell was never legal\n• Combo shortcuts are offered again on boards holding a land that entered tapped (Sprout Swarm, Altar of the Brood)\n• Equipment keeps the right attachment target through the whole resolution\n• Abilities counting \"the first/second time this turn\" resolve in written order (Belladonna Took)\n\n⚔️ Combat & Gameplay\n• Resolve All is now run by the engine: it survives a reload, resumes after the AI rechecks priority, and no longer leaves the game on a stale prompt\n• Games saved mid-resolution restore cleanly instead of reconnecting into the same crash, including stuck Devour resolutions\n• Concede works in bot pod matches and ends the whole match, dropping you back to the standings\n\n🖥️ Interface\n• Card images are no longer letterboxed into a middle slice — hover previews, both mobile previews, and the textbox slice show the whole card\n• The between-games sideboard modal's move buttons are reachable on touch; they were hover-only, so there was no way to move a card at all on a phone\n• Draft and post-draft deck building are properly responsive on phone and tablet: pack scaling, land tools, builder switching, and remembered layout\n• Face-down permanents show keyword badges they were actually granted — a cloaked creature's ward, a manifested creature's menace from Killer's Mask\n• Visual packs stream the Scryfall catalog on desktop instead of loading it whole, and failed downloads now say what went wrong\n• Menu tiles, rail, and account controls polished; desktop builds ship the auto-updater manifest and Android builds publish their APK\n\n🌍 Localization\n• Localized card art is versioned, so a language switch picks up refreshed art instead of a stale cache\n\n🌐 Multiplayer\n• Draft reconnects hold their seat, deadline, and pod state through retries and failed leaves\n• Superseded game sockets are fenced, so an old tab can no longer act on a game you rejoined elsewhere\n\n🤖 AI\n• AI mana payments are validated before they finalize, so a bad payment can't wedge the turn\n• The ManaBrew adapter tracks wire protocol 5.2.0, including cancelling out of target selection",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1543291116286378005"
+    },
+    {
       "id": 199,
       "date": "2026-08-27",
       "title": "Commander Draft and Android arrive",

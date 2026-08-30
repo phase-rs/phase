@@ -4989,11 +4989,33 @@ pub(super) fn handle_resolution_choice(
                 // eligible IDs when the prompt is created; the cards can be
                 // in different zones, so there is no single zone to recheck.
                 let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
-                // `PutAtLibraryPosition` permits either Hand or Library source
-                // cards. Partition them by current zone at delivery time.
+                // PART 1 of a two-part fix — this half RESCUES ALREADY-WEDGED
+                // SAVES; the producer half in `effects/put_on_top.rs` PREVENTS
+                // FUTURE WEDGES. Neither is redundant, so do not delete one as
+                // duplicative of the other: `into_game_state` restores a
+                // persisted prompt verbatim, so a save wedged by the old
+                // producer still arrives here claiming `zone: Library` while
+                // its frozen members sit in Exile. Fixing only the producer
+                // leaves every such save permanently at 0 legal actions;
+                // fixing only this guard leaves the producer still lying.
+                //
+                // `PutAtLibraryPosition` freezes its eligible IDs when the
+                // prompt is created, so a member's current zone can legitimately
+                // differ from the prompt's advertised `zone` (Codie, Vociferous
+                // Codex bottoms cards that are sitting in Exile). Admit any
+                // origin from which the move into a library is a pure
+                // relocation, and no others.
+                //
+                // `current_zone` is `None` for an object that has ceased to
+                // exist. That case must stay REFUSED, deliberately and not
+                // incidentally: delivery below indexes `state.objects[&card_id]`
+                // (`effect_zone_non_library_delivery_order`,
+                // `replay_effect_zone_library_placement`), which panics rather
+                // than erroring on a missing id. `Option::is_some_and` encodes
+                // that — a vanished member never satisfies the predicate.
                 let is_put_at_library_position_member =
                     matches!(effect_kind, EffectKind::PutAtLibraryPosition)
-                        && matches!(current_zone, Some(Zone::Hand | Zone::Library));
+                        && current_zone.is_some_and(Zone::is_library_relocation_origin);
                 if !matches!(effect_kind, EffectKind::ChangeZone)
                     && current_zone != Some(zone)
                     && !is_put_at_library_position_member

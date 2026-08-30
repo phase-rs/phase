@@ -68,6 +68,7 @@ export default defineConfig({
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.v2.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
     __CHANGELOG_META_URL__: JSON.stringify("/changelog-meta.json"),
+    __STATUS_URL__: JSON.stringify("/status.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
     __ENGINE_WASM_URL__: "undefined",

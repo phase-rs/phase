@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
-use nom::combinator::{eof, map, opt, peek, value, verify};
+use nom::combinator::{cut, eof, map, opt, peek, value, verify};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -17,19 +17,21 @@ use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
     parse_object_recipient_pronoun, parse_property_keyword, parse_superlative_adjective,
+    scan_at_word_boundaries,
 };
 use super::quantity as nom_quantity;
+use super::target as nom_target;
 use crate::parser::oracle_target::{
     cast_capable_zones_except, parse_shared_quality, parse_type_phrase, parse_zone_suffix,
-    parse_zone_word, peek_zone_boundary,
+    parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -175,7 +177,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
-        // CR 608.2c: Effect-resolution gates like Abzan Beastmaster's "if you
+        // CR 603.4 + CR 608.2a: Intervening-if gates like Abzan Beastmaster's "if you
         // control the creature with the greatest toughness or tied for the
         // greatest toughness" are player-control predicates over an implicit
         // creature aggregate population.
@@ -2126,7 +2128,13 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
         map(parse_ge_threshold, |n| (Comparator::GE, n)),
     ))
     .parse(rest)?;
-    let (rest, _) = alt((tag("Auras"), tag("Aura"))).parse(rest.trim_start())?;
+    // `parse_inner_condition` is a LOWERCASE-input combinator — its production
+    // entry point (`oracle_static::shared::parse_static_condition`) calls it
+    // with `&text.to_lowercase()`. Capitalized `tag("Aura")` here made this arm
+    // unreachable in a real parse, so Timber Paladin's three tiered gates all
+    // fell to `StaticCondition::Unrecognized`, which `game/layers.rs` evaluates
+    // as always-true — every tier applied and the 10/10 tier won on timestamp.
+    let (rest, _) = alt((tag("auras"), tag("aura"))).parse(rest.trim_start())?;
     let aura_filter = TargetFilter::Typed(TypedFilter {
         type_filters: vec![
             TypeFilter::Enchantment,
@@ -3087,80 +3095,89 @@ fn parse_optional_tied_for_tail(
     Ok((rest, relaxed))
 }
 
-/// CR 608.2c + CR 109.4: Parse a player-control superlative gate such as
+/// CR 109.2 + CR 109.4 + CR 603.4 + CR 608.2a: Parse a player-control superlative gate such as
 /// "you control the creature with the greatest toughness or tied for the
-/// greatest toughness" or "you control a creature with the greatest power
-/// among creatures on the battlefield". This is not source-relative: the
-/// player controls at least one creature whose P/T is tied for the table-wide
-/// maximum/minimum.
+/// greatest toughness" or "you control an artifact with the greatest mana
+/// value". An unqualified type noun denotes a battlefield permanent, and the
+/// player controls at least one candidate whose property equals the aggregate
+/// over the implicit candidate population or an explicit `among` population.
 fn parse_you_control_superlative_object_condition(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
-    let (rest, _) = alt((tag("the "), tag("a "))).parse(rest)?;
-    let (rest, object_filter) = value(
-        TargetFilter::Typed(TypedFilter::creature()),
-        tag("creature"),
+    let (rest, _) = alt((value((), tag("the ")), parse_article)).parse(rest)?;
+    let (rest, candidate_text) = terminated(
+        verify(take_until(" with the "), |candidate: &&str| {
+            !candidate.is_empty()
+        }),
+        tag(" with the "),
     )
     .parse(rest)?;
-    let (rest, _) = tag(" with the ").parse(rest)?;
     let (rest, aggregate) = parse_superlative_adjective(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     let (rest, property) = parse_property_keyword(rest)?;
-    let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
-    let comparator = match aggregate {
-        AggregateFunction::Max => Comparator::GE,
-        AggregateFunction::Min => Comparator::LE,
-        AggregateFunction::Sum => return Err(oracle_err(rest)),
-    };
-    let (rest, population_filter) =
-        if let Ok((among_rest, _)) = tag::<_, _, OracleError<'_>>(" among ").parse(rest) {
-            let (filter, remainder) = parse_type_phrase(among_rest);
-            if matches!(filter, TargetFilter::Any) {
-                return Err(oracle_err(remainder));
-            }
-            let consumed = among_rest.len() - remainder.len();
-            (&among_rest[consumed..], filter)
-        } else {
-            (rest, object_filter.clone())
-        };
+
+    // The adjective/property pair commits this production. Before that point,
+    // unrelated supported `you control` phrases must remain available to the
+    // ordinary control-condition parser. After it, every malformed candidate,
+    // tie tail, population, or leaf boundary is a hard failure so `alt` cannot
+    // reinterpret a partially consumed superlative as a weaker condition.
+    let (rest, (object_filter, population_filter)) = cut(|rest| {
+        // CR 109.2 + CR 109.4: `you control` describes a battlefield permanent,
+        // not an off-battlefield "card" or a stack "spell". `parse_type_phrase`
+        // intentionally consumes those terminal nouns in other contexts, so
+        // reject them before delegating the candidate noun phrase.
+        if scan_at_word_boundaries(candidate_text, |word| {
+            verify(nom_target::parse_type_filter_word, |type_filter| {
+                matches!(type_filter, TypeFilter::Card)
+            })
+            .parse(word)
+        })
+        .is_some()
+        {
+            return Err(oracle_err(candidate_text));
+        }
+
+        let (object_filter, candidate_remainder) = parse_type_phrase(candidate_text);
+        if matches!(object_filter, TargetFilter::Any) || !candidate_remainder.is_empty() {
+            return Err(oracle_err(candidate_remainder));
+        }
+        if object_filter
+            .extract_zones()
+            .iter()
+            .any(|zone| *zone != Zone::Battlefield)
+        {
+            return Err(oracle_err(candidate_text));
+        }
+
+        let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
+        let (rest, population_filter) =
+            if let Ok((among_rest, _)) = tag::<_, _, OracleError<'_>>(" among ").parse(rest) {
+                let (filter, remainder) = parse_type_phrase(among_rest);
+                if matches!(filter, TargetFilter::Any) {
+                    return Err(oracle_err(remainder));
+                }
+                (remainder, filter)
+            } else {
+                (rest, object_filter.clone())
+            };
+
+        let (rest, _) =
+            peek(alt((eof, tag("."), tag(","), tag(" and "), tag(" or ")))).parse(rest)?;
+        Ok((rest, (object_filter, population_filter)))
+    })
+    .parse(rest)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
 
-    let stat = match property {
-        ObjectProperty::Power => PtStat::Power,
-        ObjectProperty::Toughness => PtStat::Toughness,
-        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
-            return Err(oracle_err(rest));
-        }
-    };
     let controlled_filter = add_filter_property(
-        inject_controller_you(object_filter.clone()),
-        FilterProp::PtComparison {
-            stat,
-            scope: PtValueScope::Current,
-            comparator,
-            value: QuantityExpr::Ref {
-                qty: QuantityRef::PropertyAggregate(
-                    PropertyAggregate::new(
-                        aggregate,
-                        property,
-                        CardTypeSetSource::Objects {
-                            filter: population_filter,
-                        },
-                    )
-                    .expect("object property aggregate is valid"),
-                ),
-            },
-        },
+        inject_controller_you(object_filter),
+        superlative_property_filter_prop(aggregate, property, population_filter),
     );
     Ok((
         rest,
-        make_quantity_ge(
-            QuantityRef::ObjectCount {
-                filter: controlled_filter,
-            },
-            1,
-        ),
+        StaticCondition::IsPresent {
+            filter: Some(controlled_filter),
+        },
     ))
 }
 
@@ -10194,8 +10211,8 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CountScope, RoundingMode, TriggerCondition, TypeFilter, TypedFilter,
-        ZoneRef,
+        CardTypeSetSource, CountScope, PtStat, PtValueScope, RoundingMode, TriggerCondition,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -13334,7 +13351,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_plural_aura_count() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by 3 or more Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by 3 or more auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13348,7 +13365,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_exactly_one_aura() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly one Aura").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly one aura").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13362,7 +13379,7 @@ mod tests {
 
     #[test]
     fn test_source_enchanted_by_exactly_two_auras() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -13530,7 +13547,7 @@ mod tests {
     // (it is tried earlier in the `alt()` and requires `tag("is enchanted by ")`).
     #[test]
     fn test_source_is_enchanted_does_not_steal_aura_count() {
-        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two Auras").unwrap();
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two auras").unwrap();
         assert_eq!(rest, "");
         let StaticCondition::QuantityComparison {
             comparator, rhs, ..
@@ -20095,7 +20112,214 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: Abzan Beastmaster's resolve-time gate is an existential
+    /// CR 109.2 + CR 109.4 + CR 608.2c: Padeem's intervening-if is an
+    /// existential controlled-artifact check against the table-wide greatest
+    /// artifact mana value. Candidate membership is exact equality to the Max,
+    /// so tied artifacts qualify without widening the predicate to GE.
+    #[test]
+    fn parse_inner_condition_you_control_artifact_with_greatest_mana_value() {
+        let (rest, condition) = parse_inner_condition(
+            "you control the artifact with the greatest mana value or tied for the greatest mana value.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(candidate)),
+        } = condition
+        else {
+            panic!("expected controlled artifact presence gate, got {condition:?}");
+        };
+        assert_eq!(candidate.controller, Some(ControllerRef::You));
+        assert_eq!(candidate.type_filters, vec![TypeFilter::Artifact]);
+        assert_eq!(candidate.properties.len(), 2);
+        assert!(candidate.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+
+        let Some(FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(aggregate),
+                },
+        }) = candidate
+            .properties
+            .iter()
+            .find(|property| matches!(property, FilterProp::Cmc { .. }))
+        else {
+            panic!(
+                "expected exact mana-value membership in the artifact maximum, got {:?}",
+                candidate.properties
+            );
+        };
+        assert_eq!(aggregate.function(), AggregateFunction::Max);
+        assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+        let CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(population),
+        } = aggregate.source()
+        else {
+            panic!("expected an artifact object population, got {aggregate:?}");
+        };
+        assert_eq!(population.type_filters, vec![TypeFilter::Artifact]);
+        assert!(
+            population.controller.is_none(),
+            "implicit ranked population must be table-wide"
+        );
+    }
+
+    /// The Min mirror uses the same exact-membership building block: an
+    /// artifact qualifies iff its mana value equals the least artifact mana
+    /// value, including ties.
+    #[test]
+    fn parse_inner_condition_you_control_artifact_with_least_mana_value() {
+        let (rest, condition) = parse_inner_condition(
+            "you control an artifact with the least mana value or tied for the least mana value.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(candidate)),
+        } = condition
+        else {
+            panic!("expected controlled artifact presence gate, got {condition:?}");
+        };
+        let Some(FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(aggregate),
+                },
+        }) = candidate
+            .properties
+            .iter()
+            .find(|property| matches!(property, FilterProp::Cmc { .. }))
+        else {
+            panic!("expected exact membership in the artifact minimum, got {candidate:?}");
+        };
+        assert_eq!(aggregate.function(), AggregateFunction::Min);
+        assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+        let CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(population),
+        } = aggregate.source()
+        else {
+            panic!("expected an artifact object population, got {aggregate:?}");
+        };
+        assert_eq!(candidate.controller, Some(ControllerRef::You));
+        assert_eq!(candidate.type_filters, vec![TypeFilter::Artifact]);
+        assert_eq!(candidate.properties.len(), 2);
+        assert!(candidate.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+        assert_eq!(population.type_filters, vec![TypeFilter::Artifact]);
+        assert!(population.controller.is_none());
+    }
+
+    /// CR 109.2 + CR 109.4: controlled-permanent superlatives must reject
+    /// off-battlefield/stack nouns at any word boundary, explicit
+    /// non-battlefield zones, and any genuine type-phrase tail.
+    #[test]
+    fn parse_inner_condition_you_control_superlative_rejects_nonpermanent_nouns_and_leftovers() {
+        for (text, reason) in [
+            (
+                "you control an artifact card with the greatest mana value.",
+                "terminal `card`",
+            ),
+            (
+                "you control a creature card in your graveyard with the greatest power.",
+                "zone-qualified `card`",
+            ),
+            (
+                "you control an artifact spell on the stack with the greatest mana value.",
+                "zone-qualified `spell`",
+            ),
+            (
+                "you control a creature in your graveyard with the greatest power.",
+                "explicit non-battlefield zone",
+            ),
+        ] {
+            assert!(
+                matches!(parse_inner_condition(text), Err(nom::Err::Failure(_))),
+                "{reason} must not be accepted in a `you control` permanent predicate"
+            );
+        }
+        assert!(
+            matches!(
+                parse_inner_condition(
+                    "you control an artifact relic with the greatest mana value."
+                ),
+                Err(nom::Err::Failure(_))
+            ),
+            "an unparsed candidate-noun tail must fail closed"
+        );
+    }
+
+    /// Before the superlative adjective/property commits the specialized
+    /// production, ordinary controlled-object conditions still fall through to
+    /// the established control-condition grammar.
+    #[test]
+    fn parse_inner_condition_you_control_superlative_keeps_supported_fallbacks() {
+        let (rest, plain) = parse_inner_condition("you control an artifact").unwrap();
+        assert!(rest.is_empty());
+        assert!(matches!(
+            plain,
+            StaticCondition::IsPresent { filter: Some(_) }
+        ));
+
+        let (rest, qualified) =
+            parse_inner_condition("you control a creature with flying").unwrap();
+        assert!(rest.is_empty());
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(filter)),
+        } = qualified
+        else {
+            panic!("expected controlled-creature presence gate, got {qualified:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Flying
+            }
+        )));
+    }
+
+    /// CR 109.2: an explicit battlefield candidate remains a permanent, and
+    /// forbidden-noun scanning must not treat a subtype such as Spellshaper as
+    /// the standalone word "spell".
+    #[test]
+    fn parse_inner_condition_you_control_superlative_accepts_explicit_battlefield_candidate() {
+        let (rest, condition) = parse_inner_condition(
+            "you control a spellshaper creature on the battlefield with the greatest power.",
+        )
+        .unwrap();
+        assert!(rest.is_empty());
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(filter)),
+        } = condition
+        else {
+            panic!("expected controlled permanent superlative, got {condition:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
+            .contains(&TypeFilter::Subtype("Spellshaper".to_string())));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+    }
+
+    /// CR 603.4 + CR 608.2a: Abzan Beastmaster's resolve-time gate is an existential
     /// controlled-creature check against the table-wide greatest toughness.
     #[test]
     fn parse_inner_condition_you_control_creature_tied_for_greatest_toughness() {
@@ -20105,25 +20329,22 @@ mod tests {
         .unwrap();
         assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
         match c {
-            StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ObjectCount {
-                                filter: TargetFilter::Typed(tf),
-                            },
-                    },
-                comparator,
-                rhs: QuantityExpr::Fixed { value: 1 },
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
             } => {
-                assert_eq!(comparator, Comparator::GE);
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(tf.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }
+                )));
                 let has_table_wide_toughness_max = tf.properties.iter().any(|prop| {
                     let FilterProp::PtComparison {
                         stat: PtStat::Toughness,
                         scope: PtValueScope::Current,
-                        comparator: Comparator::GE,
+                        comparator: Comparator::EQ,
                         value:
                             QuantityExpr::Ref {
                                 qty: QuantityRef::PropertyAggregate(aggregate),
@@ -20152,7 +20373,7 @@ mod tests {
                     tf.properties
                 );
             }
-            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
+            other => panic!("expected controlled creature presence gate, got {other:?}"),
         }
     }
 
@@ -20167,25 +20388,22 @@ mod tests {
         .unwrap();
         assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
         match c {
-            StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ObjectCount {
-                                filter: TargetFilter::Typed(tf),
-                            },
-                    },
-                comparator,
-                rhs: QuantityExpr::Fixed { value: 1 },
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
             } => {
-                assert_eq!(comparator, Comparator::GE);
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(tf.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }
+                )));
                 let has_battlefield_power_max = tf.properties.iter().any(|prop| {
                     let FilterProp::PtComparison {
                         stat: PtStat::Power,
                         scope: PtValueScope::Current,
-                        comparator: Comparator::GE,
+                        comparator: Comparator::EQ,
                         value:
                             QuantityExpr::Ref {
                                 qty: QuantityRef::PropertyAggregate(aggregate),
@@ -20221,8 +20439,26 @@ mod tests {
                     tf.properties
                 );
             }
-            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
+            other => panic!("expected controlled creature presence gate, got {other:?}"),
         }
+    }
+
+    /// A superlative condition embedded before an effect clause keeps the
+    /// comma for the trigger/effect composer while still producing the fully
+    /// typed controlled-candidate predicate.
+    #[test]
+    fn parse_inner_condition_you_control_superlative_preserves_comma_boundary() {
+        let (rest, condition) = parse_inner_condition(
+            "you control a creature with the greatest power among creatures on the battlefield, create a token",
+        )
+        .unwrap();
+        assert_eq!(rest, ", create a token");
+        assert!(matches!(
+            condition,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(_))
+            }
+        ));
     }
 
     /// CR 702: "a creature you control has <keyword>" — subject-first

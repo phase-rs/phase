@@ -31,6 +31,36 @@ impl Zone {
             Zone::Library | Zone::Hand => false,
         }
     }
+
+    /// Whether moving an object from this zone into a library is a *pure
+    /// relocation* — a CR 400.7 zone change that creates a new object, and
+    /// nothing more.
+    ///
+    /// CR 110.1: a permanent is a card or token *on the battlefield*, and it
+    /// stops being a permanent as it moves to another zone — so a battlefield
+    /// departure is a leaves-the-battlefield event (CR 603.6c), not a
+    /// relocation: it fires LTB triggers, severs the attachment graph, and
+    /// purges the trigger index.
+    /// CR 112.1: a spell is a card *on the stack*, so removing a stack member
+    /// would silently destroy a spell mid-resolution.
+    /// CR 408 / CR 903.9b: a command-zone object (emblem, commander, dungeon)
+    /// is governed by its own zone-change replacements, so it is deliberately
+    /// excluded rather than merely unlisted.
+    ///
+    /// In hand, library, graveyard and exile the object is a card and the move
+    /// is a plain relocation, which
+    /// `zone_pipeline::move_objects_simultaneously_then` handles uniformly.
+    ///
+    /// Exhaustive rather than a `matches!` so that adding a `Zone` variant is a
+    /// compile error forcing an explicit relocation/not-relocation decision —
+    /// silently defaulting a new zone either way is a rules question, not a
+    /// formatting one.
+    pub fn is_library_relocation_origin(self) -> bool {
+        match self {
+            Zone::Hand | Zone::Library | Zone::Graveyard | Zone::Exile => true,
+            Zone::Battlefield | Zone::Stack | Zone::Command => false,
+        }
+    }
 }
 
 /// CR 118.9a + CR 601.2b + CR 601.2h: Source zone for an `AbilityCost::Exile`
