@@ -305,15 +305,18 @@ fn resolve_counter_placement_target<'a>(
         return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
-    // non-self filter resolves through the trigger's event-object context.
-    // That keeps Pip-Boy 3000's attack trigger bound to TriggeringSource while
-    // allowing a BecomesTarget trigger such as Shay Cormac to bind EventTarget.
+    // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
+    // attacks ... put a +1/+1 counter on that creature") refers to the
+    // triggering source object — not to the parent target (the modal parent
+    // here is a `GenericEffect` with no target, leaving `ParentTarget`
+    // unbound). Mirrors `resolve_it_pronoun` for the explicit "that creature"
+    // anaphor.
     if let Some(rem) = resolve_that_creature_in_trigger(on_rest, ctx) {
         // Map `rem` (sliced from `on_rest`) back into `text` so the returned
         // remainder lifetime matches `text`. `on_rest` is the lowercase view;
         // ASCII-equal-length guard above keeps byte offsets aligned.
         let offset = text.len() - rem.len();
-        return (resolve_it_pronoun(ctx), &text[offset..], None);
+        return (TargetFilter::TriggeringSource, &text[offset..], None);
     }
     // CR 608.2c + CR 111.10: a same-chain demonstrative/definite anaphor
     // ("that creature"/"that token"/"that permanent"/"the token"/"the permanent")
@@ -1166,9 +1169,8 @@ fn classify_counter_target(text: &str, ctx: &mut ParseContext) -> CounterTargetK
         // CR 608.2k: Bare pronoun — context-dependent
         CounterTargetKind::Supported(resolve_it_pronoun(ctx))
     } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
-        // CR 608.2k + CR 301.5a: resolve demonstratives through their trigger
-        // context, including BecomesTarget's event object.
-        CounterTargetKind::Supported(resolve_it_pronoun(ctx))
+        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
+        CounterTargetKind::Supported(TargetFilter::TriggeringSource)
     } else {
         let (t, _rem, syntax) = parse_target_with_syntax(text, &mut ParseContext::default());
         #[cfg(debug_assertions)]

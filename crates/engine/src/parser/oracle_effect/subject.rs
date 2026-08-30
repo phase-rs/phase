@@ -13,7 +13,7 @@ use super::animation::{
 };
 use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
-use super::{resolve_it_pronoun, ParseContext};
+use super::ParseContext;
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
@@ -3287,17 +3287,15 @@ pub(super) fn parse_subject_application(
             // CR 608.2k + CR 608.2c: Inside a trigger effect, "that [type]" is an
             // anaphoric back-reference to the triggering event's subject object (the
             // land that was tapped, the creature that was blocked, etc.) — NOT a
-            // broadcast over all matching permanents. `resolve_it_pronoun` selects
-            // the event object for BecomesTarget and the triggering source for the
-            // established trigger contexts, so the resolver
-            // (extract_event_context_filter in effects/mod.rs) binds the transient
-            // effect to the specific triggering object via SpecificObject.
+            // broadcast over all matching permanents. Set `target: TriggeringSource`
+            // so the resolver (extract_event_context_filter in effects/mod.rs) binds
+            // the transient effect to the specific triggering object via SpecificObject.
             // Outside triggers, fall back to the type filter (anaphor resolves via
             // `inherits_parent` + ParentTarget at the call site).
             if ctx.subject.is_some() {
                 return Some(SubjectApplication {
                     affected: filter,
-                    target: Some(resolve_it_pronoun(ctx)),
+                    target: Some(TargetFilter::TriggeringSource),
                     multi_target: None,
                     inherits_parent: true,
                     is_optional: false,

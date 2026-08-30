@@ -1415,14 +1415,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // the lowercased trigger head; binding-only hoist, behavior-preserving.
     let cond_lower = condition_text.to_lowercase();
 
-    // Parse the typed trigger condition before constructing the effect context.
-    // The event discriminant establishes the only event-object antecedent that
-    // an immediate body may inherit: spell-cast triggers name the spell source,
-    // while BecomesTarget triggers name the targeted object. Parsing it once
-    // here also keeps the IR's partial definition and the body context tied to
-    // the same condition interpretation.
-    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
-
     let effect_lower = effect_text.to_lowercase();
     let after_structural_if = effect_lower
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
@@ -1507,12 +1499,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        object_pronoun_ref: if condition == TriggerMode::BecomesTarget {
-            Some(TargetFilter::EventTarget)
-        } else {
-            trigger_object_pronoun_ref_for_condition(condition_text)
-                .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition))
-        },
+        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
+            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
         ),
@@ -1672,6 +1660,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     };
     // Transfer diagnostics from the per-trigger effect context to the outer ctx.
     ctx.diagnostics.append(&mut effect_ctx.diagnostics);
+
+    // Parse the condition to get TriggerMode + partial TriggerDefinition
+    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
 
     // Constraint from full text (parsed during IR production so lowering has it)
     let constraint = parse_trigger_constraint(&lower);
@@ -2461,7 +2452,7 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     }
 }
 
-/// Rebind immediate `ParentTarget` anaphora in a BecomesTarget trigger to the
+/// Rebind immediate `ParentTarget` or `TriggeringSource` anaphora in a BecomesTarget trigger to the
 /// object that became a target. This mirrors the event-source lift's first
 /// fresh-choice boundary: the triggering object remains the antecedent only
 /// until an instruction introduces a player-chosen object, after which a
@@ -2518,7 +2509,9 @@ fn rebind_parent_target_to_event_target_in_effect(effect: &mut Effect) {
 
 fn rebind_parent_target_to_event_target_in_filter(filter: &mut TargetFilter) {
     match filter {
-        TargetFilter::ParentTarget => *filter = TargetFilter::EventTarget,
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource => {
+            *filter = TargetFilter::EventTarget
+        }
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
                 rebind_parent_target_to_event_target_in_prop(prop);
