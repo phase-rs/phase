@@ -3607,13 +3607,12 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer => false,
-        // CR 603.2 + CR 120.1 + CR 603.4: "that creature"/"that permanent" bound
-        // to the damaged object of the current trigger event. Matches only the
-        // specific object that received this trigger's damage, so an
-        // intervening-`if` like "if that creature was dealt excess damage this
-        // turn" (Maarika) never fires off an unrelated creature's earlier excess
-        // hit. Resolves through the same event-extraction authority as
-        // `ObjectScope::EventTarget`; inert (matches nothing) outside a trigger.
+        // CR 603.2 + CR 603.4: "that creature"/"that permanent" bound to the
+        // object target carried by the current trigger event. Matches only that
+        // specific object (including a BecomesTarget object), so an
+        // intervening-`if` never fires from an unrelated event. Resolves through
+        // the same event-extraction authority as `ObjectScope::EventTarget`;
+        // inert (matches nothing) outside a trigger.
         TargetFilter::EventTarget => crate::game::quantity::triggering_event_target_object(state)
             .is_some_and(|damaged| damaged == object_id),
         // CR 400.7 + CR 603.7c: a parent object can be the member predicate of

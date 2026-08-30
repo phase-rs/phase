@@ -34060,6 +34060,7 @@ pub(crate) fn parse_effect_chain_ir(
         };
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
+            object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
