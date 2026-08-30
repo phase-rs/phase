@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::game::ability_utils::{choose_target_for_ability, TargetSelectionAdvance};
 use crate::game::casting;
 use crate::game::casting_costs;
 use crate::game::layers;
@@ -2192,6 +2193,46 @@ fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<
     Some(actions)
 }
 
+/// Returns target choices that cannot complete target declaration without
+/// cloning the game state. Terminal choices and cancellation remain on the
+/// validation pipeline because they can immediately advance into cost payment.
+fn target_selection_actions_with_nonterminal_fast_path(
+    state: &GameState,
+) -> Option<Vec<GameAction>> {
+    let WaitingFor::TargetSelection {
+        pending_cast,
+        target_slots,
+        selection,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+
+    let pipeline = FilterPipeline::default_pipeline();
+    let mut actions = Vec::new();
+    for candidate in candidate_actions(state) {
+        let advances_without_completion = match &candidate.action {
+            GameAction::ChooseTarget { target } => matches!(
+                choose_target_for_ability(
+                    state,
+                    &pending_cast.ability,
+                    target_slots,
+                    &pending_cast.target_constraints,
+                    selection,
+                    target.clone(),
+                ),
+                Ok(TargetSelectionAdvance::InProgress(_))
+            ),
+            _ => false,
+        };
+        if advances_without_completion || pipeline.accepts(state, &candidate) {
+            actions.push(candidate.action);
+        }
+    }
+    Some(actions)
+}
+
 /// The flat priority-action list: validated candidate actions minus mana
 /// abilities. This is the single authority for the non-target-selection action
 /// body so the auto-pass probe (`priority_player_has_meaningful_action`) and
@@ -2251,10 +2292,12 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 
     let mut actions: Vec<GameAction> =
         if context::target_selection_requires_reducer_validation(state) {
-            validated_candidate_actions(state)
-                .into_iter()
-                .map(|candidate| candidate.action)
-                .collect()
+            target_selection_actions_with_nonterminal_fast_path(state).unwrap_or_else(|| {
+                validated_candidate_actions(state)
+                    .into_iter()
+                    .map(|candidate| candidate.action)
+                    .collect()
+            })
         } else {
             target_selection_actions_without_simulation(state)
                 .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe))

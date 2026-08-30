@@ -133,8 +133,9 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
             .expect("the engine-enumerated target must be accepted");
         let action_counters = perf_counters::snapshot();
         assert_eq!(
-            action_counters.state_clone_for_legality, 0,
-            "memoized target selection must not clone state for legality"
+            action_counters.state_clone_for_legality,
+            if remaining > 1 { 1 } else { 2 },
+            "only cancellation and the terminal target choice may clone state for legality"
         );
         assert_eq!(
             perf_counters::homogeneous_target_walk_cache_snapshot().advances
