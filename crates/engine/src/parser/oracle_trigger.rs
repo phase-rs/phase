@@ -2554,7 +2554,9 @@ fn rebind_parent_target_to_event_target_in_prop(prop: &mut FilterProp) {
 
 fn target_filter_contains_event_target(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::EventTarget => true,
+        TargetFilter::EventTarget | TargetFilter::ParentTarget | TargetFilter::TriggeringSource => {
+            true
+        }
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
