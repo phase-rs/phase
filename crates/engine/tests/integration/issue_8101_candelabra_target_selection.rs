@@ -78,6 +78,7 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     let mut returned_legal_actions = 0;
     let mut target_candidates = 0;
     let mut cancel_candidates = 0;
+    let mut accepted_action_legality_clones = 0;
 
     for remaining in (1..=TARGET_COUNT).rev() {
         let raw = candidate_actions(runner.state());
@@ -123,6 +124,7 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
         cancel_candidates += cancel_count;
 
         let target = target_actions[0];
+        perf_counters::reset();
         let cache_advances_before_choice =
             perf_counters::homogeneous_target_walk_cache_snapshot().advances;
         runner
@@ -130,6 +132,12 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
                 target: Some(TargetRef::Object(target)),
             })
             .expect("the engine-enumerated target must be accepted");
+        let action_counters = perf_counters::snapshot();
+        accepted_action_legality_clones += action_counters.state_clone_for_legality;
+        assert_eq!(
+            action_counters.state_clone_for_legality, 2,
+            "memoized validation must probe only CancelCast plus the chosen target"
+        );
         assert_eq!(
             perf_counters::homogeneous_target_walk_cache_snapshot().advances
                 - cache_advances_before_choice,
@@ -138,13 +146,12 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
         );
     }
 
-    let counters = perf_counters::snapshot();
     assert_eq!(raw_action_candidates, 3320, "raw action candidate census");
     assert_eq!(returned_legal_actions, 3320, "returned legal action census");
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
     assert_eq!(
-        counters.state_clone_for_legality,
+        accepted_action_legality_clones,
         (TARGET_COUNT * 2) as u64,
         "memoized validation still probes each CancelCast plus one target per prompt"
     );
