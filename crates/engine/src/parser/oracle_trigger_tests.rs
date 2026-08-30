@@ -261,6 +261,25 @@ fn becomes_target_delayed_payload_fails_honestly() {
 }
 
 #[test]
+fn becomes_target_delayed_condition_fails_honestly() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, draw a card.",
+        "Delayed Condition Guard",
+    );
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("delayed trigger installer");
+    let Effect::CreateDelayedTrigger { effect, .. } = execute.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
 fn becomes_target_delayed_copy_token_payload_fails_honestly() {
     let trigger = parse_trigger_line(
         "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, create a token that's a copy of it.",

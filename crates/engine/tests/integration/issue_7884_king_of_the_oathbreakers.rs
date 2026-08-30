@@ -1,9 +1,10 @@
 //! Issue #7884 — immediate `BecomesTarget` event-object bindings.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{Effect, FilterProp, TargetFilter};
+use engine::types::ability::{Effect, FilterProp, TargetFilter, TargetRef};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -37,6 +38,10 @@ fn king_phases_out_before_broken_wings_resolves_and_the_spell_fizzles() {
         )
         .with_subtypes(vec!["Spirit"])
         .id();
+    let other_spirit = scenario
+        .add_creature_from_oracle(P0, "Other Spirit", 2, 2, "Flying")
+        .with_subtypes(vec!["Spirit"])
+        .id();
     let broken_wings = scenario
         .add_spell_to_hand_from_oracle(
             P1,
@@ -49,15 +54,23 @@ fn king_phases_out_before_broken_wings_resolves_and_the_spell_fizzles() {
 
     let mut runner = scenario.build();
     give_p1_priority(&mut runner);
-    let _outcome = runner.cast(broken_wings).target_object(king).resolve();
+    let _outcome = runner
+        .cast(broken_wings)
+        .target_object(other_spirit)
+        .resolve();
 
     let king_object = &runner.state().objects[&king];
+    let other_spirit_object = &runner.state().objects[&other_spirit];
     assert!(
-        king_object.is_phased_out(),
-        "King's immediate event target must phase out before Broken Wings resolves"
+        !king_object.is_phased_out(),
+        "King is the trigger source, but only the other Spirit that became a target may phase out"
+    );
+    assert!(
+        other_spirit_object.is_phased_out(),
+        "the other Spirit that became the event target must phase out before Broken Wings resolves"
     );
     assert_eq!(
-        king_object.zone,
+        other_spirit_object.zone,
         Zone::Battlefield,
         "a phased-out permanent remains on the battlefield"
     );
@@ -118,7 +131,46 @@ fn pawpatch_target_prompt_excludes_the_triggering_creature_and_counters_another_
         }),
         "Pawpatch target must exclude the event-target creature before the cast pipeline runs",
     );
-    let _outcome = runner.cast(bolt).target_objects(&[a, b]).resolve();
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Lightning Bolt must enter the normal target-selection pipeline");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(a)),
+        })
+        .expect("Lightning Bolt must target creature A");
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::TriggerTargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Pawpatch's triggered ability must reach the production target prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        !selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(a)),
+        "the triggering creature A must be rejected by Pawpatch's target prompt"
+    );
+    assert!(
+        selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(b)),
+        "another controlled creature B must be accepted by Pawpatch's target prompt"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(b)),
+        })
+        .expect("the distinct creature B must be a legal target");
+    runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().objects[&b]

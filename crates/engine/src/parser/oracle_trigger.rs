@@ -55,13 +55,13 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
     CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement,
-    SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
+    EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -2452,11 +2452,11 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     }
 }
 
-/// Rebind immediate `ParentTarget` or `TriggeringSource` anaphora in a BecomesTarget trigger to the
-/// object that became a target. This mirrors the event-source lift's first
-/// fresh-choice boundary: the triggering object remains the antecedent only
-/// until an instruction introduces a player-chosen object, after which a
-/// `ParentTarget` denotes that new choice.
+/// Engine contract: rebind immediate `ParentTarget` or `TriggeringSource`
+/// anaphora in a BecomesTarget trigger to the object that became a target. This
+/// mirrors the event-source lift's first fresh-choice boundary: the triggering
+/// object remains the antecedent only until an instruction introduces a
+/// player-chosen object, after which a `ParentTarget` denotes that new choice.
 ///
 /// Delayed payloads are intentionally not traversed. They resolve in a later
 /// trigger window and require a creation-time snapshot rather than live event
@@ -2604,6 +2604,44 @@ fn ability_contains_event_target(ability: &AbilityDefinition) -> bool {
             .is_some_and(ability_contains_event_target)
 }
 
+fn trigger_definition_contains_event_target(trigger: &TriggerDefinition) -> bool {
+    [
+        trigger.valid_card.as_ref(),
+        trigger.valid_source.as_ref(),
+        trigger.valid_target.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(target_filter_contains_event_target)
+}
+
+fn delayed_condition_contains_event_target(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            target_filter_contains_event_target(filter)
+        }
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
+            trigger_definition_contains_event_target(trigger)
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => {
+            trigger_definition_contains_event_target(trigger)
+                || or_trigger
+                    .as_deref()
+                    .is_some_and(trigger_definition_contains_event_target)
+        }
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => false,
+    }
+}
+
 fn effect_contains_event_target(effect: &Effect) -> bool {
     let mut effect = effect.clone();
     let mut found = false;
@@ -2651,8 +2689,13 @@ fn effect_contains_event_target(effect: &Effect) -> bool {
 }
 
 fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
-    if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
-        if ability_contains_event_target(effect) {
+    if let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = ability.effect.as_mut()
+    {
+        if delayed_condition_contains_event_target(condition)
+            || ability_contains_event_target(effect)
+        {
             *effect.effect = Effect::unimplemented(
                 "becomes_target_delayed_event_target",
                 "delayed BecomesTarget payload requires an unsupported event snapshot",

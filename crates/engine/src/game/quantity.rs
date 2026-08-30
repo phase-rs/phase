@@ -2456,7 +2456,7 @@ pub(crate) fn triggering_event_player(state: &GameState) -> Option<PlayerId> {
         .and_then(|e| crate::game::targeting::extract_player_from_event(&e, state))
 }
 
-/// CR 603.2: Resolve the object targeted or receiving the current trigger
+/// Engine contract: resolve the object targeted or receiving the current trigger
 /// event, preferring the resolution-time
 /// `current_trigger_event` and falling back to the detection-time thread-local
 /// override (the same dual-path `triggering_event_player` uses).
@@ -5734,7 +5734,7 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
-        // CR 603.2 + CR 603.4: the object targeted or receiving the triggering
+        // Engine contract: the object targeted or receiving the triggering
         // event. Same dual-time (detection + resolution) fallback as
         // `EventSource`, calling the generic event-target extractor.
         ObjectScope::EventTarget => state
@@ -5813,7 +5813,7 @@ pub(crate) fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e)),
-        // CR 603.2 + CR 603.4: the object targeted or receiving the triggering
+        // Engine contract: the object targeted or receiving the triggering
         // event. Same dual-time (detection + resolution) fallback as
         // `EventSource`, calling the generic event-target extractor.
         ObjectScope::EventTarget => state
