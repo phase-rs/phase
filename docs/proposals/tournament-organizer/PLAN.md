@@ -732,6 +732,49 @@ or background job beyond the reaper this design already calls for
 scope to also cover `InProgress`/`Completed`/`Abandoned` on every sweep,
 not add a second timer).
 
+**Expiry event delivery — NEW, maintainer review: the lifecycle rules above
+had no typed outbound/fan-out contract, so a reaper sweep could mutate
+durable tournament state while every connected client's view silently went
+stale.** The existing lobby reaper is the concrete precedent to mirror, not
+a novel mechanism: `Broker::reap_expired` (`crates/lobby-broker/src/
+broker.rs:306-314`) already maps each expired lobby game to
+`Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved{game_code})`,
+and the native shell's reaper timer (`main.rs`'s periodic sweep, ~line
+2095) already recovers those codes from the returned outbounds and fans
+them out to `bg_lobby_subs` — the shared subscriber list — via the same
+generic `Outbound::ToSubscribers` path every other broker message uses.
+Tournament expiry needs the identical shape, generalized to two outcomes:
+
+1. **`InProgress` → `Abandoned` (record persists, status changes)** emits
+   `Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code,
+   view })` — `TournamentUpdate` and `TournamentView` are already named in
+   this proposal's own protocol surface (RESEARCH.md §1, from #4612's
+   original design) but were never wired to expiry specifically; this is
+   the same authoritative full-state push a manual `ReportMatchResult`
+   would already trigger, not a new message shape invented for this case.
+2. **Terminal deletion (`Completed`/`Abandoned` past the 30-day retention
+   window)** emits `Outbound::ToSubscribers(LobbyServerMessage::
+   TournamentRemoved { code })` — a new variant, but named identically to
+   the existing `LobbyGameRemoved` precedent it mirrors, for the same
+   reason: a client holding a stale view of a now-gone tournament needs an
+   explicit "this no longer exists" signal, not silence.
+3. **Both cases additionally emit `Outbound::ToSubscribers(
+   LobbyServerMessage::TournamentListUpdate { .. })`** (also already named
+   in RESEARCH.md §1) so any tournament-browser/list view reflects the
+   status change or removal, not just a client already viewing that one
+   tournament's detail page.
+
+`Broker::reap_expired` widens to call `self.tournaments.check_expired(env)`
+in the same sweep as the existing `self.lobby.check_expired(...)` call,
+appending these new outbound kinds to the same returned `Vec<Outbound>` —
+one reaper, one call site, both lobby games and tournaments fanned out
+through it, exactly matching this section's "no second timer" framing
+above. PR 2's native wiring (below) extends the SAME `main.rs` reap block
+that today only recovers `LobbyGameRemoved`-shaped codes to also recover
+and dispatch these new variants through `bg_lobby_subs`. PR 3's Cloudflare
+Worker shell needs the identical widening on the Durable Object's alarm
+path (the WASM-side equivalent of the native timer) — see PR 3 below.
+
 ## 3. Authority model — organizer/player tokens, not socket identity
 
 Fixes #4615 finding #1 directly, using the `draft_session.rs` precedent
@@ -840,7 +883,14 @@ stale `Registration` (300s), transition stale `InProgress` to `Abandoned`
 (7 days), and delete retained `Completed`/`Abandoned` records (30 days).
 PR 2 wires this single all-status sweep into the existing native reaper
 call site (`main.rs:1000`) — it does not add a second reaper, a second
-timer, or a status-restricted variant.
+timer, or a status-restricted variant. **NEW, maintainer review — delivery
+contract:** PR 2's protocol variants (`LobbyServerMessage::TournamentUpdate`
+/ `TournamentRemoved` / `TournamentListUpdate`, §2's "Expiry event
+delivery" note) are exactly what the native reap block's existing
+`main.rs:2095`-area logic gains a second recovery arm for, alongside its
+existing `LobbyGameRemoved` handling — the SAME `bg_lobby_subs` fan-out
+loop, not a separate broadcast path, since tournament messages are
+lobby-scoped and share that subscriber list.
 
 **PR 3 — Cloudflare Worker shell.**
 `lobby-worker/broker-wasm` `mutates_lobby` match extension, `lobby-do.ts`
@@ -853,7 +903,16 @@ pub fn is_empty(&self) -> bool {
 confirmed today's `is_empty()` (`lobby-worker/broker-wasm/src/lib.rs:168-170`)
 only checks `self.inner.lobby()` — this predicate MUST be updated in the same
 PR that adds the `tournaments` field to `Broker`, not deferred, or a
-tournament-only Durable Object will stop rescheduling its cleanup alarm
+tournament-only Durable Object will stop rescheduling its cleanup alarm.
+**NEW, maintainer review:** the Durable Object's alarm handler — the
+WASM-side equivalent of PR 2's native timer loop — needs the identical
+widening: it must recover `TournamentUpdate`/`TournamentRemoved`/
+`TournamentListUpdate` outbounds from the same widened `reap_expired` call
+and fan them out via its own connection-broadcast mechanism, not just
+process the pre-existing `LobbyGameRemoved` case. Without this, the
+Cloudflare-hosted path silently diverges from the native server's delivery
+behavior — durable state changes, but only native-server-connected clients
+learn about it
 (exactly #4615's finding #4).
 
 **PR 4 — frontend.**
@@ -1002,3 +1061,18 @@ preserved, `pairings`/standings unchanged, only `status` and
 outright by `check_expired`, while one still within the window is
 untouched — proving the previously-missing terminal-state retention rule
 is actually enforced, not just documented.
+
+**NEW — maintainer review (expiry event delivery, §2)**: dedicated
+discriminating tests for each transition's outbound contract, not just its
+state change — (a) the `InProgress`→`Abandoned` transition's returned
+`Vec<Outbound>` contains a `TournamentUpdate` with the updated (Abandoned)
+view AND a `TournamentListUpdate`, not just a bare state mutation; (b) the
+terminal-deletion transition's returned outbounds contain a
+`TournamentRemoved` AND a `TournamentListUpdate`, never a bare deletion
+with no outbound at all; (c) a native-server integration test confirming
+the widened `main.rs` reap block actually recovers and dispatches BOTH new
+variants to `bg_lobby_subs` alongside its existing `LobbyGameRemoved`
+handling, not just one or the other; (d) the equivalent Cloudflare Worker
+test confirming the Durable Object alarm path fans out the same two
+variants through its own broadcast mechanism — proving PR 3 doesn't
+silently diverge from PR 2's delivery behavior.
