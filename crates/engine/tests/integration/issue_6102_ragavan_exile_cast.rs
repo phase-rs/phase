@@ -68,7 +68,6 @@ fn advance_to_post_combat_main_with_p0_priority(runner: &mut engine::game::scena
         {
             return;
         }
-        drop(state);
         runner.pass_both_players();
     }
     panic!(
