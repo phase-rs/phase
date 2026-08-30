@@ -279,8 +279,10 @@ fn witness_payment_continuations_inner(
     } else {
         noncancel_roots * 4
     })
-    .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
-    .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
+    .clamp(
+        PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS,
+        PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+    );
 
     let mut attempts = 0;
     let mut successors = empty();
