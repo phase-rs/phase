@@ -777,6 +777,7 @@ mod issue_7386_ozolith_combat_counter_move;
 mod issue_7470_hidden_strings_optional_frame_leak;
 mod issue_7539_debug_turn_face_up;
 mod issue_787_once_upon_a_time;
+mod issue_7884_king_of_the_oathbreakers;
 mod issue_788_unexpectedly_absent;
 mod issue_7945_free_grant_face_down;
 mod issue_8024_terminal_rest_captures;

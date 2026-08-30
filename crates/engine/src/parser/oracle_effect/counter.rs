@@ -3,12 +3,12 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, opt, peek, value};
-use nom::sequence::terminated;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
-    DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, MultiTargetSpec,
+    DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
     ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
@@ -305,18 +305,15 @@ fn resolve_counter_placement_target<'a>(
         return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
-    // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
-    // attacks ... put a +1/+1 counter on that creature") refers to the
-    // triggering source object — not to the parent target (the modal parent
-    // here is a `GenericEffect` with no target, leaving `ParentTarget`
-    // unbound). Mirrors `resolve_it_pronoun` for the explicit "that creature"
-    // anaphor.
+    // non-self filter resolves through the trigger's event-object context.
+    // That keeps Pip-Boy 3000's attack trigger bound to TriggeringSource while
+    // allowing a BecomesTarget trigger such as Shay Cormac to bind EventTarget.
     if let Some(rem) = resolve_that_creature_in_trigger(on_rest, ctx) {
         // Map `rem` (sliced from `on_rest`) back into `text` so the returned
         // remainder lifetime matches `text`. `on_rest` is the lowercase view;
         // ASCII-equal-length guard above keeps byte offsets aligned.
         let offset = text.len() - rem.len();
-        return (TargetFilter::TriggeringSource, &text[offset..], None);
+        return (resolve_it_pronoun(ctx), &text[offset..], None);
     }
     // CR 608.2c + CR 111.10: a same-chain demonstrative/definite anaphor
     // ("that creature"/"that token"/"that permanent"/"the token"/"the permanent")
@@ -364,8 +361,51 @@ fn resolve_counter_placement_target<'a>(
     // CR 107.3i: Mirror the where-X strip above for the "up to N" branch.
     let target_text =
         strip_where_x_tail_ascii(target_text, &lower[lower.len() - target_text.len()..]);
-    let (target, rem) = parse_target_with_ctx(target_text, ctx);
-    (target, rem, multi)
+    let (target, remainder) = parse_target_with_ctx(target_text, ctx);
+    let (target, remainder) = apply_other_than_that_recipient_suffix(target, remainder, ctx);
+    (target, remainder, multi)
+}
+
+/// Consume an object-anaphoric distinctness rider on a counter recipient.
+///
+/// The shared target parser correctly stops after the recipient phrase, leaving
+/// `other than that creature` for the counter grammar. Keep the restriction on
+/// the typed recipient so ordinary follow-up suffixes (such as `equal to …` or
+/// `for each …`) still receive the remaining text.
+fn apply_other_than_that_recipient_suffix<'a>(
+    target: TargetFilter,
+    remainder: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let TargetFilter::Typed(mut typed) = target else {
+        return (target, remainder);
+    };
+    let lower = remainder.to_lowercase();
+    let Ok((remaining, ())) = parse_other_than_that_recipient_suffix(&lower) else {
+        return (TargetFilter::Typed(typed), remainder);
+    };
+    let consumed = lower.len() - remaining.len();
+    typed.properties.push(FilterProp::DistinctFrom {
+        reference: Box::new(resolve_it_pronoun(ctx)),
+    });
+    (TargetFilter::Typed(typed), &remainder[consumed..])
+}
+
+fn parse_other_than_that_recipient_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            preceded(
+                space1,
+                preceded(
+                    tag("other than that "),
+                    alt((tag("creature"), tag("permanent"), tag("token"), tag("card"))),
+                ),
+            ),
+            peek(alt((eof, tag(" "), tag(","), tag(".")))),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 107.3i: Trim a trailing `, where X is …` or ` where X is …` binding
@@ -1126,8 +1166,9 @@ fn classify_counter_target(text: &str, ctx: &mut ParseContext) -> CounterTargetK
         // CR 608.2k: Bare pronoun — context-dependent
         CounterTargetKind::Supported(resolve_it_pronoun(ctx))
     } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
-        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
-        CounterTargetKind::Supported(TargetFilter::TriggeringSource)
+        // CR 608.2k + CR 301.5a: resolve demonstratives through their trigger
+        // context, including BecomesTarget's event object.
+        CounterTargetKind::Supported(resolve_it_pronoun(ctx))
     } else {
         let (t, _rem, syntax) = parse_target_with_syntax(text, &mut ParseContext::default());
         #[cfg(debug_assertions)]
@@ -3249,6 +3290,30 @@ mod tests {
             TargetFilter::LastCreated,
             "token in chain → bare it binds the created token"
         );
+    }
+
+    #[test]
+    fn put_counter_other_than_that_creature_excludes_context_object() {
+        let mut ctx = default_ctx();
+        ctx.object_pronoun_ref = Some(TargetFilter::EventTarget);
+        let text = "put a +1/+1 counter on target creature you control other than that creature";
+        let (effect, remainder, _) =
+            try_parse_put_counter(text, text, &mut ctx).expect("counter clause must parse");
+        assert_eq!(remainder, "");
+        let Effect::PutCounter {
+            target: TargetFilter::Typed(target),
+            ..
+        } = effect
+        else {
+            panic!("expected a typed PutCounter target, got {effect:?}");
+        };
+        assert!(target.properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::DistinctFrom { reference }
+                    if **reference == TargetFilter::EventTarget
+            )
+        }));
     }
 
     /// Gap-A + §B2 integration: the real Esper Terra chapter chain parses with zero

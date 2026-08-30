@@ -1216,11 +1216,11 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let obj_id = extract_source_from_event(event)?;
             Some(TargetRef::Object(obj_id))
         }
-        // CR 603.2 + CR 120.1: "that creature" / "that permanent" — the object
-        // that *received* the triggering event's damage (recipient counterpart
+        // CR 603.2: "that creature" / "that permanent" — the object targeted
+        // or otherwise carried by the triggering event (the target counterpart
         // of `TriggeringSource`). Resolves via the same authority
-        // `ObjectScope::EventTarget` uses so the antecedent is the specific
-        // damaged object, never a generic type filter.
+        // `ObjectScope::EventTarget` uses so the antecedent is a specific event
+        // object, never a generic type filter.
         TargetFilter::EventTarget => {
             let event = event?;
             let obj_id = extract_target_object_from_event(event)?;
@@ -1736,18 +1736,22 @@ pub(crate) fn extract_sources_from_event(event: &crate::types::events::GameEvent
     }
 }
 
-/// CR 603.2 + CR 120.1: Extract the object that *received* the damage referenced
-/// by the current trigger event — the recipient counterpart to
-/// [`extract_source_from_event`]. Resolves `ObjectScope::EventTarget` ("that
-/// creature" in "deals damage to a creature equal to that creature's
-/// toughness"). Only `DamageDealt` with an object recipient yields a value;
-/// player recipients and non-damage events have no object recipient.
+/// CR 603.2: Extract the object targeted or receiving the current trigger
+/// event — the target counterpart to [`extract_source_from_event`]. Resolves
+/// `ObjectScope::EventTarget` and `TargetFilter::EventTarget` for event
+/// families that carry an object target. Player targets deliberately yield no
+/// object: generic object/filter/quantity consumers must not coerce a player
+/// into an object reference.
 pub(crate) fn extract_target_object_from_event(
     event: &crate::types::events::GameEvent,
 ) -> Option<ObjectId> {
     use crate::types::events::GameEvent;
     match event {
         GameEvent::DamageDealt {
+            target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
+        GameEvent::BecomesTarget {
             target: TargetRef::Object(id),
             ..
         } => Some(*id),
@@ -2689,6 +2693,27 @@ pub(crate) fn resolve_tracked_set_sentinel(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn extract_target_object_from_event_handles_object_becomes_target_only() {
+        let object = ObjectId(41);
+        let object_event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(object),
+            source_id: ObjectId(7),
+            source_controller: PlayerId(0),
+        };
+        let player_event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(1)),
+            source_id: ObjectId(7),
+            source_controller: PlayerId(0),
+        };
+
+        assert_eq!(
+            extract_target_object_from_event(&object_event),
+            Some(object)
+        );
+        assert_eq!(extract_target_object_from_event(&player_event), None);
+    }
 
     /// A `SpecificPlayer` controller scope matches a stack ability by comparing
     /// the stored player id with the stack entry's stored controller. This is an

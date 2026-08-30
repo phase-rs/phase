@@ -511,6 +511,9 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
 /// because the triggering event's source IS the attached-to creature.
 pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+    if ctx.parent_target_available {
+        return TargetFilter::ParentTarget;
+    }
     if let Some(target) = ctx.object_pronoun_ref.clone() {
         return target;
     }
@@ -33667,6 +33670,11 @@ pub(crate) fn parse_effect_chain_ir(
             // player" on Ghyrson) bind to the triggering event instead of being
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
+            // Keep the triggering-event antecedent available while the current
+            // target phrase parses its structural riders ("other than that
+            // creature"). `resolve_it_pronoun` gives an earlier fresh choice
+            // priority through `parent_target_available` for later chunks.
+            object_pronoun_ref: ctx.object_pronoun_ref.clone(),
             bare_card_aggregate_source,
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
