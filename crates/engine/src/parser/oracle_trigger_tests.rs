@@ -242,25 +242,6 @@ fn becomes_target_rebinds_otherwise_branch_before_fresh_choice_boundary() {
 }
 
 #[test]
-fn spell_cast_context_remains_triggering_source() {
-    let trigger = parse_trigger_line(
-        "Whenever you cast a spell, return it to its owner's hand.",
-        "Spellcast Guard",
-    );
-    assert_eq!(trigger.mode, TriggerMode::SpellCast);
-    assert!(matches!(
-        trigger
-            .execute
-            .as_deref()
-            .map(|ability| ability.effect.as_ref()),
-        Some(Effect::ChangeZone {
-            target: TargetFilter::TriggeringSource,
-            ..
-        })
-    ));
-}
-
-#[test]
 fn becomes_target_delayed_payload_fails_honestly() {
     let trigger = parse_trigger_line(
         "Whenever a creature you control becomes the target of a spell or ability, when that creature dies, put a +1/+1 counter on it.",

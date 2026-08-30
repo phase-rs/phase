@@ -1507,11 +1507,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        object_pronoun_ref: match &condition {
-            TriggerMode::SpellCast => Some(TargetFilter::TriggeringSource),
-            TriggerMode::BecomesTarget => Some(TargetFilter::EventTarget),
-            _ => trigger_object_pronoun_ref_for_condition(condition_text)
-                .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        object_pronoun_ref: if condition == TriggerMode::BecomesTarget {
+            Some(TargetFilter::EventTarget)
+        } else {
+            trigger_object_pronoun_ref_for_condition(condition_text)
+                .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition))
         },
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
