@@ -1,12 +1,12 @@
-//! Time the Candelabra of Tawnos target-selection read path at realistic fanout.
+//! Time Candelabra of Tawnos target walking at realistic fanout.
 //!
 //! Build/run in an isolated target directory:
-//! `CARGO_TARGET_DIR=/tmp/forge-candelabra cargo run -p phase-ai --features scenario-benches --bin candelabra-target-selection-bench`
+//! `CARGO_TARGET_DIR=/tmp/forge-candelabra cargo run -p phase-ai --features scenario-benches --bin candelabra-target-walk-bench`
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine::ai_support::{candidate_actions, legal_actions};
 use engine::game::perf_counters;
@@ -63,11 +63,14 @@ fn main() {
     let mut raw_action_candidates = 0usize;
     let mut returned_legal_actions = 0usize;
     perf_counters::reset();
-    let start = Instant::now();
+    let mut action_generation = Duration::ZERO;
+    let mut choose_target_submit = Duration::ZERO;
 
     for remaining in (1..=TARGET_COUNT).rev() {
+        let generation_start = Instant::now();
         let raw = candidate_actions(runner.state());
         let actions = legal_actions(runner.state());
+        action_generation += generation_start.elapsed();
         let raw_targets = raw
             .iter()
             .filter(|candidate| {
@@ -106,20 +109,22 @@ fn main() {
         cancel_candidates += cancels;
         raw_action_candidates += raw.len();
         returned_legal_actions += actions.len();
+        let submit_start = Instant::now();
         runner
             .act(GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(targets[0])),
             })
             .expect("the engine-enumerated target must be accepted");
+        choose_target_submit += submit_start.elapsed();
     }
 
-    let elapsed = start.elapsed();
     let counters = perf_counters::snapshot();
     assert_eq!(target_candidates, TARGET_COUNT * (TARGET_COUNT + 1) / 2);
     assert_eq!(cancel_candidates, TARGET_COUNT);
     println!(
         "raw_actions={raw_action_candidates} returned_legal_actions={returned_legal_actions} \
-         targets={target_candidates} cancels={cancel_candidates} clones={} elapsed={elapsed:.3?}",
+         targets={target_candidates} cancels={cancel_candidates} clones={} \
+         action_generation={action_generation:.3?} choose_target_submit={choose_target_submit:.3?}",
         counters.state_clone_for_legality,
     );
 }

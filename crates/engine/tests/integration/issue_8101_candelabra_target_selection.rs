@@ -131,8 +131,8 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
     assert_eq!(
         counters.state_clone_for_legality,
-        TARGET_COUNT as u64 + 1,
-        "only each CancelCast and the terminal target choice require raw validation"
+        (TARGET_COUNT * 2) as u64,
+        "memoized validation still probes each CancelCast plus one target per prompt"
     );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),

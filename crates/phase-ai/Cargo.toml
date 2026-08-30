@@ -78,8 +78,8 @@ required-features = ["scenario-benches"]
 test = false
 
 [[bin]]
-name = "candelabra-target-selection-bench"
-path = "src/bin/candelabra_target_selection_bench.rs"
+name = "candelabra-target-walk-bench"
+path = "src/bin/candelabra_target_walk_bench.rs"
 required-features = ["scenario-benches"]
 test = false
 
