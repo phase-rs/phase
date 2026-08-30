@@ -73,6 +73,7 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
         initial_target_walk_counters.initializations, 1,
         "the homogeneous target walk must enumerate its initial legal set once"
     );
+    perf_counters::reset();
     let mut raw_action_candidates = 0;
     let mut returned_legal_actions = 0;
     let mut target_candidates = 0;
@@ -122,24 +123,26 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
         cancel_candidates += cancel_count;
 
         let target = target_actions[0];
+        let cache_advances_before_choice =
+            perf_counters::homogeneous_target_walk_cache_snapshot().advances;
         runner
             .act(GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target)),
             })
             .expect("the engine-enumerated target must be accepted");
+        assert_eq!(
+            perf_counters::homogeneous_target_walk_cache_snapshot().advances
+                - cache_advances_before_choice,
+            if remaining > 1 { 1 } else { 0 },
+            "each non-final target selection must consume the cached legal set once"
+        );
     }
 
     let counters = perf_counters::snapshot();
-    let target_walk_counters = perf_counters::homogeneous_target_walk_cache_snapshot();
     assert_eq!(raw_action_candidates, 3320, "raw action candidate census");
     assert_eq!(returned_legal_actions, 3320, "returned legal action census");
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
-    assert_eq!(
-        target_walk_counters.advances,
-        TARGET_COUNT as u64 - 1,
-        "each nonterminal target selection must consume the cached legal set"
-    );
     assert_eq!(
         counters.state_clone_for_legality,
         (TARGET_COUNT * 2) as u64,
