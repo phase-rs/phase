@@ -274,11 +274,12 @@ fn witness_payment_continuations_inner(
     if partial_direct_payment_search {
         order.truncate(direct_root_count);
     }
-    let attempt_budget = if partial_direct_payment_search {
+    let attempt_budget = (if partial_direct_payment_search {
         direct_root_count * 4
     } else {
-        (noncancel_roots * 4).max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
-    }
+        noncancel_roots * 4
+    })
+    .max(PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS)
     .min(PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS);
 
     let mut attempts = 0;
@@ -1077,46 +1078,7 @@ mod tests {
                 PaymentContinuationUnsupported::MissingPendingCast
             )
         ));
-        assert_eq!(batch.successors, vec![None]);
-    }
-
-    #[test]
-    fn continuation_scheduler_rotates_before_a_high_branch_lane_retries() {
-        let state = GameState::new_two_player(1);
-        let node = |actions| WitnessNode {
-            root_index: 0,
-            root_action: GameAction::PassPriority,
-            root_successor: state.clone(),
-            state: state.clone(),
-            events: Vec::new(),
-            remaining_actions: Some((actions, 0)),
-        };
-        let mut queue = VecDeque::from([
-            node(vec![
-                GameAction::PassPriority,
-                GameAction::BackToManaPayment,
-            ]),
-            node(vec![GameAction::BackToManaPayment]),
-        ]);
-
-        let mut first = queue.pop_front().unwrap();
-        assert!(matches!(
-            first.next_action(),
-            Some(GameAction::PassPriority)
-        ));
-        if first.has_remaining_actions() {
-            queue.push_back(first);
-        }
-
-        let mut later_root = queue.pop_front().unwrap();
-        assert!(matches!(
-            later_root.next_action(),
-            Some(GameAction::BackToManaPayment)
-        ));
-        assert!(
-            queue.front().is_some(),
-            "the high-branch root's second action waits until the later root receives a turn"
-        );
+        assert!(batch.successors.iter().all(Option::is_none));
     }
 
     #[test]

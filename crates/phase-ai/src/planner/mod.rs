@@ -831,7 +831,10 @@ impl<'a> PlannerServices<'a> {
     ) -> Vec<PreparedCandidate> {
         candidates
             .into_iter()
-            .filter(|candidate| Self::candidate_is_valid(state, &candidate.candidate))
+            .filter(|candidate| {
+                candidate.payment_successor.is_some()
+                    || Self::candidate_is_valid(state, &candidate.candidate)
+            })
             .collect()
     }
 
