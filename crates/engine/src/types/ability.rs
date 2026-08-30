@@ -4013,9 +4013,9 @@ pub enum CastingPermission {
     PlayFromExile {
         duration: Duration,
         granted_to: PlayerId,
-        /// A "play" permission can authorize either a spell cast or a land
-        /// play; a "cast" permission cannot authorize a
-        /// land play. This field deliberately defaults to `Play` for legacy
+        /// CR 305.1 + CR 305.9: A "play" permission can authorize either a
+        /// spell cast or a land special action; a "cast" permission cannot
+        /// authorize a land play. This field deliberately defaults to `Play` for legacy
         /// serialized grants, even though `CardPlayMode` itself defaults to
         /// `Cast`: `PlayFromExile` was historically the "may play" building
         /// block.

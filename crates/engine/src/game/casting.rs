@@ -3970,9 +3970,9 @@ fn play_from_exile_permission_source_at_index(
     if *granted_to != player {
         return None;
     }
-    // A "cast" permission authorizes spell casts only, while a "play"
-    // permission also authorizes land plays. Spell casting may
-    // use either verb; the land special action requires the broader one.
+    // CR 305.1 + CR 305.9: A "cast" permission authorizes spell casts only,
+    // while a "play" permission also authorizes the land special action.
+    // Spell casting may use either verb; land play requires the broader one.
     if requested_mode == Some(CardPlayMode::Play) && *mode != CardPlayMode::Play {
         return None;
     }
