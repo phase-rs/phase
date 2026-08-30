@@ -22,7 +22,9 @@
 //! leaves the persistence ingress something to refuse.
 
 use engine::game::visibility::filter_state_for_viewer;
-use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
+use engine::types::game_state::{
+    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::player::PlayerId;
 
 use crate::resolve_all_consent::{pending_consent_with_live_run, pending_consent_without_its_run};
@@ -110,6 +112,32 @@ fn assert_is_the_projection_refusal(error: &str, predecessors: &[&str], ingress:
              without ever reaching the gate: {error}"
         );
     }
+}
+
+/// Restores an AUTHORITATIVE state through the PERSISTENCE ingress — both arms —
+/// and returns the restored state from each.
+///
+/// The positive controls must exercise THIS path, not a bare `GameState` decode.
+/// The gate lives on persistence, so a regression that refused every unmarked
+/// persisted state would leave a transport-path control green while real saves
+/// stopped loading. Reported by review on #8202.
+fn persisted_restore_both_arms(state: GameState) -> Vec<GameState> {
+    let arms = [
+        ("Raw", PersistedGameState::Raw(Box::new(state.clone()))),
+        ("Trusted", PersistedGameState::capture(state)),
+    ];
+    arms.into_iter()
+        .map(|(arm, persisted)| {
+            let wire = serde_json::to_value(persisted)
+                .unwrap_or_else(|e| panic!("{arm} persisted state serializes: {e}"));
+            serde_json::from_value::<PersistedGameState>(wire)
+                .unwrap_or_else(|e| panic!("{arm} authoritative save must restore: {e}"))
+                .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+                .unwrap_or_else(|e| panic!("{arm} prepared restore: {e:?}"))
+                .finalize_immediately()
+                .unwrap_or_else(|e| panic!("{arm} finalized restore: {e:?}"))
+        })
+        .collect()
 }
 
 /// Decodes a projection through the PERSISTENCE ingress — the only one that
@@ -241,13 +269,18 @@ fn carrier_less_authoritative_state_still_restores() {
         "test precondition: this authority is genuinely carrier-less, like a projection"
     );
 
-    let json = serde_json::to_string(&state).expect("an authoritative state serializes");
-    let restored = serde_json::from_str::<GameState>(&json)
-        .expect("a carrier-less authoritative state must still restore");
-    assert!(
-        restored.viewer_projection.is_none(),
-        "an authoritative state restores as authoritative"
-    );
+    // Through the PERSISTENCE ingress, both arms — this is the path the gate is on,
+    // so this is the path a positive control has to cover.
+    for restored in persisted_restore_both_arms(state) {
+        assert!(
+            restored.viewer_projection.is_none(),
+            "an authoritative state restores as authoritative"
+        );
+        assert!(
+            restored.resolve_all_consent_run.is_none(),
+            "the carrier-less shape survives the restore unchanged"
+        );
+    }
 }
 
 /// Matrix row 5 — constraint 2: authoritative payloads stay byte-identical.
@@ -394,8 +427,16 @@ fn absent_marker_key_decodes_as_authoritative() {
          pre-change save shape, byte for byte"
     );
 
-    let restored =
-        serde_json::from_value::<GameState>(wire).expect("a pre-change save must still load");
+    // Restore the key-less payload through PERSISTENCE, which is where a legacy save
+    // actually arrives. `Raw` is the legacy on-disk shape, so it is asserted directly
+    // on the mutated wire rather than via a re-serialized value.
+    let legacy_raw = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("a pre-change save must still load through persistence");
+    let restored = legacy_raw
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("legacy prepared restore")
+        .finalize_immediately()
+        .expect("legacy finalized restore");
     assert_eq!(
         restored.viewer_projection, None,
         "an absent key means authoritative, which is correct: it IS authoritative"
