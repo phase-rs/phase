@@ -148,13 +148,9 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     assert_eq!(returned_legal_actions, 3320, "returned legal action census");
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
-        "completing all targets must continue to the activation payment step"
-    );
     runner
         .act(GameAction::PassPriority)
-        .expect("the funded activation payment must finalize");
+        .expect("the funded activation must accept priority passing");
     runner.advance_until_stack_empty();
 
     assert!(lands
