@@ -20356,7 +20356,10 @@ fn classify_block_exception_count_vs_quality() {
 
 #[test]
 fn cant_be_blocked_as_long_as_defending_controls() {
-    // CR 509.1a: "can't be blocked as long as defending player controls an artifact"
+    // CR 509.1b: an evasion ability creates a blocking restriction — "can't be
+    // blocked as long as defending player controls an artifact". NOT 509.1a,
+    // which governs only which creatures the defending player chooses to block
+    // with and says nothing about restrictions.
     let def = parse_static_line(
         "This creature can't be blocked as long as defending player controls an artifact.",
     )

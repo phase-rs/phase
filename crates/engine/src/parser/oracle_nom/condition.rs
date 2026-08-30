@@ -31,7 +31,7 @@ use crate::types::ability::{
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -4024,56 +4024,175 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
-/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name
-/// as one another"
-/// → `QuantityComparison(ObjectCountBySharedQuality[Name, Max] >= N)`.
+/// Lift a GROUP shared-quality marker out of a filter produced by
+/// `parse_type_phrase`, returning its quality and removing the property.
 ///
-/// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both read
-/// "you control " + a GE threshold + a type phrase + a shared-characteristic
-/// suffix; they differ only on the RELATION over that characteristic (`different`
-/// → count the distinct values; `the same` → group by value and take the largest
-/// group). `aggregate: Max` is what makes "three or more lands with the same name"
-/// mean "some ONE name is shared by at least three of your lands" rather than
-/// "you have at least three lands in total".
+/// `FilterProp::SharesQuality { reference: None }` is a GROUP-SELECTION
+/// constraint on a chosen candidate set: CR 601.2c is where the player
+/// "announces their choice of an appropriate object or player for each target
+/// the spell requires", and CR 608.2b is where the engine re-checks that choice
+/// on resolution — which is exactly where `game::effects::mod`'s group
+/// validator runs it. `game::filter::filter_prop_uses_object_population`
+/// documents the marker as "candidate-local, validated at resolution time, not
+/// whole-board membership", and `game::filter::evaluate_shares_quality`
+/// accordingly answers TRUE for every object when the reference is absent.
 ///
-/// Name is the only quality printed with this relation today (Endless Atlas,
-/// Sceptre of Eternal Glory); the `alt` is the extension point for the rest of
-/// `SharedQuality` when a card prints one.
+/// That contract makes it INERT inside a whole-board count: a
+/// `QuantityRef::ObjectCount` over such a filter counts every matching object
+/// and silently drops the shared-quality constraint. The counting authority for
+/// "N objects that share quality Q" is
+/// `QuantityRef::ObjectCountBySharedQuality` with `AggregateFunction::Max`.
+///
+/// The rules supply the VOCABULARY the quality axis ranges over, and nothing
+/// more: CR 109.3 enumerates an object's characteristics (and closes with "Any
+/// other information about an object isn't a characteristic"), and CR 205.3m
+/// enumerates the creature types `SharedQuality::CreatureType` reads. The
+/// aggregate semantic — "some ONE value of the characteristic is shared by at
+/// least N objects" — is `AggregateFunction::Max` over
+/// `game::filter::object_shared_quality_values_public`'s buckets. That is an
+/// engine representation fact and is deliberately left UNATTRIBUTED: neither
+/// 109.3 nor 205.3m says anything about a value being shared by at least N
+/// objects. The group/count layer split likewise carries no CR number of its
+/// own. This function moves the constraint from the filter to that authority.
+///
+/// Declines, leaving the filter untouched, for:
+///   * `reference: Some(..)` — that IS a per-object predicate and
+///     `ObjectCount` is correct for it;
+///   * `SharedQualityRelation::DoesNotShare` — no aggregate form exists;
+///   * a non-`Typed` filter — an `Or`/`And` of counted populations is not one
+///     bucketed count.
+///
+/// In each case the caller's `alt` falls through to `parse_control_count_ge`
+/// and the row keeps exactly the shape it has today. A refusal cannot be raised
+/// from here instead: three transitive callers disagree about what a refusal
+/// means, and two of them (`static_helpers::try_parse_cost_modification` and
+/// `oracle_trigger::try_extract_intervening`) turn one into an UNCONDITIONAL
+/// static or an unhoisted intervening-if — strictly worse than the shape they
+/// would refuse.
+fn take_group_shared_quality(filter: &mut TargetFilter) -> Option<SharedQuality> {
+    let TargetFilter::Typed(tf) = filter else {
+        return None;
+    };
+    let idx = tf.properties.iter().position(|prop| {
+        matches!(
+            prop,
+            FilterProp::SharesQuality {
+                reference: None,
+                relation: SharedQualityRelation::Shares,
+                ..
+            }
+        )
+    })?;
+    // `position` matched this variant at `idx` on the line above and `remove`
+    // cannot change it; `let … else` keeps the destructure total without a
+    // wildcard arm or a panic.
+    let FilterProp::SharesQuality { quality, .. } = tf.properties.remove(idx) else {
+        return None;
+    };
+    Some(quality)
+}
+
+/// CR 201.2 + CR 109.3: Parse "<scope> control(s) N or more [type] that share a
+/// [quality]" and "<scope> control(s) N or more [type] with the same [quality]
+/// [as one another]"
+/// → `QuantityComparison(ObjectCountBySharedQuality[quality, Max] >= N)`.
+///
+/// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both
+/// read a control-scope prefix + a GE threshold + a type phrase + a
+/// shared-characteristic constraint; they differ only on the RELATION over that
+/// characteristic (`different` → count the distinct values; `the same` / `share
+/// a` → group by value and take the largest group). `aggregate: Max` is what
+/// makes "three or more lands with the same name" mean "some ONE name is shared
+/// by at least three of your lands" rather than "you have at least three lands
+/// in total".
+///
+/// **Two printings, one predicate.** English prints this constraint either as a
+/// relative clause ("three or more creatures **that share a creature type**",
+/// Graxiplon, Littjara Kinseekers, Synchronized Eviction) or as a postmodifier
+/// ("three or more lands **with the same name**", Endless Atlas, Sceptre of
+/// Eternal Glory, Mechanized Production, Chrome Replicator). The two reach this
+/// function differently and so are two branches, not two parsers:
+///
+///   * **Branch A (relative clause)** — `parse_type_phrase` has ALREADY consumed
+///     the clause through `oracle_target::parse_that_clause_suffix`, leaving a
+///     `FilterProp::SharesQuality` group marker on the filter and an empty
+///     remainder. `take_group_shared_quality` lifts the marker onto this
+///     counting authority rather than re-parsing the text, so
+///     `oracle_target::parse_shared_quality_clause` stays the single authority
+///     for that vocabulary.
+///   * **Branch B (postmodifier)** — not a `that …` clause, so
+///     `parse_type_phrase` leaves it in the remainder and the quality noun is
+///     delegated to the same shared authority, `parse_shared_quality`.
+///
+/// The controller scope is parameterized on `parse_control_scope_prefix`, so
+/// all three of `you` / `your opponents` / `defending player` are covered by one
+/// path. CR 508.5 + CR 508.5a resolve the defending-player anchor per attacking
+/// creature; CR 509.1b is the rule that makes an evasion ability a blocking
+/// restriction, which is the form the defending-player scope is printed in
+/// today (Graxiplon).
+///
+/// Branch B's quality vocabulary widens from `name` alone to the full
+/// `parse_shared_quality` set as a consequence of that DRY substitution.
+/// `game::filter::shared_quality_values` matches every `SharedQuality` variant
+/// exhaustively, so nothing is accepted here that cannot be evaluated; `name`
+/// is simply the only one printed with this relation today.
+///
+/// ORDERING: this arm must precede the plain `parse_control_count_ge` arm in
+/// `parse_control_conditions` — see the ordering warning there, which is the
+/// authority on why.
 fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, ctrl) = parse_control_scope_prefix(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (mut filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    let trimmed = remainder.trim_start();
-    let (after_suffix, quality) = preceded(
-        tag("with the same "),
-        terminated(
-            alt((value(SharedQuality::Name, tag("name")),)),
-            opt(tag(" as one another")),
-        ),
-    )
-    .parse(trimmed)?;
-    let filter = inject_controller_you(filter);
-    let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
-    Ok((
-        &input[consumed..],
-        StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCountBySharedQuality {
+    // Branch A — relative-clause printing.
+    if let Some(quality) = take_group_shared_quality(&mut filter) {
+        let filter = inject_controller(filter, ctrl);
+        // `remainder` is empty here but still points into `input`, so the
+        // pointer arithmetic re-includes any `.` that `trim_end_matches`
+        // dropped. Same idiom as `parse_control_count_ge`.
+        let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+        return Ok((
+            &input[consumed..],
+            make_quantity_comparison(
+                QuantityRef::ObjectCountBySharedQuality {
                     filter,
                     quality,
                     aggregate: AggregateFunction::Max,
                 },
+                Comparator::GE,
+                n,
+            ),
+        ));
+    }
+    // Branch B — postmodifier printing. `parse_shared_quality` tries the plural
+    // `names` before the singular `name`, so on "name as one another" the
+    // singular arm wins and the `opt` consumes the tail.
+    let trimmed = remainder.trim_start();
+    let (after_suffix, quality) = preceded(
+        tag("with the same "),
+        terminated(parse_shared_quality, opt(tag(" as one another"))),
+    )
+    .parse(trimmed)?;
+    let filter = inject_controller(filter, ctrl);
+    let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        make_quantity_comparison(
+            QuantityRef::ObjectCountBySharedQuality {
+                filter,
+                quality,
+                aggregate: AggregateFunction::Max,
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: n as i32 },
-        },
+            Comparator::GE,
+            n,
+        ),
     ))
 }
 
@@ -4144,28 +4263,68 @@ fn controlled_battlefield_subtype_filter(subtype: String) -> TargetFilter {
 
 /// Parse the leading controller-scope phrase of a "control N or more" count
 /// condition, returning the `ControllerRef` the count is scoped to:
-/// "you control " → `You`, "your opponents control " → `Opponent`.
+/// "you control " → `You`, "your opponents control " → `Opponent`,
+/// "defending player controls " → `DefendingPlayer`.
 ///
-/// CR 109.3: object control is a per-player property; this is the single axis
-/// that distinguishes the self-scoped ("you control three or more creatures")
-/// and opponent-scoped ("your opponents control three or more creatures",
-/// Lashwhip Predator) forms of the same `ObjectCount >= N` threshold.
+/// CR 109.2 + CR 109.3: object control is a per-player property, and a
+/// description that names a card type without naming a zone means a permanent
+/// on the battlefield — which is why every leaf here is paired with
+/// `inject_controller`'s `InZone { Battlefield }`. This is the single axis that
+/// distinguishes the self-scoped ("you control three or more creatures"),
+/// opponent-scoped ("your opponents control three or more creatures", Lashwhip
+/// Predator) and combat-scoped ("defending player controls three or more
+/// artifacts", Ayesha Tanaka, Armorer) forms of the same `ObjectCount >= N`
+/// threshold.
+///
+/// The `defending player` leaf is the only one whose resolution depends on
+/// combat state; outside combat it answers `None`, which the filter door
+/// renders as a zero count. For a `CantBeBlocked` static the anchor binds — the
+/// source is already in `combat.attackers` when CR 509.1b's blocking-restriction
+/// check runs — but for a `CantAttack` static it does NOT, because the
+/// declaration is validated before the candidate is recorded as an attacker.
+/// See `issue_8183_static_gate_fail_open.rs`'s Dandân test, which pins that gap.
 fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
     alt((
         value(ControllerRef::You, tag("you control ")),
         value(ControllerRef::Opponent, tag("your opponents control ")),
+        // CR 508.5 + CR 508.5a: the combat-context leaf of the same
+        // control-subject axis. The defending player is determined per
+        // attacking creature and resolved at read time by the shared
+        // `combat` anchor authority, so the count is scoped exactly like the
+        // `you` / `your opponents` forms with no new condition variant.
+        // CR 509.1b: a restriction may be created by an evasion ability —
+        // Ayesha Tanaka, Armorer, "…can't be blocked as long as defending
+        // player controls three or more artifacts".
+        value(
+            ControllerRef::DefendingPlayer,
+            tag("defending player controls "),
+        ),
     ))
     .parse(input)
 }
 
-/// Canonical combinator: "you control / your opponents control N or more [type]"
-/// → QuantityComparison.
+/// Canonical combinator: "you control / your opponents control / defending
+/// player controls N or more [type]" → QuantityComparison.
 ///
-/// Single authority for this pattern — called from `oracle_static.rs` and
-/// `oracle_trigger.rs` to avoid three-way duplication. The controller scope is
-/// parameterized on the `you control` / `your opponents control` axis
-/// (`parse_control_scope_prefix`) so both forms share one parse path.
+/// Single authority for this pattern. It has no direct external caller; it is
+/// reached only as an arm of `parse_control_conditions`, which is what
+/// `oracle_static/evasion.rs`'s rule-static `unless` rider calls and what the
+/// `parse_condition` / `parse_inner_condition` dispatch chain reaches. The
+/// controller scope is parameterized on the `you control` / `your opponents
+/// control` / `defending player controls` axis (`parse_control_scope_prefix`)
+/// so all three forms share one parse path.
 /// Returns the remainder after the type phrase (may be non-empty for trailing text).
+///
+/// ORDERING CONSTRAINT — do not disturb. `parse_control_scope_prefix` is
+/// consumed here and by `parse_control_count_ge_shared_quality`, and BOTH
+/// require `parse_ge_threshold` (a numeral or `at least N`) immediately after
+/// the prefix. The incumbent `defending player controls a/an <type>` rows
+/// present an ARTICLE, not a numeral, so they fail `parse_ge_threshold`, this
+/// arm declines, and they fall through to `parse_defending_player_controls`
+/// exactly as before. **Do NOT route `parse_you_control_a` / `_no` /
+/// `_dont_control_a` / `parse_control_count_le` / `_eq` through
+/// `parse_control_scope_prefix`** — that would move every one of those rows
+/// onto this production.
 pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, ctrl) = parse_control_scope_prefix(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
@@ -10367,6 +10526,282 @@ mod tests {
                 tf.properties
             );
         }
+    }
+
+    /// Destructure an `ObjectCountBySharedQuality >= N` comparison over a
+    /// `Typed` filter for the group-share rows below, panicking with the
+    /// offending input rather than on an opaque match failure.
+    ///
+    /// Also asserts THE repair property shared by every row here: no GROUP
+    /// `FilterProp::SharesQuality { reference: None, relation: Shares }` is left
+    /// on the filter. That marker is a group-selection constraint that
+    /// `game::filter::evaluate_shares_quality` answers TRUE for every object, so
+    /// a filter that still carries it inside a count silently drops the
+    /// constraint — the shipped defect this lift repairs.
+    fn expect_group_shared_count(
+        text: &str,
+        cond: StaticCondition,
+    ) -> (TypedFilter, SharedQuality, AggregateFunction, i32) {
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCountBySharedQuality {
+                            filter,
+                            quality,
+                            aggregate,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value },
+        } = cond
+        else {
+            panic!("expected ObjectCountBySharedQuality >= N for {text:?}, got {cond:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for {text:?}, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }),
+            "inject_controller must add InZone{{Battlefield}} for {text:?}, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::SharesQuality {
+                    reference: None,
+                    relation: SharedQualityRelation::Shares,
+                    ..
+                }
+            )),
+            "the group SharesQuality marker must be LIFTED out of the filter for \
+             {text:?}, not merely accompanied by the count; got {:?}",
+            tf.properties
+        );
+        (tf, quality, aggregate, value)
+    }
+
+    /// CR 508.5 + CR 509.1b: "defending player controls N or more [type]" — the
+    /// combat-scoped leaf of the control-count axis (Ayesha Tanaka, Armorer:
+    /// "…can't be blocked as long as defending player controls three or more
+    /// artifacts").
+    ///
+    /// The input is exactly what `parse_compound_cant_be_blocked_condition`
+    /// hands over after the `~ ` subject and the trailing `.` are stripped, so
+    /// it must NOT carry a trailing period.
+    ///
+    /// Revert-failing: remove the `defending player controls ` arm from
+    /// `parse_control_scope_prefix` and the prefix is rejected, the whole
+    /// condition fails to parse, and the `unwrap_or_else` panics.
+    #[test]
+    fn parse_defending_player_control_count_ge_artifacts() {
+        let text = "as long as defending player controls three or more artifacts";
+        let (rest, cond) =
+            parse_condition(text).unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+        assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        } = cond
+        else {
+            panic!("expected ObjectCount >= 3 for {text:?}, got {cond:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for {text:?}, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::DefendingPlayer),
+            "the count must be scoped to the defending player, not the source's \
+             controller"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }),
+            "inject_controller must add InZone{{Battlefield}}, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 508.5 + CR 509.1b + CR 205.3m: Graxiplon's printed gate — the
+    /// defending-player scope crossed with the RELATIVE-CLAUSE printing of the
+    /// group-share count, entered through `unless ` (which supplies the `Not`).
+    ///
+    /// Revert-failing twice over: remove the `defending player controls ` arm
+    /// and the parse fails outright; revert the Branch A lift and
+    /// `parse_control_count_ge_shared_quality` declines (its Branch B needs
+    /// `tag("with the same ")` on the empty remainder the consumed relative
+    /// clause leaves), so `parse_control_count_ge` lands the INERT `ObjectCount`
+    /// and both the destructure and the residual-marker assertion fire.
+    #[test]
+    fn parse_defending_player_control_count_ge_group_shared_creature_type() {
+        let text =
+            "unless defending player controls three or more creatures that share a creature type";
+        let (rest, cond) =
+            parse_condition(text).unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+        assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+        let StaticCondition::Not { condition } = cond else {
+            panic!("`unless` must supply the negation for {text:?}, got {cond:?}");
+        };
+        let (tf, quality, aggregate, value) = expect_group_shared_count(text, *condition);
+        assert_eq!(value, 3);
+        assert_eq!(quality, SharedQuality::CreatureType);
+        assert_eq!(aggregate, AggregateFunction::Max);
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+    }
+
+    /// CR 205.3m + CR 603.4 + CR 601.2f: "you control <threshold> creatures
+    /// that share a creature type" — the RELATIVE-CLAUSE printing on the `you`
+    /// scope. Two rules because the two inputs take two routes: the first is a
+    /// triggered ability's intervening-if (CR 603.4), the second is a
+    /// cost-reduction static read during cost determination (CR 601.2f).
+    ///
+    /// These are the two SHIPPED rows this change repairs: Littjara Kinseekers
+    /// (`three or more`, reaching the runtime through
+    /// `oracle_trigger::try_extract_intervening`) and Synchronized Eviction
+    /// (`at least two`, through `static_helpers::try_parse_cost_modification`).
+    /// On main both land `QuantityRef::ObjectCount` over a filter that still
+    /// carries the group `SharesQuality` marker, and
+    /// `game::filter::evaluate_shares_quality` answers TRUE for every object
+    /// when `reference` is `None` — so the count is the plain creature count and
+    /// the gate fires on ANY three (respectively two) creatures.
+    ///
+    /// The second input is also the only row in this file that exercises
+    /// `parse_ge_threshold`'s `at least N` arm.
+    ///
+    /// Revert-failing: revert Branch A and `parse_control_count_ge` lands the
+    /// inert `ObjectCount`, firing both the destructure and the residual-marker
+    /// assertion. Reverting the `defending player controls ` leaf does NOT move
+    /// these rows — the `you control ` arm is untouched by it — which is what
+    /// makes this the exclusive discriminator for the lift.
+    #[test]
+    fn parse_you_control_count_ge_group_shared_creature_type() {
+        for (text, expected_n) in [
+            // Littjara Kinseekers' intervening-if, after `~` normalization.
+            (
+                "if you control three or more creatures that share a creature type",
+                3,
+            ),
+            // Synchronized Eviction's cost-reduction gate.
+            (
+                "if you control at least two creatures that share a creature type",
+                2,
+            ),
+        ] {
+            let (rest, cond) =
+                parse_condition(text).unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let (tf, quality, aggregate, value) = expect_group_shared_count(text, cond);
+            assert_eq!(value, expected_n, "threshold for {text:?}");
+            assert_eq!(quality, SharedQuality::CreatureType, "quality for {text:?}");
+            assert_eq!(aggregate, AggregateFunction::Max, "aggregate for {text:?}");
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "scope for {text:?}"
+            );
+        }
+    }
+
+    /// REGRESSION GUARD for the four incumbent Branch B (postmodifier) rows the
+    /// rewritten `parse_control_count_ge_shared_quality` must not move: Endless
+    /// Atlas and Sceptre of Eternal Glory (activated-ability conditions),
+    /// Mechanized Production and Chrome Replicator (trigger intervening-ifs).
+    ///
+    /// Chrome Replicator is the only one with a compound type phrase and a
+    /// non-zone `FilterProp` sitting where a `SharesQuality` marker would sit,
+    /// and its route (`try_extract_intervening`) drops the whole intervening-if
+    /// on a decline — so a Branch B regression there is SILENT and the ETB
+    /// creates its token unconditionally.
+    ///
+    /// Goes RED on any breakage of Branch B, of the `parse_shared_quality`
+    /// substitution, or of the `inject_controller_you` → `inject_controller(ctrl)`
+    /// swap. Reverting either unit wholesale restores the incumbent Branch B, so
+    /// these rows guard regressions INSIDE the rewrite rather than discriminating
+    /// a revert.
+    #[test]
+    fn parse_control_count_ge_shared_name_postmodifier_rows_are_unchanged() {
+        for (text, expected_n, expected_types, expects_non_token) in [
+            // Endless Atlas / Sceptre of Eternal Glory.
+            (
+                "as long as you control three or more lands with the same name",
+                3,
+                vec![TypeFilter::Land],
+                false,
+            ),
+            // Mechanized Production — the ` as one another` tail and the `if `
+            // entry rather than `as long as `.
+            (
+                "if you control eight or more artifacts with the same name as one another",
+                8,
+                vec![TypeFilter::Artifact],
+                false,
+            ),
+            // Chrome Replicator.
+            (
+                "if you control two or more nonland, nontoken permanents with the same name as one another",
+                2,
+                vec![TypeFilter::Permanent, TypeFilter::Non(Box::new(TypeFilter::Land))],
+                true,
+            ),
+        ] {
+            let (rest, cond) =
+                parse_condition(text).unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let (tf, quality, aggregate, value) = expect_group_shared_count(text, cond);
+            assert_eq!(value, expected_n, "threshold for {text:?}");
+            assert_eq!(quality, SharedQuality::Name, "quality for {text:?}");
+            assert_eq!(aggregate, AggregateFunction::Max, "aggregate for {text:?}");
+            assert_eq!(tf.type_filters, expected_types, "types for {text:?}");
+            assert_eq!(tf.controller, Some(ControllerRef::You), "scope for {text:?}");
+            assert_eq!(
+                tf.properties.contains(&FilterProp::NonToken),
+                expects_non_token,
+                "NonToken property for {text:?}, got {:?}",
+                tf.properties
+            );
+        }
+    }
+
+    /// HOSTILE FIXTURE — Bursting Beebles: "can't be blocked as long as
+    /// defending player controls two or more nonland permanents that share an
+    /// artist."
+    ///
+    /// CR 109.3 enumerates an object's characteristics and closes with "Any
+    /// other information about an object isn't a characteristic." Artist is not
+    /// among them, `GameObject` carries no artist field, and `SharedQuality`
+    /// correctly has no `Artist` arm. So `parse_shared_quality_clause` never
+    /// consumes the clause, this arm leaves it in the remainder, and the
+    /// caller's emptiness check refuses — the gate stays
+    /// `StaticCondition::Unrecognized` and `coverage.rs` keeps reporting the
+    /// gap honestly.
+    ///
+    /// **If this ever goes RED the fix is NOT to relax the test.** A consumed
+    /// remainder here means some route accepted a gate BROADER than printed
+    /// (Beebles would become unblockable on any two nonland permanents) while
+    /// coverage went green — a silent, coverage-invisible regression.
+    #[test]
+    fn share_an_artist_is_not_consumed_and_stays_an_honest_gap() {
+        let text =
+            "as long as defending player controls two or more nonland permanents that share an artist";
+        let (rest, _cond) =
+            parse_condition(text).unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+        assert_eq!(
+            rest, " that share an artist",
+            "the artist clause must be left UNCONSUMED so the caller's \
+             emptiness check refuses the whole gate"
+        );
     }
 
     #[test]
