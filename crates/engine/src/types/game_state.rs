@@ -19074,12 +19074,16 @@ impl GameStateDecode {
             .as_object_mut()
             .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
         match mode {
-            // Historical raw persistence predates the explicit resolution-wire
-            // discriminator. This is the only ingress allowed to stamp v1.
+            // An UNVERSIONED raw payload carries no resolution-wire
+            // discriminator. Raw persistence in general does: the engine's own
+            // raw writer, `PersistedGameState::Raw`'s `Serialize`, routes
+            // through `ResolutionStateWire::to_value`, which always declares
+            // version 2. This is the only ingress allowed to infer a MISSING
+            // discriminator, and `declare_raw_resolution_wire` is the single
+            // authority that does. A payload that declares its own version
+            // keeps it and is handled exactly as any declared payload is.
             GameStateDecodeMode::PersistedRaw => {
-                object
-                    .entry("resolution_state_version".to_string())
-                    .or_insert_with(|| serde_json::Value::from(1));
+                crate::types::resolution::declare_raw_resolution_wire(object)?;
             }
             // Trusted snapshots are written as versioned resolution-wire
             // envelopes and must retain their declared compatibility mode.
@@ -28714,6 +28718,902 @@ mod tests {
                 "expected fail-closed stack-trigger migration, got {error}"
             );
         }
+    }
+
+    /// A coherent state parking exactly one `SpellResolution` frame with **no**
+    /// `resolving_stack_entry`. That omission is load-bearing: it is what keeps
+    /// `PersistedRestoreError::UnsettledPriorityResolution` from firing at the
+    /// restore boundary (its guard reads `resolving_stack_entry.is_some()`), so
+    /// the payload exercises the full decode *and* restore path rather than
+    /// stopping at a fail-closed refusal.
+    fn parked_spell_resolution_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(9_101),
+            PlayerId(0),
+            "Parked spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .resolution_stack
+            .push_spell_resolution(PendingSpellResolution {
+                object_id: spell,
+                controller: PlayerId(0),
+                casting_variant: CastingVariant::Normal,
+                cast_from_zone: None,
+                cast_controller: None,
+                cast_timing_permission: None,
+                spell_targets: Vec::new(),
+                actual_mana_spent: 0,
+                kickers_paid: Vec::new(),
+                additional_cost_payment_count: 0,
+                additional_cost_payments: Vec::new(),
+                convoked_creatures: Vec::new(),
+            });
+        state
+    }
+
+    /// The same parked frame, but resting on a **triggered** `resolving_stack_entry`
+    /// that carries its `TriggerFiring` discriminator. Removing that carrier from
+    /// the serialized value is what the unlabeled-carrier tests below do.
+    fn parked_frame_on_triggered_carrier_fixture() -> GameState {
+        let mut state = parked_spell_resolution_fixture();
+        let source = create_object(
+            &mut state,
+            CardId(9_102),
+            PlayerId(0),
+            "Triggered carrier source".to_string(),
+            Zone::Battlefield,
+        );
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(9_103),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Triggered carrier source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        state
+    }
+
+    /// V1 + V2. A raw save carrying a live `resolution_stack` decodes AND fully
+    /// restores, with the parked frame preserved rather than discarded.
+    ///
+    /// Red before `declare_raw_resolution_wire`: the raw ingress stamped
+    /// `resolution_state_version = 1` unconditionally, and the v1 branch refuses
+    /// any payload containing `resolution_stack`.
+    #[test]
+    fn raw_round_trip_preserves_a_live_resolution_frame() {
+        let state = parked_spell_resolution_fixture();
+        let parked = state
+            .active_spell_resolution()
+            .expect("the fixture parks a spell resolution")
+            .object_id;
+
+        // `GameState`'s derived `Serialize` — the unversioned raw writer whose
+        // shape `declare_raw_resolution_wire` infers from. NOT
+        // `to_value(PersistedGameState::Raw(..))`, which routes through
+        // `ResolutionStateWire::to_value` and emits a DECLARED v2 wire that would
+        // take the inference's early return and make this test vacuous.
+        let wire = serde_json::to_value(&state).expect("the bare GameState serializes");
+        assert!(
+            wire.get("resolution_stack").is_some(),
+            "the raw writer must emit resolution_stack for a non-empty frame stack; \
+             the inference keys on exactly this field"
+        );
+        assert!(
+            wire.get("resolution_state_version").is_none(),
+            "the raw writer must not declare a resolution wire version"
+        );
+        assert!(
+            wire.get("resolution_frames").is_none(),
+            "the raw writer must not emit the v2 frame carrier"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an unversioned raw payload with a live frame stack decodes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("a parked frame on no resolving carrier is coherent at the restore boundary")
+            .finalize_immediately()
+            .expect("the prepared restore finalizes");
+
+        assert_eq!(
+            restored.resolution_stack.len(),
+            1,
+            "the parked frame must survive the persistence boundary"
+        );
+        assert_eq!(
+            restored.active_spell_resolution().map(|p| p.object_id),
+            Some(parked),
+            "the frame must be PRESERVED, not merely tolerated — this is what \
+             distinguishes the fix from dropping the offending key"
+        );
+    }
+
+    /// V4. The absent-`resolution_stack` sibling: pre-#6269 saves and post-#6269
+    /// saves with an empty frame stack alike keep the legacy v1 treatment.
+    #[test]
+    fn raw_round_trip_without_a_resolution_frame_is_unchanged() {
+        let state = GameState::new_two_player(42);
+        let wire = serde_json::to_value(&state).expect("the bare GameState serializes");
+        assert!(
+            wire.get("resolution_stack").is_none(),
+            "an empty frame stack is omitted by skip_serializing_if, which is what \
+             routes this payload to the legacy v1 branch"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an unversioned raw payload without a frame stack still decodes")
+            .into_game_state()
+            .expect("the legacy v1 projection restores");
+
+        assert!(
+            restored.resolution_stack.is_empty(),
+            "the v1 projection yields an empty frame stack, exactly as before"
+        );
+    }
+
+    /// V6 + V7. The unlabeled-carrier allowance is **not** widened to the raw
+    /// ingress by the inference. A raw payload that now classifies as v2 and
+    /// carries a triggered `resolving_stack_entry` with no firing carrier is
+    /// refused, at BOTH a Priority rest and a non-Priority prompt rest.
+    ///
+    /// What this prevents: `migrate_legacy_trigger_firing_carriers` fabricates
+    /// `TriggerFiring::LegacyDelayed` for an unlabeled triggered carrier when
+    /// `allow_unlabeled_v1_carriers` is set. CR 603.7 classifies delayed
+    /// triggered abilities, `TriggerFiring::is_delayed()` returns `true` for
+    /// `LegacyDelayed`, and three production consumers in `game/triggers.rs`
+    /// branch on it — trigger doubling (CR 603.2d), dropped-target re-push
+    /// (CR 603.3d), and ordering-batch grouping. Fabricating that classification
+    /// for an ordinary trigger is a rules error, so the inference must leave the
+    /// allowance exactly where it was.
+    #[test]
+    fn raw_inferred_v2_refuses_an_unlabeled_triggered_carrier() {
+        let priority_rest = parked_frame_on_triggered_carrier_fixture();
+
+        // The non-Priority sibling. `SpellResolution` is an `AfterChild` frame,
+        // so `ResolutionStack::validate` imposes no prompt match on it; what this
+        // case varies is the REST, because `recover_terminal_resolution_rest_on_restore`
+        // short-circuits on any non-Priority `waiting_for`. The refusal must
+        // therefore come from decode, not from the restore-boundary guard.
+        let mut prompt_rest = parked_frame_on_triggered_carrier_fixture();
+        prompt_rest.waiting_for = WaitingFor::ExertChoice {
+            player: PlayerId(0),
+            attacker: ObjectId(9_104),
+            remaining: Vec::new(),
+        };
+
+        for (label, state) in [
+            ("Priority rest", priority_rest),
+            ("prompt rest", prompt_rest),
+        ] {
+            let labeled = serde_json::to_value(&state).expect("the bare GameState serializes");
+            assert!(
+                labeled.get("resolution_stack").is_some(),
+                "{label}: the fixture must reach the inferred-v2 classification"
+            );
+
+            // Paired positive reach-guard, asserted FIRST: the identical payload
+            // WITH the carrier decodes. Without this the refusal below could pass
+            // for an unrelated reason.
+            assert!(
+                labeled
+                    .get("resolving_trigger_firing")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("Ordinary"),
+                "{label}: the fixture must carry the firing discriminator"
+            );
+            serde_json::from_value::<PersistedGameState>(labeled.clone()).unwrap_or_else(|error| {
+                panic!("{label}: the labeled payload must decode, got {error}")
+            });
+
+            let mut unlabeled = labeled;
+            unlabeled
+                .as_object_mut()
+                .expect("the raw payload is a JSON object")
+                .remove("resolving_trigger_firing");
+
+            let error = serde_json::from_value::<PersistedGameState>(unlabeled)
+                .expect_err("an unlabeled triggered carrier must not be admitted");
+            assert!(
+                error
+                    .to_string()
+                    .contains("resolving triggered entry has no firing carrier"),
+                "{label}: expected the fail-closed carrier refusal, got {error}"
+            );
+        }
+    }
+
+    /// V8. A declared `resolution_state_version` always beats the inferred shape,
+    /// and the raw and trusted ingresses agree on identical bytes — the inference
+    /// introduces no origin-dependent behavior anywhere downstream.
+    #[test]
+    fn declared_resolution_state_version_wins_over_inferred_shape() {
+        let state = parked_spell_resolution_fixture();
+        let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
+
+        let declare = |version: u64| {
+            let mut value = bare.clone();
+            value
+                .as_object_mut()
+                .expect("the raw payload is a JSON object")
+                .insert(
+                    "resolution_state_version".to_string(),
+                    serde_json::Value::from(version),
+                );
+            value
+        };
+
+        for (version, expected) in [
+            (
+                1_u64,
+                "v1 resolution state must not contain resolution_stack",
+            ),
+            (2_u64, "v2 resolution state is missing resolution_frames"),
+        ] {
+            let declared = declare(version);
+            let raw_error = serde_json::from_value::<PersistedGameState>(declared.clone())
+                .expect_err("a declared version keeps its own branch's verdict");
+            assert!(
+                raw_error.to_string().contains(expected),
+                "v{version} raw: expected {expected}, got {raw_error}"
+            );
+
+            // The same inner bytes through the TRUSTED ingress must produce the
+            // same verdict. That ingress never stamps a version, so agreement here
+            // is what proves the inference did not invent an origin-dependent path.
+            let mut trusted = serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .expect("the trusted envelope serializes");
+            trusted
+                .as_object_mut()
+                .expect("the trusted envelope is a JSON object")
+                .insert("state".to_string(), declared);
+            let trusted_error = serde_json::from_value::<PersistedGameState>(trusted)
+                .expect_err("the trusted ingress reaches the same declared branch");
+            assert!(
+                trusted_error.to_string().contains(expected),
+                "v{version} trusted: expected {expected}, got {trusted_error}"
+            );
+        }
+    }
+
+    /// V12. Pins the premise `declare_raw_resolution_wire` rests on for the
+    /// entire client-wire population: `client_state_wire_value` must keep
+    /// emitting `resolution_stack`.
+    ///
+    /// That function redacts by an explicit, MUTABLE removal list. Nothing in the
+    /// type system ties it to the inference rule, so if it ever begins stripping
+    /// `resolution_stack`, every client-wire payload silently stops being
+    /// classifiable and no compiler signal fires. This assertion is the signal.
+    ///
+    /// It pins a SECOND premise of the same kind, and for the same reason: the
+    /// client wire must keep declaring NO `resolution_state_version`. Both are
+    /// premises about whether `declare_raw_resolution_wire` is REACHED at all —
+    /// its first statement early-returns on a declared version, and its guard's
+    /// first conjunct is `resolution_stack` present. That is why the version
+    /// premise lives here rather than in
+    /// `client_wire_removes_every_unconditional_projection_field`, whose subject
+    /// is the removal LIST, i.e. whether the guard FIRES once reached. If the
+    /// deferred write-time stamping lands at `client_state_wire_value` on its
+    /// own, every client-wire payload takes that early return, the projection
+    /// guard goes dead for its entire population, and without the assertion
+    /// below no row reddens.
+    #[test]
+    fn client_wire_still_carries_resolution_stack() {
+        let state = parked_spell_resolution_fixture();
+        let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
+        // `viewer: None` performs no viewer filtering, so no projection sentinel
+        // is stamped — the same constructor a client debug export comes through.
+        let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+            &state, None,
+        ))
+        .expect("the client wire envelope serializes");
+
+        // Paired positive reach-guard, asserted FIRST. `next_delayed_trigger_token`
+        // carries `#[serde(default)]` with NO `skip_serializing_if`, so the derived
+        // `Serialize` always emits it and only the redactor can remove it. Without
+        // this, a green below could mean the redactor never ran — i.e. that this
+        // test measured the bare writer instead of the wire.
+        assert!(
+            bare.get("next_delayed_trigger_token").is_some(),
+            "the bare writer always emits next_delayed_trigger_token; if it does not, \
+             this test can no longer prove the redactor ran"
+        );
+        assert!(
+            wire["state"].get("next_delayed_trigger_token").is_none(),
+            "the client redactor must have run — it removes next_delayed_trigger_token"
+        );
+
+        assert!(
+            wire["state"].get("resolution_stack").is_some(),
+            "`client_state_wire_value` no longer preserves `resolution_stack`. \
+             `declare_raw_resolution_wire` (types/resolution.rs) keys on that field, \
+             and its inference rule silently stops applying to every client-wire \
+             payload if the redactor removes it. Fix the redactor or re-derive the \
+             rule — do not delete this assertion."
+        );
+
+        assert!(
+            wire["state"].get("resolution_state_version").is_none(),
+            "`client_state_wire_value` now DECLARES a resolution wire version. \
+             `declare_raw_resolution_wire` (types/resolution.rs) early-returns on \
+             that key, so its client-wire projection guard is now dead for every \
+             payload this writer produces and no other row reddens. If this is the \
+             deferred write-time stamp landing, replace the absence fingerprint with \
+             a positive `wire_projection` check — do not delete this assertion."
+        );
+    }
+
+    /// The three fields `client_state_wire_value` removes that are
+    /// UNCONDITIONALLY serialized. Local mirror of
+    /// `CLIENT_WIRE_UNCONDITIONAL_FIELDS` in `types/resolution.rs`, which is
+    /// private to that module. The mirror is deliberate: it is exactly what
+    /// mutation B of
+    /// `redaction_fingerprint_is_conjunctive_over_every_unconditional_field`
+    /// detects — dropping an entry from the production `const` leaves this list
+    /// three-wide and reddens the loop iteration for the dropped key.
+    const FINGERPRINT_FIELDS: &[&str] = &[
+        "next_delayed_trigger_token",
+        "next_delayed_trigger_instance",
+        "resolved_rules_journal",
+    ];
+
+    /// The distinctive phrase of the client-wire projection refusal raised by
+    /// `declare_raw_resolution_wire` (`types/resolution.rs`). Its FIRST clause:
+    /// the part of that sentence which is a statement about the file, and so is
+    /// true of both populations the guard refuses — a client-wire projection and
+    /// a genuine 2026-07-21..22 build-window save. The trailing hedge clause is
+    /// NOT asserted on anywhere in this module, and deliberately so — note that
+    /// this constant is a SUBSTRING of the sentence the hedge replaced, so no
+    /// row here reddens if that wording is reverted. The single assertion that
+    /// does is in `raw_capture_is_refused_as_a_client_wire_projection`
+    /// (`tests/integration/raw_resolution_stack_restore.rs`), on the reporter's
+    /// real bytes. Do not add a second one here.
+    const CLIENT_WIRE_PROJECTION_REFUSAL: &str =
+        "missing the private rules record for the resolution it was paused in";
+
+    /// The unversioned raw writer the inference keys on: `GameState`'s own
+    /// derived `Serialize`, NOT `to_value(PersistedGameState::Raw(..))` (which
+    /// routes through `ResolutionStateWire::to_value` and declares a version).
+    fn bare_value(state: &GameState) -> serde_json::Value {
+        serde_json::to_value(state).expect("the bare GameState serializes")
+    }
+
+    /// The redacted client-wire projection of the same state. `viewer: None`
+    /// performs no viewer filtering, so no `viewer_projection` sentinel is
+    /// stamped — this is the exact constructor a client debug export comes
+    /// through, and the population `reject_viewer_projection_as_authority`
+    /// cannot see.
+    fn client_wire_value(state: &GameState) -> serde_json::Value {
+        serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+            state, None,
+        ))
+        .expect("the client wire envelope serializes")["state"]
+            .clone()
+    }
+
+    fn without_keys(mut value: serde_json::Value, keys: &[&str]) -> serde_json::Value {
+        let object = value
+            .as_object_mut()
+            .expect("the raw payload is a JSON object");
+        for key in keys {
+            object.remove(*key);
+        }
+        value
+    }
+
+    /// The same redacted payload with ONE fingerprint key restored, at the value
+    /// an absent key already decodes to: `next_delayed_trigger_token` carries a
+    /// plain `#[serde(default)]` (so absent means `0`), and
+    /// `normalize_delayed_trigger_allocators` collapses both `0` and the absent
+    /// case to `1` for a payload with no install roots.
+    ///
+    /// So this payload is DECODE-IDENTICAL to the redacted one and differs only
+    /// in whether the guard's conjunction holds. It measures what the same bytes
+    /// do with the projection guard bypassed, without deleting the guard — which
+    /// is what makes the `!contains(…)` clauses below discriminated rather than
+    /// vacuously true of any refusal.
+    fn with_the_projection_guard_bypassed(mut wire: serde_json::Value) -> serde_json::Value {
+        wire.as_object_mut()
+            .expect("the client wire payload is a JSON object")
+            .insert(
+                "next_delayed_trigger_token".to_string(),
+                serde_json::Value::from(0),
+            );
+        wire
+    }
+
+    /// A state parking one `AbilityContinuation` frame and no
+    /// `resolving_stack_entry`.
+    ///
+    /// `stashed` selects the shape:
+    /// * `None` — a legitimately absent firing (a paused spell or
+    ///   activated-ability resolution). Decodes on BOTH sides today.
+    /// * `Some(f)` — the RESIDUAL shape: the continuation holds a firing while
+    ///   the live carrier does not. It is built the way production builds it —
+    ///   the live carrier is set, `PendingContinuation::new` snapshots it
+    ///   (`trigger_firing: state.resolving_trigger_firing`), and then the live
+    ///   carrier is taken, which is exactly
+    ///   `game/stack.rs::finish_resolving_stack_entry`'s
+    ///   `state.resolving_trigger_firing.take()`. The engine puts it back through
+    ///   `game/effects/mod.rs::restore_continuation_trigger_firing`'s
+    ///   `(None, Some(stashed))` arm; this fixture is that state captured
+    ///   mid-flight.
+    ///
+    /// Deliberately NOT built on `parked_frame_on_triggered_carrier_fixture()`:
+    /// that fixture sets a triggered `resolving_stack_entry` AND a live firing,
+    /// so extending it yields the coherent shape, which the client wire already
+    /// refuses without any of this — see
+    /// `raw_inferred_v2_refuses_an_unlabeled_triggered_carrier`.
+    fn parked_continuation_fixture(stashed: Option<TriggerFiring>) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_301),
+            PlayerId(0),
+            "Continuation source".to_string(),
+            Zone::Battlefield,
+        );
+        state.resolving_trigger_firing = stashed;
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+        // `finish_resolving_stack_entry`'s `.take()`, reproduced.
+        state.resolving_trigger_firing = None;
+        state
+    }
+
+    /// V14. Pins the OTHER half of the premise
+    /// `client_wire_still_carries_resolution_stack` pins: the three fields whose
+    /// absence `declare_raw_resolution_wire` reads as a client-wire redaction
+    /// fingerprint are removed by `client_state_wire_value` and by nothing else.
+    ///
+    /// Mutation (i) — delete any one `root.remove(k)` for these three keys in
+    /// `client_state_wire_value`. Reddens at the WIRE-ABSENT assertion for that
+    /// key; the reach-guard is untouched, because the three siblings it names are
+    /// not in the removal list.
+    ///
+    /// Mutation (ii) — give any of the three declarations a
+    /// `skip_serializing_if`. This is a mutation CLASS, and whether it is
+    /// detected is VALUE-dependent: a predicate that skips the value the fixture
+    /// happens to hold reddens the BARE-PRESENT assertion (which runs before its
+    /// wire-absent sibling), and a predicate that does not skip it leaves this row
+    /// green while the guard's premise has in fact been broken. The
+    /// serde-default control below closes the realistic `is_default` / `is_zero` /
+    /// `is_empty` family for all three fields at once; it does not close an
+    /// arbitrary predicate, and no test can.
+    ///
+    /// Do not delete these assertions: the fingerprint is a fact about a MUTABLE
+    /// removal list, and nothing in the type system ties the two together.
+    #[test]
+    fn client_wire_removes_every_unconditional_projection_field() {
+        let state = parked_spell_resolution_fixture();
+        let bare = bare_value(&state);
+        let wire = client_wire_value(&state);
+
+        // Paired positive reach-guard, asserted FIRST. These three are
+        // unconditionally serialized too but are NOT in the redactor's removal
+        // list, so they must survive on BOTH sides. Without them a green below
+        // could mean "absent everywhere" — the wire value not being a real
+        // `GameState` at all — rather than "the redactor removed exactly these".
+        for sibling in [
+            "next_object_id",
+            "next_pip_id",
+            "next_logical_zone_change_group_id",
+        ] {
+            assert!(
+                bare.get(sibling).is_some(),
+                "the bare writer must emit {sibling}; without it this row cannot \
+                 discriminate a removal from an absence"
+            );
+            assert!(
+                wire.get(sibling).is_some(),
+                "the client redactor must NOT remove {sibling}; it is the control \
+                 that proves the removals below are selective"
+            );
+        }
+
+        for field in FINGERPRINT_FIELDS {
+            assert!(
+                bare.get(*field).is_some(),
+                "the bare writer must always emit {field} — the fingerprint reads \
+                 its absence as a fact about the WRITER, which holds only while the \
+                 field has no skip_serializing_if"
+            );
+            assert!(
+                wire.get(*field).is_none(),
+                "`client_state_wire_value` no longer removes {field}. \
+                 `is_redacted_client_wire_projection` (types/resolution.rs) reads the \
+                 absence of all three as the client-wire redaction fingerprint, and \
+                 that inference silently stops applying if the removal list changes. \
+                 Fix the redactor or re-derive the rule — do not delete this assertion."
+            );
+        }
+
+        // Mutation (ii)'s serde-default control: a state holding exactly the
+        // values an absent key decodes to must STILL emit all three. Any
+        // skip-when-default predicate added to a declaration reddens here.
+        let mut serde_defaults = GameState::new_two_player(7);
+        serde_defaults.next_delayed_trigger_token = 0;
+        serde_defaults.next_delayed_trigger_instance = initial_delayed_trigger_instance_id();
+        serde_defaults.resolved_rules_journal = ResolvedRulesJournal::default();
+        let defaulted = bare_value(&serde_defaults);
+        for field in FINGERPRINT_FIELDS {
+            assert!(
+                defaulted.get(*field).is_some(),
+                "the bare writer must emit {field} even when it holds its serde \
+                 default; a skip-when-default predicate would make its absence \
+                 value-dependent and destroy the fingerprint's premise"
+            );
+        }
+    }
+
+    /// V15. The mechanism row: a payload that decodes cleanly on BOTH sides
+    /// today is newly refused on the redacted side, by name.
+    ///
+    /// Mutation — delete the fingerprint guard in `declare_raw_resolution_wire`.
+    /// The wire payload is MEASURED `DECODE OK (Raw)` today, so with the guard
+    /// gone it decodes. Reddens at the `expect_err` on the wire payload; the
+    /// message `contains` below is never reached under that mutation.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_client_wire_projection() {
+        let state = parked_continuation_fixture(None);
+
+        // Paired positive reach-guard, asserted FIRST: the unredacted payload
+        // decodes through the raw ingress, so the refusal below is attributable
+        // to the redaction and to nothing else in the fixture.
+        let reached = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect("the unredacted payload decodes at the unversioned raw ingress");
+        assert!(
+            matches!(reached, PersistedGameState::Raw(_)),
+            "the reach-guard must decode through the raw ingress, which is the seam \
+             under test"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(client_wire_value(&state))
+            .expect_err(
+                "a redacted client-wire projection must not decode at the unversioned \
+                 raw ingress",
+            )
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+    }
+
+    /// V16. The discriminating row. UNREDACTED this state is REFUSED; redacted
+    /// it decoded silently, with the CR 603.2 ordinary vs CR 603.7 delayed
+    /// firing classification gone from the parked continuation. The guard
+    /// restores the refusal.
+    ///
+    /// The reach-guard is a REFUSAL, not an admission, and that is the point: the
+    /// claim is not "a payload is refused", it is "the redaction converts a
+    /// refusal into an acceptance". An admission guard would be FALSE for this
+    /// fixture, so the row could not even be written that way.
+    ///
+    /// Mutation A — delete the fingerprint guard. The wire payload is MEASURED
+    /// `DECODE OK (Raw) continuation_firings=[None]` today, so it decodes.
+    /// Reddens at the `expect_err` on the wire payload. The reach-guard is
+    /// unaffected: the guard never fires on the bare payload, whose fingerprint
+    /// is fully present.
+    ///
+    /// Mutation B (message only) — reword the guard's `Err` string. The
+    /// `expect_err` still passes, so this reddens at the projection-message
+    /// `contains`. No other mutation reaches that assertion.
+    ///
+    /// The final `!contains(…)` clause is a "not for the wrong reason" guard that
+    /// NO mutation above reddens (deletion reddens the `expect_err` first, reword
+    /// reddens the `contains`). It is not vacuous, though: the bypass control
+    /// immediately before it shows what these exact bytes do when the guard's
+    /// conjunction is broken — they DECODE, losing the stashed firing, which is
+    /// the defect itself.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_projection_that_would_otherwise_lose_its_stashed_firing() {
+        let state = parked_continuation_fixture(Some(TriggerFiring::Ordinary));
+
+        // REACH-GUARD, asserted FIRST — and it is a REFUSAL.
+        let unredacted = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect_err(
+                "the unredacted residual shape is REFUSED — that refusal is what the \
+                 redaction converts into a silent restore",
+            )
+            .to_string();
+        assert!(
+            unredacted
+                .contains("paused trigger continuation has no active resolving trigger carrier"),
+            "the unredacted refusal must come from the coherence authority, got {unredacted}"
+        );
+
+        let wire = client_wire_value(&state);
+
+        // The defect, exhibited rather than asserted: with the guard's
+        // conjunction broken by one restored key, these same bytes DECODE, and
+        // the parked continuation's firing is gone.
+        let bypassed = serde_json::from_value::<PersistedGameState>(
+            with_the_projection_guard_bypassed(wire.clone()),
+        )
+        .expect("with the fingerprint incomplete the redacted payload still decodes today");
+        let PersistedGameState::Raw(decoded) = bypassed else {
+            panic!("a bare gameState object decodes through the raw ingress");
+        };
+        assert!(
+            decoded
+                .resolution_stack
+                .ability_continuations()
+                .all(|continuation| continuation.trigger_firing.is_none()),
+            "the redaction is what silently drops the stashed firing — if it no longer \
+             does, this row's premise is gone"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(wire)
+            .expect_err("the redacted residual shape must not decode")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+        assert!(
+            !error.contains("paused trigger continuation has no active resolving trigger carrier"),
+            "the guard must refuse BEFORE the coherence authority is consulted — after \
+             the redaction that authority has no evidence left to refuse on, got {error}"
+        );
+    }
+
+    /// V17. Multi-authority hostile row: the firing is carried on the live
+    /// resolving entry AND on the parked continuation, while the install root
+    /// that authorises it lives in the `resolved_rules_journal` and in the
+    /// `delayed_triggers` entry's `provenance` — both of which the same redaction
+    /// strips.
+    ///
+    /// Mutation — move the guard to after the decode (e.g. into
+    /// `validate_trigger_firing_coherence`). It cannot be written faithfully,
+    /// and that is the finding: by the time a `GameState` exists the three
+    /// fingerprint fields have already taken their serde defaults and the
+    /// evidence is gone, so a guard placed there is equivalent to no guard. That
+    /// equivalence is what makes the PRE-decode placement load-bearing. With no
+    /// guard the payload is still refused, so the `expect_err` still passes;
+    /// it reddens at the projection-message `contains`, and the string it then
+    /// produces is measured by the bypass control below.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_projection_before_its_delayed_install_roots_are_consulted() {
+        let mut state = parked_frame_on_triggered_carrier_fixture();
+        // `parked_frame_on_triggered_carrier_fixture` returns only a `GameState`,
+        // so the triggered entry's source is read back out of it. CR 603.7: the
+        // continuation's own `chain.source_id` must be THAT object, because
+        // `validate_trigger_firing_coherence` checks the paused continuation's
+        // provenance against its chain source, not merely against the origin.
+        let source = state
+            .resolving_stack_entry
+            .as_ref()
+            .expect("the fixture supplies a triggered resolving entry")
+            .source_id;
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(1),
+            instance: DelayedTriggerInstanceId(1),
+            source_id: source,
+        };
+        // The install root, without which the BARE reach-guard cannot be
+        // established. `register_root` accepts a live delayed trigger's
+        // provenance as a root, so a live entry is sufficient and is far less
+        // construction than a journal command.
+        let mut delayed = DelayedTrigger::new(
+            crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        );
+        delayed.provenance = DelayedInstallIdentity::ReceiptEligible(origin);
+        state.delayed_triggers.push(delayed);
+        // The allocator tail check is `next_delayed_trigger_token <= max_token`,
+        // so both allocators must sit ABOVE the root they authorise.
+        state.next_delayed_trigger_token = 2;
+        state.next_delayed_trigger_instance = 2;
+        state.resolving_trigger_firing = Some(TriggerFiring::ReceiptEligible(origin));
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+
+        // Paired positive reach-guard, asserted FIRST: the coherent, unredacted
+        // multi-authority payload decodes.
+        let reached = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect("the unredacted multi-authority payload decodes at the raw ingress");
+        assert!(
+            matches!(reached, PersistedGameState::Raw(_)),
+            "the reach-guard must decode through the raw ingress, which is the seam \
+             under test"
+        );
+
+        let wire = client_wire_value(&state);
+
+        // Measures the string the ingress produces with the guard bypassed, so
+        // the `!contains` clause below is a discriminated claim rather than a
+        // sentence that is true of any refusal whatsoever.
+        let bypassed = serde_json::from_value::<PersistedGameState>(
+            with_the_projection_guard_bypassed(wire.clone()),
+        )
+        .expect_err("the redaction strips every install root, so the payload is refused")
+        .to_string();
+        assert!(
+            bypassed.contains("resolving triggered entry has no firing carrier"),
+            "with the guard bypassed the redacted payload must fall through to the \
+             carrier refusal, got {bypassed}"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(wire)
+            .expect_err("the redacted multi-authority payload must not decode")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+        assert!(
+            !error.contains("resolving triggered entry has no firing carrier"),
+            "the projection must be refused at the ingress, before the delayed \
+             install roots are consulted, got {error}"
+        );
+    }
+
+    /// V18. The fingerprint is CONJUNCTIVE over every entry of
+    /// `CLIENT_WIRE_UNCONDITIONAL_FIELDS`. The discriminating population is a
+    /// PARTIALLY absent fingerprint — the real 2026-07-22 to 2026-08-01 build
+    /// shape — because a fully restored one satisfies neither `.all(…)` nor
+    /// `.any(…)` and is blind to every mutation of the conjunction.
+    ///
+    /// Removing two keys does not change the decode for an unrelated reason:
+    /// the serde defaults are `next_delayed_trigger_token → 0`,
+    /// `next_delayed_trigger_instance → 1`, `resolved_rules_journal → default`,
+    /// this fixture holds no delayed triggers and an empty journal, and
+    /// `normalize_delayed_trigger_allocators` collapses both `0` and `1` to `1`
+    /// with no install roots. The decoded state is identical either way.
+    ///
+    /// Mutation A — `.any(…)` instead of `.all(…)` in
+    /// `is_redacted_client_wire_projection`. Every loop iteration has two of the
+    /// three absent, so `any` is true and the guard fires. Reddens at the
+    /// `expect`/`unwrap_or_else` INSIDE the loop, on the first iteration. The
+    /// reach-guard stays green (all three absent means `any` is true too).
+    ///
+    /// Mutation B — drop any one key `k` from `CLIENT_WIRE_UNCONDITIONAL_FIELDS`.
+    /// The iteration whose only present key is `k` then evaluates the conjunction
+    /// over the other two, both of which it removed, so the guard fires. Reddens
+    /// on exactly that iteration; the other two stay green. Together the two
+    /// mutations pin the conjunction AND each of the three entries independently.
+    #[test]
+    fn redaction_fingerprint_is_conjunctive_over_every_unconditional_field() {
+        let base = bare_value(&parked_continuation_fixture(None));
+
+        // Paired positive reach-guard, asserted FIRST: with ALL three absent this
+        // payload family IS refused. Without it the three greens below would be
+        // vacuous — they would pass for a payload the guard could never fire on.
+        let error = serde_json::from_value::<PersistedGameState>(without_keys(
+            base.clone(),
+            FINGERPRINT_FIELDS,
+        ))
+        .expect_err("a fully absent fingerprint must be refused")
+        .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the reach-guard must be refused as a projection, got {error}"
+        );
+
+        for present in FINGERPRINT_FIELDS.iter().copied() {
+            let others: Vec<&str> = FINGERPRINT_FIELDS
+                .iter()
+                .copied()
+                .filter(|field| *field != present)
+                .collect();
+            let decoded =
+                serde_json::from_value::<PersistedGameState>(without_keys(base.clone(), &others))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "a payload still carrying {present} is not a mechanical \
+                             client-wire redaction and must decode, got {error}"
+                        )
+                    });
+            assert!(
+                matches!(decoded, PersistedGameState::Raw(_)),
+                "a payload still carrying {present} must decode through the raw ingress"
+            );
+        }
+    }
+
+    /// V19. The boundary §5.3 deliberately did NOT widen: an unversioned payload
+    /// WITHOUT `resolution_stack` keeps its legacy v1 treatment even when it
+    /// bears the full redaction fingerprint. Those payloads decode today, their
+    /// exposure predates the wire inference, and refusing them would be a real
+    /// availability regression for a defect this ingress did not introduce.
+    ///
+    /// Mutation — drop the `object.contains_key("resolution_stack") &&` conjunct
+    /// from the guard. The no-frames payload then bears the fingerprint and is
+    /// refused. Reddens at the subject's `unwrap_or_else`.
+    #[test]
+    fn unversioned_payload_without_a_frame_stack_keeps_its_legacy_v1_treatment() {
+        // Paired positive reach-guard, asserted FIRST: the SAME fingerprint
+        // removal applied to a payload that DOES carry a frame stack is refused.
+        // So the only difference between the two payloads below is the frame
+        // stack, which is exactly the conjunct under test.
+        let with_frames = without_keys(
+            bare_value(&parked_continuation_fixture(None)),
+            FINGERPRINT_FIELDS,
+        );
+        let error = serde_json::from_value::<PersistedGameState>(with_frames)
+            .expect_err("the frame-stack sibling must be refused as a projection")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the reach-guard must be refused as a projection, got {error}"
+        );
+
+        let bare = bare_value(&GameState::new_two_player(42));
+        assert!(
+            bare.get("resolution_stack").is_none(),
+            "an empty frame stack is omitted by skip_serializing_if, which is what \
+             routes this payload to the legacy v1 branch — without that this row \
+             would pass for the wrong reason"
+        );
+
+        let decoded =
+            serde_json::from_value::<PersistedGameState>(without_keys(bare, FINGERPRINT_FIELDS))
+                .expect("a payload with no frame stack keeps its legacy v1 treatment");
+        assert!(
+            matches!(decoded, PersistedGameState::Raw(_)),
+            "the no-frames payload must still decode through the raw ingress"
+        );
     }
 
     /// CR 109.5 + CR 611.2a: a restored restriction still carrying the raw
