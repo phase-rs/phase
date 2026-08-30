@@ -67,6 +67,11 @@ fn candelabra_target_selection() -> (GameRunner, Vec<ObjectId>) {
 #[test]
 fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     let (mut runner, lands) = candelabra_target_selection();
+    let initial_target_walk_counters = perf_counters::homogeneous_target_walk_cache_snapshot();
+    assert_eq!(
+        initial_target_walk_counters.initializations, 1,
+        "the homogeneous target walk must enumerate its initial legal set once"
+    );
     perf_counters::reset();
     let mut raw_action_candidates = 0;
     let mut returned_legal_actions = 0;
@@ -130,10 +135,6 @@ fn candelabra_many_targets_avoid_nonterminal_legality_clones_and_resolve() {
     assert_eq!(returned_legal_actions, 3320, "returned legal action census");
     assert_eq!(target_candidates, 3240, "target candidate census");
     assert_eq!(cancel_candidates, 80, "cancel candidate census");
-    assert_eq!(
-        target_walk_counters.initializations, 1,
-        "the homogeneous target walk must enumerate its initial legal set once"
-    );
     assert_eq!(
         target_walk_counters.advances,
         TARGET_COUNT as u64 - 1,

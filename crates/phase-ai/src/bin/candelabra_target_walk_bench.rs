@@ -92,7 +92,16 @@ fn main() {
                 GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(id)),
                 } => Some(*id),
-                _ => None,
+                GameAction::ChooseTarget { target: None } => {
+                    panic!("Candelabra target selection must not offer a targetless choice")
+                }
+                GameAction::SelectTargets { .. } => {
+                    panic!("Candelabra must use the incremental ChooseTarget action")
+                }
+                GameAction::CancelCast => None,
+                unexpected => {
+                    panic!("Candelabra target selection offered unexpected action: {unexpected:?}")
+                }
             })
             .collect();
         let cancels = actions
