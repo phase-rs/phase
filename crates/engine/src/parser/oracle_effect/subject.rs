@@ -13,7 +13,7 @@ use super::animation::{
 };
 use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
-use super::ParseContext;
+use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
