@@ -7,15 +7,12 @@
 //! as ALWAYS TRUE — fail-open) and now covers four layers of the same genus:
 //!
 //!   * sections 1–3 — #8183's own three: a gate that failed to TYPE;
-//!   * section 4 — the defending-player gates. Ayesha and Graxiplon are parser
-//!     gaps like #8183's; **Dandân's is different in kind** — its gate types
+//!   * sections 4–5 — the defending-player gates. Ayesha's gate (section 5)
+//!     and Graxiplon's (section 1) are parser gaps like #8183's;
+//!     **Dandân's (section 4) is different in kind** — its gate types
 //!     correctly and the ANCHOR cannot bind;
-//!   * section 5 — the group-share counting gap: the gate types, the anchor
+//!   * section 6 — the group-share counting gap: the gate types, the anchor
 //!     binds, and the gate is STILL inert because of what the filter carries.
-//!
-//! CR 604.1: a static ability is "simply true" — its gate decides whether it
-//! currently applies, so a gate the parser drops or mis-polarizes silently
-//! turns the restriction on (or off) for every board state.
 //!
 //! CR 604.1: a static ability is "simply true" — its gate decides whether it
 //! currently applies, so a gate the parser drops or mis-polarizes silently
@@ -26,10 +23,16 @@
 //!     The `unless` NEGATION was dropped at the `can't be blocked` fallback
 //!     branch, leaving a bare `Unrecognized` that evaluates TRUE, so
 //!     `CantBeBlocked` applied unconditionally: Graxiplon was permanently
-//!     unblockable. With the fix the gate is `Not(Unrecognized)`, which
-//!     evaluates FALSE, so the restriction does not apply and the block is
-//!     legal (CR 509.1b — the defending player checks each creature for
-//!     blocking restrictions, and an evasion ability creates one).
+//!     unblockable. #8183 restored the NEGATION but not its operand: the gate
+//!     became `Not(Unrecognized)`, and since `Unrecognized` evaluates TRUE the
+//!     `Not` evaluates FALSE, so the restriction applied on NO board. That was
+//!     an honest improvement over permanent unblockability, but it is still not
+//!     the printed card. The `defending player controls ` leaf of
+//!     `parse_control_scope_prefix` types the operand, so the gate finally
+//!     answers the board: with the printed gate UNMET the `Not` is TRUE, the
+//!     restriction APPLIES, and the block is ILLEGAL (CR 509.1b — the
+//!     defending player checks each creature for blocking restrictions, and an
+//!     evasion ability creates one).
 //!
 //!  2. **Training Drone** — "This creature can't attack or block unless it's
 //!     equipped." The anaphoric "it" in the gate was never resolved to the
@@ -49,27 +52,28 @@
 //!     continuous effect from a static ability applies at any given moment to
 //!     whatever its text indicates; CR 508.1k — an attacking creature).
 //!
-//!  4. **The defending-player gates.**
-//!     **Ayesha Tanaka, Armorer** — "can't be blocked as long as defending
-//!     player controls three or more artifacts" — and **Graxiplon** —
-//!     "…unless defending player controls three or more creatures that share a
-//!     creature type" — both fell to `Unrecognized` because the control-count
-//!     combinator had only `you control` and `your opponents control` leaves.
-//!     With the `defending player controls` leaf the count is scoped through
-//!     `ControllerRef::DefendingPlayer` and the anchor binds: for a
-//!     `CantBeBlocked` static the source is already in `combat.attackers` when
-//!     CR 509.1b's blocking-restriction check runs (CR 508.5 / CR 508.5a
-//!     determine which seat).
-//!
-//!     **Dandân** — "can't attack unless defending player controls an Island" —
-//!     is the same printed grammar on the OTHER side of combat, and it is a
+//!  4. **Dandân — the defending-player anchor that cannot bind.**
+//!     "Can't attack unless defending player controls an Island" is the same
+//!     printed grammar as section 5's on the OTHER side of combat, and it is a
 //!     RUNTIME ANCHOR gap rather than a parser gap. Its gate types correctly,
 //!     but attack legality is checked before the candidate is recorded as an
 //!     attacker, so the anchor resolves to nothing and the gate reads UNMET on
 //!     every board. That test pins the gap deliberately; read its doc comment
 //!     before changing it.
 //!
-//!  5. **The group-share counting gap.**
+//!  5. **Ayesha Tanaka, Armorer — the defending-player count that never typed.**
+//!     "Can't be blocked as long as defending player controls three or more
+//!     artifacts" — and, on the same combinator, **Graxiplon**'s "…unless
+//!     defending player controls three or more creatures that share a creature
+//!     type" from section 1 — both fell to `Unrecognized` because the
+//!     control-count combinator had only `you control` and `your opponents
+//!     control` leaves. With the `defending player controls ` leaf the count is
+//!     scoped through `ControllerRef::DefendingPlayer` and the anchor binds: for
+//!     a `CantBeBlocked` static the source is already in `combat.attackers` when
+//!     CR 509.1b's blocking-restriction check runs (CR 508.5 / CR 508.5a
+//!     determine which seat).
+//!
+//!  6. **The group-share counting gap.**
 //!     **Littjara Kinseekers** ("if you control three or more creatures that
 //!     share a creature type", CR 603.4) and **Synchronized Eviction** ("costs
 //!     {2} less to cast if you control at least two creatures that share a
@@ -398,11 +402,13 @@ fn legal_attackers_for(runner: &GameRunner, blocker: ObjectId) -> Vec<ObjectId> 
 
 /// REACH-GUARD for the Graxiplon runtime test below.
 ///
-/// `graxiplon_can_be_blocked_when_gate_unmet` asserts a block is LEGAL. That
-/// assertion is satisfied for the wrong reason if Graxiplon parsed no
-/// `CantBeBlocked` static at all, or parsed one with no gate. This pins that
-/// the static exists AND carries a condition, so the legal block below is
-/// evidence about the GATE and not about an absent static.
+/// `graxiplon_cannot_be_blocked_when_gate_unmet` asserts a block is ILLEGAL.
+/// That assertion is satisfied for the wrong reason if Graxiplon parsed a
+/// `CantBeBlocked` static carrying NO gate, which would refuse every block
+/// unconditionally and reproduce the pre-#8183 bug while reading green. This
+/// pins that the static exists AND carries a condition, so the illegal block
+/// below is evidence about the GATE and not about an unconditional
+/// restriction.
 #[test]
 fn graxiplon_parses_a_condition_gated_cant_be_blocked_static() {
     let mut scenario = GameScenario::new();
@@ -1059,9 +1065,14 @@ fn dandan_attack_legality_ignores_the_defending_players_board() {
 ///
 /// Both rows assert a blocking outcome. Either is satisfied for the wrong
 /// reason if Ayesha parsed no `CantBeBlocked` static, or parsed one whose gate
-/// is still an always-true `Unrecognized`. Naming the whole condition tree here
-/// — a single `QuantityComparison` leaf — pins both at once: it exists, it is
-/// typed, and there is no `Unrecognized` anywhere inside it.
+/// is still an always-true `Unrecognized`. The pattern names the VARIANT, not
+/// the whole tree (`QuantityComparison { .. }`), which is sufficient here: it
+/// pins that the gate exists and is typed, and a `QuantityComparison` carries
+/// only `QuantityExpr` / `Comparator` fields, `QuantityExpr` is closed over
+/// arithmetic on `QuantityRef` / `i32`, and no `QuantityRef` variant embeds a
+/// `StaticCondition` — so no `Unrecognized` can hide inside it. Contrast
+/// Dandân's guard above, which destructures every node and needs no such
+/// type-level argument.
 ///
 /// Revert-discrimination: the `defending player controls ` leaf only. The
 /// Branch A lift never touches Ayesha, whose gate carries no shared-quality
@@ -1376,10 +1387,18 @@ fn synchronized_eviction_is_reduced_when_two_creatures_share_a_type() {
 ///
 /// **No lands and no other mana source on either board.** `can_cast_object_now`
 /// asks whether the cost is feasibly PAYABLE, not whether the floating pool
-/// alone covers it, so a single untapped land would make both rows castable and
-/// destroy the discrimination. The floating pool must be the only mana
-/// available — the same reason `hollow_one_cost_reduction.rs` puts no lands on
-/// its board. This is the most breakable property of this fixture.
+/// alone covers it: it reaches
+/// `casting::can_feasibly_pay_mana_cost_without_x_with_probe`, whose first act
+/// is the auto-tap probe `casting::can_pay_cost_after_auto_tap_with_probe`, and
+/// only the residual is charged against the pool. So the floating pool must be
+/// the only mana available — the same reason `hollow_one_cost_reduction.rs`
+/// puts no lands on its board.
+///
+/// Breaking it FAILS LOUDLY, which is why it is documented rather than
+/// asserted: `synchronized_eviction_is_not_reduced_when_creatures_share_no_type`
+/// asserts `!can_cast_object_now`, so any added mana source turns THAT row RED.
+/// "Both rows go green proving nothing" is not a reachable state. Only P0's
+/// side is load-bearing either way.
 ///
 /// The phase is `PreCombatMain` to match that precedent; Synchronized Eviction
 /// is an INSTANT, so the phase is not load-bearing for legality.

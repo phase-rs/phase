@@ -4084,27 +4084,38 @@ fn take_group_shared_quality(filter: &mut TargetFilter) -> Option<SharedQuality>
         )
     })?;
     // `position` matched this variant at `idx` on the line above and `remove`
-    // cannot change it; `let … else` keeps the destructure total without a
-    // wildcard arm or a panic.
+    // cannot change it, so this arm is unreachable. It must PANIC rather than
+    // return `None`: the property has already been removed by the time we get
+    // here, so a silent decline would hand the caller's `alt` fall-through a
+    // filter with a dropped constraint.
     let FilterProp::SharesQuality { quality, .. } = tf.properties.remove(idx) else {
-        return None;
+        unreachable!(
+            "`position` matched FilterProp::SharesQuality at index {idx}; \
+             `Vec::remove` returns that same element"
+        )
     };
     Some(quality)
 }
 
-/// CR 201.2 + CR 109.3: Parse "<scope> control(s) N or more [type] that share a
+/// CR 201.2a + CR 109.3: Parse "<scope> control(s) N or more [type] that share a
 /// [quality]" and "<scope> control(s) N or more [type] with the same [quality]
 /// [as one another]"
 /// → `QuantityComparison(ObjectCountBySharedQuality[quality, Max] >= N)`.
 ///
 /// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both
-/// read a control-scope prefix + a GE threshold + a type phrase + a
-/// shared-characteristic constraint; they differ only on the RELATION over that
+/// read a controller prefix + a GE threshold + a type phrase + a
+/// shared-characteristic constraint, and differ on the RELATION over that
 /// characteristic (`different` → count the distinct values; `the same` / `share
-/// a` → group by value and take the largest group). `aggregate: Max` is what
-/// makes "three or more lands with the same name" mean "some ONE name is shared
-/// by at least three of your lands" rather than "you have at least three lands
-/// in total".
+/// a` → group by value and take the largest group). They now also differ on
+/// SCOPE: this function is parameterized on `parse_control_scope_prefix` while
+/// the distinct-quality sibling still hard-codes `tag("you control ")`. That
+/// asymmetry is deliberate — no card prints "defending player controls N or
+/// more … with different …", so widening the sibling would add an unexercised
+/// path with no corpus evidence behind it. Widen it when such a card prints.
+///
+/// `aggregate: Max` is what makes "three or more lands with the same name" mean
+/// "some ONE name is shared by at least three of your lands" rather than "you
+/// have at least three lands in total".
 ///
 /// **Two printings, one predicate.** English prints this constraint either as a
 /// relative clause ("three or more creatures **that share a creature type**",
@@ -4160,13 +4171,12 @@ fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, Static
         let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
         return Ok((
             &input[consumed..],
-            make_quantity_comparison(
+            make_quantity_ge(
                 QuantityRef::ObjectCountBySharedQuality {
                     filter,
                     quality,
                     aggregate: AggregateFunction::Max,
                 },
-                Comparator::GE,
                 n,
             ),
         ));
@@ -4184,13 +4194,12 @@ fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, Static
     let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
         &input[consumed..],
-        make_quantity_comparison(
+        make_quantity_ge(
             QuantityRef::ObjectCountBySharedQuality {
                 filter,
                 quality,
                 aggregate: AggregateFunction::Max,
             },
-            Comparator::GE,
             n,
         ),
     ))
@@ -10791,6 +10800,16 @@ mod tests {
     /// remainder here means some route accepted a gate BROADER than printed
     /// (Beebles would become unblockable on any two nonland permanents) while
     /// coverage went green — a silent, coverage-invisible regression.
+    ///
+    /// Revert-failing: the `defending player controls ` leaf of
+    /// `parse_control_scope_prefix` ONLY, and it fails as a PANIC rather than an
+    /// assertion — without that leaf nothing parses this prefix, `parse_condition`
+    /// returns `Err`, and the row dies at the `unwrap_or_else`. Reverting the
+    /// Branch B `parse_shared_quality` substitution leaves this row GREEN,
+    /// because `artist` is outside that vocabulary either way. Neither is the
+    /// guard this row exists for: its guard is that the remainder stays
+    /// `" that share an artist"`, which goes RED the moment any route learns to
+    /// consume the clause.
     #[test]
     fn share_an_artist_is_not_consumed_and_stays_an_honest_gap() {
         let text =
