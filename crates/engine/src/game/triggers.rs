@@ -13099,6 +13099,17 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
 /// `None` for it. Any migration of another condition arm onto this helper MUST
 /// first establish that the provenance it reads is stamped pre-move.
 ///
+/// The live-entrant branch is also scoped to `record.to_zone == Zone::Battlefield`
+/// — CR 608.2h + CR 113.7a: only the battlefield is the "public zone it was
+/// expected in" for reading current-info characteristics such as the
+/// pre-`reset_for_battlefield_exit` cast stamps this helper's `WasCast` caller
+/// depends on; any other destination must always fall through to the record's
+/// LKI, never the live object, even when the live object still sits in
+/// `record.to_zone` with a matching incarnation. This mirrors the
+/// `destination == Zone::Battlefield` gate in `matches_zone_change_event_object_filter`
+/// (`game/filter.rs`) cited below. Any migration of another condition arm onto
+/// this helper MUST preserve this destination scope.
+///
 /// Returns `None` when the event names a subject that nothing can answer for —
 /// fail closed. A different object's provenance is NEVER substituted for the
 /// subject's; that substitution is issue #8163.
@@ -13124,13 +13135,19 @@ fn trigger_subject_read<'event, 'state>(
     };
 
     let live = state.objects.get(object_id);
+    // CR 608.2h + CR 113.7a: the live-entrant branch is scoped to battlefield
+    // destinations only, mirroring `matches_zone_change_event_object_filter`
+    // (`game/filter.rs`) — a non-battlefield destination always falls through
+    // to the record's own LKI below, even when the live object still sits in
+    // that zone with a matching incarnation.
     // CR 400.7: the live object answers only while it is still THIS entrant.
-    let is_entrant = live.is_some_and(|object| {
-        object.zone == record.to_zone
-            && record
-                .entered_incarnation
-                .is_none_or(|incarnation| object.incarnation == incarnation)
-    });
+    let is_entrant = record.to_zone == Zone::Battlefield
+        && live.is_some_and(|object| {
+            object.zone == record.to_zone
+                && record
+                    .entered_incarnation
+                    .is_none_or(|incarnation| object.incarnation == incarnation)
+        });
     if is_entrant {
         return live.map(TriggerSourceRead::ExactLive);
     }
@@ -34152,6 +34169,87 @@ pub mod tests {
             ),
             "the event record's own LKI must answer once the entrant has left, per \
              CR 608.2h — never the trigger source, which is separately stamped as NOT cast"
+        );
+    }
+
+    /// `/review-impl` LOW finding (second round): `trigger_subject_read`'s
+    /// live-entrant branch must be scoped to `record.to_zone == Zone::Battlefield`,
+    /// mirroring the `destination == Zone::Battlefield` gate in
+    /// `matches_zone_change_event_object_filter` (`game/filter.rs`). A
+    /// `ZoneChanged` event whose `to_zone` is NOT the battlefield (a
+    /// dies/exiled-shaped trigger carrying a cast-provenance intervening-if)
+    /// must never read a live object sitting in that non-battlefield
+    /// `to_zone` even when its zone and incarnation both match the record —
+    /// `entered_incarnation` is only ever stamped by battlefield entries, so a
+    /// zone-only match there would license reading a live object whose cast
+    /// stamps were already cleared. It must fall through to the event
+    /// record's own last known information (CR 608.2h + CR 113.7a).
+    #[test]
+    fn was_cast_non_battlefield_destination_reads_record_lki_not_cleared_live_object() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().cast_from_zone = None;
+
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Feasting Troll King".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.cast_controller = Some(PlayerId(0));
+        }
+        // Non-battlefield destination: the record's projection is captured
+        // pre-move, while the entrant's real cast stamps are still live.
+        let event = GameEvent::ZoneChanged {
+            object_id: entrant,
+            from: Some(Zone::Stack),
+            to: Zone::Graveyard,
+            record: Box::new(
+                state
+                    .objects
+                    .get(&entrant)
+                    .unwrap()
+                    .snapshot_for_zone_change(entrant, Some(Zone::Stack), Zone::Graveyard),
+            ),
+        };
+
+        // The live object now sits in `record.to_zone` (Graveyard) with its
+        // cast stamps cleared, exactly as `reset_for_battlefield_exit` clears
+        // them on a battlefield departure — but `entered_incarnation` is
+        // `None` here (only battlefield entries stamp it), so a zone-only
+        // check would wrongly treat this as "still the entrant".
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.cast_from_zone = None;
+            obj.cast_controller = None;
+        }
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "a non-battlefield destination must never license reading the live \
+             object's cleared cast stamps -- it must fall through to the event \
+             record's LKI (CR 608.2h + CR 113.7a)"
         );
     }
 
