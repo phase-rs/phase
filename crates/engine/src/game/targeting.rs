@@ -1125,6 +1125,7 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         TargetFilter::ParentTargetSlot { index } => {
             resolve_parent_slot_from_root(state, ability, *index)
                 .and_then(|target| target_ref_object(&target))
+                .filter(|id| ability.target_pin_is_current(*id, state))
                 .into_iter()
                 .collect()
         }

@@ -279,16 +279,22 @@ pub fn resolve(
         let targets = parent_target_snapshot(state, ability);
         let pins =
             if ability_pins_object_anaphor(&delayed_ability) && !condition_expects_referent_move {
-                targets
-                    .iter()
-                    .filter_map(|target| match target {
-                        TargetRef::Object(id) => state
-                            .objects
-                            .get(id)
-                            .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
-                        TargetRef::Player(_) => None,
+                ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .map(|context| context.object_incarnations.clone())
+                    .unwrap_or_else(|| {
+                        targets
+                            .iter()
+                            .filter_map(|target| match target {
+                                TargetRef::Object(id) => state.objects.get(id).map(
+                                    crate::types::identifiers::ObjectIncarnationRef::from_object,
+                                ),
+                                TargetRef::Player(_) => None,
+                            })
+                            .collect()
                     })
-                    .collect()
             } else {
                 Vec::new()
             };

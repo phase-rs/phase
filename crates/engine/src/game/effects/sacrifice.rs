@@ -230,7 +230,7 @@ pub fn resolve(
     }
 
     let live_targets = ability.live_object_targets(state);
-    let targeted_objects = if matches!(
+    let mut targeted_objects = if matches!(
         sacrifice_controller_scope(filter),
         Some(ControllerRef::ParentTargetController)
     ) {
@@ -246,6 +246,24 @@ pub fn resolve(
         };
         crate::game::effects::effect_object_targets(filter, pool)
     };
+
+    // CR 400.7 + CR 603.7c: preserve declared slot numbering while rejecting
+    // the individual stale referent after indexing. Falling through to the
+    // untargeted sacrifice path would make a controller sacrifice a different
+    // permanent, so this exact stale-slot shape resolves as a no-op instead.
+    let stale_parent_target_slot = matches!(filter, TargetFilter::ParentTargetSlot { .. })
+        && targeted_objects
+            .iter()
+            .any(|id| !ability.target_pin_is_current(*id, state));
+    targeted_objects.retain(|id| ability.target_pin_is_current(*id, state));
+    if stale_parent_target_slot {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
 
     if targeted_objects.is_empty() {
         // CR 701.21a: Derive the player(s) whose permanents are in scope from

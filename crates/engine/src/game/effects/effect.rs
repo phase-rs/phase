@@ -529,8 +529,7 @@ fn register_transient_effect(
     // that scan `state.transient_continuous_effects` directly.
     // A `ControllerRef::TargetPlayer` affected filter is different: its player
     // target parameterizes a broadcast object filter and is resolved below.
-    let has_forwarded_result = ability.context.forwarded_result_context.is_some();
-    if (!ability.targets.is_empty() || has_forwarded_result)
+    if (!ability.targets.is_empty() || forwarded_parent_target)
         && direct_binding_uses_targets
         && !static_affected_references_target_player
     {
@@ -808,7 +807,7 @@ fn transient_bound_filters(
             let objects = crate::game::effects::effect_object_targets(filter, raw);
             return objects
                 .into_iter()
-                .filter(|id| state.objects.contains_key(id))
+                .filter(|id| context.object_pin_is_current(*id, state))
                 .map(|id| TargetFilter::SpecificObject { id })
                 .collect();
         }
@@ -1244,6 +1243,103 @@ mod tests {
                 keyword: Keyword::Menace,
             }]
         );
+    }
+
+    #[test]
+    fn forwarded_result_context_does_not_skip_cost_paid_object_binding() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let paid = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Paid Object".to_string(),
+            Zone::Exile,
+        );
+        let snapshot = crate::types::ability::CostPaidObjectSnapshot {
+            object_id: paid,
+            lki: state.objects[&paid].snapshot_public_characteristics(),
+        };
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::CostPaidObject)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        ability.set_cost_paid_object_recursive(snapshot);
+        ability.context.forwarded_result_context =
+            Some(crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[]));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: paid }
+        );
+    }
+
+    #[test]
+    fn forwarded_result_context_rejects_a_new_object_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forwarded Object".to_string(),
+            Zone::Battlefield,
+        );
+        let context =
+            crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[target]);
+        state.objects.get_mut(&target).unwrap().bump_incarnation();
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        ability.context.forwarded_result_context = Some(context);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.transient_continuous_effects.is_empty());
     }
 
     #[test]

@@ -151,6 +151,10 @@ fn resolve_effect_recipients(
     // targets while still referring to an earlier slot (Self-Destruct class).
     if let TargetFilter::ParentTargetSlot { index } = target_filter {
         return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .filter(|target| match target {
+                TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                TargetRef::Player(_) => true,
+            })
             .into_iter()
             .collect();
     }
