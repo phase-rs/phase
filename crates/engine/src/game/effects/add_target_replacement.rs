@@ -516,8 +516,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
-        ReplacementDefinition, RestrictionExpiry, SourceExclusion, TargetFilter, TypeFilter,
-        TypedFilter,
+        ForwardedResultContext, ReplacementDefinition, RestrictionExpiry, SourceExclusion,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -673,7 +673,7 @@ mod tests {
             PlayerId(0),
         );
         ability.context.forwarded_result_context = Some(Box::new(
-            crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[reanimated]),
+            ForwardedResultContext::from_object_ids(&state, &[reanimated]),
         ));
 
         resolve(&mut state, &ability, &mut Vec::new()).unwrap();
@@ -685,6 +685,122 @@ mod tests {
                 .any(|replacement| replacement.event == ReplacementEvent::Moved),
             "the rider must bind to the forwarded reanimated object"
         );
+    }
+
+    #[test]
+    fn empty_forwarded_result_context_does_not_fall_back_to_declared_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reanimator".to_string(),
+            Zone::Battlefield,
+        );
+        let declared_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Declared Target".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Exile);
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(declared_target)],
+            source,
+            PlayerId(0),
+        );
+        ability.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&state, &[]),
+        ));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state.objects[&declared_target]
+            .replacement_definitions
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_forwarded_result_context_does_not_bind_a_replacement() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reanimator".to_string(),
+            Zone::Battlefield,
+        );
+        let moved = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let context = ForwardedResultContext::from_object_ids(&state, &[moved]);
+        state.objects.get_mut(&moved).unwrap().incarnation += 1;
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Exile);
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.context.forwarded_result_context = Some(Box::new(context));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state.objects[&moved].replacement_definitions.is_empty());
+    }
+
+    #[test]
+    fn any_replacement_without_forwarded_context_uses_declared_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Exile);
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state.objects[&target]
+            .replacement_definitions
+            .iter()
+            .any(|replacement| replacement.event == ReplacementEvent::Moved));
     }
 
     #[test]

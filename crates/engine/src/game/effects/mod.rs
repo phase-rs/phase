@@ -13337,6 +13337,9 @@ fn resolve_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
+                trailing_resolved.context.forwarded_result_context = Some(Box::new(
+                    ForwardedResultContext::from_object_ids(state, &forwarded_objects),
+                ));
                 resolve_ability_chain(state, &trailing_resolved, events, depth + 1)?;
             }
         } else if ability.forward_result
@@ -13358,13 +13361,19 @@ fn resolve_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
+                remaining.context.forwarded_result_context = Some(Box::new(
+                    ForwardedResultContext::from_object_ids(state, &forwarded_objects),
+                ));
                 resolve_ability_chain(state, &remaining, events, depth + 1)?;
             }
             return Ok(());
-        } else if !forwarded_objects.is_empty() {
+        } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
-            let attachment_candidates =
-                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects);
+            let attachment_candidates = (!forwarded_objects.is_empty())
+                .then(|| {
+                    attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects)
+                })
+                .unwrap_or_default();
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
@@ -13374,7 +13383,9 @@ fn resolve_chain_body(
             // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
             // ability's source. Its ParentTarget anaphora read the separate
             // forwarded-result context at delayed-trigger creation.
-            if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
+            if !forwarded_objects.is_empty()
+                && !copy_spell_self_ref_keeps_resolving_spell_source(sub)
+            {
                 if !matches!(sub.effect, Effect::CreateDelayedTrigger { .. }) {
                     sub_with_context.source_id = forwarded_objects[0];
                 }
