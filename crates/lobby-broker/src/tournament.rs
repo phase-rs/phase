@@ -584,14 +584,25 @@ impl TournamentMeta {
 /// arity — MTR Appendix E and MSTR's own table are genuinely different inputs
 /// to the same kind of lookup, not one table with an extra column.
 ///
-/// **`HEAD_TO_HEAD` — MTR Appendix E.** Its published rows are exactly the
-/// doubling rule "the smallest `r` with `2^r >= players`", floored at 3 for
-/// the 4-8 bracket: 4-8 -> 3, 9-16 -> 4, 17-32 -> 5, 33-64 -> 6, 65-128 -> 7.
-/// Appendix E's rows *above* 128 players are not reproduced anywhere in this
-/// repository (`RESEARCH.md` §8 records the table as cited but deliberately
-/// not re-verified), so beyond 128 this keeps applying the same doubling rule
-/// rather than inventing row boundaries; an organizer running a field that
-/// large is expected to override.
+/// **`HEAD_TO_HEAD` — MTR Appendix E, i.e. the doubling rule.** Its rows are
+/// exactly "the smallest `r` with `2^r >= players`", floored at 3 for the 4-8
+/// bracket: 4-8 -> 3, 9-16 -> 4, 17-32 -> 5, 33-64 -> 6, 65-128 -> 7, and the
+/// same doubling continues unbroken above that — 129-256 -> 8, 257-512 -> 9,
+/// 513-1024 -> 10, 1025-2048 -> 11, and so on. There is no plateau and no
+/// off-power-of-two row boundary anywhere in the sequence, so nothing here
+/// caps or special-cases large fields. The boundaries were confirmed against
+/// direct real-world tournament-organizer experience (16 -> 4 and 17 -> 5
+/// exactly, with the pattern holding cleanly upward);
+/// `default_total_rounds_follows_the_doubling_rule_without_plateau` pins every
+/// one of them, including 1025 -> 11 as proof the count keeps climbing.
+///
+/// This is literally the same arithmetic as the `SingleElimination` arm above:
+/// both are `ceil(log2(field))`, because the number of Swiss rounds needed to
+/// separate a field is the depth of the bracket that would decide it. The only
+/// difference is Swiss's 3-round floor. An organizer who wants a different
+/// value — matching some other published chart for an unusual format, or
+/// running a very large field to a different length — sets
+/// [`TournamentMeta::total_rounds_override`], which wins outright.
 ///
 /// **`arity > HEAD_TO_HEAD` — MSTR's own table** for 4-player pods, quoted in
 /// `RESEARCH.md` §13: 6-16 -> 2 rounds, 17-24 -> 3, 25-32 -> 4, 33-40 -> 5,
@@ -2231,6 +2242,71 @@ mod tests {
         assert_eq!(mgr.get("T").expect("t").total_rounds(), 4);
         mgr.meta_mut("T").expect("t").total_rounds_override = Some(11);
         assert_eq!(mgr.get("T").expect("t").total_rounds(), 11);
+    }
+
+    /// The head-to-head Swiss default is the doubling rule "smallest `r` with
+    /// `2^r >= players`" the whole way up: no plateau, no off-power-of-two row
+    /// boundary. Both sides of every boundary are pinned, because the counts
+    /// above 128 players are exactly where a mis-transcribed chart would land
+    /// a fabricated cap or an invented row.
+    #[test]
+    fn default_total_rounds_follows_the_doubling_rule_without_plateau() {
+        for (players, rounds) in [
+            (16, 4),
+            (17, 5),
+            (32, 5),
+            (33, 6),
+            (64, 6),
+            (65, 7),
+            (128, 7),
+            (129, 8),
+            (256, 8),
+            (257, 9),
+            (512, 9),
+            (513, 10),
+            (1024, 10),
+            // Still climbing: a cap or plateau at 10 rounds fails here.
+            (1025, 11),
+        ] {
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, players),
+                rounds,
+                "head-to-head Swiss default for {players} players"
+            );
+        }
+
+        // Unbounded and monotonic: every doubling adds exactly one round, as
+        // far as a `u32` field can go. Nothing plateaus, and no row boundary
+        // sits anywhere but a power of two.
+        for r in 4..32u32 {
+            let full = 1u32 << r;
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, full),
+                r,
+                "exactly 2^{r} players"
+            );
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, full + 1),
+                r + 1,
+                "one player past 2^{r}"
+            );
+        }
+
+        // Above the 3-round floor the Swiss table and the single-elimination
+        // bracket depth are the same `ceil(log2(field))` arithmetic — the doc
+        // comment's internal-consistency claim, asserted here rather than left
+        // to prose.
+        for players in [9u32, 16, 17, 100, 1025] {
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, players),
+                default_total_rounds(
+                    BracketShape::SingleElimination,
+                    MatchArity::HEAD_TO_HEAD,
+                    players
+                ),
+                "doubling rule and bracket depth agree for {players} players"
+            );
+        }
     }
 
     /// A single-elimination event's round count is its bracket depth, not the
