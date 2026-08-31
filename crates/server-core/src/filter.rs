@@ -408,20 +408,20 @@ mod tests {
             CardId(22),
             PlayerId(0),
             "Forest".to_string(),
-            Zone::Battlefield,
+            Zone::Library,
         );
         let card_b = create_object(
             &mut state,
             CardId(23),
             PlayerId(0),
             "Island".to_string(),
-            Zone::Battlefield,
+            Zone::Library,
         );
         let members = [card_a, card_b]
             .into_iter()
             .map(|id| MassLibraryOrderMember {
                 identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
-                origin: Zone::Battlefield,
+                origin: Zone::Library,
             })
             .collect();
 
@@ -469,6 +469,8 @@ mod tests {
             }
             other => panic!("Expected EffectZoneChoice, got {other:?}"),
         }
+        assert_eq!(filtered.objects[&card_a].name, "Hidden Card");
+        assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
     }
 
     /// CR 603.3b: `WaitingFor::OrderTriggers` carries only public information

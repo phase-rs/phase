@@ -5,14 +5,18 @@
 use std::io::Read;
 
 use engine::ai_support::legal_actions;
+use engine::game::effects::change_zone::resolve_all;
 use engine::game::engine::apply_as_current;
+use engine::types::ability::{
+    ControllerRef, Effect, LibraryPosition, ResolvedAbility, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    MassLibraryOrderBatch, MassLibraryOrderMember, PersistedGameState, WaitingFor,
+    GameState, MassLibraryOrderBatch, MassLibraryOrderMember, PersistedGameState, WaitingFor,
 };
-use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
 
 fn gunzip(gz: &[u8]) -> String {
     let mut json = String::new();
@@ -199,42 +203,65 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
     );
 }
 
-/// Before the typed queue existed, a single owner with multiple cards had no
-/// continuation carrier. Its archived prompt remains admissible only while the
-/// resolving `ChangeZoneAll` producer and every current owner/member agree.
+/// CR 401.4: A single-owner mass `ChangeZoneAll` creates no continuation
+/// carrier, but its real resolution-time prompt must still accept the owner's
+/// submitted order and finish at priority.
 #[test]
-fn legacy_single_owner_mass_order_without_pending_carrier_is_legal() {
-    std::thread::Builder::new()
-        .name("legacy-mass-order-admission".to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            let mut state = legacy_turn15_persisted()
-                .into_game_state()
-                .expect("fixture restores");
-            let cards = vec![ObjectId(161), ObjectId(189), ObjectId(216), ObjectId(211)];
+fn single_owner_mass_library_order_completes_through_change_zone_all() {
+    let mut state = GameState::new_two_player(42);
+    let first = engine::game::zones::create_object(
+        &mut state,
+        CardId(500),
+        PlayerId(0),
+        "First Creature".to_string(),
+        Zone::Battlefield,
+    );
+    let second = engine::game::zones::create_object(
+        &mut state,
+        CardId(501),
+        PlayerId(0),
+        "Second Creature".to_string(),
+        Zone::Battlefield,
+    );
+    for card in [first, second] {
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Creature);
+    }
+    let ability = ResolvedAbility::new(
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: Some(LibraryPosition::Bottom),
+            random_order: false,
+        },
+        vec![],
+        ObjectId(900),
+        PlayerId(0),
+    );
 
-            state.pending_mass_library_order_choice = None;
-            state.priority_player = PlayerId(1);
-            let WaitingFor::EffectZoneChoice {
-                player,
-                cards: offered_cards,
-                count,
-                min_count,
-                ..
-            } = &mut state.waiting_for
-            else {
-                panic!("fixture starts at EffectZoneChoice");
-            };
-            *player = PlayerId(1);
-            *offered_cards = cards.clone();
-            *count = cards.len();
-            *min_count = cards.len();
+    resolve_all(&mut state, &ability, &mut Vec::new())
+        .expect("production ChangeZoneAll opens a mass ordering prompt");
+    let cards = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+        other => panic!("expected mass ordering prompt, got {other:?}"),
+    };
+    assert_eq!(cards.len(), 2);
+    assert!(state.pending_mass_library_order_choice.is_none());
 
-            assert_select_cards_is_publicly_legal(&state, &cards);
-        })
-        .expect("large-stack admission test thread starts")
-        .join()
-        .expect("large-stack admission test thread completes");
+    apply_as_current(&mut state, GameAction::SelectCards { cards })
+        .expect("production mass ordering selection is accepted");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// The compatibility gate proves a very specific archived producer. A prompt
