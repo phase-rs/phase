@@ -520,7 +520,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         // observe its rebinding receipt, but never chooses a different path.
         if (difficulty === "VeryHard" && this.engine) {
           try {
-            const state = await this.engine!.getState();
+            const state = unwrapClientGameState(await this.engine!.getState());
             if (state.waiting_for.type === "Priority") {
               const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
               if (scores?.length) {
@@ -561,7 +561,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         try {
           // A snapshot can become stale while scoring. That is safe: the main
           // worker rebinds every score against a newly-issued contract below.
-          const state = await this.engine.getState();
+          const state = unwrapClientGameState(await this.engine.getState());
           if (state.waiting_for.type === "Priority") {
             const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
             if (scores?.length) {
