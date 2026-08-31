@@ -13,7 +13,8 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
+    GameState, MassLibraryOrderBatch, MassLibraryOrderMember, PendingCounterPostAction,
+    PendingZoneChangeDelivery, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1014,6 +1015,7 @@ pub fn resolve(
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
             // `EffectZoneChoice` round-trip so it is evaluated against the
@@ -1566,16 +1568,20 @@ fn group_object_ids_by_owner_apnap(
 }
 
 fn mass_library_order_effect_zone_choice(
-    owner: PlayerId,
-    cards: Vec<ObjectId>,
+    batch: MassLibraryOrderBatch,
     source_id: ObjectId,
     library_position: crate::types::ability::LibraryPosition,
     track_exiled_by_source: bool,
     duration: Option<crate::types::ability::Duration>,
 ) -> WaitingFor {
-    let choice_count = cards.len();
+    let choice_count = batch.members.len();
+    let cards = batch
+        .members
+        .iter()
+        .map(|member| member.identity.object_id)
+        .collect();
     WaitingFor::EffectZoneChoice {
-        player: owner,
+        player: batch.owner,
         cards,
         count: choice_count,
         min_count: choice_count,
@@ -1595,9 +1601,34 @@ fn mass_library_order_effect_zone_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: Some(library_position),
+        mass_library_order: Some(batch),
         is_cost_payment: false,
         enters_modified_if: None,
         duration,
+    }
+}
+
+/// Freeze the exact object incarnation and origin that a
+/// mass library-order prompt may arrange. This is deliberately captured before
+/// the first selection is published; a later zone change creates a distinct
+/// object even when the engine retains its object id.
+fn snapshot_mass_library_order_batch(
+    state: &GameState,
+    owner: PlayerId,
+    cards: Vec<ObjectId>,
+) -> MassLibraryOrderBatch {
+    MassLibraryOrderBatch {
+        owner,
+        members: cards
+            .into_iter()
+            .map(|object_id| {
+                let object = &state.objects[&object_id];
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::from_object(object),
+                    origin: object.zone,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -1605,22 +1636,30 @@ fn mass_library_order_effect_zone_choice(
 /// surface the next owner's `EffectZoneChoice` if any remain.
 pub(crate) fn resume_next_mass_library_order_choice(state: &mut GameState) -> Option<PlayerId> {
     let mut pending = state.pending_mass_library_order_choice.take()?;
-    let (owner, cards) = pending.remaining_batches.first()?.clone();
-    pending.remaining_batches.remove(0);
-    if pending.remaining_batches.is_empty() {
+    let batch = if !pending.remaining_batches.is_empty() {
+        pending.remaining_batches.remove(0)
+    } else {
+        let (owner, cards) = pending.legacy_remaining_batches.first()?.clone();
+        pending.legacy_remaining_batches.remove(0);
+        // Legacy tuple queues did not record identity/origin. The strict legacy
+        // admission gate accepted the CURRENT prompt only after proving every
+        // member still occupies its old battlefield origin; snapshot the next
+        // batch before publishing it so every later interaction is typed.
+        snapshot_mass_library_order_batch(state, owner, cards)
+    };
+    if pending.remaining_batches.is_empty() && pending.legacy_remaining_batches.is_empty() {
         state.pending_mass_library_order_choice = None;
     } else {
         state.pending_mass_library_order_choice = Some(pending.clone());
     }
     state.waiting_for = mass_library_order_effect_zone_choice(
-        owner,
-        cards,
+        batch.clone(),
         pending.source_id,
         pending.library_position,
         pending.track_exiled_by_source,
         pending.duration,
     );
-    Some(owner)
+    Some(batch.owner)
 }
 
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
@@ -1940,7 +1979,11 @@ pub fn resolve_all(
             .first()
             .expect("matching.len() > 1 guarantees at least one owner batch")
             .clone();
-        let remaining_batches: Vec<_> = owner_batches.into_iter().skip(1).collect();
+        let remaining_batches: Vec<_> = owner_batches
+            .into_iter()
+            .skip(1)
+            .map(|(owner, cards)| snapshot_mass_library_order_batch(state, owner, cards))
+            .collect();
         if !remaining_batches.is_empty() {
             state.pending_mass_library_order_choice =
                 Some(crate::types::game_state::PendingMassLibraryOrderChoice {
@@ -1951,11 +1994,11 @@ pub fn resolve_all(
                     track_exiled_by_source,
                     duration: ability.duration.clone(),
                     remaining_batches,
+                    legacy_remaining_batches: Vec::new(),
                 });
         }
         state.waiting_for = mass_library_order_effect_zone_choice(
-            first_owner,
-            first_cards,
+            snapshot_mass_library_order_batch(state, first_owner, first_cards),
             ability.source_id,
             effect_library_position
                 .clone()
@@ -5987,6 +6030,7 @@ mod tests {
                 player,
                 cards,
                 effect_kind,
+                mass_library_order,
                 ..
             } => {
                 assert_eq!(
@@ -5996,6 +6040,22 @@ mod tests {
                 );
                 assert_eq!(cards.len(), 3);
                 assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+                let batch = mass_library_order
+                    .as_ref()
+                    .expect("fresh mass ordering prompt carries exact member identities");
+                assert_eq!(batch.owner, PlayerId(1));
+                assert_eq!(
+                    batch
+                        .members
+                        .iter()
+                        .map(|member| member.identity.object_id)
+                        .collect::<Vec<_>>(),
+                    *cards
+                );
+                assert!(batch
+                    .members
+                    .iter()
+                    .all(|member| member.origin == Zone::Library));
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
@@ -6054,7 +6114,12 @@ mod tests {
         resolve_all(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                mass_library_order,
+                ..
+            } => {
                 assert_eq!(
                     *player,
                     PlayerId(1),
@@ -6065,11 +6130,22 @@ mod tests {
                 let mut expect = vec![p1_a, p1_b];
                 expect.sort_by_key(|id| id.0);
                 assert_eq!(sorted, expect);
+                assert_eq!(
+                    mass_library_order.as_ref().map(|batch| batch.owner),
+                    Some(PlayerId(1))
+                );
             }
             other => panic!("expected first-owner EffectZoneChoice, got {other:?}"),
         }
         assert!(
-            state.pending_mass_library_order_choice.is_some(),
+            state
+                .pending_mass_library_order_choice
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.legacy_remaining_batches.is_empty()
+                        && pending.remaining_batches.len() == 1
+                        && pending.remaining_batches[0].owner == PlayerId(0)
+                }),
             "non-active owner batch must remain queued"
         );
 
@@ -6082,9 +6158,18 @@ mod tests {
         .unwrap();
 
         match &state.waiting_for {
-            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                mass_library_order,
+                ..
+            } => {
                 assert_eq!(*player, PlayerId(0), "second owner receives their batch");
                 assert_eq!(cards, &vec![p0_card]);
+                assert_eq!(
+                    mass_library_order.as_ref().map(|batch| batch.owner),
+                    Some(PlayerId(0))
+                );
             }
             other => panic!("expected second-owner EffectZoneChoice, got {other:?}"),
         }
@@ -9507,6 +9592,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

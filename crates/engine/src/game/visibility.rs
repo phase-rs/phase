@@ -1868,6 +1868,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
                 library_position: None,
+                mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 // The bounded-move duration is a public effect parameter, not

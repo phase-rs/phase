@@ -26,6 +26,126 @@ use super::turns;
 use super::zones;
 use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
 
+/// A fresh mass library-order prompt is valid only for
+/// the exact member identities and origins frozen by its producer. Prompt cards
+/// and snapshot members remain lockstep so an arbitrary eligible id cannot be
+/// substituted into a persisted choice.
+fn mass_library_order_batch_is_current(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+    batch: &crate::types::game_state::MassLibraryOrderBatch,
+) -> bool {
+    let unique_cards: HashSet<_> = cards.iter().copied().collect();
+    batch.owner == player
+        && batch.members.len() == cards.len()
+        && unique_cards.len() == cards.len()
+        && batch.members.iter().zip(cards).all(|(member, card_id)| {
+            member.identity.object_id == *card_id
+                && state.objects.get(card_id).is_some_and(|object| {
+                    object.incarnation == member.identity.incarnation
+                        && object.zone == member.origin
+                        && object.owner == batch.owner
+                })
+        })
+}
+
+/// Admit only the old serialized shape emitted by the
+/// former `ChangeZoneAll` mass-order producer. This narrow migration gate is
+/// intentionally not a general battlefield-origin exception: fresh prompts
+/// carry `mass_library_order`, and ordinary `PutAtLibraryPosition` choices
+/// retain their advertised-zone validation.
+#[allow(clippy::too_many_arguments)]
+fn legacy_mass_library_order_prompt_is_current(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+    count: usize,
+    min_count: usize,
+    up_to: bool,
+    source_id: ObjectId,
+    effect_kind: EffectKind,
+    zone: Zone,
+    destination: Option<Zone>,
+    enter_tapped: crate::types::zones::EtbTapState,
+    enter_transformed: bool,
+    enters_under_player: Option<crate::types::player::PlayerId>,
+    enters_attacking: bool,
+    owner_library: bool,
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    enter_with_counters: &[(crate::types::counter::CounterType, u32)],
+    conditional_enter_with_counters: &[(
+        crate::types::ability::TargetFilter,
+        crate::types::counter::CounterType,
+        QuantityExpr,
+    )],
+    count_param: u32,
+    library_position: Option<&LibraryPosition>,
+    is_cost_payment: bool,
+    enters_modified_if: Option<&crate::types::ability::TargetFilter>,
+    track_exiled_by_source: bool,
+    duration: Option<&crate::types::ability::Duration>,
+) -> bool {
+    if !matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+        || zone != Zone::Library
+        || destination.is_some()
+        || library_position.is_none()
+        || count != cards.len()
+        || min_count != cards.len()
+        || up_to
+        || enter_tapped != crate::types::zones::EtbTapState::Unspecified
+        || enter_transformed
+        || enters_under_player.is_some()
+        || enters_attacking
+        || owner_library
+        || face_down_profile.is_some()
+        || !enter_with_counters.is_empty()
+        || !conditional_enter_with_counters.is_empty()
+        || count_param != 0
+        || is_cost_payment
+        || enters_modified_if.is_some()
+    {
+        return false;
+    }
+
+    let mut all_members = std::collections::HashSet::new();
+    let current_batch_is_valid = cards.iter().all(|card_id| {
+        all_members.insert(*card_id)
+            && state
+                .objects
+                .get(card_id)
+                .is_some_and(|object| object.zone == Zone::Battlefield && object.owner == player)
+    });
+    if !current_batch_is_valid {
+        return false;
+    }
+
+    let Some(pending) = state.pending_mass_library_order_choice.as_ref() else {
+        return cards.len() >= 2;
+    };
+    if pending.source_id != source_id
+        || pending.library_position != *library_position.expect("checked above")
+        || pending.track_exiled_by_source != track_exiled_by_source
+        || pending.duration.as_ref() != duration
+        || pending.legacy_remaining_batches.is_empty()
+        || !pending.remaining_batches.is_empty()
+    {
+        return false;
+    }
+    pending
+        .legacy_remaining_batches
+        .iter()
+        .all(|(owner, batch)| {
+            !batch.is_empty()
+                && batch.iter().all(|card_id| {
+                    all_members.insert(*card_id)
+                        && state.objects.get(card_id).is_some_and(|object| {
+                            object.zone == Zone::Battlefield && object.owner == *owner
+                        })
+                })
+        })
+}
+
 /// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
 /// Original survivors remain in the printed search continuation; modified cards
 /// are delivered independently and therefore cannot be consumed by that
@@ -4996,6 +5116,7 @@ pub(super) fn handle_resolution_choice(
                 conditional_enter_with_counters,
                 count_param,
                 library_position,
+                mass_library_order,
                 is_cost_payment,
                 enters_modified_if,
                 duration,
@@ -5045,6 +5166,43 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            let typed_mass_library_order_is_current =
+                mass_library_order.as_ref().is_some_and(|batch| {
+                    mass_library_order_batch_is_current(state, player, &cards, batch)
+                });
+            let legacy_mass_library_order_is_current = mass_library_order.is_none()
+                && legacy_mass_library_order_prompt_is_current(
+                    state,
+                    player,
+                    &cards,
+                    count,
+                    min_count,
+                    up_to,
+                    source_id,
+                    effect_kind,
+                    zone,
+                    destination,
+                    enter_tapped,
+                    enter_transformed,
+                    enters_under_player,
+                    enters_attacking,
+                    owner_library,
+                    face_down_profile.as_ref(),
+                    &enter_with_counters,
+                    &conditional_enter_with_counters,
+                    count_param,
+                    library_position.as_ref(),
+                    is_cost_payment,
+                    enters_modified_if.as_ref(),
+                    track_exiled_by_source,
+                    duration.as_ref(),
+                );
+            if mass_library_order.is_some() && !typed_mass_library_order_is_current {
+                return Err(EngineError::InvalidAction(
+                    "Mass library-order prompt no longer names its exact members".to_string(),
+                ));
+            }
+
             for card_id in &chosen {
                 if !cards.contains(card_id) {
                     return Err(EngineError::InvalidAction(
@@ -5055,36 +5213,10 @@ pub(super) fn handle_resolution_choice(
                 // eligible IDs when the prompt is created; the cards can be
                 // in different zones, so there is no single zone to recheck.
                 let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
-                // PART 1 of a two-part fix — this half RESCUES ALREADY-WEDGED
-                // SAVES; the producer half in `effects/put_on_top.rs` PREVENTS
-                // FUTURE WEDGES. Neither is redundant, so do not delete one as
-                // duplicative of the other: `into_game_state` restores a
-                // persisted prompt verbatim, so a save wedged by the old
-                // producer still arrives here claiming `zone: Library` while
-                // its frozen members sit in Exile. Fixing only the producer
-                // leaves every such save permanently at 0 legal actions;
-                // fixing only this guard leaves the producer still lying.
-                //
-                // `PutAtLibraryPosition` freezes its eligible IDs when the
-                // prompt is created, so a member's current zone can legitimately
-                // differ from the prompt's advertised `zone` (Codie, Vociferous
-                // Codex bottoms cards that are sitting in Exile). Admit any
-                // origin from which the move into a library is a pure
-                // relocation, and no others.
-                //
-                // `current_zone` is `None` for an object that has ceased to
-                // exist. That case must stay REFUSED, deliberately and not
-                // incidentally: delivery below indexes `state.objects[&card_id]`
-                // (`effect_zone_non_library_delivery_order`,
-                // `replay_effect_zone_library_placement`), which panics rather
-                // than erroring on a missing id. `Option::is_some_and` encodes
-                // that — a vanished member never satisfies the predicate.
-                let is_put_at_library_position_member =
-                    matches!(effect_kind, EffectKind::PutAtLibraryPosition)
-                        && current_zone.is_some_and(Zone::is_library_relocation_origin);
                 if !matches!(effect_kind, EffectKind::ChangeZone)
                     && current_zone != Some(zone)
-                    && !is_put_at_library_position_member
+                    && !typed_mass_library_order_is_current
+                    && !legacy_mass_library_order_is_current
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
@@ -10693,6 +10825,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

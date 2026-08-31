@@ -4218,14 +4218,80 @@ pub struct PendingPerPlayerZoneChoice {
 /// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
 /// batches drain after each batch completes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MassLibraryOrderMember {
+    /// The exact object incarnation that was selected for this ordered move.
+    pub identity: ObjectIncarnationRef,
+    /// The zone this member occupied when the mass move created the prompt.
+    pub origin: Zone,
+}
+
+/// One owner's exact members of a mass library-order instruction.
+/// The identity and origin are frozen at prompt creation so a later object with
+/// the same id cannot satisfy an in-flight ordering choice.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MassLibraryOrderBatch {
+    pub owner: PlayerId,
+    pub members: Vec<MassLibraryOrderMember>,
+}
+
+/// Wire form for a pending mass ordering queue. The
+/// custom decode preserves pre-identity archives long enough for the exact
+/// legacy admission gate to upgrade their next prompt.
+#[derive(serde::Deserialize)]
+struct PendingMassLibraryOrderChoiceWire {
+    source_id: ObjectId,
+    library_position: crate::types::ability::LibraryPosition,
+    track_exiled_by_source: bool,
+    #[serde(default)]
+    duration: Option<crate::types::ability::Duration>,
+    #[serde(default)]
+    remaining_batches: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PendingMassLibraryOrderChoice {
     pub source_id: ObjectId,
     pub library_position: crate::types::ability::LibraryPosition,
     pub track_exiled_by_source: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
-    /// Remaining (owner, cards) batches in APNAP order after the current prompt.
-    pub remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// Remaining exact owner batches in APNAP order after the current prompt.
+    pub remaining_batches: Vec<MassLibraryOrderBatch>,
+    /// Old archives encoded `remaining_batches` as `(owner, object_ids)` tuples.
+    /// This field is never emitted for new saves and is promoted to a typed batch
+    /// before the successor prompt is published.
+    #[serde(skip)]
+    pub legacy_remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl<'de> serde::Deserialize<'de> for PendingMassLibraryOrderChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PendingMassLibraryOrderChoiceWire::deserialize(deserializer)?;
+        let (remaining_batches, legacy_remaining_batches) = match wire.remaining_batches {
+            Some(value) => {
+                match serde_json::from_value::<Vec<MassLibraryOrderBatch>>(value.clone()) {
+                    Ok(batches) => (batches, Vec::new()),
+                    Err(_) => (
+                        Vec::new(),
+                        serde_json::from_value::<Vec<(PlayerId, Vec<ObjectId>)>>(value)
+                            .map_err(serde::de::Error::custom)?,
+                    ),
+                }
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        Ok(Self {
+            source_id: wire.source_id,
+            library_position: wire.library_position,
+            track_exiled_by_source: wire.track_exiled_by_source,
+            duration: wire.duration,
+            remaining_batches,
+            legacy_remaining_batches,
+        })
+    }
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -12556,6 +12622,11 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
+        /// Exact origin/identity snapshot for a fresh
+        /// mass `ChangeZoneAll` library-order prompt. Generic zone choices leave
+        /// this absent and therefore retain their ordinary strict zone check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mass_library_order: Option<MassLibraryOrderBatch>,
         /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
         /// rather than effect resolution. Cost-payment choices require special
         /// handling for exile-link tracking (push_exiled_with_source_this_turn).
@@ -33558,6 +33629,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -33951,6 +34023,13 @@ mod tests {
 
     #[test]
     fn effect_zone_choice_roundtrips() {
+        let mass_library_order = MassLibraryOrderBatch {
+            owner: PlayerId(0),
+            members: vec![MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::of(ObjectId(1), 7),
+                origin: Zone::Battlefield,
+            }],
+        };
         let wf = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
@@ -33972,6 +34051,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: Some(mass_library_order.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -33980,6 +34060,42 @@ mod tests {
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"EffectZoneChoice\""));
+        assert!(json.contains("\"mass_library_order\""));
+
+        let mut legacy_wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy_wire["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mass_library_order");
+        assert!(matches!(
+            serde_json::from_value::<WaitingFor>(legacy_wire).unwrap(),
+            WaitingFor::EffectZoneChoice {
+                mass_library_order: None,
+                ..
+            }
+        ));
+        assert_eq!(mass_library_order.members.len(), 1);
+    }
+
+    #[test]
+    fn pending_mass_library_order_choice_decodes_legacy_tuple_batches() {
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::Bottom,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: Vec::new(),
+            legacy_remaining_batches: Vec::new(),
+        };
+        let mut wire = serde_json::to_value(pending).unwrap();
+        wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
+
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert!(decoded.remaining_batches.is_empty());
+        assert_eq!(
+            decoded.legacy_remaining_batches,
+            vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
+        );
     }
 
     /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
@@ -34524,6 +34640,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
