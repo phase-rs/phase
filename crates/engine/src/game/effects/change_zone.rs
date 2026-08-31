@@ -207,6 +207,26 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
     (!zones.is_empty()).then_some(zones)
 }
 
+/// Returns the zones scanned by a `ChangeZoneAll` before its target is resolved.
+/// Kept shared with compatibility validation so an archived mass-order prompt
+/// cannot admit cards from a zone the original producer would not have scanned.
+pub(crate) fn change_zone_all_origin_zones(
+    state: &GameState,
+    origin: Option<Zone>,
+    target: &TargetFilter,
+) -> Vec<Zone> {
+    let extracted = target.extract_zones();
+    if !extracted.is_empty() {
+        extracted
+    } else if let Some(origin) = origin {
+        vec![origin]
+    } else if let Some(zones) = tracked_set_member_zones(state, target) {
+        zones
+    } else {
+        vec![Zone::Battlefield]
+    }
+}
+
 /// CR 400.7 + CR 603.7c: A delayed tracked-set move retains an object-anaphor
 /// member predicate until its creation-time pin has been recorded. At firing,
 /// bind that predicate to the stored referent before the mass scan: the object
@@ -1700,16 +1720,7 @@ pub fn resolve_all(
             library_position,
             random_order,
         } => {
-            let extracted = target.extract_zones();
-            let scan_zones = if !extracted.is_empty() {
-                extracted
-            } else if let Some(origin) = origin {
-                vec![*origin]
-            } else if let Some(zones) = tracked_set_member_zones(state, target) {
-                zones
-            } else {
-                vec![Zone::Battlefield]
-            };
+            let scan_zones = change_zone_all_origin_zones(state, *origin, target);
             // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
             // to a concrete u32 once, mirroring the single-object `ChangeZone`
             // arm. Every entering object receives these counters (e.g. a

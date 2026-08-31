@@ -50,6 +50,76 @@ fn assert_select_cards_is_publicly_legal(
     );
 }
 
+fn real_single_owner_mass_library_order_state(origin: Zone) -> (GameState, Vec<ObjectId>) {
+    let mut state = GameState::new_two_player(42);
+    let first = engine::game::zones::create_object(
+        &mut state,
+        CardId(500),
+        PlayerId(0),
+        "First Creature".to_string(),
+        origin,
+    );
+    let second = engine::game::zones::create_object(
+        &mut state,
+        CardId(501),
+        PlayerId(0),
+        "Second Creature".to_string(),
+        origin,
+    );
+    for card in [first, second] {
+        state
+            .objects
+            .get_mut(&card)
+            .expect("newly created card exists")
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Creature);
+    }
+    let ability = ResolvedAbility::new(
+        Effect::ChangeZoneAll {
+            origin: Some(origin),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: Some(LibraryPosition::Bottom),
+            random_order: false,
+        },
+        vec![],
+        ObjectId(900),
+        PlayerId(0),
+    );
+    state.resolving_stack_entry = Some(StackEntry {
+        id: ObjectId(901),
+        source_id: ability.source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ability.source_id,
+            ability: Box::new(ability.clone()),
+        },
+    });
+
+    resolve_all(&mut state, &ability, &mut Vec::new())
+        .expect("production ChangeZoneAll opens a mass ordering prompt");
+    let cards = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            cards,
+            mass_library_order,
+            ..
+        } => {
+            assert!(mass_library_order.is_some());
+            cards.clone()
+        }
+        other => panic!("expected mass ordering prompt, got {other:?}"),
+    };
+    assert_eq!(cards.len(), 2);
+    assert!(state.pending_mass_library_order_choice.is_none());
+    (state, cards)
+}
+
 /// A persisted legacy queue must retain its old tuple provenance on every save
 /// until it has promoted each owner batch. The public reducer can then advance
 /// both owners back to priority without relaxing ordinary library-zone choices.
@@ -209,77 +279,76 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
 /// submitted order and finish at priority.
 #[test]
 fn single_owner_mass_library_order_completes_through_change_zone_all() {
-    let mut state = GameState::new_two_player(42);
-    let first = engine::game::zones::create_object(
-        &mut state,
-        CardId(500),
-        PlayerId(0),
-        "First Creature".to_string(),
-        Zone::Battlefield,
-    );
-    let second = engine::game::zones::create_object(
-        &mut state,
-        CardId(501),
-        PlayerId(0),
-        "Second Creature".to_string(),
-        Zone::Battlefield,
-    );
-    for card in [first, second] {
-        state
-            .objects
-            .get_mut(&card)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(engine::types::card_type::CoreType::Creature);
-    }
-    let ability = ResolvedAbility::new(
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Battlefield),
-            destination: Zone::Library,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            enters_under: None,
-            enter_tapped: EtbTapState::Unspecified,
-            enters_attacking: false,
-            enter_with_counters: vec![],
-            face_down_profile: None,
-            library_position: Some(LibraryPosition::Bottom),
-            random_order: false,
-        },
-        vec![],
-        ObjectId(900),
-        PlayerId(0),
-    );
-    state.resolving_stack_entry = Some(StackEntry {
-        id: ObjectId(901),
-        source_id: ability.source_id,
-        controller: PlayerId(0),
-        kind: StackEntryKind::ActivatedAbility {
-            source_id: ability.source_id,
-            ability: Box::new(ability.clone()),
-        },
-    });
-
-    resolve_all(&mut state, &ability, &mut Vec::new())
-        .expect("production ChangeZoneAll opens a mass ordering prompt");
-    let cards = match &mut state.waiting_for {
-        WaitingFor::EffectZoneChoice {
-            cards,
-            mass_library_order,
-            ..
-        } => {
-            assert!(mass_library_order.is_some());
-            *mass_library_order = None;
-            cards.clone()
-        }
-        other => panic!("expected mass ordering prompt, got {other:?}"),
+    let (mut state, cards) = real_single_owner_mass_library_order_state(Zone::Battlefield);
+    let &[first, _second] = cards.as_slice() else {
+        panic!("production prompt must contain exactly two cards");
     };
-    assert_eq!(cards.len(), 2);
-    assert!(state.pending_mass_library_order_choice.is_none());
+
+    let nonmatching = engine::game::zones::create_object(
+        &mut state,
+        CardId(502),
+        PlayerId(0),
+        "Nonmatching Artifact".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&nonmatching)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(engine::types::card_type::CoreType::Artifact);
+    let mut substituted = state.clone();
+    let WaitingFor::EffectZoneChoice {
+        cards,
+        mass_library_order,
+        ..
+    } = &mut substituted.waiting_for
+    else {
+        panic!("the production prompt must remain an EffectZoneChoice");
+    };
+    *cards = vec![first, nonmatching];
+    *mass_library_order = None;
+    assert!(
+        apply_as_current(
+            &mut substituted,
+            GameAction::SelectCards {
+                cards: vec![first, nonmatching],
+            },
+        )
+        .is_err(),
+        "a same-owner battlefield card outside the resolving target filter must not substitute"
+    );
+
+    let WaitingFor::EffectZoneChoice {
+        mass_library_order, ..
+    } = &mut state.waiting_for
+    else {
+        panic!("the production prompt must remain an EffectZoneChoice");
+    };
+    *mass_library_order = None;
 
     apply_as_current(&mut state, GameAction::SelectCards { cards })
         .expect("production mass ordering selection is accepted");
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
+fn legacy_marker_removed_real_continuation_preserves_hand_and_graveyard_origins() {
+    for origin in [Zone::Hand, Zone::Graveyard] {
+        let (mut state, cards) = real_single_owner_mass_library_order_state(origin);
+        let WaitingFor::EffectZoneChoice {
+            mass_library_order, ..
+        } = &mut state.waiting_for
+        else {
+            panic!("the production prompt must remain an EffectZoneChoice");
+        };
+        *mass_library_order = None;
+
+        apply_as_current(&mut state, GameAction::SelectCards { cards })
+            .expect("the legacy continuation accepts its producer's origin");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
 }
 
 /// The compatibility gate proves a very specific archived producer. A prompt

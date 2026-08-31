@@ -52,8 +52,8 @@ fn mass_library_order_batch_is_current(
 
 /// Admit only the old serialized shape emitted by the
 /// former `ChangeZoneAll` mass-order producer. This narrow migration gate is
-/// intentionally not a general battlefield-origin exception: fresh prompts
-/// carry `mass_library_order`, and ordinary `PutAtLibraryPosition` choices
+/// intentionally not a general origin exception: fresh prompts carry
+/// `mass_library_order`, and ordinary `PutAtLibraryPosition` choices
 /// retain their advertised-zone validation.
 #[allow(clippy::too_many_arguments)]
 fn legacy_mass_library_order_prompt_is_current(
@@ -108,35 +108,42 @@ fn legacy_mass_library_order_prompt_is_current(
         return false;
     }
 
-    let mut all_members = std::collections::HashSet::new();
-    let current_batch_is_valid = cards.iter().all(|card_id| {
-        all_members.insert(*card_id)
-            && state
-                .objects
-                .get(card_id)
-                .is_some_and(|object| object.zone == Zone::Battlefield && object.owner == player)
-    });
-    if !current_batch_is_valid {
-        return false;
-    }
-
     let Some(entry) = state.resolving_stack_entry.as_ref() else {
         return false;
     };
-    let stack_entry_is_exact_mass_order_producer = entry.source_id == source_id
-        && entry.ability().is_some_and(|ability| {
-            ability.source_id == source_id
-                && matches!(
-                    &ability.effect,
-                    Effect::ChangeZoneAll {
-                        destination: Zone::Library,
-                        library_position: Some(position),
-                        random_order: false,
-                        ..
-                    } if position == library_position.expect("checked above")
-                )
-        });
-    if !stack_entry_is_exact_mass_order_producer {
+    let Some(ability) = entry.ability() else {
+        return false;
+    };
+    let Effect::ChangeZoneAll {
+        destination: Zone::Library,
+        origin,
+        library_position: Some(position),
+        random_order: false,
+        target,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    if entry.source_id != source_id
+        || ability.source_id != source_id
+        || position != library_position.expect("checked above")
+    {
+        return false;
+    }
+
+    let filter_context = super::filter::FilterContext::from_ability(ability);
+    let permitted_origins =
+        effects::change_zone::change_zone_all_origin_zones(state, *origin, target);
+    let mut all_members = std::collections::HashSet::new();
+    let current_batch_is_valid = cards.iter().all(|card_id| {
+        all_members.insert(*card_id)
+            && state.objects.get(card_id).is_some_and(|object| {
+                permitted_origins.contains(&object.zone) && object.owner == player
+            })
+            && super::filter::matches_target_filter(state, *card_id, target, &filter_context)
+    });
+    if !current_batch_is_valid {
         return false;
     }
 
@@ -154,15 +161,22 @@ fn legacy_mass_library_order_prompt_is_current(
                             && batch.iter().all(|card_id| {
                                 all_members.insert(*card_id)
                                     && state.objects.get(card_id).is_some_and(|object| {
-                                        object.zone == Zone::Battlefield && object.owner == *owner
+                                        permitted_origins.contains(&object.zone)
+                                            && object.owner == *owner
                                     })
+                                    && super::filter::matches_target_filter(
+                                        state,
+                                        *card_id,
+                                        target,
+                                        &filter_context,
+                                    )
                             })
                         })
                 )
         }
         // The old producer did not write a continuation carrier when a single
         // owner had multiple cards to order. The exact resolving producer and
-        // the mandatory current battlefield owner/membership check above are
+        // the mandatory current producer-origin owner/membership check above are
         // the only authority for that archived shape.
         None => cards.len() > 1,
     }
