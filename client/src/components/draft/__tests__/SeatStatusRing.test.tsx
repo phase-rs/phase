@@ -58,9 +58,9 @@ describe("SeatStatusRing", () => {
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getByText("1 packs at Drafter")).toBeInTheDocument();
     expect(container.querySelector("[data-seat-status-ring]")).toHaveClass(
-      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+4rem),1fr))]",
-      "mb-3",
-      "gap-1.5",
+      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+3.5rem),1fr))]",
+      "mb-2",
+      "gap-1",
       "text-xs",
     );
     const units = container.querySelectorAll<HTMLElement>("[data-seat-pass-unit]");
@@ -69,21 +69,25 @@ describe("SeatStatusRing", () => {
       expect(unit.firstElementChild).toHaveAttribute("data-seat-badge");
       expect(unit.lastElementChild).toHaveAttribute("data-pass-arrow");
       const badge = unit.querySelector<HTMLElement>("[data-seat-badge]")!;
-      expect(badge).toHaveClass("min-w-[15ch]", "min-h-[44px]", "gap-0.5", "py-0.5", "pr-9");
+      expect(badge).toHaveClass("min-w-[15ch]", "min-h-[40px]", "py-0.5", "pr-7");
+      expect(badge).not.toHaveClass("gap-0.5", "pr-9");
       expect(unit.querySelector("[data-pass-arrow]")).toHaveTextContent("→");
     }
     const packIcon = screen.getByText("1", { selector: "[aria-hidden='true'] span" }).parentElement!;
-    expect(packIcon).toHaveClass("h-8", "w-8");
+    expect(packIcon).toHaveClass("h-7", "w-7", "right-0.5");
     expect(within(packIcon).getByText("1")).toHaveClass(
-      "inset-[5px]",
-      "rounded-full",
-      "border",
-      "border-jade/80",
-      "bg-slate-950/80",
+      "inset-0",
       "text-xs",
       "text-jade",
+      "[-webkit-text-stroke:1px_rgb(2_6_23_/_0.95)]",
+      "[paint-order:stroke_fill]",
     );
-    expect(within(packIcon).getByText("1")).not.toHaveClass("text-white");
+    expect(within(packIcon).getByText("1")).not.toHaveClass(
+      "text-white",
+      "rounded-full",
+      "border",
+      "bg-slate-950/80",
+    );
   });
 
   it("places right-pass arrows before their equal-width seat badges", () => {

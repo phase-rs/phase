@@ -130,8 +130,6 @@ export interface DraftWorkspaceProps {
   mobileOverlay?: boolean;
   mobileWorkspaceOpen?: boolean;
   onMobileWorkspaceOpenChange?(open: boolean): void;
-  mobileSummaryAccessory?: ReactNode;
-  tabletSideboardAccessory?: ReactNode;
   responsiveContext?: "draft" | "builder";
 }
 
@@ -151,8 +149,6 @@ export function DraftWorkspace({
   mobileOverlay = false,
   mobileWorkspaceOpen = false,
   onMobileWorkspaceOpenChange,
-  mobileSummaryAccessory,
-  tabletSideboardAccessory,
   responsiveContext = "draft",
 }: DraftWorkspaceProps) {
   const { t } = useTranslation(["draft", "common"]);
@@ -547,7 +543,7 @@ export function DraftWorkspace({
               data-zone="sideboard"
               data-drop-target="collapsed-sideboard"
               data-drop-state={sideboardDropActive ? "active" : "idle"}
-              className={`${tabletPortraitLayout && tabletSideboardAccessory ? "grid grid-rows-[auto_minmax(0,1fr)] gap-2" : ""} ${tabletPortraitLayout
+              className={tabletPortraitLayout
                 ? sideboardCollapsed
                   ? "h-full min-h-0 min-w-0"
                   : "absolute inset-0 z-20 min-h-0 min-w-0"
@@ -555,31 +551,24 @@ export function DraftWorkspace({
                 ? "h-full min-h-0 min-w-0"
                 : builderPhonePortraitLayout
                   ? "min-w-0 shrink-0"
-                  : "min-w-0"}`}
+                  : "min-w-0"}
             >
-              {tabletPortraitLayout && tabletSideboardAccessory && (
-                <div data-tablet-sideboard-accessory className="ml-auto w-1/2 shrink-0">
-                  {tabletSideboardAccessory}
-                </div>
-              )}
-              <div className={tabletPortraitLayout && tabletSideboardAccessory ? "min-h-0" : "contents"}>
-                <CompactSideboard
-                  pool={pool}
-                  poolGroups={poolGroups}
-                  workspace={normalized}
-                  preferences={boardPreferences}
-                  interactionLocked={interactionLocked}
-                  dropActive={sideboardDropActive}
-                  collapsed={sideboardCollapsed}
-                  {...(dragController === undefined ? {} : { dragController })}
-                  onToggle={toggleSideboard}
-                  onWorkspaceChange={(next) => { if (!interactionLocked) onWorkspaceChange(next); }}
-                  onCardHover={interactionLocked ? undefined : onCardHover}
-                  responsiveLayout={responsiveLayout}
-                  responsiveContext={responsiveContext}
-                  touchDragEnabled={touchDragEnabled}
-                />
-              </div>
+              <CompactSideboard
+                pool={pool}
+                poolGroups={poolGroups}
+                workspace={normalized}
+                preferences={boardPreferences}
+                interactionLocked={interactionLocked}
+                dropActive={sideboardDropActive}
+                collapsed={sideboardCollapsed}
+                {...(dragController === undefined ? {} : { dragController })}
+                onToggle={toggleSideboard}
+                onWorkspaceChange={(next) => { if (!interactionLocked) onWorkspaceChange(next); }}
+                onCardHover={interactionLocked ? undefined : onCardHover}
+                responsiveLayout={responsiveLayout}
+                responsiveContext={responsiveContext}
+                touchDragEnabled={touchDragEnabled}
+              />
             </section>}
           </div>
         ) : (
@@ -662,16 +651,6 @@ export function DraftWorkspace({
     </section>
     {mobileOverlayActive && (
       <>
-      {mobileSummaryAccessory && (
-        <div
-          data-mobile-summary-accessory
-          className={responsiveLayout === "phone-landscape"
-            ? "fixed bottom-[58px] right-[9px] z-[42] w-[50vw]"
-            : "fixed bottom-[calc(112px_+_env(safe-area-inset-bottom))] right-[9px] z-[42] w-[50vw]"}
-        >
-          {mobileSummaryAccessory}
-        </div>
-      )}
       <div
         data-mobile-workspace-summary
         className={responsiveLayout === "phone-landscape"

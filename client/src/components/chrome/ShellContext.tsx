@@ -23,6 +23,15 @@ export type DraftShellPhoneAction = {
   onClick: () => void;
 };
 
+export type DraftShellTopAction = {
+  id: "pause-resume" | "end-draft";
+  label: string;
+  shortLabel: string;
+  tone: "neutral" | "emerald" | "danger";
+  disabled?: boolean;
+  onClick: () => void;
+};
+
 export type DraftShellProgressVariant = "quick" | "pod";
 
 export type DraftShellChromeConfig = {
@@ -30,7 +39,10 @@ export type DraftShellChromeConfig = {
   phoneAction?: DraftShellPhoneAction;
   progressVariant?: DraftShellProgressVariant;
   showProgress?: boolean;
+  topActions?: readonly DraftShellTopAction[];
 };
+
+const EMPTY_DRAFT_SHELL_TOP_ACTIONS: readonly DraftShellTopAction[] = [];
 
 const DraftShellChromeContext = createContext<(config: DraftShellChromeConfig) => void>(
   () => undefined,
@@ -49,11 +61,12 @@ export function useDraftShellChrome(
   phoneAction?: DraftShellPhoneAction,
   progressVariant: DraftShellProgressVariant = "quick",
   showProgress = true,
+  topActions: readonly DraftShellTopAction[] = EMPTY_DRAFT_SHELL_TOP_ACTIONS,
 ): void {
   const setConfig = useContext(DraftShellChromeContext);
 
   useLayoutEffect(() => {
-    setConfig({ mode, phoneAction, progressVariant, showProgress });
+    setConfig({ mode, phoneAction, progressVariant, showProgress, topActions });
     return () => setConfig({ mode: "default" });
-  }, [mode, phoneAction, progressVariant, setConfig, showProgress]);
+  }, [mode, phoneAction, progressVariant, setConfig, showProgress, topActions]);
 }

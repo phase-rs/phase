@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../../stores/draftPodStore";
+import type { DraftShellTopAction } from "../chrome/ShellContext";
 import { menuButtonClass } from "../menu/buttonStyles";
 
 const EMPTY_SEATS: Array<{ seat_index: number; display_name: string; is_bot: boolean; connected: boolean }> = [];
@@ -16,26 +17,72 @@ function winnerChoiceClass(selected: boolean): string {
   });
 }
 
+const EMPTY_HOST_DRAFT_TOP_ACTIONS: readonly DraftShellTopAction[] = [];
+
+export function useHostDraftTopActions({ enabled }: { enabled: boolean }): readonly DraftShellTopAction[] {
+  const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+  const [endingDraft, setEndingDraft] = useState(false);
+  const role = useMultiplayerDraftStore((state) => state.role);
+  const phase = useMultiplayerDraftStore((state) => state.phase);
+  const paused = useMultiplayerDraftStore((state) => state.paused);
+  const requestPause = useMultiplayerDraftStore((state) => state.requestPause);
+  const requestResume = useMultiplayerDraftStore((state) => state.requestResume);
+  const leave = useMultiplayerDraftStore((state) => state.leave);
+  const resetPod = useDraftPodStore((state) => state.reset);
+
+  const handleEndDraft = useCallback(async () => {
+    if (endingDraft || !window.confirm(t("hostControls.endDraftConfirm"))) return;
+    setEndingDraft(true);
+    try {
+      await leave(false);
+      resetPod();
+      navigate("/");
+    } catch (err) {
+      console.error("[HostControls] failed to end draft:", err);
+      setEndingDraft(false);
+    }
+  }, [endingDraft, leave, navigate, resetPod, t]);
+
+  return useMemo(() => {
+    if (!enabled || role !== "host" || phase !== "drafting") {
+      return EMPTY_HOST_DRAFT_TOP_ACTIONS;
+    }
+    return [
+      {
+        id: "pause-resume",
+        label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
+        shortLabel: paused ? t("hostControls.resumeDraftShort") : t("hostControls.pauseDraftShort"),
+        tone: paused ? "emerald" : "neutral",
+        onClick: paused ? requestResume : requestPause,
+      },
+      {
+        id: "end-draft",
+        label: t("hostControls.endDraft"),
+        shortLabel: t("hostControls.endDraftShort"),
+        tone: "danger",
+        disabled: endingDraft,
+        onClick: () => { void handleEndDraft(); },
+      },
+    ];
+  }, [enabled, endingDraft, handleEndDraft, paused, phase, requestPause, requestResume, role, t]);
+}
+
 // ── Component ───────────────────────────────────────────────────────────
 
 /**
  * Floating host-only control panel for tournament management.
  * Renders nothing when the local player is not the host.
  */
-export function HostControls({ presentation = "floating" }: {
-  presentation?: "floating" | "integrated";
-}) {
+export function HostControls() {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
   const [endingDraft, setEndingDraft] = useState(false);
-  const [integratedOpen, setIntegratedOpen] = useState(false);
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
+  const draftTopActions = useHostDraftTopActions({ enabled: phase === "drafting" });
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
-  const paused = useMultiplayerDraftStore((s) => s.paused);
   const advanceRound = useMultiplayerDraftStore((s) => s.advanceRound);
-  const requestPause = useMultiplayerDraftStore((s) => s.requestPause);
-  const requestResume = useMultiplayerDraftStore((s) => s.requestResume);
   const pairings = useMultiplayerDraftStore((s) => s.pairings);
   const overrideMatchResult = useMultiplayerDraftStore(
     (s) => s.overrideMatchResult,
@@ -50,7 +97,6 @@ export function HostControls({ presentation = "floating" }: {
   if (role !== "host") return null;
 
   // Only show when there are contextual controls to display
-  const showPauseResume = phase === "drafting";
   const showAdvanceRound =
     podPolicy === "Casual" && phase === "roundComplete";
   const showOverride =
@@ -85,56 +131,8 @@ export function HostControls({ presentation = "floating" }: {
     }
   };
 
-  if (presentation === "integrated") {
-    if (phase !== "drafting") return null;
-    return (
-      <div
-        data-integrated-host-controls
-        className="flex w-full flex-col overflow-hidden rounded-[8px] border border-hairline bg-slate-950/95 text-fg shadow-panel"
-      >
-        <button
-          type="button"
-          aria-expanded={integratedOpen}
-          onClick={() => setIntegratedOpen((open) => !open)}
-          className="flex min-h-9 w-full items-center justify-between gap-2 px-3 text-left text-[0.68rem] font-semibold uppercase text-fg-muted"
-        >
-          <span>{t("hostControls.title")}</span>
-          <span aria-hidden="true">{integratedOpen ? "▼" : "▲"}</span>
-        </button>
-        {integratedOpen && (
-          <div className="flex flex-col gap-2 border-t border-hairline p-2">
-            <button
-              type="button"
-              onClick={paused ? requestResume : requestPause}
-              className={menuButtonClass({
-                tone: paused ? "emerald" : "neutral",
-                size: "sm",
-                className: "w-full",
-              })}
-            >
-              {paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft")}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleEndDraft()}
-              disabled={endingDraft}
-              className={menuButtonClass({
-                tone: "red",
-                size: "sm",
-                disabled: endingDraft,
-                className: "w-full",
-              })}
-            >
-              {t("hostControls.endDraft")}
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   if (
-    !showPauseResume &&
+    draftTopActions.length === 0 &&
     !showAdvanceRound &&
     !showOverride &&
     !showKickReplace &&
@@ -148,18 +146,21 @@ export function HostControls({ presentation = "floating" }: {
         {t("hostControls.title")}
       </div>
 
-      {/* Pause/Resume — available during drafting */}
-      {showPauseResume && (
+      {draftTopActions.map((action) => (
         <button
-          onClick={paused ? requestResume : requestPause}
+          key={action.id}
+          onClick={action.onClick}
+          disabled={action.disabled}
           className={menuButtonClass({
-            tone: paused ? "emerald" : "neutral",
+            tone: action.tone === "danger" ? "red" : action.tone,
             size: "sm",
+            disabled: action.disabled,
+            className: action.id === "end-draft" ? "mt-1" : undefined,
           })}
         >
-          {paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft")}
+          {action.label}
         </button>
-      )}
+      ))}
 
       {/* Advance Round — Casual mode only, when round is complete */}
       {showAdvanceRound && (
@@ -232,7 +233,7 @@ export function HostControls({ presentation = "floating" }: {
         </div>
       )}
 
-      {showEndDraft && (
+      {phase !== "drafting" && showEndDraft && (
         <button
           onClick={() => void handleEndDraft()}
           disabled={endingDraft}

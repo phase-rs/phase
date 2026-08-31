@@ -15,12 +15,14 @@
  * move this file exists to catch — would leave every row green.
  */
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HostControls } from "../HostControls";
+import { HostControls, useHostDraftTopActions } from "../HostControls";
 
-const { draftState } = vi.hoisted(() => ({
+const { draftState, navigate, resetPod } = vi.hoisted(() => ({
+  navigate: vi.fn(),
+  resetPod: vi.fn(),
   draftState: {
     role: "host" as string | null,
     phase: "matchInProgress",
@@ -72,16 +74,20 @@ vi.mock("../../../stores/multiplayerDraftStore", async (importOriginal) => ({
 }));
 
 vi.mock("../../../stores/draftPodStore", () => ({
-  useDraftPodStore: (selector: (state: { reset: () => void }) => unknown) => selector({ reset: vi.fn() }),
+  useDraftPodStore: (selector: (state: { reset: () => void }) => unknown) => selector({ reset: resetPod }),
 }));
 
 vi.mock("react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react-router")>()),
-  useNavigate: () => vi.fn(),
+  useNavigate: () => navigate,
 }));
 
 describe("HostControls", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   beforeEach(() => {
     draftState.role = "host";
@@ -93,6 +99,12 @@ describe("HostControls", () => {
       loserSeat: 1,
       timerMs: 0,
     };
+    draftState.paused = false;
+    draftState.requestPause.mockClear();
+    draftState.requestResume.mockClear();
+    draftState.leave.mockClear();
+    navigate.mockClear();
+    resetPod.mockClear();
   });
 
   // H1a — pinning row (not red-first: the fixture states `phase` directly). It
@@ -149,5 +161,69 @@ describe("HostControls", () => {
     draftState.sideboardPrompt = null;
     render(<HostControls />);
     expect(screen.getByRole("button", { name: "End Draft" })).toBeInTheDocument();
+  });
+
+  it("memoizes the responsive host draft descriptors and dispatches pause or resume", () => {
+    draftState.phase = "drafting";
+    draftState.sideboardPrompt = null;
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useHostDraftTopActions({ enabled }),
+      { initialProps: { enabled: true } },
+    );
+
+    expect(result.current.map(({ id, label, shortLabel, tone }) => ({ id, label, shortLabel, tone })))
+      .toEqual([
+        { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral" },
+        { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger" },
+      ]);
+    const first = result.current;
+    rerender({ enabled: true });
+    expect(result.current).toBe(first);
+    result.current[0].onClick();
+    expect(draftState.requestPause).toHaveBeenCalledOnce();
+
+    draftState.paused = true;
+    rerender({ enabled: true });
+    expect(result.current[0]).toMatchObject({
+      id: "pause-resume",
+      label: "Resume Draft",
+      shortLabel: "Resume",
+      tone: "emerald",
+    });
+    result.current[0].onClick();
+    expect(draftState.requestResume).toHaveBeenCalledOnce();
+  });
+
+  it("returns no responsive draft actions when disabled, non-drafting, or guest", () => {
+    draftState.phase = "drafting";
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useHostDraftTopActions({ enabled }),
+      { initialProps: { enabled: false } },
+    );
+    expect(result.current).toEqual([]);
+
+    rerender({ enabled: true });
+    expect(result.current).toHaveLength(2);
+    draftState.role = "guest";
+    rerender({ enabled: true });
+    expect(result.current).toEqual([]);
+    draftState.role = "host";
+    draftState.phase = "deckbuilding";
+    rerender({ enabled: true });
+    expect(result.current).toEqual([]);
+  });
+
+  it("confirms and ends the pod through the responsive end action", async () => {
+    draftState.phase = "drafting";
+    draftState.sideboardPrompt = null;
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    draftState.leave.mockResolvedValue(undefined);
+    const { result } = renderHook(() => useHostDraftTopActions({ enabled: true }));
+
+    result.current[1].onClick();
+
+    await vi.waitFor(() => expect(draftState.leave).toHaveBeenCalledWith(false));
+    expect(resetPod).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith("/");
   });
 });

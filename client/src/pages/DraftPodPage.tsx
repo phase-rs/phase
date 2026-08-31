@@ -23,7 +23,7 @@ import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { EliminationBracket } from "../components/draft/EliminationBracket";
-import { HostControls } from "../components/draft/HostControls";
+import { HostControls, useHostDraftTopActions } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
@@ -995,10 +995,6 @@ function DraftingPhaseContent({
               mobileOverlay
               mobileWorkspaceOpen={mobileWorkspaceOpen}
               onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
-              mobileSummaryAccessory={<HostControls presentation="integrated" />}
-              tabletSideboardAccessory={responsiveLayout === "tablet-portrait"
-                ? <HostControls presentation="integrated" />
-                : undefined}
             />
           </div>
         )}
@@ -1216,6 +1212,9 @@ export function DraftPodPage() {
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
   const phoneDrafting = phase === "drafting" && phoneLayout;
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const hostDraftTopActions = useHostDraftTopActions({
+    enabled: phase === "drafting" && (phoneLayout || tabletLayout),
+  });
   const betweenGamesEditorActive = screen === "betweenGames"
     && sideboardPrompt !== null
     && view !== null
@@ -1270,6 +1269,7 @@ export function DraftPodPage() {
     phoneAction,
     "pod",
     !(phase === "drafting" && responsiveLayout === "phone-portrait"),
+    hostDraftTopActions,
   );
 
   useEffect(() => {
@@ -1406,7 +1406,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!phoneDrafting && !(responsiveLayout === "tablet-portrait" && phase === "drafting") && <HostControls />}
+      {!(phase === "drafting" && (phoneLayout || tabletLayout)) && <HostControls />}
     </div>
   );
 }

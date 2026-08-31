@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -9,12 +8,10 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router";
 
 import type { DraftCardInstance, DraftPoolGroups } from "../../../adapter/draft-adapter";
 import { useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
-import { HostControls } from "../HostControls";
 import { CompactSideboard } from "../workspace/CompactSideboard";
 import { DraftWorkspace, shouldShowDraftWorkspaceDeck } from "../workspace/DraftWorkspace";
 import {
@@ -425,7 +422,6 @@ describe("draft workspace shell", () => {
         mobileOverlay
         mobileWorkspaceOpen={false}
         onMobileWorkspaceOpenChange={vi.fn()}
-        mobileSummaryAccessory={<div data-testid="summary-accessory">Accessory</div>}
         onWorkspaceChange={vi.fn()}
         onPreferencesChange={preferenceChanges}
       />,
@@ -460,75 +456,9 @@ describe("draft workspace shell", () => {
     expect(preferenceChanges).toHaveBeenCalledTimes(1);
 
     const summary = container.querySelector<HTMLElement>("[data-mobile-workspace-summary]")!;
-    const accessory = container.querySelector<HTMLElement>("[data-mobile-summary-accessory]")!;
-    expect(accessory).toHaveClass(
-      "right-[9px]",
-      "w-[50vw]",
-      "bottom-[calc(112px_+_env(safe-area-inset-bottom))]",
-    );
-    expect(accessory.nextElementSibling).toBe(summary);
-    expect(within(accessory).getByTestId("summary-accessory")).toBeInTheDocument();
     expect(summary).toHaveClass("overflow-x-auto", "whitespace-nowrap");
     expect(within(summary).getByRole("button", { name: "Show Deck workspace" }))
       .toHaveClass("shrink-0", "whitespace-nowrap");
-  });
-
-  it("positions_the_phone_landscape_summary_accessory_above_the_full_bottom_row", () => {
-    const { container } = render(
-      <DraftWorkspace
-        pool={[]}
-        poolGroups={groups([])}
-        workspace={state({})}
-        preferences={preferences()}
-        responsiveLayout="phone-landscape"
-        mobileOverlay
-        mobileSummaryAccessory={<div>Accessory</div>}
-        onWorkspaceChange={vi.fn()}
-        onPreferencesChange={vi.fn()}
-      />,
-    );
-
-    const accessory = container.querySelector<HTMLElement>("[data-mobile-summary-accessory]")!;
-    const summary = container.querySelector<HTMLElement>("[data-mobile-workspace-summary]")!;
-    expect(accessory).toHaveClass("bottom-[58px]", "right-[9px]", "w-[50vw]");
-    expect(accessory.nextElementSibling).toBe(summary);
-  });
-
-  it("collapses_integrated_host_controls_and_exposes_drafting_actions_only_for_the_host", () => {
-    const requestPause = vi.fn();
-    const requestResume = vi.fn();
-    useMultiplayerDraftStore.setState({
-      role: "host",
-      phase: "drafting",
-      paused: false,
-      requestPause,
-      requestResume,
-    });
-    const rendered = render(<MemoryRouter><HostControls presentation="integrated" /></MemoryRouter>);
-
-    const toggle = screen.getByRole("button", { name: "Host Controls" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(toggle).toHaveTextContent("▲");
-    expect(screen.queryByRole("button", { name: "Pause Draft" })).not.toBeInTheDocument();
-
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(toggle).toHaveTextContent("▼");
-    fireEvent.click(screen.getByRole("button", { name: "Pause Draft" }));
-    expect(requestPause).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "End Draft" })).toBeInTheDocument();
-
-    act(() => useMultiplayerDraftStore.setState({ paused: true }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume Draft" }));
-    expect(requestResume).toHaveBeenCalledOnce();
-
-    act(() => useMultiplayerDraftStore.setState({ role: "guest" }));
-    expect(document.querySelector("[data-integrated-host-controls]")).not.toBeInTheDocument();
-    rendered.unmount();
-
-    useMultiplayerDraftStore.setState({ role: "host", phase: "deckbuilding" });
-    render(<MemoryRouter><HostControls presentation="integrated" /></MemoryRouter>);
-    expect(document.querySelector("[data-integrated-host-controls]")).not.toBeInTheDocument();
   });
 
   it("opens_the_phone_workspace_overlay_as_a_board_without_persisting_the_default_view", () => {
@@ -796,9 +726,10 @@ describe("draft workspace shell", () => {
     expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("168px");
 
     rerender(<DraftWorkspace {...props} responsiveLayout="phone-landscape" />);
-    expect(stack()).toHaveAttribute("data-sideboard-column-count", "2");
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "1");
+    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["0", "1"], ["0", "2"]]);
     expect(cardAt(1, 0).style.top).toBe("32px");
-    expect(cardAt(0, 1).style.left).toBe("calc(50% + 3px)");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("192px");
 
     rerender(<DraftWorkspace {...props} responsiveLayout="tablet-portrait" />);
     expect(stack()).toHaveAttribute("data-sideboard-column-count", "3");
@@ -811,28 +742,6 @@ describe("draft workspace shell", () => {
     expect(positions().slice(0, 3)).toEqual([["0", "0"], ["0", "1"], ["0", "2"]]);
     expect(cardAt(1, 0).style.top).toBe("40px");
     expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("240px");
-  });
-
-  it("integrates_the_half_width_host_accessory_only_above_tablet_portrait_sideboard", () => {
-    const props = {
-      pool: [] as DraftCardInstance[],
-      poolGroups: groups([]),
-      workspace: state({}),
-      preferences: preferences({ sideboardCollapsed: false }),
-      tabletSideboardAccessory: <div data-testid="tablet-host-controls">Host</div>,
-      onWorkspaceChange: vi.fn(),
-      onPreferencesChange: vi.fn(),
-    };
-    const { container, rerender } = render(
-      <DraftWorkspace {...props} responsiveLayout="tablet-portrait" />,
-    );
-
-    const accessory = container.querySelector<HTMLElement>("[data-tablet-sideboard-accessory]")!;
-    expect(accessory).toHaveClass("ml-auto", "w-1/2", "shrink-0");
-    expect(accessory.nextElementSibling?.querySelector('[data-zone="sideboard"]')).toBeInTheDocument();
-
-    rerender(<DraftWorkspace {...props} responsiveLayout="tablet-landscape" />);
-    expect(container.querySelector("[data-tablet-sideboard-accessory]")).not.toBeInTheDocument();
   });
 
   it("renders_one_fixed_ordered_pointer_following_overlay", () => {

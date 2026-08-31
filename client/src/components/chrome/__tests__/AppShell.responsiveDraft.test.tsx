@@ -4,10 +4,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import { AppShell } from "../AppShell";
-import { useDraftShellChrome, type DraftShellChromeMode } from "../ShellContext";
+import {
+  useDraftShellChrome,
+  type DraftShellChromeMode,
+  type DraftShellTopAction,
+} from "../ShellContext";
 
 const chromeControlProps: Array<{ hideVolume?: boolean; hideLanguage?: boolean }> = [];
 const phoneActionClick = vi.fn();
+const pauseActionClick = vi.fn();
+const endActionClick = vi.fn();
 
 vi.mock("../../../hooks/useChangelog", () => ({
   useChangelog: () => ({
@@ -37,7 +43,11 @@ function DraftChromeProbe() {
     label: "Pod Draft in Progress",
     onClick: phoneActionClick,
   }), []);
-  useDraftShellChrome(mode, phoneAction, "pod", showProgress);
+  const topActions = useMemo<readonly DraftShellTopAction[]>(() => [
+    { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral", onClick: pauseActionClick },
+    { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger", onClick: endActionClick },
+  ], []);
+  useDraftShellChrome(mode, phoneAction, "pod", showProgress, topActions);
   return (
     <div>
       <button type="button" onClick={() => setMode("phone-drafting")}>Phone draft mode</button>
@@ -55,6 +65,8 @@ describe("AppShell responsive draft chrome", () => {
     cleanup();
     chromeControlProps.length = 0;
     phoneActionClick.mockClear();
+    pauseActionClick.mockClear();
+    endActionClick.mockClear();
   });
 
   it("replaces phone navigation and socials with a top-row Home button", async () => {
@@ -78,6 +90,13 @@ describe("AppShell responsive draft chrome", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pod Draft in Progress" }));
     expect(phoneActionClick).toHaveBeenCalledOnce();
     expect(screen.getByTestId("pod-icon")).toBeInTheDocument();
+    const phoneChromeOrder = [...phoneChromeRow!.children]
+      .flatMap((element) => element.getAttribute("aria-label") ?? []);
+    expect(phoneChromeOrder).toEqual(["Home", "Pod Draft in Progress", "Pause Draft", "End Draft"]);
+    fireEvent.click(screen.getByRole("button", { name: "Pause Draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
+    expect(pauseActionClick).toHaveBeenCalledOnce();
+    expect(endActionClick).toHaveBeenCalledOnce();
     expect(screen.queryByText("Choose Set")).not.toBeInTheDocument();
     expect(screen.getByText("Draft")).toHaveAttribute("aria-current", "step");
     const shellSteps = document.querySelector("[data-shell-draft-steps]");
@@ -113,8 +132,11 @@ describe("AppShell responsive draft chrome", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet mode" }));
-    await waitFor(() => expect(screen.queryByRole("link", { name: "Home" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
+    const tabletChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
+    expect([...tabletChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
+      .toEqual(["Home", "Pause Draft", "End Draft"]);
     expect(document.querySelector(".menu-scene")).toHaveClass("h-dvh", "min-h-0", "overflow-y-hidden");
     expect(document.querySelector("main.shell-content")).toHaveClass("min-h-0", "overflow-hidden");
     expect(screen.queryByTestId("social-bar")).not.toBeInTheDocument();
@@ -128,6 +150,8 @@ describe("AppShell responsive draft chrome", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet builder mode" }));
     await waitFor(() => expect(screen.getByText("Build Deck")).toHaveAttribute("aria-current", "step"));
+    expect(screen.queryByRole("link", { name: "Home" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause Draft" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Default mode" }));
     await waitFor(() => expect(screen.getByTestId("social-bar")).toBeInTheDocument());

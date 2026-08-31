@@ -62,13 +62,16 @@
   "hostControls": {
     "title": "Host Controls",
     "resumeDraft": "Resume Draft",
+    "resumeDraftShort": "Resume",
     "pauseDraft": "Pause Draft",
+    "pauseDraftShort": "Pause",
     "startNextRound": "Start Next Round",
     "overrideResult": "Override Result",
     "versusPair": "{{a}} v {{b}}",
     "kickReplace": "Kick + Replace",
     "replaceWithBot": "Replace {{name}} with Bot",
     "endDraft": "End Draft",
+    "endDraftShort": "End",
     "endDraftConfirm": "End this draft for everyone? This cannot be undone."
   },
   "manaCurve": {

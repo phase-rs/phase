@@ -34,8 +34,9 @@ export function AppShell() {
   // "What's New": the unread dot lives on the rail, the modal is shell-owned.
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [draftChromeConfig, setDraftChromeConfig] = useState<DraftShellChromeConfig>({ mode: "default" });
-  const { mode: draftChromeMode, phoneAction, showProgress = true } = draftChromeConfig;
+  const { mode: draftChromeMode, phoneAction, showProgress = true, topActions = [] } = draftChromeConfig;
   const phoneDraftChrome = draftChromeMode === "phone-drafting" || draftChromeMode === "phone-deckbuilding";
+  const draftTopRowChrome = phoneDraftChrome || draftChromeMode === "tablet-drafting";
   const responsiveDraftChrome = draftChromeMode !== "default";
   const shellDraftPhase = draftChromeMode === "phone-deckbuilding" || draftChromeMode === "tablet-deckbuilding"
     ? "deckbuilding"
@@ -99,7 +100,7 @@ export function AppShell() {
               ? "sticky top-0 z-30 flex min-h-[calc(env(safe-area-inset-top)+52px)] items-center gap-2 px-2 pb-1 pt-[calc(env(safe-area-inset-top)+1rem)]"
               : "sticky top-0 z-30 flex min-h-[calc(env(safe-area-inset-top)+44px)] items-center px-2 pb-1 pt-[calc(env(safe-area-inset-top)+0.5rem)] min-[820px]:min-h-[calc(env(safe-area-inset-top)+56px)] min-[820px]:px-4 min-[820px]:pt-[calc(env(safe-area-inset-top)+0.75rem)]"}
             >
-              {phoneDraftChrome && (
+              {draftTopRowChrome && (
                 <>
                   <Link
                     to="/"
@@ -110,7 +111,7 @@ export function AppShell() {
                     <HomeIcon className="h-6 w-6 opacity-70" />
                     <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
                   </Link>
-                  {phoneAction && (
+                  {phoneDraftChrome && phoneAction && (
                     <button
                       type="button"
                       onClick={phoneAction.onClick}
@@ -121,6 +122,24 @@ export function AppShell() {
                       {phoneAction.icon}
                     </button>
                   )}
+                  {topActions.map((action) => (
+                    <button
+                      key={action.id}
+                      type="button"
+                      data-draft-top-action={action.id}
+                      onClick={action.onClick}
+                      disabled={action.disabled}
+                      aria-label={action.label}
+                      title={action.label}
+                      className={`relative z-10 flex min-h-11 shrink-0 items-center justify-center rounded-[8px] border px-2 text-[10px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${action.tone === "danger"
+                        ? "border-rose-400/35 bg-rose-950/45 text-rose-200 hover:border-rose-300/55"
+                        : action.tone === "emerald"
+                          ? "border-emerald-400/35 bg-emerald-950/45 text-emerald-200 hover:border-emerald-300/55"
+                          : "border-hairline bg-black/45 text-fg-muted hover:border-white/15 hover:bg-slate-950"}`}
+                    >
+                      {action.shortLabel}
+                    </button>
+                  ))}
                 </>
               )}
               {responsiveDraftChrome && showProgress ? (

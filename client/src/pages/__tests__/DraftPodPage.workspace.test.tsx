@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
-import type { DraftShellPhoneAction } from "../../components/chrome/ShellContext";
+import type { DraftShellPhoneAction, DraftShellTopAction } from "../../components/chrome/ShellContext";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import type { DraftWorkspaceProps } from "../../components/draft/workspace/DraftWorkspace";
 import type { ResponsiveDraftLayout } from "../../components/draft/workspace/workspacePreferences";
@@ -27,6 +27,8 @@ const captured = vi.hoisted(() => ({
   mobileWorkspaceOpen: null as boolean | null,
   shellMode: null as string | null,
   phoneAction: undefined as DraftShellPhoneAction | undefined,
+  topActions: [] as readonly DraftShellTopAction[],
+  hostActionsEnabled: [] as boolean[],
   progressVariant: null as string | null,
   showProgress: null as boolean | null,
   hostPresentations: [] as string[],
@@ -52,6 +54,7 @@ const store = vi.hoisted(() => {
     tournament_format: "Swiss", pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
   };
   const state = {
+    role: "host",
     phase: "drafting",
     view,
     workspaceState: {
@@ -114,21 +117,31 @@ vi.mock("../../stores/draftPodStore", () => ({
 vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
 vi.mock("../../components/chrome/ShellContext", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../components/chrome/ShellContext")>(),
-  useDraftShellChrome: (mode: string, phoneAction?: DraftShellPhoneAction, progressVariant?: string, showProgress?: boolean) => {
+  useDraftShellChrome: (mode: string, phoneAction?: DraftShellPhoneAction, progressVariant?: string, showProgress?: boolean, topActions?: readonly DraftShellTopAction[]) => {
     captured.shellMode = mode;
     captured.phoneAction = phoneAction;
     captured.progressVariant = progressVariant ?? "quick";
     captured.showProgress = showProgress ?? true;
+    captured.topActions = topActions ?? [];
   },
 }));
 vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean }) => {
   captured.menuShell = props;
   return <>{props.children}</>;
 } }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: ({ presentation = "floating" }: { presentation?: string }) => {
-  captured.hostPresentations.push(presentation);
-  return <div data-testid={`host-controls-${presentation}`} />;
-} }));
+vi.mock("../../components/draft/HostControls", () => ({
+  HostControls: () => {
+    captured.hostPresentations.push("floating");
+    return <div data-testid="host-controls-floating" />;
+  },
+  useHostDraftTopActions: ({ enabled }: { enabled: boolean }): readonly DraftShellTopAction[] => {
+    captured.hostActionsEnabled.push(enabled);
+    return enabled && store.state.role === "host" ? [
+      { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral", onClick: vi.fn() },
+      { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger", onClick: vi.fn() },
+    ] : [];
+  },
+}));
 vi.mock("../../components/draft/SeatStatusRing", () => ({ SeatStatusRing: () => <div data-testid="seat-status-ring" /> }));
 vi.mock("../../components/draft/PickTimer", () => ({ PickTimer: () => null }));
 vi.mock("../../components/draft/DraftProgress", () => ({ DraftProgress: () => null }));
@@ -162,9 +175,7 @@ vi.mock("../../components/draft/PackDisplay", () => ({
 vi.mock("../../components/draft/workspace/DraftWorkspace", () => ({
   DraftWorkspace: (props: DraftWorkspaceProps) => {
     captured.workspace = props;
-    const phoneLayout = props.responsiveLayout === "phone-portrait" || props.responsiveLayout === "phone-landscape";
-    const tabletLayout = props.responsiveLayout === "tablet-portrait" || props.responsiveLayout === "tablet-landscape";
-    return <div data-testid="workspace">{phoneLayout ? props.mobileSummaryAccessory : tabletLayout ? props.tabletSideboardAccessory : null}</div>;
+    return <div data-testid="workspace" />;
   },
 }));
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
@@ -189,10 +200,13 @@ describe("DraftPodPage workspace", () => {
     captured.mobileWorkspaceOpen = null;
     captured.shellMode = null;
     captured.phoneAction = undefined;
+    captured.topActions = [];
+    captured.hostActionsEnabled = [];
     captured.progressVariant = null;
     captured.showProgress = null;
     captured.hostPresentations = [];
     store.state.phase = "drafting";
+    store.state.role = "host";
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
@@ -281,11 +295,14 @@ describe("DraftPodPage workspace", () => {
       mobileOverlay: true,
       mobileWorkspaceOpen: false,
     });
+    expect(captured.workspace).not.toHaveProperty("mobileSummaryAccessory");
+    expect(captured.workspace).not.toHaveProperty("tabletSideboardAccessory");
     expect(document.querySelector(`[data-responsive-draft-layout="${responsiveLayout}"]`)).toHaveClass(heightClass);
     expect(screen.queryByTestId("seat-status-ring")).not.toBeInTheDocument();
     expect(captured.phoneAction?.label).toBe("Pod Draft in Progress");
-    expect(captured.hostPresentations).toEqual(["integrated"]);
-    expect(screen.getByTestId("host-controls-integrated")).toBeInTheDocument();
+    expect(captured.topActions.map((action) => action.id)).toEqual(["pause-resume", "end-draft"]);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.hostPresentations).toEqual([]);
     expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
 
     act(() => captured.phoneAction?.onClick());
@@ -303,6 +320,9 @@ describe("DraftPodPage workspace", () => {
     expect(captured.shellMode).toBe("phone-deckbuilding");
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.builderLayout).toBe(responsiveLayout);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
+    expect(captured.topActions).toEqual([]);
+    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
   });
 
   it.each([
@@ -320,26 +340,33 @@ describe("DraftPodPage workspace", () => {
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.workspace?.responsiveLayout).toBe(responsiveLayout);
+    expect(captured.workspace).not.toHaveProperty("mobileSummaryAccessory");
+    expect(captured.workspace).not.toHaveProperty("tabletSideboardAccessory");
     expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
     expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
-    if (responsiveLayout === "tablet-portrait") {
-      expect(captured.workspace?.tabletSideboardAccessory).toBeDefined();
-      expect(captured.hostPresentations).toEqual(["integrated"]);
-      expect(screen.getByTestId("host-controls-integrated")).toBeInTheDocument();
-      expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
-    } else {
-      expect(captured.workspace?.tabletSideboardAccessory).toBeUndefined();
-      expect(captured.hostPresentations).toEqual(["floating"]);
-      expect(screen.queryByTestId("host-controls-integrated")).not.toBeInTheDocument();
-      expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
-    }
+    expect(captured.topActions.map((action) => action.id)).toEqual(["pause-resume", "end-draft"]);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.hostPresentations).toEqual([]);
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
 
-    act(() => { store.state.phase = "deckbuilding"; });
+    act(() => { store.state.role = "guest"; });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.topActions).toEqual([]);
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+
+    act(() => {
+      store.state.role = "host";
+      store.state.phase = "deckbuilding";
+    });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.shellMode).toBe("tablet-deckbuilding");
     expect(captured.progressVariant).toBe("pod");
     expect(captured.showProgress).toBe(true);
     expect(captured.builderLayout).toBe(responsiveLayout);
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
+    expect(captured.topActions).toEqual([]);
+    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
   });
   });

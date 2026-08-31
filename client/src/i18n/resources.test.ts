@@ -108,6 +108,31 @@ describe("i18n locale key parity", () => {
   }
 });
 
+describe("responsive draft host action labels", () => {
+  const expected = {
+    en: ["Pause", "Resume", "End"],
+    de: ["Pause", "Weiter", "Beenden"],
+    es: ["Pausar", "Seguir", "Terminar"],
+    fr: ["Pause", "Reprendre", "Terminer"],
+    it: ["Pausa", "Riprendi", "Termina"],
+    pl: ["Wstrzymaj", "Wznów", "Zakończ"],
+    pt: ["Pausar", "Continuar", "Encerrar"],
+  } as const;
+
+  it("ships concise pause, resume, and end labels in every locale", () => {
+    for (const lng of SUPPORTED_LNGS) {
+      const hostControls = (resources[lng].draft as {
+        hostControls: Record<string, string>;
+      }).hostControls;
+      expect([
+        hostControls.pauseDraftShort,
+        hostControls.resumeDraftShort,
+        hostControls.endDraftShort,
+      ]).toEqual(expected[lng]);
+    }
+  });
+});
+
 // Encoding gate: catalogs use literal UTF-8 characters (not `\uXXXX` escapes) so
 // translations stay human-readable and reviewable. The cost of literals is
 // encoding drift — a file saved as Latin-1, or mojibake pasted in — so enforce
