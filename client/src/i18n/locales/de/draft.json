@@ -62,16 +62,13 @@
   "hostControls": {
     "title": "Host-Steuerung",
     "resumeDraft": "Draft fortsetzen",
-    "resumeDraftShort": "Weiter",
     "pauseDraft": "Draft pausieren",
-    "pauseDraftShort": "Pause",
     "startNextRound": "Nächste Runde starten",
     "overrideResult": "Ergebnis überschreiben",
     "versusPair": "{{a}} gegen {{b}}",
     "kickReplace": "Rauswerfen + Ersetzen",
     "replaceWithBot": "{{name}} durch Bot ersetzen",
     "endDraft": "Draft beenden",
-    "endDraftShort": "Beenden",
     "endDraftConfirm": "Diesen Draft fuer alle beenden? Das kann nicht rueckgaengig gemacht werden."
   },
   "manaCurve": {

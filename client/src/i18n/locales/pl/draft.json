@@ -62,16 +62,13 @@
   "hostControls": {
     "title": "Sterowanie gospodarza",
     "resumeDraft": "Wznów draft",
-    "resumeDraftShort": "Wznów",
     "pauseDraft": "Wstrzymaj draft",
-    "pauseDraftShort": "Wstrzymaj",
     "startNextRound": "Rozpocznij następną rundę",
     "overrideResult": "Zmień wynik",
     "versusPair": "{{a}} v {{b}}",
     "kickReplace": "Wyrzuć i zastąp",
     "replaceWithBot": "Zastąp gracza {{name}} botem",
     "endDraft": "Zakoncz draft",
-    "endDraftShort": "Zakończ",
     "endDraftConfirm": "Zakonczyc ten draft dla wszystkich? Tej akcji nie mozna cofnac."
   },
   "manaCurve": {

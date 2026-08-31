@@ -111,7 +111,7 @@ export function AppShell() {
                     <HomeIcon className="h-6 w-6 opacity-70" />
                     <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
                   </Link>
-                  {phoneDraftChrome && phoneAction && (
+                  {phoneAction && (
                     <button
                       type="button"
                       onClick={phoneAction.onClick}
@@ -137,7 +137,7 @@ export function AppShell() {
                           ? "border-emerald-400/35 bg-emerald-950/45 text-emerald-200 hover:border-emerald-300/55"
                           : "border-hairline bg-black/45 text-fg-muted hover:border-white/15 hover:bg-slate-950"}`}
                     >
-                      {action.shortLabel}
+                      {action.label}
                     </button>
                   ))}
                 </>

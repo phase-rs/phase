@@ -962,7 +962,7 @@ function DraftingPhaseContent({
         <div className={responsiveLayout === "desktop"
           ? "w-full min-w-0"
           : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
-          {!phoneLayout && <SeatStatusRing />}
+          {responsiveLayout === "desktop" && <SeatStatusRing />}
           {responsiveLayout === "desktop" && <DraftProgress view={view} />}
           <PickTimer />
           <PackDisplay
@@ -1211,6 +1211,7 @@ export function DraftPodPage() {
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
   const phoneDrafting = phase === "drafting" && phoneLayout;
+  const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
   const hostDraftTopActions = useHostDraftTopActions({
     enabled: phase === "drafting" && (phoneLayout || tabletLayout),
@@ -1237,8 +1238,13 @@ export function DraftPodPage() {
   }, []);
 
   useEffect(() => {
-    if (!phoneLayout) {
+    if (!responsiveDrafting) {
       setPodStatusOpen(false);
+    }
+  }, [responsiveDrafting]);
+
+  useEffect(() => {
+    if (!phoneLayout) {
       setMobileWorkspaceOpen(false);
     }
   }, [phoneLayout]);
@@ -1248,13 +1254,13 @@ export function DraftPodPage() {
   }, []);
 
   const phoneAction: DraftShellPhoneAction | undefined = useMemo(() => {
-    if (!phoneDrafting) return undefined;
+    if (!responsiveDrafting) return undefined;
     return {
       icon: <PodIcon className="h-6 w-6 opacity-70" />,
       label: t("landing.podInProgress"),
       onClick: handleOpenPodStatus,
     };
-  }, [phoneDrafting, handleOpenPodStatus, t]);
+  }, [handleOpenPodStatus, responsiveDrafting, t]);
 
   useDraftShellChrome(
     phoneDrafting

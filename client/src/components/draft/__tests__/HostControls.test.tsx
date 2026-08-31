@@ -171,10 +171,10 @@ describe("HostControls", () => {
       { initialProps: { enabled: true } },
     );
 
-    expect(result.current.map(({ id, label, shortLabel, tone }) => ({ id, label, shortLabel, tone })))
+    expect(result.current.map(({ id, label, tone }) => ({ id, label, tone })))
       .toEqual([
-        { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral" },
-        { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger" },
+        { id: "pause-resume", label: "Pause Draft", tone: "neutral" },
+        { id: "end-draft", label: "End Draft", tone: "danger" },
       ]);
     const first = result.current;
     rerender({ enabled: true });
@@ -187,7 +187,6 @@ describe("HostControls", () => {
     expect(result.current[0]).toMatchObject({
       id: "pause-resume",
       label: "Resume Draft",
-      shortLabel: "Resume",
       tone: "emerald",
     });
     result.current[0].onClick();

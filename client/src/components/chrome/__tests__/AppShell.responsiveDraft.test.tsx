@@ -44,8 +44,8 @@ function DraftChromeProbe() {
     onClick: phoneActionClick,
   }), []);
   const topActions = useMemo<readonly DraftShellTopAction[]>(() => [
-    { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral", onClick: pauseActionClick },
-    { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger", onClick: endActionClick },
+    { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: pauseActionClick },
+    { id: "end-draft", label: "End Draft", tone: "danger", onClick: endActionClick },
   ], []);
   useDraftShellChrome(mode, phoneAction, "pod", showProgress, topActions);
   return (
@@ -93,6 +93,8 @@ describe("AppShell responsive draft chrome", () => {
     const phoneChromeOrder = [...phoneChromeRow!.children]
       .flatMap((element) => element.getAttribute("aria-label") ?? []);
     expect(phoneChromeOrder).toEqual(["Home", "Pod Draft in Progress", "Pause Draft", "End Draft"]);
+    expect(screen.getByRole("button", { name: "Pause Draft" })).toHaveTextContent("Pause Draft");
+    expect(screen.getByRole("button", { name: "End Draft" })).toHaveTextContent("End Draft");
     fireEvent.click(screen.getByRole("button", { name: "Pause Draft" }));
     fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
     expect(pauseActionClick).toHaveBeenCalledOnce();
@@ -133,10 +135,14 @@ describe("AppShell responsive draft chrome", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet mode" }));
     await waitFor(() => expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pod Draft in Progress" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pod Draft in Progress" }));
+    expect(phoneActionClick).toHaveBeenCalledOnce();
     const tabletChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
     expect([...tabletChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
-      .toEqual(["Home", "Pause Draft", "End Draft"]);
+      .toEqual(["Home", "Pod Draft in Progress", "Pause Draft", "End Draft"]);
+    expect(screen.getByRole("button", { name: "Pause Draft" })).toHaveTextContent("Pause Draft");
+    expect(screen.getByRole("button", { name: "End Draft" })).toHaveTextContent("End Draft");
     expect(document.querySelector(".menu-scene")).toHaveClass("h-dvh", "min-h-0", "overflow-y-hidden");
     expect(document.querySelector("main.shell-content")).toHaveClass("min-h-0", "overflow-hidden");
     expect(screen.queryByTestId("social-bar")).not.toBeInTheDocument();

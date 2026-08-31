@@ -52,14 +52,12 @@ export function useHostDraftTopActions({ enabled }: { enabled: boolean }): reado
       {
         id: "pause-resume",
         label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
-        shortLabel: paused ? t("hostControls.resumeDraftShort") : t("hostControls.pauseDraftShort"),
         tone: paused ? "emerald" : "neutral",
         onClick: paused ? requestResume : requestPause,
       },
       {
         id: "end-draft",
         label: t("hostControls.endDraft"),
-        shortLabel: t("hostControls.endDraftShort"),
         tone: "danger",
         disabled: endingDraft,
         onClick: () => { void handleEndDraft(); },

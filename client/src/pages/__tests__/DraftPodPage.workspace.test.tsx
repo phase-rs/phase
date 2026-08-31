@@ -137,8 +137,8 @@ vi.mock("../../components/draft/HostControls", () => ({
   useHostDraftTopActions: ({ enabled }: { enabled: boolean }): readonly DraftShellTopAction[] => {
     captured.hostActionsEnabled.push(enabled);
     return enabled && store.state.role === "host" ? [
-      { id: "pause-resume", label: "Pause Draft", shortLabel: "Pause", tone: "neutral", onClick: vi.fn() },
-      { id: "end-draft", label: "End Draft", shortLabel: "End", tone: "danger", onClick: vi.fn() },
+      { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
+      { id: "end-draft", label: "End Draft", tone: "danger", onClick: vi.fn() },
     ] : [];
   },
 }));
@@ -337,22 +337,28 @@ describe("DraftPodPage workspace", () => {
 
     expect(captured.shellMode).toBe("tablet-drafting");
     expect(captured.progressVariant).toBe("pod");
-    expect(captured.phoneAction).toBeUndefined();
+    expect(captured.phoneAction?.label).toBe("Pod Draft in Progress");
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.workspace?.responsiveLayout).toBe(responsiveLayout);
     expect(captured.workspace).not.toHaveProperty("mobileSummaryAccessory");
     expect(captured.workspace).not.toHaveProperty("tabletSideboardAccessory");
     expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
-    expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
+    expect(screen.queryByTestId("seat-status-ring")).not.toBeInTheDocument();
     expect(captured.topActions.map((action) => action.id)).toEqual(["pause-resume", "end-draft"]);
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
     expect(captured.hostPresentations).toEqual([]);
     expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
 
+    act(() => captured.phoneAction?.onClick());
+    expect(screen.getByRole("dialog", { name: "Pod Draft in Progress" })).toBeInTheDocument();
+    expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close pod status" }));
+
     act(() => { store.state.role = "guest"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
     expect(captured.topActions).toEqual([]);
+    expect(captured.phoneAction?.label).toBe("Pod Draft in Progress");
     expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
 
     act(() => {
@@ -367,6 +373,8 @@ describe("DraftPodPage workspace", () => {
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
     expect(captured.topActions).toEqual([]);
+    expect(captured.phoneAction).toBeUndefined();
+    expect(screen.queryByRole("dialog", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
     expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
   });
   });

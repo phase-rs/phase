@@ -26,7 +26,6 @@ export type DraftShellPhoneAction = {
 export type DraftShellTopAction = {
   id: "pause-resume" | "end-draft";
   label: string;
-  shortLabel: string;
   tone: "neutral" | "emerald" | "danger";
   disabled?: boolean;
   onClick: () => void;

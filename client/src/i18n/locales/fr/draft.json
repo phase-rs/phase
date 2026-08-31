@@ -62,16 +62,13 @@
   "hostControls": {
     "title": "Contrôles de l'hôte",
     "resumeDraft": "Reprendre le draft",
-    "resumeDraftShort": "Reprendre",
     "pauseDraft": "Mettre le draft en pause",
-    "pauseDraftShort": "Pause",
     "startNextRound": "Démarrer la manche suivante",
     "overrideResult": "Modifier le résultat",
     "versusPair": "{{a}} c. {{b}}",
     "kickReplace": "Exclure + Remplacer",
     "replaceWithBot": "Remplacer {{name}} par un bot",
     "endDraft": "Terminer le draft",
-    "endDraftShort": "Terminer",
     "endDraftConfirm": "Terminer ce draft pour tout le monde ? Cette action est irreversible."
   },
   "manaCurve": {
