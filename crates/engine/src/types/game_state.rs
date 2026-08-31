@@ -4254,7 +4254,6 @@ pub struct PendingMassLibraryOrderChoice {
     pub source_id: ObjectId,
     pub library_position: crate::types::ability::LibraryPosition,
     pub track_exiled_by_source: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     /// Remaining exact owner batches in APNAP order after the current prompt.
     pub remaining_batches: Vec<MassLibraryOrderBatch>,

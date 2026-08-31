@@ -183,6 +183,49 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
     );
 }
 
+/// Before the typed queue existed, a single owner with multiple cards had no
+/// continuation carrier. Its archived prompt remains admissible only while the
+/// resolving `ChangeZoneAll` producer and every current owner/member agree.
+#[test]
+fn legacy_single_owner_mass_order_without_pending_carrier_completes() {
+    let mut state = legacy_turn15_persisted()
+        .into_game_state()
+        .expect("fixture restores");
+    let cards = vec![ObjectId(161), ObjectId(189), ObjectId(216), ObjectId(211)];
+
+    state.pending_mass_library_order_choice = None;
+    state.priority_player = PlayerId(1);
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards: offered_cards,
+        count,
+        min_count,
+        ..
+    } = &mut state.waiting_for
+    else {
+        panic!("fixture starts at EffectZoneChoice");
+    };
+    *player = PlayerId(1);
+    *offered_cards = cards.clone();
+    *count = cards.len();
+    *min_count = cards.len();
+
+    assert_select_cards_is_publicly_legal(&state, &cards);
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: cards.clone(),
+        },
+    )
+    .expect("the legacy one-owner ordering prompt is still accepted");
+    assert!(cards.iter().all(|card_id| {
+        state
+            .objects
+            .get(card_id)
+            .is_some_and(|object| object.zone == Zone::Library)
+    }));
+}
+
 /// The compatibility gate proves a very specific archived producer. A prompt
 /// that merely looks like it orders multiple battlefield cards stays subject to
 /// normal advertised-zone validation.

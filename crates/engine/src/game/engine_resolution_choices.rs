@@ -120,18 +120,6 @@ fn legacy_mass_library_order_prompt_is_current(
         return false;
     }
 
-    let Some(pending) = state.pending_mass_library_order_choice.as_ref() else {
-        return false;
-    };
-    if pending.source_id != source_id
-        || pending.library_position != *library_position.expect("checked above")
-        || pending.track_exiled_by_source != track_exiled_by_source
-        || pending.duration.as_ref() != duration
-        || pending.legacy_remaining_batches.is_empty()
-        || !pending.remaining_batches.is_empty()
-    {
-        return false;
-    }
     let Some(entry) = state.resolving_stack_entry.as_ref() else {
         return false;
     };
@@ -151,18 +139,34 @@ fn legacy_mass_library_order_prompt_is_current(
     if !stack_entry_is_exact_mass_order_producer {
         return false;
     }
-    pending
-        .legacy_remaining_batches
-        .iter()
-        .all(|(owner, batch)| {
-            !batch.is_empty()
-                && batch.iter().all(|card_id| {
-                    all_members.insert(*card_id)
-                        && state.objects.get(card_id).is_some_and(|object| {
-                            object.zone == Zone::Battlefield && object.owner == *owner
-                        })
-                })
-        })
+
+    match state.pending_mass_library_order_choice.as_ref() {
+        Some(pending) => {
+            pending.source_id == source_id
+                && pending.library_position == *library_position.expect("checked above")
+                && pending.track_exiled_by_source == track_exiled_by_source
+                && pending.duration.as_ref() == duration
+                && !pending.legacy_remaining_batches.is_empty()
+                && pending.remaining_batches.is_empty()
+                && pending
+                    .legacy_remaining_batches
+                    .iter()
+                    .all(|(owner, batch)| {
+                        !batch.is_empty()
+                            && batch.iter().all(|card_id| {
+                                all_members.insert(*card_id)
+                                    && state.objects.get(card_id).is_some_and(|object| {
+                                        object.zone == Zone::Battlefield && object.owner == *owner
+                                    })
+                            })
+                    })
+        }
+        // The old producer did not write a continuation carrier when a single
+        // owner had multiple cards to order. The exact resolving producer and
+        // the mandatory current battlefield owner/membership check above are
+        // the only authority for that archived shape.
+        None => cards.len() > 1,
+    }
 }
 
 /// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
@@ -5128,7 +5132,7 @@ pub(super) fn handle_resolution_choice(
                 enter_transformed,
                 enters_under_player,
                 enters_attacking,
-                owner_library: _,
+                owner_library,
                 track_exiled_by_source,
                 face_down_profile,
                 enter_with_counters,
