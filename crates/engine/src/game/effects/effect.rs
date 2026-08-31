@@ -797,17 +797,14 @@ fn transient_bound_filters(
         let Some(filter) = resolved_filter else {
             return Vec::new();
         };
-        if let Some(context) = &ability.context.forwarded_result_context {
+        if let Some(objects) = forwarded_result_object_targets(state, ability, filter) {
             // CR 608.2c: A forward-result antecedent is independent of the
             // ability's declared targets. `ParentTargetSlot` indexes the raw
             // event-order list; broad `ParentTarget` filters only live objects
             // after that contextual binding. An empty completed result returns
             // no bindings instead of falling back to an older target list.
-            let raw = context.targets.as_slice();
-            let objects = crate::game::effects::effect_object_targets(filter, raw);
             return objects
                 .into_iter()
-                .filter(|id| context.object_pin_is_current(*id, state))
                 .map(|id| TargetFilter::SpecificObject { id })
                 .collect();
         }
@@ -839,6 +836,26 @@ fn transient_bound_filters(
             TargetRef::Player(player_id) => TargetFilter::SpecificPlayer { id: *player_id },
         })
         .collect()
+}
+
+/// CR 400.7 + CR 608.2c: Resolve an inherited forward-result reference from the
+/// result event's ordered object list, keeping only the same object incarnations.
+/// `None` distinguishes absence of the carrier from an empty completed result.
+fn forwarded_result_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    ability
+        .context
+        .forwarded_result_context
+        .as_ref()
+        .map(|context| {
+            crate::game::effects::effect_object_targets(filter, &context.targets)
+                .into_iter()
+                .filter(|id| context.object_pin_is_current(*id, state))
+                .collect()
+        })
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
@@ -963,7 +980,11 @@ fn snapshot_transient_modifications(
             ) =>
             {
                 let ids =
-                    crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+                    forwarded_result_object_targets(state, ability, filter).unwrap_or_else(|| {
+                        crate::game::targeting::resolved_object_ids_for_filter(
+                            state, ability, filter,
+                        )
+                    });
                 ContinuousModification::AddKeyword {
                     keyword: crate::types::keywords::Keyword::Enchant(
                         ids.first()
