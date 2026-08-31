@@ -1364,6 +1364,61 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_result_context_concretizes_reanimator_enchant_target() {
+        let mut state = GameState::new_two_player(42);
+        let aura = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reanimator Aura".to_string(),
+            Zone::Battlefield,
+        );
+        let reanimated_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Reanimated Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            aura,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        ability.context.forwarded_result_context = Some(
+            crate::types::ability::ForwardedResultContext::from_object_ids(
+                &state,
+                &[reanimated_creature],
+            ),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::SpecificObject {
+                    id: reanimated_creature,
+                }),
+            }]
+        );
+    }
+
+    #[test]
     fn generic_effect_registers_transient_effect_for_matching_filter() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
