@@ -5249,6 +5249,22 @@ pub(super) fn handle_resolution_choice(
                     "Mass library-order prompt no longer names its exact members".to_string(),
                 ));
             }
+            let resolving_mass_library_order = state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| entry.ability())
+                .is_some_and(|ability| {
+                    ability.source_id == source_id
+                        && matches!(
+                            &ability.effect,
+                            Effect::ChangeZoneAll {
+                                destination: Zone::Library,
+                                library_position: Some(position),
+                                random_order: false,
+                                ..
+                            } if library_position.as_ref() == Some(position)
+                        )
+                });
 
             for card_id in &chosen {
                 if !cards.contains(card_id) {
@@ -5260,10 +5276,17 @@ pub(super) fn handle_resolution_choice(
                 // eligible IDs when the prompt is created; the cards can be
                 // in different zones, so there is no single zone to recheck.
                 let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
+                // `PutAtLibraryPosition` also freezes eligible IDs. Its prompt
+                // may advertise Library while relocating a card from another
+                // non-battlefield zone, such as Codie's linked Exile set.
+                let is_library_relocation = matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                    && current_zone.is_some_and(Zone::is_library_relocation_origin)
+                    && !resolving_mass_library_order;
                 if !matches!(effect_kind, EffectKind::ChangeZone)
                     && current_zone != Some(zone)
                     && !typed_mass_library_order_is_current
                     && !legacy_mass_library_order_is_current
+                    && !is_library_relocation
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
