@@ -19401,18 +19401,17 @@ mod tests {
         assert_eq!(state.players[0].life, 12);
     }
 
-    fn empty_forwarding_zone_change(
+    fn forwarding_zone_change(
         source: ObjectId,
-        declared_target: ObjectId,
+        target: ObjectId,
+        targets: Vec<TargetRef>,
         sub_ability: ResolvedAbility,
     ) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
-                target: TargetFilter::SpecificObject {
-                    id: declared_target,
-                },
+                target: TargetFilter::SpecificObject { id: target },
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
@@ -19424,13 +19423,21 @@ mod tests {
                 face_down_profile: None,
                 enters_modified_if: None,
             },
-            vec![],
+            targets,
             source,
             PlayerId(0),
         )
         .sub_ability(sub_ability);
         ability.forward_result = true;
         ability
+    }
+
+    fn empty_forwarding_zone_change(
+        source: ObjectId,
+        declared_target: ObjectId,
+        sub_ability: ResolvedAbility,
+    ) -> ResolvedAbility {
+        forwarding_zone_change(source, declared_target, vec![], sub_ability)
     }
 
     fn any_replacement_rider(source: ObjectId, declared_target: ObjectId) -> ResolvedAbility {
@@ -19451,16 +19458,6 @@ mod tests {
         )
     }
 
-    fn forwarded_result_context_from_declared_target(
-        state: &GameState,
-        declared_target: ObjectId,
-    ) -> Box<ForwardedResultContext> {
-        Box::new(ForwardedResultContext::from_object_ids(
-            state,
-            &[declared_target],
-        ))
-    }
-
     #[test]
     fn empty_forward_result_replaces_a_stale_context_before_an_any_rider() {
         let mut state = GameState::new_two_player(42);
@@ -19476,15 +19473,18 @@ mod tests {
             CardId(1),
             PlayerId(0),
             "Declared Target".to_string(),
-            Zone::Battlefield,
+            Zone::Graveyard,
         );
-        let mut ability = empty_forwarding_zone_change(
+        let empty_result = empty_forwarding_zone_change(
             source,
             declared_target,
             any_replacement_rider(source, declared_target),
         );
-        ability.context.forwarded_result_context = Some(
-            forwarded_result_context_from_declared_target(&state, declared_target),
+        let ability = forwarding_zone_change(
+            source,
+            declared_target,
+            vec![TargetRef::Object(declared_target)],
+            empty_result,
         );
 
         resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
@@ -19509,7 +19509,7 @@ mod tests {
             CardId(1),
             PlayerId(0),
             "Declared Target".to_string(),
-            Zone::Battlefield,
+            Zone::Graveyard,
         );
         let mut rider = any_replacement_rider(source, declared_target);
         rider.sub_link = SubAbilityLink::SequentialSibling;
@@ -19524,9 +19524,12 @@ mod tests {
             PlayerId(0),
         )
         .sub_ability(rider);
-        let mut ability = empty_forwarding_zone_change(source, declared_target, dependent);
-        ability.context.forwarded_result_context = Some(
-            forwarded_result_context_from_declared_target(&state, declared_target),
+        let empty_result = empty_forwarding_zone_change(source, declared_target, dependent);
+        let ability = forwarding_zone_change(
+            source,
+            declared_target,
+            vec![TargetRef::Object(declared_target)],
+            empty_result,
         );
 
         resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
@@ -19551,7 +19554,7 @@ mod tests {
             CardId(1),
             PlayerId(0),
             "Declared Target".to_string(),
-            Zone::Battlefield,
+            Zone::Graveyard,
         );
         let attach = ResolvedAbility::new(
             Effect::Attach {
@@ -19563,9 +19566,12 @@ mod tests {
             PlayerId(0),
         )
         .sub_ability(any_replacement_rider(source, declared_target));
-        let mut ability = empty_forwarding_zone_change(source, declared_target, attach);
-        ability.context.forwarded_result_context = Some(
-            forwarded_result_context_from_declared_target(&state, declared_target),
+        let empty_result = empty_forwarding_zone_change(source, declared_target, attach);
+        let ability = forwarding_zone_change(
+            source,
+            declared_target,
+            vec![TargetRef::Object(declared_target)],
+            empty_result,
         );
 
         resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
