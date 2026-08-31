@@ -1636,18 +1636,24 @@ fn snapshot_mass_library_order_batch(
 /// surface the next owner's `EffectZoneChoice` if any remain.
 pub(crate) fn resume_next_mass_library_order_choice(state: &mut GameState) -> Option<PlayerId> {
     let mut pending = state.pending_mass_library_order_choice.take()?;
-    let batch = if !pending.remaining_batches.is_empty() {
-        pending.remaining_batches.remove(0)
-    } else {
-        let (owner, cards) = pending.legacy_remaining_batches.first()?.clone();
-        pending.legacy_remaining_batches.remove(0);
-        // Legacy tuple queues did not record identity/origin. The strict legacy
-        // admission gate accepted the CURRENT prompt only after proving every
-        // member still occupies its old battlefield origin; snapshot the next
-        // batch before publishing it so every later interaction is typed.
-        snapshot_mass_library_order_batch(state, owner, cards)
+    let batch = match &mut pending.remaining_batches {
+        crate::types::game_state::PendingMassLibraryOrderBatches::Typed(batches) => {
+            if batches.is_empty() {
+                return None;
+            }
+            batches.remove(0)
+        }
+        crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches) => {
+            let (owner, cards) = batches.first()?.clone();
+            batches.remove(0);
+            // Legacy tuple queues did not record identity/origin. The strict legacy
+            // admission gate accepted the CURRENT prompt only after proving every
+            // member still occupies its old battlefield origin; snapshot the next
+            // batch before publishing it so every later interaction is typed.
+            snapshot_mass_library_order_batch(state, owner, cards)
+        }
     };
-    if pending.remaining_batches.is_empty() && pending.legacy_remaining_batches.is_empty() {
+    if pending.remaining_batches.is_empty() {
         state.pending_mass_library_order_choice = None;
     } else {
         state.pending_mass_library_order_choice = Some(pending.clone());
@@ -1993,8 +1999,10 @@ pub fn resolve_all(
                         .expect("library-order branch requires an explicit library position"),
                     track_exiled_by_source,
                     duration: ability.duration.clone(),
-                    remaining_batches,
-                    legacy_remaining_batches: Vec::new(),
+                    remaining_batches:
+                        crate::types::game_state::PendingMassLibraryOrderBatches::Typed(
+                            remaining_batches,
+                        ),
                 });
         }
         state.waiting_for = mass_library_order_effect_zone_choice(
@@ -6142,9 +6150,11 @@ mod tests {
                 .pending_mass_library_order_choice
                 .as_ref()
                 .is_some_and(|pending| {
-                    pending.legacy_remaining_batches.is_empty()
-                        && pending.remaining_batches.len() == 1
-                        && pending.remaining_batches[0].owner == PlayerId(0)
+                    matches!(
+                        &pending.remaining_batches,
+                        crate::types::game_state::PendingMassLibraryOrderBatches::Typed(batches)
+                            if batches.len() == 1 && batches[0].owner == PlayerId(0)
+                    )
                 }),
             "non-active owner batch must remain queued"
         );

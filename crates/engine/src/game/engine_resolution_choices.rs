@@ -146,12 +146,10 @@ fn legacy_mass_library_order_prompt_is_current(
                 && pending.library_position == *library_position.expect("checked above")
                 && pending.track_exiled_by_source == track_exiled_by_source
                 && pending.duration.as_ref() == duration
-                && !pending.legacy_remaining_batches.is_empty()
-                && pending.remaining_batches.is_empty()
-                && pending
-                    .legacy_remaining_batches
-                    .iter()
-                    .all(|(owner, batch)| {
+                && matches!(
+                    &pending.remaining_batches,
+                    crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches)
+                        if !batches.is_empty() && batches.iter().all(|(owner, batch)| {
                         !batch.is_empty()
                             && batch.iter().all(|card_id| {
                                 all_members.insert(*card_id)
@@ -159,7 +157,8 @@ fn legacy_mass_library_order_prompt_is_current(
                                         object.zone == Zone::Battlefield && object.owner == *owner
                                     })
                             })
-                    })
+                        })
+                )
         }
         // The old producer did not write a continuation carrier when a single
         // owner had multiple cards to order. The exact resolving producer and

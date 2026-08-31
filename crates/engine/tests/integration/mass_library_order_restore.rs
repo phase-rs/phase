@@ -147,6 +147,14 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
         panic!("fixture starts at EffectZoneChoice");
     };
     *mass_library_order = Some(batch);
+    let mut typed_reach_guard = typed_state.clone();
+    apply_as_current(
+        &mut typed_reach_guard,
+        GameAction::SelectCards {
+            cards: vec![ObjectId(199)],
+        },
+    )
+    .expect("the unmodified typed prompt reaches the production reducer");
     typed_state
         .objects
         .get_mut(&ObjectId(199))
@@ -166,6 +174,14 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
     let mut legacy_state = legacy_turn15_persisted()
         .into_game_state()
         .expect("fixture restores");
+    let mut legacy_reach_guard = legacy_state.clone();
+    apply_as_current(
+        &mut legacy_reach_guard,
+        GameAction::SelectCards {
+            cards: vec![ObjectId(199)],
+        },
+    )
+    .expect("the unmodified legacy prompt reaches the production reducer");
     legacy_state
         .objects
         .get_mut(&ObjectId(199))

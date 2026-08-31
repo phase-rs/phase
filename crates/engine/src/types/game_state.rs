@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
@@ -4235,87 +4234,46 @@ pub struct MassLibraryOrderBatch {
     pub members: Vec<MassLibraryOrderMember>,
 }
 
-/// Wire form for a pending mass ordering queue. The
-/// custom decode preserves pre-identity archives long enough for the exact
-/// legacy admission gate to upgrade their next prompt.
-#[derive(serde::Deserialize)]
-struct PendingMassLibraryOrderChoiceWire {
-    source_id: ObjectId,
-    library_position: crate::types::ability::LibraryPosition,
-    track_exiled_by_source: bool,
-    #[serde(default)]
-    duration: Option<crate::types::ability::Duration>,
-    #[serde(default)]
-    remaining_batches: Option<serde_json::Value>,
+/// Remaining batches of an in-flight mass library order.
+///
+/// The untagged wire preserves the historical tuple-array representation,
+/// while the enum makes its provenance state mutually exclusive at runtime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PendingMassLibraryOrderBatches {
+    /// Current saves carry exact member identity and origin for every batch.
+    Typed(Vec<MassLibraryOrderBatch>),
+    /// Pre-identity archives carried only `(owner, object_ids)` tuples. These
+    /// may authorize only the narrow migration path before their successor is
+    /// promoted to a typed prompt.
+    Legacy(Vec<(PlayerId, Vec<ObjectId>)>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl Default for PendingMassLibraryOrderBatches {
+    fn default() -> Self {
+        Self::Typed(Vec::new())
+    }
+}
+
+impl PendingMassLibraryOrderBatches {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Typed(batches) => batches.is_empty(),
+            Self::Legacy(batches) => batches.is_empty(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMassLibraryOrderChoice {
     pub source_id: ObjectId,
     pub library_position: crate::types::ability::LibraryPosition,
     pub track_exiled_by_source: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
-    /// Remaining exact owner batches in APNAP order after the current prompt.
-    pub remaining_batches: Vec<MassLibraryOrderBatch>,
-    /// Old archives encoded `remaining_batches` as `(owner, object_ids)` tuples.
-    /// Keep that precise legacy representation through a save/reload cycle: it
-    /// is the only provenance the narrow compatibility gate can use before the
-    /// successor prompt is promoted to a typed batch.
-    pub legacy_remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
-}
-
-impl Serialize for PendingMassLibraryOrderChoice {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct(
-            "PendingMassLibraryOrderChoice",
-            4 + usize::from(self.duration.is_some()),
-        )?;
-        state.serialize_field("source_id", &self.source_id)?;
-        state.serialize_field("library_position", &self.library_position)?;
-        state.serialize_field("track_exiled_by_source", &self.track_exiled_by_source)?;
-        if let Some(duration) = &self.duration {
-            state.serialize_field("duration", duration)?;
-        }
-        if self.remaining_batches.is_empty() && !self.legacy_remaining_batches.is_empty() {
-            state.serialize_field("remaining_batches", &self.legacy_remaining_batches)?;
-        } else {
-            state.serialize_field("remaining_batches", &self.remaining_batches)?;
-        }
-        state.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for PendingMassLibraryOrderChoice {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = PendingMassLibraryOrderChoiceWire::deserialize(deserializer)?;
-        let (remaining_batches, legacy_remaining_batches) = match wire.remaining_batches {
-            Some(value) => {
-                match serde_json::from_value::<Vec<MassLibraryOrderBatch>>(value.clone()) {
-                    Ok(batches) => (batches, Vec::new()),
-                    Err(_) => (
-                        Vec::new(),
-                        serde_json::from_value::<Vec<(PlayerId, Vec<ObjectId>)>>(value)
-                            .map_err(serde::de::Error::custom)?,
-                    ),
-                }
-            }
-            None => (Vec::new(), Vec::new()),
-        };
-        Ok(Self {
-            source_id: wire.source_id,
-            library_position: wire.library_position,
-            track_exiled_by_source: wire.track_exiled_by_source,
-            duration: wire.duration,
-            remaining_batches,
-            legacy_remaining_batches,
-        })
-    }
+    /// Remaining owner batches in APNAP order after the current prompt.
+    #[serde(default)]
+    pub remaining_batches: PendingMassLibraryOrderBatches,
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -34108,18 +34066,17 @@ mod tests {
             library_position: LibraryPosition::Bottom,
             track_exiled_by_source: false,
             duration: None,
-            remaining_batches: Vec::new(),
-            legacy_remaining_batches: Vec::new(),
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(Vec::new()),
         };
         let mut wire = serde_json::to_value(pending).unwrap();
         wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
 
         let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
-        assert!(decoded.remaining_batches.is_empty());
-        assert_eq!(
-            decoded.legacy_remaining_batches,
-            vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
-        );
+        assert!(matches!(
+            decoded.remaining_batches,
+            PendingMassLibraryOrderBatches::Legacy(ref batches)
+                if batches == &vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
+        ));
 
         let reserialized = serde_json::to_value(decoded).unwrap();
         assert_eq!(
