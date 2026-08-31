@@ -189,6 +189,65 @@ describe("VisualPackManager initialization", () => {
     expect(revisionUnlisten).toHaveBeenCalledTimes(1);
   });
 
+  it("adopts a background operation and accepts a live lower-progress update", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.subscribeProgress).toHaveBeenCalled());
+    const running = {
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "install" as const, state: "downloading" as const,
+      packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: 2, objectsPromoted: 1, completedRevision: null,
+    };
+    fixture.emitProgress({ phase: "running", error: null, operation: running });
+    expect(await screen.findByText("1/2")).toBeInTheDocument();
+
+    fixture.emitProgress({ phase: "running", error: null, operation: { ...running, objectsPromoted: 0 } });
+    expect(await screen.findByText("0/2")).toBeInTheDocument();
+
+    fixture.emitProgress({ phase: "completed", error: null, operation: { ...running, state: "completed", objectsPromoted: 2, completedRevision: installedRevision("2") } });
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    fixture.emitProgress({
+      phase: "started",
+      error: null,
+      operation: {
+        ...running,
+        operationId: operationId("d".repeat(32)),
+        catalogRoot: ROOT_B,
+        kind: "repair",
+        objectsPromoted: 0,
+        completedRevision: null,
+      },
+    });
+    expect(await screen.findByText("0/2")).toBeInTheDocument();
+  });
+
+  it("keeps unknown image totals indeterminate until finalization makes the total authoritative", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.subscribeProgress).toHaveBeenCalled());
+    const operation = {
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "repair" as const, state: "downloading" as const,
+      packTotal: 1, packsPromoted: 0, objectTotal: 0, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
+    };
+    fixture.emitProgress({ phase: "running", error: null, operation });
+    expect(await screen.findByText("Images downloaded: 0")).toBeInTheDocument();
+    const progressBars = screen.getAllByRole("progressbar");
+    expect(progressBars[progressBars.length - 1]).not.toHaveAttribute("value");
+
+    fixture.emitProgress({ phase: "running", error: null, operation: { ...operation, objectEstimate: 0 } });
+    expect(await screen.findByText("0/0")).toBeInTheDocument();
+    const knownProgressBars = screen.getAllByRole("progressbar");
+    expect(knownProgressBars[knownProgressBars.length - 1]).toHaveAttribute("value", "0");
+
+    fixture.emitProgress({ phase: "running", error: null, operation: { ...operation, objectTotal: 2, objectsPromoted: 1 } });
+    expect(await screen.findByText("Images downloaded: 1")).toBeInTheDocument();
+    fixture.emitProgress({ phase: "running", error: null, operation: { ...operation, state: "finalizing", objectTotal: 2, objectsPromoted: 1 } });
+    expect(await screen.findByText("1/2")).toBeInTheDocument();
+  });
+
   it("restores a removal confirmation to its pointer launcher", async () => {
     const fixture = backend();
     platform.load.mockResolvedValue(fixture.value);
@@ -1691,6 +1750,77 @@ describe("VisualPackManager initialization", () => {
     });
     await screen.findByRole("button", { name: /resume operation/i });
   }
+
+  it("preserves a failed progress event emitted before a manual start reply", async () => {
+    const fixture = backend();
+    const started = deferred<Awaited<ReturnType<VisualPackBackend["start"]>>>();
+    vi.mocked(fixture.value.start).mockReturnValue(started.promise);
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalled());
+    fixture.emitProgress({
+      phase: "failed",
+      error: "network",
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: 2, objectsPromoted: 1, completedRevision: null,
+      },
+    });
+    started.resolve({ status: "started", operationId: OPERATION, catalogRoot: ROOT_A, persistence: "persisted" });
+
+    expect(await screen.findByRole("button", { name: /resume operation/i })).toBeInTheDocument();
+  });
+
+  it("reopens a failed operation only when the backend starts its retry", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await reachFailedOperation(fixture);
+
+    fixture.emitProgress({
+      phase: "started",
+      error: null,
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: 2, objectsPromoted: 0, completedRevision: null,
+      },
+    });
+    expect(await screen.findByText("0/2")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resume operation/i })).not.toBeInTheDocument();
+
+    fixture.emitProgress({
+      phase: "completed",
+      error: null,
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "completed",
+        packTotal: 1, packsPromoted: 1, objectTotal: 2, objectEstimate: 2, objectsPromoted: 2, completedRevision: installedRevision("2"),
+      },
+    });
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+  });
+
+  it("accepts reconciliation cancellation after a retryable failure", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await reachFailedOperation(fixture);
+
+    fixture.emitProgress({
+      phase: "cancelled",
+      error: null,
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "cancelled",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: 2, objectsPromoted: 1, completedRevision: null,
+      },
+    });
+
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resume operation/i })).not.toBeInTheDocument();
+  });
 
   it("reports a terminated operation as stopped, not as a cancellation", async () => {
     const fixture = backend();

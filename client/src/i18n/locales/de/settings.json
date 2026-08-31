@@ -289,6 +289,7 @@
       "root": "Katalogstamm",
       "packs": "Pakete: {{current}} von {{total}}",
       "objects": "Bilder: {{current}} von {{total}}",
+      "objectsUnknown": "Heruntergeladene Bilder: {{current}}",
       "scanNote": "Die Gesamtzahl wächst beim Durchsuchen des Scryfall-Snapshots. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "estimateNote": "Die Gesamtzahl stand beim Start dieses Downloads fest. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "finalizing": "Die Installation des Katalogs wird abgeschlossen"
@@ -330,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt."
+      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt.",
+      "inProgress": "Offline-Visualisierungen werden entfernt…"
     },
     "cleanup": {
       "malformed_entry": "Ein fehlerhafter Cache-Eintrag konnte nicht wiederhergestellt werden",

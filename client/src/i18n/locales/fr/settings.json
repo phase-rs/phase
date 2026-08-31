@@ -288,7 +288,8 @@
       "id": "Fonctionnement",
       "root": "Racine du catalogue",
       "packs": "Packs : {{current}} sur {{total}}",
-      "objects": "Images : {{current}} sur {{total}}",
+      "objects": "Images : {{current}} sur {{total}}",
+      "objectsUnknown": "Images téléchargées : {{current}}",
       "scanNote": "Le total augmente pendant l’analyse de l’instantané Scryfall. Les images déjà téléchargées restent locales et sont ignorées à la reprise.",
       "estimateNote": "Le total a été fixé au démarrage de ce téléchargement. Les images déjà téléchargées restent locales et sont ignorées à la reprise.",
       "finalizing": "Finalisation de l'installation du catalogue"
@@ -330,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Suppression validée lors de la révision {{revision}}."
+      "committed": "Suppression validée lors de la révision {{revision}}.",
+      "inProgress": "Suppression des visuels hors ligne…"
     },
     "cleanup": {
       "malformed_entry": "Une entrée de cache mal formée n'a pas pu être récupérée",

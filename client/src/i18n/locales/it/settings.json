@@ -289,6 +289,7 @@
       "root": "Radice del catalogo",
       "packs": "Pacchetti: {{current}} di {{total}}",
       "objects": "Immagini: {{current}} di {{total}}",
+      "objectsUnknown": "Immagini scaricate: {{current}}",
       "scanNote": "Il totale cresce durante la scansione dell’istantanea Scryfall. Le immagini già scaricate restano locali e vengono ignorate alla ripresa.",
       "estimateNote": "Il totale è stato fissato all’avvio di questo download. Le immagini già scaricate restano locali e vengono ignorate alla ripresa.",
       "finalizing": "Finalizzazione dell'installazione del catalogo"
@@ -330,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Rimozione commessa alla revisione {{revision}}."
+      "committed": "Rimozione commessa alla revisione {{revision}}.",
+      "inProgress": "Rimozione degli elementi visivi offline…"
     },
     "cleanup": {
       "malformed_entry": "Non è stato possibile recuperare una voce della cache dal formato errato",

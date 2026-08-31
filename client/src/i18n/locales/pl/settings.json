@@ -289,6 +289,7 @@
       "root": "Katalog główny",
       "packs": "Pakiety: {{current}} z {{total}}",
       "objects": "Obrazy: {{current}} z {{total}}",
+      "objectsUnknown": "Pobrane obrazy: {{current}}",
       "scanNote": "Łączna liczba rośnie podczas skanowania migawki Scryfall. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
       "estimateNote": "Łączna liczba została ustalona przy starcie tego pobierania. Pobrane obrazy pozostają lokalnie i są pomijane po wznowieniu.",
       "finalizing": "Kończenie instalacji katalogu"
@@ -330,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Usunięcie dokonane w wersji {{revision}}."
+      "committed": "Usunięcie dokonane w wersji {{revision}}.",
+      "inProgress": "Usuwanie elementów wizualnych offline…"
     },
     "cleanup": {
       "malformed_entry": "Nie można odzyskać źle sformułowanego wpisu w pamięci podręcznej",
