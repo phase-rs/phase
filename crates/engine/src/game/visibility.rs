@@ -1836,6 +1836,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref conditional_enter_with_counters,
         count_param,
         library_position: None,
+        mass_library_order: _,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
