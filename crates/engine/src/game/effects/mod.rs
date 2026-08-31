@@ -13,10 +13,11 @@ use crate::types::ability::{
     ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
-    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    ForwardedResultContext, ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
+    ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -10085,6 +10086,19 @@ pub fn resolve_ability_chain(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
+    // CR 608.2c: A forwarded result belongs to one resolution chain. A root
+    // ability can be resumed from serialized state, so discard any stale value
+    // before it begins a new resolution; nested producers replace the context
+    // after this node's effect completes.
+    let root_context_owned;
+    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+        let mut owned = ability.clone();
+        owned.context.forwarded_result_context = None;
+        root_context_owned = owned;
+        &root_context_owned
+    } else {
+        ability
+    };
     // Safety limit to prevent stack overflow on pathological data
     if depth > 20 {
         return Err(EffectError::ChainTooDeep);
@@ -13337,32 +13351,14 @@ fn resolve_chain_body(
             // `copy_spell::resolve` look up the wrong stack entry after
             // `resolve_top` has popped the spell (issue #2860).
             //
-            // CR 603.7c + CR 201.5: `CreateDelayedTrigger` must keep the
-            // creating ability's source. SelfRef inside the delayed body means
-            // "this card" (Gift of Immortality #4956), not the just-returned
-            // host. ParentTarget anaphora still receive the moved object via
-            // `targets` below (snapshot at delayed-trigger creation).
+            // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
+            // ability's source. Its ParentTarget anaphora read the separate
+            // forwarded-result context at delayed-trigger creation.
             if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
                 if !matches!(sub.effect, Effect::CreateDelayedTrigger { .. }) {
                     sub_with_context.source_id = forwarded_objects[0];
                 }
-                if matches!(
-                    ability.effect,
-                    Effect::Conjure {
-                        destination: Zone::Battlefield,
-                        ..
-                    }
-                ) && !effect_uses_implicit_tracked_set_targets(&sub.effect)
-                {
-                    // Conjure's propagated `ability.targets` carry the
-                    // duplicate_of referent (Three Tree Battalion's
-                    // battlefield-put creature), not the just-conjured object.
-                    // Trailing ParentTarget anaphora ("the duplicate", "its
-                    // base power…") must bind to the conjured card via the
-                    // ZoneChanged event, mirroring ChangeZone forward_result
-                    // wiring.
-                    sub_with_context.targets = vec![TargetRef::Object(forwarded_objects[0])];
-                } else if matches!(sub.effect, Effect::Attach { .. }) {
+                if matches!(sub.effect, Effect::Attach { .. }) {
                     let attach_target_is_last_created = matches!(
                         &sub.effect,
                         Effect::Attach {
@@ -13403,32 +13399,6 @@ fn resolve_chain_body(
                             .targets
                             .push(TargetRef::Object(ability.source_id));
                     }
-                } else if sub_with_context.targets.is_empty()
-                    && !effect_uses_implicit_tracked_set_targets(&sub.effect)
-                    // CR 608.2d: a `Resolution`-timed sub makes its OWN untargeted
-                    // choice at its own resolution — neither inheriting the
-                    // parent's target NOR force-binding the just-moved
-                    // forward_result object is correct for it; leave `targets`
-                    // empty so the interactive `PutCounter` recipient prompt
-                    // handles it when this sub's own turn to resolve comes
-                    // (Kathril, Aspect Warper, issue #6321 / PR #6533).
-                    && sub_with_context.target_choice_timing != TargetChoiceTiming::Resolution
-                {
-                    // CR 608.2c: ParentTarget consumers in a forward_result sub-chain
-                    // need the moved object's id in `targets`, not just a rebound
-                    // `source_id`. Goryo's Vengeance ("return target … creature …
-                    // That creature gains haste. Exile it at the beginning of the
-                    // next end step.") carries explicit cast-time targets on the
-                    // parent `ChangeZone`; Emperor-of-Bones-style descriptors do
-                    // not. Both shapes must snapshot the just-moved card for
-                    // downstream ParentTarget / delayed-trigger registration.
-                    if !ability.targets.is_empty() {
-                        sub_with_context.targets = ability.targets.clone();
-                    } else {
-                        sub_with_context
-                            .targets
-                            .insert(0, TargetRef::Object(forwarded_objects[0]));
-                    }
                 }
                 // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
                 // reanimator-Aura's own identity — surviving the forward_result rebind above
@@ -13457,6 +13427,17 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            // CR 608.2c: Forward the entire event-ordered result separately
+            // from ordinary declared targets. A nested producer replaces this
+            // value after its own parent context has been applied; `Some([])`
+            // deliberately records a completed zero-object move.
+            sub_with_context.context.forwarded_result_context = Some(ForwardedResultContext {
+                targets: forwarded_objects
+                    .iter()
+                    .copied()
+                    .map(TargetRef::Object)
+                    .collect(),
+            });
             if !attachment_candidates.is_empty() {
                 sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
             }

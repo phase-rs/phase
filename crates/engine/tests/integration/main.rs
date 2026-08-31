@@ -785,6 +785,7 @@ mod issue_7945_free_grant_face_down;
 mod issue_8024_terminal_rest_captures;
 mod issue_8101_candelabra_target_selection;
 mod issue_8183_static_gate_fail_open;
+mod issue_8215_hellkite_courser;
 mod issue_822_erode_path_to_exile_search_controller;
 mod issue_828_full_throttle;
 mod issue_841_selvala_explorer_returned;

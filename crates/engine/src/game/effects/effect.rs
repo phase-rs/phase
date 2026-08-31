@@ -500,15 +500,19 @@ fn register_transient_effect(
             .affected
             .as_ref()
             .is_some_and(crate::game::ability_utils::filter_references_target_player);
-    let inherited_object_target = static_def
+    let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
+        && application_filter.is_some_and(crate::game::effects::filter_refs_parent_target);
+    let inherited_object_target = (static_def
         .affected
         .as_ref()
         .is_some_and(generic_effect_affected_uses_inherited_targets)
+        || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets))
         && !static_affected_references_target_player
-        && ability
+        && (ability
             .targets
             .iter()
-            .any(|target| matches!(target, TargetRef::Object(_)));
+            .any(|target| matches!(target, TargetRef::Object(_)))
+            || forwarded_parent_target);
     let direct_binding_uses_targets = target_filter.is_some()
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target;
@@ -525,7 +529,8 @@ fn register_transient_effect(
     // that scan `state.transient_continuous_effects` directly.
     // A `ControllerRef::TargetPlayer` affected filter is different: its player
     // target parameterizes a broadcast object filter and is resolved below.
-    if !ability.targets.is_empty()
+    let has_forwarded_result = ability.context.forwarded_result_context.is_some();
+    if (!ability.targets.is_empty() || has_forwarded_result)
         && direct_binding_uses_targets
         && !static_affected_references_target_player
     {
@@ -793,6 +798,20 @@ fn transient_bound_filters(
         let Some(filter) = resolved_filter else {
             return Vec::new();
         };
+        if let Some(context) = &ability.context.forwarded_result_context {
+            // CR 608.2c: A forward-result antecedent is independent of the
+            // ability's declared targets. `ParentTargetSlot` indexes the raw
+            // event-order list; broad `ParentTarget` filters only live objects
+            // after that contextual binding. An empty completed result returns
+            // no bindings instead of falling back to an older target list.
+            let raw = context.targets.as_slice();
+            let objects = crate::game::effects::effect_object_targets(filter, raw);
+            return objects
+                .into_iter()
+                .filter(|id| state.objects.contains_key(id))
+                .map(|id| TargetFilter::SpecificObject { id })
+                .collect();
+        }
         // Slot carve-out (§5.4b): this hands its list straight to
         // `effect_object_targets`, which indexes `ParentTargetSlot`
         // POSITIONALLY. A pin-filtered list would renumber the slots, so the
@@ -828,6 +847,7 @@ pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> 
         filter,
         TargetFilter::TriggeringSource
             | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::CostPaidObject
             // CR 701.47c: "the amassed Army" is a resolution-local single-object
             // reference (`ResolvedAbility.amassed_army_object`), not a broadcast

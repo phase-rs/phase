@@ -164,9 +164,20 @@ pub fn resolve(
     // "create … Warrior tokens … sacrifice them at the beginning of the next
     // end step" inner chain (Token → CreateDelayedTrigger{Sacrifice}) never
     // reached runtime when registered inside a WheneverEvent delayed trigger.
+    // CR 603.7c + CR 608.2c: A forward-result continuation can temporarily
+    // rebind `source_id` so an immediate SelfRef rider addresses the moved
+    // object. A delayed trigger remains owned by the trigger source, which the
+    // captured trigger provenance preserves across that local rebind.
+    let delayed_source_id = ability
+        .context
+        .forwarded_result_context
+        .as_ref()
+        .and_then(|_| ability.trigger_source.as_ref())
+        .map(|source| source.identity.reference.object_id)
+        .unwrap_or(ability.source_id);
     let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def(
         &effect_def,
-        ability.source_id,
+        delayed_source_id,
         ability.controller,
     );
 
@@ -378,7 +389,7 @@ pub fn resolve(
             condition,
             ability: Box::new(delayed_ability),
             controller: ability.controller,
-            source_id: ability.source_id,
+            source_id: delayed_source_id,
             one_shot,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
@@ -432,6 +443,13 @@ fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) 
 /// root chain and the node's own targets are empty do we fall back to the
 /// triggering source (unchanged).
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    // CR 608.2c: A forward-result producer is a more recent antecedent than
+    // root-chain slots, node-local targets, or trigger-event fallback. Preserve
+    // the raw order for `ParentTargetSlot`; `Some([])` is a real zero-result and
+    // must not fall through to any older antecedent.
+    if let Some(context) = &ability.context.forwarded_result_context {
+        return context.targets.clone();
+    }
     let root_chain = crate::game::targeting::parent_chain_targets_from_root(state, ability);
     if !root_chain.is_empty() {
         return root_chain;
