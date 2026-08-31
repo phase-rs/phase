@@ -327,6 +327,22 @@ fn replacement_targets(
     target: &TargetFilter,
 ) -> Vec<TargetRef> {
     if matches!(target, TargetFilter::Any) {
+        if let Some(context) = &ability.context.forwarded_result_context {
+            // CR 608.2c + CR 400.7: a forward-result reanimation rider binds to
+            // the newly moved object, not the spell's original declared target.
+            // `Some([])` is a completed empty result and must not fall back to
+            // stale targets; object pins prevent a later incarnation from
+            // receiving the rider.
+            return context
+                .targets
+                .iter()
+                .filter(|target| match target {
+                    TargetRef::Object(id) => context.object_pin_is_current(*id, state),
+                    TargetRef::Player(_) => true,
+                })
+                .cloned()
+                .collect();
+        }
         return ability.targets.clone();
     }
 
@@ -623,6 +639,51 @@ mod tests {
         assert_eq!(
             installed_rider.expiry, None,
             "a non-shield rider must not acquire a turn window at this seam"
+        );
+    }
+
+    #[test]
+    fn forwarded_result_context_binds_an_any_replacement_to_the_moved_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reanimator".to_string(),
+            Zone::Battlefield,
+        );
+        let reanimated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Reanimated Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Exile)
+            .expiry(RestrictionExpiry::UntilHostLeavesPlay);
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.context.forwarded_result_context = Some(Box::new(
+            crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[reanimated]),
+        ));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(
+            state.objects[&reanimated]
+                .replacement_definitions
+                .iter()
+                .any(|replacement| replacement.event == ReplacementEvent::Moved),
+            "the rider must bind to the forwarded reanimated object"
         );
     }
 
