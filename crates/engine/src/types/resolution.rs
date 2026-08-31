@@ -6795,7 +6795,7 @@ mod tests {
                 source_id: ObjectId(131),
                 branches: Vec::new(),
                 parent_targets: Vec::new(),
-                context: SpellContext::default(),
+                context: Box::new(SpellContext::default()),
                 continuation: None,
                 replacement_applied: HashSet::new(),
                 remaining_players: Vec::new(),

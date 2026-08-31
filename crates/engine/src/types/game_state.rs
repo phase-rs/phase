@@ -4134,8 +4134,10 @@ pub struct PendingChooseOneOf {
     pub branches: Vec<AbilityDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parent_targets: Vec<TargetRef>,
+    /// Boxed to keep the serializable resolution-frame enum compact. `Box` is
+    /// serde-transparent, so suspended-game wire payloads remain unchanged.
     #[serde(default)]
-    pub context: super::ability::SpellContext,
+    pub context: Box<super::ability::SpellContext>,
     /// CR 608.2c: Runtime tail retained until the final queued chooser selects
     /// a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
