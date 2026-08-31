@@ -557,7 +557,7 @@ export function GameSetupPage() {
                     <span className="text-xs text-slate-400" title={t("common:comboDetector.title")}>
                       {t("common:comboDetector.label")}
                     </span>
-                    <div className="grid grid-cols-3 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
+                    <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                       <button
                         type="button"
                         onClick={() => setLoopDetection({ type: "Off" })}
@@ -568,17 +568,6 @@ export function GameSetupPage() {
                         }`}
                       >
                         {t("common:comboDetector.off")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setLoopDetection({ type: "On" })}
-                        className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                          loopDetection.type === "On"
-                            ? "bg-indigo-600 text-white"
-                            : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                        }`}
-                      >
-                        {t("common:comboDetector.on")}
                       </button>
                       <button
                         type="button"

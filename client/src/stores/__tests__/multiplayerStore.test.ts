@@ -30,6 +30,7 @@ import { formatMetadata } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
   isServerCompatible,
+  migrateLegacyLoopDetectionOn,
   migrateOfficialServerAddress,
   migratePersistedMultiplayerState,
   type HostingSettings,
@@ -375,6 +376,63 @@ describe("multiplayerStore", () => {
         3,
       ),
     ).toEqual({ serverAddress: "wss://lobby.phase-rs.dev/ws" });
+  });
+
+  it("forwards a legacy 'On' loop-detection choice to Interactive", () => {
+    expect(
+      migrateLegacyLoopDetectionOn({
+        format: "Commander",
+        loopDetection: { type: "On" },
+      }),
+    ).toEqual({ format: "Commander", loopDetection: { type: "Interactive" } });
+  });
+
+  it("leaves Off/Interactive loop-detection choices unchanged", () => {
+    expect(
+      migrateLegacyLoopDetectionOn({ format: "Commander", loopDetection: { type: "Off" } }),
+    ).toEqual({ format: "Commander", loopDetection: { type: "Off" } });
+    expect(
+      migrateLegacyLoopDetectionOn({
+        format: "Commander",
+        loopDetection: { type: "Interactive" },
+      }),
+    ).toEqual({ format: "Commander", loopDetection: { type: "Interactive" } });
+  });
+
+  it("passes through a null lastHostConfig unchanged", () => {
+    expect(migrateLegacyLoopDetectionOn(null)).toBeNull();
+  });
+
+  it("re-runs the legacy loop-detection migration for v3 stores (v3 -> v4)", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        {
+          lastHostConfig: {
+            format: "Commander",
+            loopDetection: { type: "On" },
+          },
+        },
+        3,
+      ),
+    ).toEqual({
+      lastHostConfig: { format: "Commander", loopDetection: { type: "Interactive" } },
+    });
+  });
+
+  it("does not re-migrate a store already at v4", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        {
+          lastHostConfig: {
+            format: "Commander",
+            loopDetection: { type: "On" },
+          },
+        },
+        4,
+      ),
+    ).toEqual({
+      lastHostConfig: { format: "Commander", loopDetection: { type: "On" } },
+    });
   });
 
   it("strips AI seats from team-based server host settings", async () => {

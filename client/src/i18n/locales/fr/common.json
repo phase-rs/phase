@@ -61,7 +61,6 @@
   "comboDetector": {
     "label": "Détecteur de combos (expérimental)",
     "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
-    "on": "Activé",
     "off": "Désactivé",
     "interactive": "Interactif"
   },

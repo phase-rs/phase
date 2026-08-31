@@ -7,8 +7,12 @@ import type { LoopDetectionMode } from "../adapter/types";
  */
 export function loopDetectionModeFromQuery(value: string | null): LoopDetectionMode {
   switch (value?.toLowerCase()) {
+    // The selector retired the standalone "On" choice in favor of
+    // "Interactive" (its surviving semantics); a bookmarked/shared
+    // `?loopDetection=on` link must still enable the detector, so it maps
+    // forward rather than silently falling through to "Off" below.
     case "on":
-      return { type: "On" };
+      return { type: "Interactive" };
     case "interactive":
       return { type: "Interactive" };
     default:
