@@ -11,7 +11,7 @@ import { usePlayerId } from "../../hooks/usePlayerId";
 import { getSeatColor } from "../../hooks/useSeatColor";
 import {
   copyGameStateDebugSnapshot,
-  exportGameStateDebugZip,
+  exportAuthoritativeGameStateZip,
 } from "../../services/gameStateExport";
 import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
 import { useGameStore } from "../../stores/gameStore";
@@ -173,14 +173,14 @@ export function DebugPanel({
   }, [gameState]);
 
   const handleExportGameState = useCallback(() => {
-    if (!gameState) return;
-    exportGameStateDebugZip(gameState)
+    if (!adapter) return;
+    exportAuthoritativeGameStateZip(adapter)
       .then((filename) => setStatus({ type: "success", message: `Exported ${filename}` }))
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         setStatus({ type: "error", message: "Failed to export game state" });
       });
-  }, [gameState]);
+  }, [adapter]);
 
   // Same destination as the top-left report flag. Close this panel first — it
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
@@ -518,11 +518,11 @@ export function DebugPanel({
           </button>
           <button
             onClick={handleExportGameState}
-            disabled={!gameState}
+            disabled={!adapter?.exportPersistenceState}
             className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
-            title="Download the current debug game state as minified JSON inside a compressed ZIP"
+            title={t("debug.exportAuthoritativeTitle")}
           >
-            Export Game State
+            {t("debug.exportAuthoritative")}
           </button>
         </section>
 

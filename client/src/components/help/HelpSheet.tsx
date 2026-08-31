@@ -6,7 +6,7 @@ import type { TFunction } from "i18next";
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
 import {
   copyGameStateDebugSnapshot,
-  exportGameStateDebugZip,
+  exportAuthoritativeGameStateZip,
 } from "../../services/gameStateExport.ts";
 import { downloadCurrentReplay } from "../../services/replayExport.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -236,8 +236,9 @@ export function HelpSheet() {
   };
 
   const handleExportState = () => {
-    if (!gameState) return;
-    exportGameStateDebugZip(gameState)
+    const adapter = useGameStore.getState().adapter;
+    if (!adapter) return;
+    exportAuthoritativeGameStateZip(adapter)
       .then((filename) => setStatus(t("help.status.exported", { filename })))
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;

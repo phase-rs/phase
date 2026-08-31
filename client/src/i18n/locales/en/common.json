@@ -5,6 +5,10 @@
     "close": "Close",
     "closeNamed": "Close {{name}}"
   },
+  "debug": {
+    "exportAuthoritative": "Export Authoritative Game State",
+    "exportAuthoritativeTitle": "Download the engine-owned state used to diagnose and restore this game"
+  },
   "quantityRef": {
     "highestNumber": "the highest number",
     "lowestNumber": "the lowest number",

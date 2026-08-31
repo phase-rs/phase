@@ -2,9 +2,11 @@ import { strFromU8, unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore.ts";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory.ts";
 import { buildGameState } from "../../test/factories/gameStateFactory.ts";
 import {
   exportGameStateDebugZip,
+  exportAuthoritativeGameStateZip,
   serializeGameStateDebugSnapshot,
 } from "../gameStateExport.ts";
 
@@ -69,5 +71,34 @@ describe("gameStateExport", () => {
     expect(entryName).toMatch(/^game-state-turn-7-.*\.json$/);
     expect(json).not.toContain("\n");
     expect(JSON.parse(json).gameState.turn_number).toBe(7);
+  });
+
+  it("writes the trusted engine envelope, not the client snapshot", async () => {
+    const trustedState = JSON.stringify({
+      state: { stack_resolution_session: { policy: "RecheckNoMeaningfulPriorityAction" } },
+      schema_version: 1,
+    });
+    let writtenBlob: Blob | null = null;
+    const write = vi.fn(async (blob: Blob) => {
+      writtenBlob = blob;
+    });
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn(async () => ({
+        createWritable: async () => ({ write, close: vi.fn(async () => {}) }),
+      })),
+    });
+    const adapter = buildEngineAdapterMock(undefined, {
+      exportPersistenceState: vi.fn().mockResolvedValue(trustedState),
+    });
+
+    const filename = await exportAuthoritativeGameStateZip(adapter);
+
+    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(adapter.exportPersistenceState).toHaveBeenCalledOnce();
+    const entries = unzipSync(new Uint8Array(await writtenBlob!.arrayBuffer()));
+    const [entryName] = Object.keys(entries);
+    expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
+    expect(strFromU8(entries[entryName])).toBe(trustedState);
   });
 });
