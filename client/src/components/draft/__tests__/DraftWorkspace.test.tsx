@@ -738,7 +738,7 @@ describe("draft workspace shell", () => {
     const sideboard = () => screen.getByRole("region", { name: "Compact sideboard" });
     expect(deckCard()).toHaveClass("touch-none");
     expect(within(sideboard()).getByRole("button", { name: "Inspect side" })).toHaveClass("touch-pan-y");
-    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("grid-cols-2");
+    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("relative");
     expect(within(sideboard()).getByRole("heading", { name: "Sideboard" })).toBeInTheDocument();
     expect(within(sideboard()).queryByText("Sideboard (1 card)")).not.toBeInTheDocument();
 
@@ -748,7 +748,7 @@ describe("draft workspace shell", () => {
 
     rerender(<DraftWorkspace {...baseProps} responsiveLayout="tablet-landscape" />);
     expect(deckCard()).toHaveClass("touch-pan-y");
-    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("grid-cols-1");
+    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("relative");
     expect(sideboard().querySelector("[data-card-stack]")).not.toHaveClass("grid-cols-2");
     expect(within(sideboard()).getByRole("heading", { name: /Sideboard/ })).toBeInTheDocument();
     const expandedToggle = within(sideboard()).getByRole("button", { name: "Hide sideboard" });
@@ -761,7 +761,7 @@ describe("draft workspace shell", () => {
     expect(collapsedToggle.querySelector("span")).toHaveClass("-rotate-90");
 
     rerender(<DraftWorkspace {...baseProps} responsiveLayout="tablet-portrait" />);
-    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("grid-cols-3");
+    expect(sideboard().querySelector("[data-card-stack]")).toHaveClass("relative");
 
     rerender(<DraftWorkspace {...baseProps} responsiveLayout="phone-portrait" responsiveContext="builder" />);
     expect(deckCard()).toHaveClass("touch-pan-y");

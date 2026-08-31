@@ -31,7 +31,7 @@ describe("workspace preferences", () => {
       pinnedHeightRatio: 2,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
-      phoneDeckVisualColumnCaps: { portrait: 0, landscape: 7 },
+      phoneDeckVisualColumnCaps: { portrait: 0, landscape: 11 },
       tabletDeckVisualColumnCaps: { portrait: 0, landscape: 16 },
       deck: {
         sort: "type",
@@ -54,7 +54,7 @@ describe("workspace preferences", () => {
       packScale: 2.9,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
-      phoneDeckVisualColumnCaps: { portrait: 1, landscape: 5 },
+      phoneDeckVisualColumnCaps: { portrait: 1, landscape: 10 },
       tabletDeckVisualColumnCaps: { portrait: 1, landscape: 15 },
       deck: { sort: "type", columnCount: 2, rows: "two", showHeaders: false },
       sideboard: { sort: "cmc", columnCount: 20, rows: "one", showHeaders: true },

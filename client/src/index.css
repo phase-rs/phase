@@ -171,6 +171,15 @@ html {
   color-scheme: dark;
 }
 
+@keyframes draft-pack-selected-glow {
+  0%, 100% {
+    box-shadow: 0 0 4px 2px rgb(3, 139, 6);
+  }
+  50% {
+    box-shadow: 0 0 7px 3px rgb(3, 139, 6);
+  }
+}
+
 body {
   background:
     radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),

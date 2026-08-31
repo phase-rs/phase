@@ -996,6 +996,7 @@ function DraftingPhaseContent({
               mobileWorkspaceOpen={mobileWorkspaceOpen}
               onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
               mobileSummaryAccessory={<HostControls presentation="integrated" />}
+              tabletSideboardAccessory={<HostControls presentation="integrated" />}
             />
           </div>
         )}
@@ -1403,7 +1404,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!phoneDrafting && <HostControls />}
+      {!phoneDrafting && !(tabletLayout && phase === "drafting") && <HostControls />}
     </div>
   );
 }

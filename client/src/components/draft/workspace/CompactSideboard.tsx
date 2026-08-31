@@ -67,13 +67,13 @@ export function CompactSideboard({
       case "phone-portrait":
         return responsiveContext === "builder"
           ? { position: "absolute", top: 5, left: 5 + stackIndex * 54, width: 70 }
-          : { position: "absolute", top: 6, left: 6 + stackIndex * 52, width: 68 };
+          : { position: "absolute", top: 6 + stackIndex * 24, left: 6, width: "calc(100% - 12px)" };
       case "phone-landscape":
         return { position: "absolute", top: stackIndex * 24, left: 4, width: "calc(100% - 8px)" };
       case "tablet-portrait":
-        return { position: "absolute", top: 7, left: 7 + stackIndex * 66, width: 88 };
+        return { position: "absolute", top: 7 + stackIndex * 30, left: 7, width: "calc(100% - 14px)" };
       case "tablet-landscape":
-        return { position: "absolute", top: 8, left: 8 + stackIndex * 76, width: 100 };
+        return { position: "absolute", top: 8 + stackIndex * 34, left: 8, width: "calc(100% - 16px)" };
       case "desktop":
         return undefined;
     }
@@ -101,8 +101,9 @@ export function CompactSideboard({
   const draftPhonePortraitExpanded = responsiveContext === "draft"
     && responsiveLayout === "phone-portrait"
     && !collapsed;
-  const naturalCardLayout = draftPhoneLayout || tabletLayout;
-  const scrollableCardLayout = naturalCardLayout || isLandscapeBuilderPhone;
+  const draftResponsiveStack = responsiveContext === "draft" && (draftPhoneLayout || tabletLayout);
+  const naturalCardLayout = draftResponsiveStack;
+  const scrollableCardLayout = draftResponsiveStack || isLandscapeBuilderPhone;
   const collapsibleCompactSideboard = builderPhoneLayout || draftPhoneLayout || tabletLayout;
   const sideRailCollapsed = (
     isLandscapeBuilderPhone
@@ -279,12 +280,8 @@ export function CompactSideboard({
         ) : (
           <div
             data-card-stack
-            className={naturalCardLayout
-              ? responsiveLayout === "tablet-portrait"
-                ? "grid min-w-0 grid-cols-3 items-start gap-2"
-                : responsiveLayout === "phone-portrait"
-                  ? "grid min-w-0 grid-cols-2 items-start gap-2"
-                  : "grid min-w-0 grid-cols-1 items-start gap-2"
+            className={draftResponsiveStack
+              ? "relative h-full min-w-0"
               : builderPhoneLayout
               ? isLandscapeBuilderPhone
                 ? "flex min-w-0 flex-col"
@@ -300,8 +297,8 @@ export function CompactSideboard({
                 onHover={(hoveredCard) => onCardHover?.(hoveredCard?.preview ?? null)}
                 onBlur={() => onCardHover?.(null)}
                 onActivate={(activatedCard) => activate(activatedCard.instanceId)}
-                stackStyle={naturalCardLayout
-                  ? { width: "100%" }
+                stackStyle={draftResponsiveStack
+                  ? responsiveStackStyle(stackIndex)
                   : isLandscapeBuilderPhone
                   ? { width: "100%", marginTop: stackIndex === 0 ? undefined : "-72%" }
                   : builderPhoneLayout

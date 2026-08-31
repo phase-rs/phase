@@ -88,7 +88,8 @@
     "passingRight": "← Passage à droite ←",
     "connected": "Connected",
     "disconnected": "Disconnected",
-    "faceUpDraftCards": "Face visible : {{cards}}"
+    "faceUpDraftCards": "Face visible : {{cards}}",
+    "activePackCount": "{{count}} boosters chez {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",

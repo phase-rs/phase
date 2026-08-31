@@ -131,6 +131,7 @@ export interface DraftWorkspaceProps {
   mobileWorkspaceOpen?: boolean;
   onMobileWorkspaceOpenChange?(open: boolean): void;
   mobileSummaryAccessory?: ReactNode;
+  tabletSideboardAccessory?: ReactNode;
   responsiveContext?: "draft" | "builder";
 }
 
@@ -151,6 +152,7 @@ export function DraftWorkspace({
   mobileWorkspaceOpen = false,
   onMobileWorkspaceOpenChange,
   mobileSummaryAccessory,
+  tabletSideboardAccessory,
   responsiveContext = "draft",
 }: DraftWorkspaceProps) {
   const { t } = useTranslation(["draft", "common"]);
@@ -234,7 +236,7 @@ export function DraftWorkspace({
     ? undefined
     : {
       value: visualColumnCap,
-      maximum: responsiveContext === "builder" && tabletLayout ? 15 : 5,
+      maximum: responsiveContext === "builder" && tabletLayout ? 15 : 10,
       orientation: responsiveLayout === "phone-portrait" || responsiveLayout === "tablet-portrait"
         ? "portrait"
         : "landscape",
@@ -545,7 +547,7 @@ export function DraftWorkspace({
               data-zone="sideboard"
               data-drop-target="collapsed-sideboard"
               data-drop-state={sideboardDropActive ? "active" : "idle"}
-              className={tabletPortraitLayout
+              className={`${tabletLayout && tabletSideboardAccessory ? "grid grid-rows-[auto_minmax(0,1fr)] gap-2" : ""} ${tabletPortraitLayout
                 ? sideboardCollapsed
                   ? "h-full min-h-0 min-w-0"
                   : "absolute inset-0 z-20 min-h-0 min-w-0"
@@ -553,24 +555,31 @@ export function DraftWorkspace({
                 ? "h-full min-h-0 min-w-0"
                 : builderPhonePortraitLayout
                   ? "min-w-0 shrink-0"
-                  : "min-w-0"}
+                  : "min-w-0"}`}
             >
-              <CompactSideboard
-                pool={pool}
-                poolGroups={poolGroups}
-                workspace={normalized}
-                preferences={boardPreferences}
-                interactionLocked={interactionLocked}
-                dropActive={sideboardDropActive}
-                collapsed={sideboardCollapsed}
-                {...(dragController === undefined ? {} : { dragController })}
-                onToggle={toggleSideboard}
-                onWorkspaceChange={(next) => { if (!interactionLocked) onWorkspaceChange(next); }}
-                onCardHover={interactionLocked ? undefined : onCardHover}
-                responsiveLayout={responsiveLayout}
-                responsiveContext={responsiveContext}
-                touchDragEnabled={touchDragEnabled}
-              />
+              {tabletLayout && tabletSideboardAccessory && (
+                <div data-tablet-sideboard-accessory className="shrink-0">
+                  {tabletSideboardAccessory}
+                </div>
+              )}
+              <div className={tabletLayout && tabletSideboardAccessory ? "min-h-0" : "contents"}>
+                <CompactSideboard
+                  pool={pool}
+                  poolGroups={poolGroups}
+                  workspace={normalized}
+                  preferences={boardPreferences}
+                  interactionLocked={interactionLocked}
+                  dropActive={sideboardDropActive}
+                  collapsed={sideboardCollapsed}
+                  {...(dragController === undefined ? {} : { dragController })}
+                  onToggle={toggleSideboard}
+                  onWorkspaceChange={(next) => { if (!interactionLocked) onWorkspaceChange(next); }}
+                  onCardHover={interactionLocked ? undefined : onCardHover}
+                  responsiveLayout={responsiveLayout}
+                  responsiveContext={responsiveContext}
+                  touchDragEnabled={touchDragEnabled}
+                />
+              </div>
             </section>}
           </div>
         ) : (

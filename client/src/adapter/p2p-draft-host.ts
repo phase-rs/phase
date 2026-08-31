@@ -3045,6 +3045,7 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        active_pack_count: 0,
         face_up_draft_cards: [],
       });
     }

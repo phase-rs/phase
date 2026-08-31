@@ -143,6 +143,8 @@ export interface SeatPublicView {
   connected: boolean;
   has_submitted_deck: boolean;
   pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
+  /** Engine-owned active-pack presence: exactly 0 or 1, never a card count. */
+  active_pack_count: number;
   face_up_draft_cards: DraftCardInstance[];
 }
 

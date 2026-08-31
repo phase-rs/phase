@@ -184,6 +184,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
           display_name: s.isBot ? `Bot ${s.seat}` : `Player ${s.seat}`,
           has_submitted_deck: submitted.has(s.seat),
           pick_status: "NotDrafting",
+          active_pack_count: 0,
           face_up_draft_cards: [],
         })),
         match_config: { match_type: "Bo1" },

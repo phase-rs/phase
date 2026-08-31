@@ -132,8 +132,11 @@ import type {
  *       and its acknowledgement both carry the exact protocol version and
  *       capability token, so a guest clears recoverable state only after the
  *       host has durably revoked that exact seat.
+ *  23 — `active_pack_count` on public seats: the engine-owned `0|1` presence
+ *       signal for a seat's active pack. It never reveals a pack's cards or
+ *       remaining-card count, and an older host cannot provide it.
  */
-export const DRAFT_PROTOCOL_VERSION = 22 as const;
+export const DRAFT_PROTOCOL_VERSION = 23 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -699,8 +702,15 @@ function normalizeSeatPublicView(raw: unknown): SeatPublicView {
     throw new Error("Invalid draft message: malformed public seat");
   }
   const seat = raw as Record<string, unknown>;
+  if (
+    !Number.isInteger(seat.active_pack_count)
+    || (seat.active_pack_count !== 0 && seat.active_pack_count !== 1)
+  ) {
+    throw new Error("Invalid draft message: active_pack_count must be an integer 0 or 1");
+  }
   return {
     ...seat,
+    active_pack_count: seat.active_pack_count,
     face_up_draft_cards: normalizeArrayField(seat, "face_up_draft_cards"),
   } as SeatPublicView;
 }

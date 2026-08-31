@@ -88,7 +88,8 @@
     "passingRight": "← Passaggio a destra ←",
     "connected": "Connected",
     "disconnected": "Disconnected",
-    "faceUpDraftCards": "A faccia in su: {{cards}}"
+    "faceUpDraftCards": "A faccia in su: {{cards}}",
+    "activePackCount": "{{count}} buste presso {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",

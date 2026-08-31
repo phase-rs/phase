@@ -1367,6 +1367,7 @@ describe("draft store workspace authority", () => {
       connected: true,
       has_submitted_deck: true,
       pick_status: "NotDrafting",
+      active_pack_count: 0,
       face_up_draft_cards: [],
     }];
     wasm.start_quick_draft.mockReturnValue(draftView);

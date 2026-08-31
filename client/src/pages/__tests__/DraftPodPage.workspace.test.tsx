@@ -163,7 +163,8 @@ vi.mock("../../components/draft/workspace/DraftWorkspace", () => ({
   DraftWorkspace: (props: DraftWorkspaceProps) => {
     captured.workspace = props;
     const phoneLayout = props.responsiveLayout === "phone-portrait" || props.responsiveLayout === "phone-landscape";
-    return <div data-testid="workspace">{phoneLayout ? props.mobileSummaryAccessory : null}</div>;
+    const tabletLayout = props.responsiveLayout === "tablet-portrait" || props.responsiveLayout === "tablet-landscape";
+    return <div data-testid="workspace">{phoneLayout ? props.mobileSummaryAccessory : tabletLayout ? props.tabletSideboardAccessory : null}</div>;
   },
 }));
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
@@ -319,8 +320,12 @@ describe("DraftPodPage workspace", () => {
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.workspace?.responsiveLayout).toBe(responsiveLayout);
+    expect(captured.workspace?.tabletSideboardAccessory).toBeDefined();
     expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
     expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
+    expect(captured.hostPresentations).toEqual(["integrated"]);
+    expect(screen.getByTestId("host-controls-integrated")).toBeInTheDocument();
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
 
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);

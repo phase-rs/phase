@@ -15,6 +15,7 @@ vi.mock("../../../stores/multiplayerDraftStore", () => ({
             connected: true,
             has_submitted_deck: false,
             pick_status: "Pending",
+            active_pack_count: 1,
             face_up_draft_cards: [],
           },
           {
@@ -24,6 +25,7 @@ vi.mock("../../../stores/multiplayerDraftStore", () => ({
             connected: true,
             has_submitted_deck: false,
             pick_status: "Picked",
+            active_pack_count: 0,
             face_up_draft_cards: [
               {
                 instance_id: "cogwork-1",
@@ -52,8 +54,11 @@ describe("SeatStatusRing", () => {
     const { container } = render(<SeatStatusRing />);
 
     expect(screen.getByText("Face-up: Cogwork Librarian")).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
+    expect(screen.getByText("1 packs at Drafter")).toBeInTheDocument();
     expect(container.querySelector("[data-seat-status-ring]")).toHaveClass(
-      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+1.5rem),1fr))]",
+      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+4.5rem),1fr))]",
       "text-xs",
     );
     const units = container.querySelectorAll<HTMLElement>("[data-seat-pass-unit]");
@@ -61,7 +66,7 @@ describe("SeatStatusRing", () => {
     for (const unit of units) {
       expect(unit.firstElementChild).toHaveAttribute("data-seat-badge");
       expect(unit.lastElementChild).toHaveAttribute("data-pass-arrow");
-      expect(unit.querySelector("[data-seat-badge]")).toHaveClass("min-w-[15ch]");
+      expect(unit.querySelector("[data-seat-badge]")).toHaveClass("min-w-[15ch]", "min-h-[52px]");
       expect(unit.querySelector("[data-pass-arrow]")).toHaveTextContent("→");
     }
   });
@@ -74,6 +79,7 @@ describe("SeatStatusRing", () => {
       connected: true,
       has_submitted_deck: false,
       pick_status: "Pending" as const,
+      active_pack_count: 1,
       face_up_draft_cards: [],
     }];
 

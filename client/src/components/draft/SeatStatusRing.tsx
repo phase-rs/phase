@@ -41,11 +41,12 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
       ? "border-emerald-400/40"
       : PICK_STATUS_BORDER[seat.pick_status];
   const faceUpNames = seat.face_up_draft_cards.map((card) => card.name).join(", ");
+  const activePackCount = seat.active_pack_count;
 
   return (
     <div
       data-seat-badge
-      className={`flex h-full w-full min-w-[15ch] flex-col items-start gap-1 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
+      className={`relative flex h-full min-h-[52px] w-full min-w-[15ch] flex-col items-start gap-1 rounded-[12px] border bg-black/18 px-2 py-1 pr-11 backdrop-blur-md ${borderColor}`}
     >
       <div className="flex min-w-0 items-center gap-1.5">
         <div
@@ -75,6 +76,11 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
           {t("seat.faceUpDraftCards", { cards: faceUpNames })}
         </span>
       )}
+      <span className="sr-only">{t("seat.activePackCount", { count: activePackCount, player: seat.display_name || t("seat.label", { number: seat.seat_index + 1 }) })}</span>
+      <span className="absolute right-1 top-1/2 h-10 w-10 -translate-y-1/2" aria-hidden="true">
+        <img src="/icons/packs.svg" alt="" className={`h-full w-full object-contain ${activePackCount === 0 ? "opacity-35 grayscale" : ""}`} />
+        <span className="absolute inset-0 flex items-center justify-center pt-0.5 font-mono text-sm font-bold tabular-nums text-white [text-shadow:0_1px_3px_rgb(0_0_0_/_0.95)]">{activePackCount}</span>
+      </span>
     </div>
   );
 }
@@ -107,7 +113,7 @@ export function SeatStatusRingLayout({
     <div
       data-seat-status-ring
       data-pass-direction={passDirection ?? "Left"}
-      className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(calc(15ch+1.5rem),1fr))] gap-2 text-xs"
+      className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(calc(15ch+4.5rem),1fr))] gap-2 text-xs"
     >
       <span className="sr-only">{passDirectionLabel}</span>
       {seats.map((seat) => (

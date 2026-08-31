@@ -47,6 +47,12 @@ pub struct SeatPublicView {
     pub connected: bool,
     pub has_submitted_deck: bool,
     pub pick_status: PickStatus,
+    /// Engine-owned presence signal for a pack a seat is actively drafting.
+    ///
+    /// This deliberately exposes only `0` or `1`, never the pack's card
+    /// count or identity. It is `1` precisely while the session is drafting
+    /// and this seat has a current pack; otherwise it is `0`.
+    pub active_pack_count: u8,
     /// CR 905.2c: Draft cards that remain face up are visible to every player.
     pub face_up_draft_cards: Vec<DraftCardInstance>,
 }
@@ -531,6 +537,7 @@ pub fn filter_for_spectator(
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                active_pack_count: u8::from(is_drafting && session.current_pack[i].is_some()),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
@@ -691,6 +698,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                active_pack_count: u8::from(is_drafting && session.current_pack[i].is_some()),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
@@ -2233,6 +2241,50 @@ mod tests {
         let view = filter_for_player(&session, 0);
         for seat in &view.seats {
             assert_eq!(seat.pick_status, PickStatus::NotDrafting);
+        }
+    }
+
+    #[test]
+    fn public_active_pack_count_is_presence_only_and_stops_outside_drafting() {
+        let (mut session, source) = test_session(2);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        let hidden_other_pack_card = session.current_pack[1].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session.current_pack[1] = None;
+
+        let player_view = filter_for_player(&session, 0);
+        let spectator_view = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert_eq!(
+            player_view
+                .seats
+                .iter()
+                .map(|seat| seat.active_pack_count)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            spectator_view
+                .seats
+                .iter()
+                .map(|seat| seat.active_pack_count)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert!(!serde_json::to_string(&player_view)
+            .unwrap()
+            .contains(&hidden_other_pack_card));
+        assert!(!serde_json::to_string(&spectator_view)
+            .unwrap()
+            .contains(&hidden_other_pack_card));
+
+        // A stale current_pack is not an active pack once drafting has ended.
+        session.status = DraftStatus::Deckbuilding;
+        for seat in filter_for_player(&session, 0).seats {
+            assert_eq!(seat.active_pack_count, 0);
+        }
+        for seat in filter_for_spectator(&session, SpectatorVisibility::Public).seats {
+            assert_eq!(seat.active_pack_count, 0);
         }
     }
 
