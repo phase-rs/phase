@@ -367,7 +367,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     if (
       operationIsDurableMutation(event.operation)
       && !startEventBufferRef.current.active
-      && (!selected || (!operationIsDurableMutation(selected) && progressIdentity(event) !== `${selected.operationId}:${selected.catalogRoot}`))
+      && (!selected || ((progressOutcomeRef.current.failed || !operationIsDurableMutation(selected)) && progressIdentity(event) !== `${selected.operationId}:${selected.catalogRoot}`))
     ) {
       const identity = progressIdentity(event);
       operationRef.current = event.operation;

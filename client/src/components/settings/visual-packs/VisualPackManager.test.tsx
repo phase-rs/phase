@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -30,6 +30,7 @@ vi.mock("../../../hooks/useSetSymbols.ts", () => ({ useSetCatalog: () => ({ cata
 const ROOT_A = catalogRoot("a".repeat(64));
 const ROOT_B = catalogRoot("b".repeat(64));
 const OPERATION = operationId("c".repeat(32));
+const OTHER_OPERATION = operationId("f".repeat(32));
 /** A curated pack's root IS its membership digest, so it is deliberately
  *  neither of the catalog roots above — an estimate that matched one of those
  *  would hide a selector-identity bug rather than expose it. */
@@ -1737,19 +1738,78 @@ describe("VisualPackManager initialization", () => {
   });
 
   /** Drive the panel to an operation that has failed and is offering Resume. */
-  async function reachFailedOperation(fixture: ReturnType<typeof backend>): Promise<void> {
+  async function reachFailedOperation(
+    fixture: ReturnType<typeof backend>,
+    state: "downloading" | "finalizing" = "downloading",
+  ): Promise<void> {
     await pressInstall(/scan catalog and estimate/i, /install selection/i);
     await waitFor(() => expect(fixture.value.start).toHaveBeenCalled());
     fixture.emitProgress({
       phase: "failed",
       error: "network",
       operation: {
-        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state,
         packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: null, objectsPromoted: 1, completedRevision: null,
       },
     });
     await screen.findByRole("button", { name: /resume operation/i });
   }
+
+  it.each(["downloading", "finalizing"] as const)("adopts a different durable operation after a failed %s operation", async (state) => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await reachFailedOperation(fixture, state);
+
+    await act(async () => {
+      fixture.emitProgress({
+        phase: "running",
+        error: null,
+        operation: {
+          operationId: OTHER_OPERATION, catalogRoot: ROOT_B, kind: "install", state: "downloading",
+          packTotal: 1, packsPromoted: 0, objectTotal: 3, objectEstimate: 3, objectsPromoted: 2, completedRevision: null,
+        },
+      });
+    });
+
+    expect(await screen.findByText("2/3")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resume operation/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not let a different durable operation replace an active operation", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await pressInstall(/scan catalog and estimate/i, /install selection/i);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalled());
+
+    fixture.emitProgress({
+      phase: "running",
+      error: null,
+      operation: {
+        operationId: OPERATION, catalogRoot: ROOT_A, kind: "install", state: "downloading",
+        packTotal: 1, packsPromoted: 0, objectTotal: 2, objectEstimate: 2, objectsPromoted: 1, completedRevision: null,
+      },
+    });
+    expect(await screen.findByText("1/2")).toBeInTheDocument();
+
+    await act(async () => {
+      fixture.emitProgress({
+        phase: "running",
+        error: null,
+        operation: {
+          operationId: OTHER_OPERATION, catalogRoot: ROOT_B, kind: "install", state: "downloading",
+          packTotal: 1, packsPromoted: 0, objectTotal: 3, objectEstimate: 3, objectsPromoted: 2, completedRevision: null,
+        },
+      });
+    });
+
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.queryByText("2/3")).not.toBeInTheDocument();
+  });
 
   it("preserves a failed progress event emitted before a manual start reply", async () => {
     const fixture = backend();
