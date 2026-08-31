@@ -13101,19 +13101,27 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
 ///
 /// The live-entrant branch is also scoped to `record.to_zone == Zone::Battlefield`
 /// — not because CR 608.2h + CR 113.7a's "public zone it was expected in" is
-/// battlefield-only (it is not), but because CR 400.7's new-object rule makes
-/// the event record's pre-move projection a superset of the live object's
-/// provenance for every destination, while only the battlefield-exit path
-/// (`reset_for_battlefield_exit`) affirmatively clears those provenance
-/// stamps — such as the cast stamps this helper's `WasCast` caller depends
-/// on — on the live object. So for every non-battlefield destination the live
-/// object can only ever be equal-or-worse as an authority than the record's
-/// LKI, and this helper always falls through to the record's LKI there,
+/// battlefield-only (it is not), but because of ordering, not enumeration: the
+/// record's projection is captured pre-move by `snapshot_for_zone_change`
+/// (invoked at `game/zones.rs:1248`), strictly before `apply_zone_exit_cleanup`
+/// (`game/zones.rs:1298`) runs. Every path that clears a live object's
+/// provenance stamps — today `reset_for_battlefield_exit` and
+/// `clear_cast_origin_off_provenance_zones` (`game/zones.rs`) — is invoked from
+/// inside that same cleanup, so whichever one fires for a given move fires
+/// AFTER the snapshot already exists, and a future clearing path added there
+/// inherits the same ordering. So for every destination the record's LKI is
+/// always an equal-or-better authority than the live object once the subject
+/// has moved, and this helper always falls through to the record's LKI there,
 /// never the live object, even when the live object still sits in
-/// `record.to_zone` with a matching incarnation. This mirrors the
-/// `destination == Zone::Battlefield` gate in `matches_zone_change_event_object_filter`
-/// (`game/filter.rs`) cited below. Any migration of another condition arm onto
-/// this helper MUST preserve this destination scope.
+/// `record.to_zone` with a matching incarnation. Concretely: on a
+/// Stack->Graveyard move (a countered spell, no battlefield involved),
+/// `clear_cast_origin_off_provenance_zones` nulls the live object's
+/// `cast_from_zone` while the record's LKI still carries
+/// `cast_from_zone = Some(Hand)` — proof this gate is required, not merely
+/// conservative. This mirrors the `destination == Zone::Battlefield` gate in
+/// `matches_zone_change_event_object_filter` (`game/filter.rs`) cited below.
+/// Any migration of another condition arm onto this helper MUST preserve this
+/// destination scope.
 ///
 /// Returns `None` when the event names a subject that nothing can answer for —
 /// fail closed. A different object's provenance is NEVER substituted for the
