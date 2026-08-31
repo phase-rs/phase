@@ -279,7 +279,11 @@ pub enum TournamentStatus {
     /// current round is settled (see `complete_tournament`'s own rationale).
     /// `current_round < total_rounds()` is therefore a legal shape for a
     /// `Completed` event, and clients must not read this status as "the full
-    /// scheduled event was played".
+    /// scheduled event was played". The comparison is against a schedule that
+    /// no longer moves once the event starts — an unset override resolves
+    /// through [`TournamentMeta::resolved_total_rounds`], latched at round 1 —
+    /// so a short `Completed` event genuinely ended early rather than having
+    /// its target quietly recomputed downward by a drop.
     Completed,
     /// Reached only via [`TournamentManager::check_expired`]'s 7-day
     /// inactivity transition, never organizer-initiated. Distinct from
@@ -471,7 +475,10 @@ pub struct CreateTournamentRequest {
     pub bracket: BracketShape,
     /// Organizer override. `None` uses the bracket- and arity-selected
     /// default ([`default_total_rounds`]), resolved against the live player
-    /// count rather than frozen at creation time (when nobody has joined yet).
+    /// count rather than frozen at creation time (when nobody has joined
+    /// yet) — and then latched into
+    /// [`TournamentMeta::resolved_total_rounds`] once round 1 is paired, so
+    /// a drop cannot shorten a schedule that is already being played.
     pub total_rounds: Option<u32>,
 }
 
@@ -489,9 +496,24 @@ pub struct TournamentMeta {
     /// rather than an eagerly-resolved `u32` because at creation time the
     /// player count is zero, and the default is keyed on
     /// `(bracket, arity, player_count)` — resolving it against an empty field
-    /// would bake in a meaningless value. Read through
-    /// [`TournamentMeta::total_rounds`].
+    /// would bake in a meaningless value. The default is instead latched into
+    /// [`Self::resolved_total_rounds`] at the first moment it *is* meaningful,
+    /// when round 1 is paired. Read through [`TournamentMeta::total_rounds`].
     pub total_rounds_override: Option<u32>,
+    /// The *engine-computed* round count, latched the first time round 1 is
+    /// paired — as opposed to [`Self::total_rounds_override`], which is the
+    /// *organizer's* explicit choice and always wins over this one. `None`
+    /// until round 1 exists, so a `Registration` event whose field is still
+    /// growing keeps resolving [`Self::total_rounds`] live.
+    ///
+    /// Latched rather than recomputed because [`default_total_rounds`] is
+    /// keyed on the *active* player count, and a drop shrinks that count
+    /// mid-event: a 3-player single-elimination bracket is two rounds deep,
+    /// but one round-1 drop would recompute the default to 1 and the round
+    /// ceiling in [`TournamentManager::generate_pairings`] would then refuse
+    /// the bracket's own final. The schedule an event started under is the
+    /// schedule it finishes under.
+    pub resolved_total_rounds: Option<u32>,
     pub current_round: u32,
     pub status: TournamentStatus,
     pub players: Vec<TournamentPlayer>,
@@ -507,15 +529,29 @@ pub struct TournamentMeta {
 }
 
 impl TournamentMeta {
-    /// The organizer's override if there is one, else the bracket- and
-    /// arity-selected default for the current active-player count. All three
-    /// inputs go through the single [`default_total_rounds`] authority rather
-    /// than being branched on here, so a caller holding a bare
-    /// `(bracket, arity, player_count)` gets the same answer this does.
+    /// The scheduled round count, resolved in three tiers:
+    ///
+    /// 1. [`Self::total_rounds_override`] — the organizer's explicit choice,
+    ///    which always wins outright.
+    /// 2. [`Self::resolved_total_rounds`] — the computed default, latched
+    ///    when round 1 was paired. Recomputation stops there on purpose: the
+    ///    default is keyed on the active player count, and a mid-event drop
+    ///    must not shorten a schedule that is already being played (see that
+    ///    field for the single-elimination case it would otherwise break).
+    /// 3. Otherwise the live bracket- and arity-selected default for the
+    ///    current active-player count — the right answer for an event that
+    ///    has not started yet, whose field is still growing.
+    ///
+    /// All three inputs to that last tier go through the single
+    /// [`default_total_rounds`] authority rather than being branched on here,
+    /// so a caller holding a bare `(bracket, arity, player_count)` gets the
+    /// same answer this does.
     pub fn total_rounds(&self) -> u32 {
-        self.total_rounds_override.unwrap_or_else(|| {
-            default_total_rounds(self.bracket, self.arity, self.active_player_count())
-        })
+        self.total_rounds_override
+            .or(self.resolved_total_rounds)
+            .unwrap_or_else(|| {
+                default_total_rounds(self.bracket, self.arity, self.active_player_count())
+            })
     }
 
     /// Non-dropped entrants, in join order.
@@ -1482,6 +1518,9 @@ impl TournamentManager {
                 scoring: req.scoring,
                 bracket: req.bracket,
                 total_rounds_override: req.total_rounds,
+                // Nothing is latched until round 1 is paired: no round has
+                // been scheduled yet, and the field is still empty.
+                resolved_total_rounds: None,
                 current_round: 0,
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
@@ -1547,6 +1586,14 @@ impl TournamentManager {
     /// override and the advertised default ([`default_total_rounds`]) purely
     /// decorative.
     ///
+    /// Because that ceiling binds, this is also where an unset default stops
+    /// being live: pairing round 1 latches the computed count into
+    /// [`TournamentMeta::resolved_total_rounds`]. The default is keyed on the
+    /// *active* player count, so without the latch a mid-event drop would
+    /// recompute it downward and this very guard would refuse a round the
+    /// bracket still owes — a 3-player single-elimination event losing its
+    /// final being the sharp case.
+    ///
     /// The three guards are ordered most- to least-permanent, so the first
     /// error a caller sees is the one that actually describes their
     /// situation: terminal status (the tournament is over), then the round
@@ -1568,9 +1615,10 @@ impl TournamentManager {
         }
         // The scheduled length is a ceiling. `total_rounds()` is the single
         // authority for it — the organizer's override if set, else the
-        // bracket- and arity-selected default resolved against the live field
-        // — so this guard cannot drift from the count clients are shown or
-        // from the one `complete_tournament`'s rationale refers to.
+        // computed default latched when round 1 was paired, else (before
+        // round 1 exists) that default resolved against the live field — so
+        // this guard cannot drift from the count clients are shown or from
+        // the one `complete_tournament`'s rationale refers to.
         //
         // A `total_rounds()` of 0 is a single-elimination field below
         // `SINGLE_ELIMINATION_MIN_PLAYERS`: "there is no bracket to run", per
@@ -1619,6 +1667,24 @@ impl TournamentManager {
         let ids: Vec<PairingId> = generated.iter().map(|p| p.id).collect();
         meta.pairings.extend(generated);
         meta.current_round = round;
+        // Latch the computed default the moment round 1 exists, so a later
+        // drop cannot shrink the schedule out from under the ceiling above
+        // (see [`TournamentMeta::resolved_total_rounds`]). `total_rounds` is
+        // the very value this call was authorized against, so the latch and
+        // the guard can never disagree about what round 1 was scheduled for.
+        //
+        // The `is_none()` test is what makes this idempotent, not `round == 1`
+        // on its own: the round test states *when* the schedule is fixed, and
+        // the `is_none()` test guarantees an already-latched one is never
+        // overwritten by a later call. With an override in play there is
+        // nothing to latch — the override already wins ahead of this tier and
+        // is fixed by the organizer, not derived from the field.
+        if round == 1
+            && meta.total_rounds_override.is_none()
+            && meta.resolved_total_rounds.is_none()
+        {
+            meta.resolved_total_rounds = Some(total_rounds);
+        }
         meta.status = TournamentStatus::InProgress;
         meta.last_activity_at = now;
         Ok(ids)
@@ -1695,6 +1761,11 @@ impl TournamentManager {
     /// current round can hold one — but the rule "a drop settles any pairing
     /// it reduces to a single active player" is unconditionally correct and
     /// does not need that invariant to hold in order to be right.
+    ///
+    /// A drop shrinks the active field but never the schedule: once round 1
+    /// has been paired, [`TournamentMeta::total_rounds`] reads the count
+    /// latched then ([`TournamentMeta::resolved_total_rounds`]), so the rounds
+    /// the remaining players are still owed stay generatable.
     pub fn drop_player(
         &mut self,
         code: &str,
@@ -3538,6 +3609,194 @@ mod tests {
         let meta = mgr.get("T").expect("t");
         assert_eq!(meta.current_round, 2, "no round was advanced");
         assert_eq!(meta.status, TournamentStatus::InProgress);
+    }
+
+    /// The ceiling binds against a *latched* schedule, not a live one. Three
+    /// players is the sharp case: the bracket is two rounds deep (4 slots ->
+    /// 2 -> 1), but a single round-1 drop leaves two active players, whose
+    /// live `default_total_rounds` is one round — so an unlatched recompute
+    /// would have the ceiling refuse the bracket's own final.
+    #[test]
+    fn single_elimination_drop_does_not_shorten_the_latched_final() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        create(
+            &mut mgr,
+            "SE",
+            MatchArity::HEAD_TO_HEAD,
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut mgr, "SE", 3, &env);
+
+        mgr.generate_pairings("SE", &env).expect("round 1");
+        {
+            let meta = mgr.get("SE").expect("t");
+            assert!(
+                meta.total_rounds_override.is_none(),
+                "this is the computed-default path"
+            );
+            assert_eq!(
+                meta.resolved_total_rounds,
+                Some(2),
+                "round 1 latches the bracket's depth"
+            );
+            assert_eq!(meta.total_rounds(), 2);
+            // Seed 1 takes the bye; seeds 2 and 3 play the semifinal.
+            let round_one: Vec<Vec<String>> =
+                meta.pairings.iter().map(|p| p.players.clone()).collect();
+            assert_eq!(round_one, vec![vec![key(0)], vec![key(1), key(2)]]);
+        }
+
+        // A drop mid-round-1: it forfeits the match it leaves one-sided and
+        // takes the active field down to two.
+        mgr.drop_player("SE", &key(2), &env).expect("drop");
+        {
+            let meta = mgr.get("SE").expect("t");
+            assert_eq!(meta.active_player_count(), 2);
+            assert_eq!(
+                meta.pairing(1).expect("the semifinal").outcome,
+                Some(PairingOutcome::Forfeit { winner: key(1) }),
+                "the drop settles the pairing it emptied"
+            );
+            assert_eq!(
+                default_total_rounds(BracketShape::SingleElimination, MatchArity::HEAD_TO_HEAD, 2),
+                1,
+                "the count an unlatched recompute would now produce"
+            );
+            assert_eq!(
+                meta.total_rounds(),
+                2,
+                "the drop must not shorten a schedule already being played"
+            );
+            assert!(meta.first_unresolved_pairing().is_none());
+        }
+
+        // ...so the final the bracket still owes actually pairs: the bye
+        // recipient against the forfeit winner.
+        mgr.generate_pairings("SE", &env)
+            .expect("round 2 is the bracket's final");
+        {
+            let meta = mgr.get("SE").expect("t");
+            assert_eq!(meta.current_round, 2);
+            let final_round: Vec<Vec<String>> = meta
+                .pairings
+                .iter()
+                .filter(|p| p.round == 2)
+                .map(|p| p.players.clone())
+                .collect();
+            assert_eq!(final_round, vec![vec![key(0), key(1)]]);
+        }
+
+        // The ceiling still binds at the latched value: the latch buys back
+        // exactly the rounds the bracket was scheduled for, and no more.
+        report_all_pending(&mut mgr, "SE", &env);
+        let err = mgr
+            .generate_pairings("SE", &env)
+            .expect_err("round 3 is past a two-round bracket");
+        assert!(err.contains("scheduled for 2 round(s)"), "{err}");
+    }
+
+    /// The same latch on the Swiss path, where the shrink is a table row
+    /// rather than a bracket depth: 9 head-to-head players schedule 4 rounds
+    /// (2^4 >= 9) and 8 schedule 3, so one drop would otherwise cancel the
+    /// last round of an event already under way. Running all four rounds also
+    /// pins the latch's idempotence — a re-latch at round 2 would drop the
+    /// count to 3 and make round 4 unpairable.
+    #[test]
+    fn swiss_drop_does_not_shorten_the_latched_round_count() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(9, 2, &env);
+        assert_eq!(
+            mgr.get("T").expect("t").total_rounds(),
+            4,
+            "9 players: the smallest r with 2^r >= 9"
+        );
+
+        mgr.generate_pairings("T", &env).expect("round 1");
+        assert_eq!(
+            mgr.get("T").expect("t").resolved_total_rounds,
+            Some(4),
+            "round 1 latches the computed default"
+        );
+
+        mgr.drop_player("T", &key(8), &env).expect("drop");
+        {
+            let meta = mgr.get("T").expect("t");
+            assert_eq!(meta.active_player_count(), 8);
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, 8),
+                3,
+                "the count an unlatched recompute would now produce"
+            );
+            assert_eq!(
+                meta.total_rounds(),
+                4,
+                "the drop must not shorten a schedule already being played"
+            );
+        }
+
+        // Every scheduled round runs, including the fourth an unlatched
+        // recompute would have refused.
+        for next in 2..=4u32 {
+            report_all_pending(&mut mgr, "T", &env);
+            mgr.generate_pairings("T", &env)
+                .unwrap_or_else(|e| panic!("round {next}: {e}"));
+            let meta = mgr.get("T").expect("t");
+            assert_eq!(meta.current_round, next);
+            assert_eq!(
+                meta.total_rounds(),
+                4,
+                "round {next} did not re-latch a shorter schedule"
+            );
+        }
+
+        // ...and the ceiling still binds at the latched value.
+        report_all_pending(&mut mgr, "T", &env);
+        let err = mgr
+            .generate_pairings("T", &env)
+            .expect_err("round 5 is past the scheduled total");
+        assert!(err.contains("scheduled for 4 round(s)"), "{err}");
+        assert!(err.contains("already at round 4"), "{err}");
+    }
+
+    /// The three resolution tiers, at the one point where they can disagree.
+    /// The organizer's override outranks a latched default exactly as it
+    /// outranks a live one, and an event created with an override latches
+    /// nothing: there is no computed default in play to freeze.
+    #[test]
+    fn total_rounds_resolves_override_then_latched_then_live() {
+        let env = FakeEnv::new();
+
+        let mut mgr = swiss(9, 2, &env);
+        {
+            let meta = mgr.get("T").expect("t");
+            assert_eq!(
+                meta.resolved_total_rounds, None,
+                "nothing is scheduled before round 1"
+            );
+            assert_eq!(meta.total_rounds(), 4, "so the default resolves live");
+        }
+        mgr.generate_pairings("T", &env).expect("round 1");
+        assert_eq!(mgr.get("T").expect("t").resolved_total_rounds, Some(4));
+
+        mgr.meta_mut("T").expect("t").total_rounds_override = Some(11);
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.total_rounds(), 11, "the override wins outright");
+        assert_eq!(
+            meta.resolved_total_rounds,
+            Some(4),
+            "and leaves the latched default untouched underneath it"
+        );
+
+        let mut capped = swiss_capped(9, 2, 2, &env);
+        capped.generate_pairings("T", &env).expect("round 1");
+        let meta = capped.get("T").expect("t");
+        assert_eq!(
+            meta.resolved_total_rounds, None,
+            "an overridden event has no computed default to latch"
+        );
+        assert_eq!(meta.total_rounds(), 2);
     }
 
     /// Completing is terminal, so it may not freeze a tournament around a
