@@ -681,6 +681,7 @@ mod tests {
         assert!(
             state.objects[&reanimated]
                 .replacement_definitions
+                .as_slice()
                 .iter()
                 .any(|replacement| replacement.event == ReplacementEvent::Moved),
             "the rider must bind to the forwarded reanimated object"
@@ -799,6 +800,7 @@ mod tests {
 
         assert!(state.objects[&target]
             .replacement_definitions
+            .as_slice()
             .iter()
             .any(|replacement| replacement.event == ReplacementEvent::Moved));
     }
