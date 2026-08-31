@@ -13100,11 +13100,16 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
 /// first establish that the provenance it reads is stamped pre-move.
 ///
 /// The live-entrant branch is also scoped to `record.to_zone == Zone::Battlefield`
-/// — CR 608.2h + CR 113.7a: only the battlefield is the "public zone it was
-/// expected in" for reading current-info characteristics such as the
-/// pre-`reset_for_battlefield_exit` cast stamps this helper's `WasCast` caller
-/// depends on; any other destination must always fall through to the record's
-/// LKI, never the live object, even when the live object still sits in
+/// — not because CR 608.2h + CR 113.7a's "public zone it was expected in" is
+/// battlefield-only (it is not), but because CR 400.7's new-object rule makes
+/// the event record's pre-move projection a superset of the live object's
+/// provenance for every destination, while only the battlefield-exit path
+/// (`reset_for_battlefield_exit`) affirmatively clears those provenance
+/// stamps — such as the cast stamps this helper's `WasCast` caller depends
+/// on — on the live object. So for every non-battlefield destination the live
+/// object can only ever be equal-or-worse as an authority than the record's
+/// LKI, and this helper always falls through to the record's LKI there,
+/// never the live object, even when the live object still sits in
 /// `record.to_zone` with a matching incarnation. This mirrors the
 /// `destination == Zone::Battlefield` gate in `matches_zone_change_event_object_filter`
 /// (`game/filter.rs`) cited below. Any migration of another condition arm onto
