@@ -89,7 +89,10 @@
     "connected": "Connected",
     "disconnected": "Disconnected",
     "faceUpDraftCards": "Aufgedeckt: {{cards}}",
-    "activePackCount": "{{count}} Packs bei {{player}}"
+    "activePackCount_one": "{{count}} Booster bei {{player}}",
+    "activePackCount_few": "{{count}} Booster bei {{player}}",
+    "activePackCount_many": "{{count}} Booster bei {{player}}",
+    "activePackCount_other": "{{count}} Booster bei {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",

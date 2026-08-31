@@ -271,7 +271,13 @@ vi.mock("../../components/menu/MenuShell", () => ({
   // PASSTHROUGH, never `() => null` — see the header.
   MenuShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: () => null }));
+vi.mock("../../components/draft/HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 
 // ── Harness ────────────────────────────────────────────────────────────
 

@@ -89,7 +89,10 @@
     "connected": "Conectado",
     "disconnected": "Desconectado",
     "faceUpDraftCards": "Boca arriba: {{cards}}",
-    "activePackCount": "{{count}} sobres en {{player}}"
+    "activePackCount_one": "{{count}} sobre en {{player}}",
+    "activePackCount_few": "{{count}} sobres en {{player}}",
+    "activePackCount_many": "{{count}} sobres en {{player}}",
+    "activePackCount_other": "{{count}} sobres en {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",

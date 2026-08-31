@@ -232,7 +232,7 @@ export function DraftWorkspace({
     ? undefined
     : {
       value: visualColumnCap,
-      maximum: responsiveContext === "builder" && tabletLayout ? 15 : 10,
+      maximum: 10,
       orientation: responsiveLayout === "phone-portrait" || responsiveLayout === "tablet-portrait"
         ? "portrait"
         : "landscape",

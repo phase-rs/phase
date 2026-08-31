@@ -56,7 +56,8 @@ describe("SeatStatusRing", () => {
     expect(screen.getByText("Face-up: Cogwork Librarian")).toBeInTheDocument();
     expect(screen.getByText("1")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
-    expect(screen.getByText("1 packs at Drafter")).toBeInTheDocument();
+    expect(screen.getByText("1 pack at Drafter")).toBeInTheDocument();
+    expect(screen.getByText("0 packs at Opponent")).toBeInTheDocument();
     expect(container.querySelector("[data-seat-status-ring]")).toHaveClass(
       "grid-cols-[repeat(auto-fit,minmax(calc(15ch+3.5rem),1fr))]",
       "mb-2",

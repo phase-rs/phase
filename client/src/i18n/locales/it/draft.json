@@ -89,7 +89,10 @@
     "connected": "Connected",
     "disconnected": "Disconnected",
     "faceUpDraftCards": "A faccia in su: {{cards}}",
-    "activePackCount": "{{count}} buste presso {{player}}"
+    "activePackCount_one": "{{count}} busta presso {{player}}",
+    "activePackCount_few": "{{count}} buste presso {{player}}",
+    "activePackCount_many": "{{count}} buste presso {{player}}",
+    "activePackCount_other": "{{count}} buste presso {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",

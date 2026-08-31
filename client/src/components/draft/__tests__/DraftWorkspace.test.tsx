@@ -319,19 +319,30 @@ function TouchDragWorkspace({
 }
 
 describe("draft workspace shell", () => {
-  it("uses a separate fifteen-column cap for the tablet visual builder", () => {
+  it.each([
+    ["draft phone", "phone-landscape", "draft", "phoneDeckVisualColumnCaps", "landscape"],
+    ["draft tablet", "tablet-portrait", "draft", "phoneDeckVisualColumnCaps", "portrait"],
+    ["builder phone", "phone-portrait", "builder", "phoneDeckVisualColumnCaps", "portrait"],
+    ["builder tablet", "tablet-landscape", "builder", "tabletDeckVisualColumnCaps", "landscape"],
+  ] as const)("caps %s visual builder controls at ten columns", (
+    _label,
+    responsiveLayout,
+    responsiveContext,
+    target,
+    orientation,
+  ) => {
     const cards = [card("deck-card")];
     const preferenceChanges = vi.fn();
+    const initialPreferences = preferences();
+    initialPreferences[target][orientation] = 9;
     render(
       <StatefulWorkspace
         cards={cards}
         initialWorkspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
-        initialPreferences={preferences({
-          tabletDeckVisualColumnCaps: { portrait: 12, landscape: 14 },
-        })}
+        initialPreferences={initialPreferences}
         preferenceChanges={preferenceChanges}
-        responsiveLayout="tablet-landscape"
-        responsiveContext="builder"
+        responsiveLayout={responsiveLayout}
+        responsiveContext={responsiveContext}
       />,
     );
 
@@ -341,37 +352,10 @@ describe("draft workspace shell", () => {
     expect(increase).toHaveClass("h-11", "w-11");
     expect(decrease).toHaveClass("h-11", "w-11");
     fireEvent.click(increase);
+
+    expect(screen.getByRole("group", { name: "Max columns per row" })).toHaveTextContent("10");
     expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
-      phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
-      tabletDeckVisualColumnCaps: { portrait: 12, landscape: 15 },
-    }));
-    expect(increase).toBeDisabled();
-  });
-
-  it("persists the tablet portrait visual-builder column cap without changing phone caps", () => {
-    const cards = [card("deck-card")];
-    const preferenceChanges = vi.fn();
-    render(
-      <StatefulWorkspace
-        cards={cards}
-        initialWorkspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
-        initialPreferences={preferences({
-          tabletDeckVisualColumnCaps: { portrait: 14, landscape: 12 },
-        })}
-        preferenceChanges={preferenceChanges}
-        responsiveLayout="tablet-portrait"
-        responsiveContext="builder"
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Layout" }));
-    const increase = screen.getByRole("button", { name: "Increase max columns per row" });
-    fireEvent.click(increase);
-
-    expect(screen.getByRole("group", { name: "Max columns per row" })).toHaveTextContent("15");
-    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
-      phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
-      tabletDeckVisualColumnCaps: { portrait: 15, landscape: 12 },
+      [target]: expect.objectContaining({ [orientation]: 10 }),
     }));
     expect(increase).toBeDisabled();
   });
@@ -554,7 +538,7 @@ describe("draft workspace shell", () => {
     fireEvent.click(portraitOpen);
     const portraitClose = within(portrait).getByRole("button", { name: "Hide sideboard" });
     expect(portraitClose).toHaveTextContent("▼");
-    expect(portrait.querySelector("[data-sideboard-body]")).toHaveClass("overflow-visible");
+    expect(portrait.querySelector("[data-sideboard-body]")).toHaveClass("overflow-y-auto", "touch-pan-y");
 
     rerender(<BuilderWorkspace key="landscape" responsiveLayout="phone-landscape" />);
     const landscape = screen.getByRole("region", { name: "Compact sideboard" });
@@ -571,9 +555,10 @@ describe("draft workspace shell", () => {
     fireEvent.click(landscapeOpen);
     expect(within(landscape).getByRole("button", { name: "Hide sideboard" })).toHaveTextContent("▼");
     expect(landscape.querySelector("[data-sideboard-body]")).toHaveClass("overflow-y-auto", "touch-pan-y");
-    expect(landscape.querySelector("[data-card-stack]")).toHaveClass("flex", "flex-col");
-    expect(landscape.querySelectorAll<HTMLElement>("[data-card-stack] > [data-instance-id]")[1].style.marginTop)
-      .toBe("-72%");
+    expect(landscape.querySelector("[data-card-stack]")).toHaveClass("relative");
+    expect(landscape.querySelector("[data-card-stack]")).toHaveAttribute("data-sideboard-column-count", "1");
+    expect(landscape.querySelector<HTMLElement>("[data-sideboard-row='1'][data-sideboard-column='0'] [data-instance-id]")!.style.top)
+      .toBe("32px");
   });
 
   it("moves_cards_between_the_phone_board_and_compact_sideboard_with_touch_drags", () => {
