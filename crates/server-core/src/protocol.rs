@@ -2630,8 +2630,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_47() {
-        assert_eq!(PROTOCOL_VERSION, 47);
+    fn protocol_version_is_48_for_required_draft_selection_mode() {
+        assert_eq!(PROTOCOL_VERSION, 48);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2641,7 +2641,8 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_47` stays
+    /// this guards — and this test reds while
+    /// `protocol_version_is_48_for_required_draft_selection_mode` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
