@@ -78,7 +78,15 @@ fn issue_8215_hellkite_courser_returns_the_forwarded_commander_at_end_step() {
         "the delayed return must snapshot the forwarded commander"
     );
 
+    // CR 508.1: `advance_to_end_step` stops at the declare-attackers
+    // turn-based action when invoked from precombat main. Cross that action
+    // through the normal game flow before asking the phase helper to reach End.
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("an empty attack declaration must cross combat");
     runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().objects[&commander].zone, Zone::Command);
     assert_eq!(runner.state().objects[&courser].zone, Zone::Battlefield);
