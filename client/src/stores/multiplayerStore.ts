@@ -528,6 +528,19 @@ export function migrateOfficialServerAddress(
     : address;
 }
 
+// The host-setup selector retired its standalone "On" loop-detection choice
+// in favor of "Interactive" (its surviving semantics). A `lastHostConfig`
+// persisted before that change may still carry `{ type: "On" }`; forward it
+// to Interactive rather than silently dropping to Off, which would turn the
+// detector off for a player who had chosen it on.
+export function migrateLegacyLoopDetectionOn(lastHostConfig: unknown): unknown {
+  if (!lastHostConfig || typeof lastHostConfig !== "object") return lastHostConfig;
+  const config = lastHostConfig as Record<string, unknown>;
+  const loopDetection = config.loopDetection as { type?: unknown } | undefined;
+  if (loopDetection?.type !== "On") return lastHostConfig;
+  return { ...config, loopDetection: { type: "Interactive" } };
+}
+
 export function migratePersistedMultiplayerState(
   persisted: unknown,
   version: number,
@@ -539,6 +552,9 @@ export function migratePersistedMultiplayerState(
       migrated.serverAddress,
       DEFAULT_MULTIPLAYER_SERVER_URL,
     );
+  }
+  if (version < 4) {
+    migrated.lastHostConfig = migrateLegacyLoopDetectionOn(migrated.lastHostConfig);
   }
   return migrated;
 }
@@ -1494,7 +1510,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 3,
+      version: 4,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -1507,6 +1523,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // lobby its build cannot handshake with. Re-running the same migration
       // repoints it at this channel's broker; a user-typed non-official address
       // is still preserved.
+      //
+      // v3 → v4: the host-setup selector dropped its standalone "On"
+      // loop-detection choice. A `lastHostConfig.loopDetection` of `{ type:
+      // "On" }` persisted under an older build is forwarded to `Interactive`
+      // (its surviving semantics) rather than left to silently fall back to
+      // `Off` on next read.
       migrate: migratePersistedMultiplayerState,
       partialize: (state) => ({
         playerId: state.playerId,

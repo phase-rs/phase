@@ -540,13 +540,6 @@ export function HostSetup({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setLoopDetection({ type: "On" })}
-                  className={seg(loopDetection.type === "On")}
-                >
-                  {t("common:comboDetector.on")}
-                </button>
-                <button
-                  type="button"
                   onClick={() => setLoopDetection({ type: "Interactive" })}
                   className={seg(loopDetection.type === "Interactive")}
                 >

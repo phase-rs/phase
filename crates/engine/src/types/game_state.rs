@@ -2426,6 +2426,17 @@ pub struct PendingAttachmentRemainder {
     pub producer: Box<ResolvedAbility>,
 }
 
+/// Private continuation authority for an interactive player-scope exile
+/// instruction. Keeping the detached tail here makes generated APNAP nodes
+/// explicit without adding runtime provenance to `ResolvedAbility`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingPlayerScopeLinkedExile {
+    pub source_id: ObjectId,
+    pub after_scope: Box<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<ObjectIncarnationRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -2455,9 +2466,26 @@ pub struct PendingContinuation {
     /// unprocessed members of a selected multi-attachment operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_remainder: Option<PendingAttachmentRemainder>,
+    /// CR 608.2f: exact linked-exile union and detached unscoped tail owned by
+    /// a generated player-scope continuation. Legacy saves default to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+    /// Private queue terminator for generated player-scope continuations. The
+    /// placeholder `chain` is never resolved when this is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) player_scope_queue_end: bool,
 }
 
 impl PendingContinuation {
+    pub(crate) fn player_scope_queue_end(
+        placeholder: Box<ResolvedAbility>,
+        state: &GameState,
+    ) -> Self {
+        let mut pending = Self::new(placeholder, state);
+        pending.player_scope_queue_end = true;
+        pending
+    }
+
     /// Construct a continuation with no parent-kind emission. Used for chains
     /// whose per-node `EffectResolved` events are the full observable story
     /// (targeted damage continuations, Learn rummage, Bolster, Clash, etc.).
@@ -2470,6 +2498,8 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
+            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_queue_end: false,
         }
     }
 
@@ -2490,6 +2520,8 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
+            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_queue_end: false,
         }
     }
 }
@@ -18271,6 +18303,12 @@ declare_game_state! {
     #[serde(skip)]
     pub resolving_continuation_attach_host: Option<AttachTarget>,
 
+    /// Execution-local view of the active generated player-scope continuation.
+    /// The serialized authority lives on `PendingContinuation`; every pause
+    /// re-parks it before control returns to callers.
+    #[serde(skip)]
+    pub(crate) resolving_player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -23170,6 +23208,7 @@ impl GameState {
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
             resolving_continuation_attach_host: None,
+            resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -25199,6 +25238,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         product_knowledge_state: _,
         resolution_stack: _,
         resolving_continuation_attach_host: _,
+        resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,
