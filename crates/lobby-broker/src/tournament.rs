@@ -268,8 +268,18 @@ pub enum TournamentStatus {
     Registration,
     /// At least one round has been generated.
     InProgress,
-    /// All rounds finished normally, standings frozen — a trustworthy final
-    /// result.
+    /// Organizer-initiated stop via
+    /// [`TournamentManager::complete_tournament`], standings frozen — a
+    /// trustworthy final result in the one sense the engine can guarantee:
+    /// *every pairing that exists has a resolved outcome* (reported,
+    /// forfeited, or a bye), so no reported match is missing from the
+    /// standings. It does **not** promise that every scheduled round ran —
+    /// round count is an overridable recommendation
+    /// ([`default_total_rounds`]), and an organizer may stop early once the
+    /// current round is settled (see `complete_tournament`'s own rationale).
+    /// `current_round < total_rounds()` is therefore a legal shape for a
+    /// `Completed` event, and clients must not read this status as "the full
+    /// scheduled event was played".
     Completed,
     /// Reached only via [`TournamentManager::check_expired`]'s 7-day
     /// inactivity transition, never organizer-initiated. Distinct from
@@ -459,8 +469,8 @@ pub struct CreateTournamentRequest {
     pub arity: MatchArity,
     pub scoring: ScoringPolicy,
     pub bracket: BracketShape,
-    /// Organizer override. `None` uses the arity-selected MTR/MSTR default
-    /// lookup ([`default_total_rounds`]), resolved against the live player
+    /// Organizer override. `None` uses the bracket- and arity-selected
+    /// default ([`default_total_rounds`]), resolved against the live player
     /// count rather than frozen at creation time (when nobody has joined yet).
     pub total_rounds: Option<u32>,
 }
@@ -477,9 +487,9 @@ pub struct TournamentMeta {
     pub bracket: BracketShape,
     /// `None` means "use [`default_total_rounds`]". Stored as an `Option`
     /// rather than an eagerly-resolved `u32` because at creation time the
-    /// player count is zero, and the MTR/MSTR default lookup is keyed on
-    /// `(arity, player_count)` — resolving it against an empty field would
-    /// bake in a meaningless value. Read through
+    /// player count is zero, and the default is keyed on
+    /// `(bracket, arity, player_count)` — resolving it against an empty field
+    /// would bake in a meaningless value. Read through
     /// [`TournamentMeta::total_rounds`].
     pub total_rounds_override: Option<u32>,
     pub current_round: u32,
@@ -497,11 +507,15 @@ pub struct TournamentMeta {
 }
 
 impl TournamentMeta {
-    /// The organizer's override if there is one, else the arity-selected
-    /// MTR/MSTR default for the current active-player count.
+    /// The organizer's override if there is one, else the bracket- and
+    /// arity-selected default for the current active-player count. All three
+    /// inputs go through the single [`default_total_rounds`] authority rather
+    /// than being branched on here, so a caller holding a bare
+    /// `(bracket, arity, player_count)` gets the same answer this does.
     pub fn total_rounds(&self) -> u32 {
-        self.total_rounds_override
-            .unwrap_or_else(|| default_total_rounds(self.arity, self.active_player_count()))
+        self.total_rounds_override.unwrap_or_else(|| {
+            default_total_rounds(self.bracket, self.arity, self.active_player_count())
+        })
     }
 
     /// Non-dropped entrants, in join order.
@@ -552,10 +566,23 @@ impl TournamentMeta {
     }
 }
 
-/// Recommended round count when the organizer supplies no override. Two
-/// separate cited tables, selected by arity — MTR Appendix E and MSTR's own
-/// table are genuinely different inputs to the same kind of lookup, not one
-/// table with an extra column.
+/// Recommended round count when the organizer supplies no override.
+///
+/// **`BracketShape::SingleElimination` — not a table lookup at all.** A
+/// single-elimination bracket's length is a property of its own shape, not a
+/// recommendation: [`build_single_elimination_round`] rounds the field up to
+/// `next_power_of_two()` slots and halves the survivors every round, so a
+/// `2^r`-slot bracket is decided in exactly `r` rounds (2 players -> 1,
+/// 3-4 -> 2, 5-8 -> 3), and the pairing builder itself refuses a further
+/// round once one entrant is left. Consulting the Swiss tables here would
+/// report a round the bracket can never pair. A field below
+/// [`SINGLE_ELIMINATION_MIN_PLAYERS`] yields 0 — the same "there is no
+/// bracket to run" the pairing builder rejects, rather than a fabricated
+/// floor.
+///
+/// **`BracketShape::Swiss`** uses two separate cited tables, selected by
+/// arity — MTR Appendix E and MSTR's own table are genuinely different inputs
+/// to the same kind of lookup, not one table with an extra column.
 ///
 /// **`HEAD_TO_HEAD` — MTR Appendix E.** Its published rows are exactly the
 /// doubling rule "the smallest `r` with `2^r >= players`", floored at 3 for
@@ -575,22 +602,32 @@ impl TournamentMeta {
 /// stops at 64 players and is stated for 4-player pods specifically; larger
 /// fields and other pod sizes clamp to its last published row rather than
 /// extrapolating a row the source never published.
-pub fn default_total_rounds(arity: MatchArity, player_count: u32) -> u32 {
-    if arity == MatchArity::HEAD_TO_HEAD {
-        // Smallest r with 2^r >= max(player_count, 8): the `max` is Appendix
-        // E's floor of 3 rounds for the 4-8 bracket.
-        let target = u64::from(player_count.max(8));
-        let mut rounds = 0u32;
-        while (1u64 << rounds) < target {
-            rounds += 1;
+pub fn default_total_rounds(bracket: BracketShape, arity: MatchArity, player_count: u32) -> u32 {
+    match bracket {
+        // Bracket depth: ceil(log2(slots)) for the same `next_power_of_two()`
+        // slot count `build_single_elimination_round` seeds round 1 from.
+        // Computed in `u64` so the widening is total for every `u32` field.
+        BracketShape::SingleElimination => {
+            u64::from(player_count).next_power_of_two().trailing_zeros()
         }
-        rounds
-    } else {
-        match player_count {
-            0..=16 => 2,
-            17..=24 => 3,
-            25..=32 => 4,
-            _ => 5,
+        BracketShape::Swiss => {
+            if arity == MatchArity::HEAD_TO_HEAD {
+                // Smallest r with 2^r >= max(player_count, 8): the `max` is
+                // Appendix E's floor of 3 rounds for the 4-8 bracket.
+                let target = u64::from(player_count.max(8));
+                let mut rounds = 0u32;
+                while (1u64 << rounds) < target {
+                    rounds += 1;
+                }
+                rounds
+            } else {
+                match player_count {
+                    0..=16 => 2,
+                    17..=24 => 3,
+                    25..=32 => 4,
+                    _ => 5,
+                }
+            }
         }
     }
 }
@@ -1658,9 +1695,10 @@ impl TournamentManager {
         Ok(())
     }
 
-    /// Freezes a tournament as [`TournamentStatus::Completed`] — all rounds
-    /// finished normally. Terminal: no further mutation is accepted, and the
-    /// 30-day retention clock starts now.
+    /// Freezes a tournament as [`TournamentStatus::Completed`] — every
+    /// pairing resolved, and the organizer choosing to stop here. Terminal:
+    /// no further mutation is accepted, and the 30-day retention clock starts
+    /// now.
     ///
     /// Refused while any pairing is still unresolved, through the same
     /// [`TournamentMeta::first_unresolved_pairing`] authority
@@ -2174,7 +2212,7 @@ mod tests {
         // MTR Appendix E's published rows.
         for (players, rounds) in [(4, 3), (8, 3), (9, 4), (16, 4), (17, 5), (32, 5), (64, 6)] {
             assert_eq!(
-                default_total_rounds(MatchArity::HEAD_TO_HEAD, players),
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, players),
                 rounds,
                 "head-to-head default for {players} players"
             );
@@ -2182,7 +2220,7 @@ mod tests {
         // MSTR's own, genuinely different table.
         for (players, rounds) in [(4, 2), (16, 2), (17, 3), (25, 4), (33, 5), (64, 5)] {
             assert_eq!(
-                default_total_rounds(MatchArity::COMMANDER_POD, players),
+                default_total_rounds(BracketShape::Swiss, MatchArity::COMMANDER_POD, players),
                 rounds,
                 "pod default for {players} players"
             );
@@ -2193,6 +2231,70 @@ mod tests {
         assert_eq!(mgr.get("T").expect("t").total_rounds(), 4);
         mgr.meta_mut("T").expect("t").total_rounds_override = Some(11);
         assert_eq!(mgr.get("T").expect("t").total_rounds(), 11);
+    }
+
+    /// A single-elimination event's round count is its bracket depth, not the
+    /// Swiss recommendation table: the same field size answers differently
+    /// under the two bracket shapes, and the small brackets the Swiss table
+    /// floors at 3 are decided in 1 or 2.
+    #[test]
+    fn default_total_rounds_uses_bracket_depth_for_single_elimination() {
+        for (players, depth) in [(2, 1), (3, 2), (4, 2), (5, 3), (6, 3), (7, 3), (8, 3)] {
+            assert_eq!(
+                default_total_rounds(
+                    BracketShape::SingleElimination,
+                    MatchArity::HEAD_TO_HEAD,
+                    players
+                ),
+                depth,
+                "single-elimination depth for {players} players"
+            );
+            // The same field under Swiss still gets Appendix E's floor of 3 —
+            // proof the bracket arm is what moved, not the table.
+            assert_eq!(
+                default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, players),
+                3,
+                "Swiss default is unchanged for {players} players"
+            );
+        }
+        // A field too small to seat a bracket reports no rounds rather than a
+        // fabricated floor, matching `build_single_elimination_round`'s own
+        // refusal below `SINGLE_ELIMINATION_MIN_PLAYERS`.
+        for players in [0, 1] {
+            assert_eq!(
+                default_total_rounds(
+                    BracketShape::SingleElimination,
+                    MatchArity::HEAD_TO_HEAD,
+                    players
+                ),
+                0,
+                "no bracket to run for {players} players"
+            );
+        }
+
+        // End to end through a real tournament: the accessor reads
+        // `self.bracket`, so a 2-player final is one round and a 3- or
+        // 4-player bracket is two.
+        let env = FakeEnv::new();
+        for (players, depth) in [(2, 1), (3, 2), (4, 2)] {
+            let mut mgr = TournamentManager::new();
+            create(
+                &mut mgr,
+                "SE",
+                MatchArity::HEAD_TO_HEAD,
+                BracketShape::SingleElimination,
+                &env,
+            );
+            join_n(&mut mgr, "SE", players, &env);
+            assert_eq!(
+                mgr.get("SE").expect("t").total_rounds(),
+                depth,
+                "{players}-player single-elimination bracket"
+            );
+            // The override still wins over the bracket-derived depth.
+            mgr.meta_mut("SE").expect("t").total_rounds_override = Some(7);
+            assert_eq!(mgr.get("SE").expect("t").total_rounds(), 7);
+        }
     }
 
     // -- unit 6: pairing ------------------------------------------------------
@@ -2977,6 +3079,14 @@ mod tests {
             let meta = mgr.get("SE").expect("t");
             let slots = n.next_power_of_two();
             assert_eq!(meta.pairings.len(), slots / 2, "{n} players");
+            // The reported round count is this bracket's own depth — the
+            // number of halvings from `slots` to one survivor — not the Swiss
+            // table's flat 3 for the whole 2-8 range.
+            assert_eq!(
+                meta.total_rounds(),
+                slots.trailing_zeros(),
+                "{n} players: round count is the bracket's depth"
+            );
 
             let byes: Vec<String> = meta
                 .pairings
@@ -3062,8 +3172,8 @@ mod tests {
             "both bye recipients and both match winners advance"
         );
 
-        // ...and on to a single final, in the Appendix E default 3 rounds for
-        // a 4-8 player field.
+        // ...and on to a single final, in the 3 rounds a 6-player bracket is
+        // deep (8 slots -> 4 -> 2 -> 1).
         assert_eq!(six.get("SE6").expect("t").total_rounds(), 3);
         report_all_pending(&mut six, "SE6", &env);
         six.generate_pairings("SE6", &env).expect("round 3");
