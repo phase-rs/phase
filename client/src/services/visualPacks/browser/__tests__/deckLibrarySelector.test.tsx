@@ -184,6 +184,7 @@ describe("deck-library selector and drift contract", () => {
     releaseCacheMatch?.();
     vi.unstubAllGlobals();
     Reflect.deleteProperty(globalThis.navigator, "locks");
+    Reflect.deleteProperty(globalThis.navigator, "storage");
   });
 
   it("registers deck_library as an installable validated identity", () => {
@@ -1171,7 +1172,7 @@ describe("deck-library selector and drift contract", () => {
     expect(phases).not.toContain("completed");
   });
 
-  it("prevents a recreated finalizing worker from completing after removal", async () => {
+  it("cancels a recreated finalizing worker when its receipt ownership changes", async () => {
     const initialBackend = await ScryfallBrowserVisualPackBackend.create();
     const initial = await initialBackend.start({
       kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
@@ -1221,16 +1222,26 @@ describe("deck-library selector and drift contract", () => {
     try {
       const recreated = await ScryfallBrowserVisualPackBackend.create();
       await finishStarted;
-      const remover = await ScryfallBrowserVisualPackBackend.create();
-      const removing = remover.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
-      await vi.waitFor(async () => {
-        const afterStart = await openDB(DATABASE, 1);
-        expect(await afterStart.get("packs", DECK_LIBRARY)).toBeUndefined();
-        afterStart.close();
-      });
+      const progress: ProgressEvent[] = [];
+      const revisions: string[] = [];
+      await recreated.subscribeProgress((event) => progress.push(event));
+      await recreated.subscribeRevision((event) => revisions.push(event.revision));
+      const changed = await openDB(DATABASE, 1);
+      const changedReceipt = await changed.get("packs", DECK_LIBRARY);
+      if (!changedReceipt) throw new Error("deck-library receipt disappeared before generation fence");
+      await changed.put("packs", { ...changedReceipt, operationId: operationId("1".repeat(32)) });
+      changed.close();
       releaseFinish();
-      await removing;
-      expect((await recreated.operationStatus(OPERATION)).state).toBe("cancelled");
+      await vi.waitFor(async () => expect((await recreated.operationStatus(OPERATION)).state).toBe("cancelled"));
+      expect(progress).toEqual([expect.objectContaining({
+        phase: "cancelled",
+        operation: expect.objectContaining({ state: "cancelled" }),
+        error: null,
+      })]);
+      expect(revisions).toEqual([]);
+      const after = await openDB(DATABASE, 1);
+      expect((await after.get("state", "state"))?.revision).toBe(current.revision);
+      after.close();
     } finally {
       releaseFinish();
       prototype.finish = originalFinish;

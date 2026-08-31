@@ -431,7 +431,7 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
           // buttons would be disabled and the only undiscoverable way out is
           // to pick another option and come back. Here it retries the thing
           // that failed.
-          disabled={(!selector && !localUnresolved) || estimatePending || pendingActions.has(curated ? "curated" : "deck_library")}
+          disabled={(!selector && !localUnresolved) || estimatePending || (localMembership && pendingActions.has(curated ? "curated" : "deck_library"))}
           onClick={() => {
             if (localUnresolved) {
               if (curated) onSelectCurated(); else onSelectDeckLibrary();

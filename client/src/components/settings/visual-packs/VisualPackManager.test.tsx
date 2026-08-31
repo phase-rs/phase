@@ -771,6 +771,30 @@ describe("VisualPackManager initialization", () => {
     });
   });
 
+  it("keeps a bulk estimate available while the deck-library selector resolves", async () => {
+    const fixture = backend();
+    const resolvingDeckLibrary = deferred<Awaited<ReturnType<VisualPackBackend["deckLibrarySelector"]>>>();
+    vi.mocked(fixture.value.deckLibrarySelector).mockReturnValue(resolvingDeckLibrary.promise);
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("radio", { name: /card back/i }));
+
+    const estimate = screen.getByRole("button", { name: /scan catalog and estimate/i });
+    expect(estimate).toBeEnabled();
+    fireEvent.click(estimate);
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "core" },
+      expect.any(Function),
+    ));
+    await waitFor(() => expect(screen.getByRole("button", { name: /install selection/i })).toBeEnabled());
+
+    resolvingDeckLibrary.resolve({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST });
+  });
+
   it("binds automatic estimates to the local pack identity when digests match", async () => {
     const fixture = backend();
     vi.mocked(fixture.value.deckLibrarySelector).mockResolvedValue({ kind: "deck_library", membershipDigest: CURATED_DIGEST });

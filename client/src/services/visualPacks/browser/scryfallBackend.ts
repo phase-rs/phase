@@ -876,6 +876,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       ) {
         await transaction.objectStore("operations").put({ ...currentOperation, state: "cancelled" });
         await transaction.done;
+        this.emit({ phase: "cancelled", operation: await this.operationStatus(selectedOperation), error: null });
         return;
       }
     }
