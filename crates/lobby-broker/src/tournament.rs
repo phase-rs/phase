@@ -292,10 +292,13 @@ impl TournamentStatus {
 }
 
 /// Which bracket shape the same [`TournamentManager`] runs for a tournament.
-/// `SingleElimination` covers MTR Appendix E's 4-8 player case; it is gated to
-/// `MatchArity::HEAD_TO_HEAD` at construction time, because pod-based single
-/// elimination (advancement semantics for a multi-player bracket match) is an
-/// unresolved design question explicitly excluded from v1.
+/// `SingleElimination` covers MTR Appendix E's 4-8 player case — the whole
+/// contiguous range, byes included, not only the power-of-two counts (see
+/// [`SINGLE_ELIMINATION_MIN_PLAYERS`]/[`SINGLE_ELIMINATION_MAX_PLAYERS`]). It
+/// is gated to `MatchArity::HEAD_TO_HEAD` at construction time, because
+/// pod-based single elimination (advancement semantics for a multi-player
+/// bracket match) is an unresolved design question explicitly excluded from
+/// v1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BracketShape {
     Swiss,
@@ -516,6 +519,31 @@ impl TournamentMeta {
 
     pub fn pairing(&self, id: PairingId) -> Option<&TournamentPairing> {
         self.pairings.iter().find(|p| p.id == id)
+    }
+
+    /// The first pairing in this tournament's history that still has no
+    /// outcome, if any — the single authority both round advancement
+    /// ([`TournamentManager::generate_pairings`]) and completion
+    /// ([`TournamentManager::complete_tournament`]) consult before moving the
+    /// tournament forward, rather than each re-implementing the scan.
+    ///
+    /// Both refuse to move past an unresolved pairing. Leaving one behind is
+    /// not recoverable: the missing match points silently distort every
+    /// standing derived after it, a later round would seed itself from those
+    /// distorted standings, and once the tournament reaches a terminal status
+    /// [`TournamentManager::report_result`] refuses the write that would have
+    /// fixed it. An organizer whose players never reported has
+    /// [`TournamentManager::drop_player`] (auto-forfeit) or an explicit report
+    /// as the way out — both leave a stated reason in the history, which
+    /// silently pairing around the hole would not.
+    ///
+    /// Scans every round, not just [`Self::current_round`]. The
+    /// `generate_pairings` guard means no earlier round can hold a pending
+    /// pairing, so this is the invariant being *checked* rather than assumed —
+    /// and it costs one pass over a list that is already scanned fresh for
+    /// every derived view.
+    pub fn first_unresolved_pairing(&self) -> Option<&TournamentPairing> {
+        self.pairings.iter().find(|p| p.outcome.is_none())
     }
 
     /// Which ranked tiebreak list applies, selected by arity.
@@ -1215,35 +1243,59 @@ pub fn build_swiss_round(
     pairings
 }
 
+/// Smallest field [`BracketShape::SingleElimination`] accepts. MTR Appendix E
+/// documents the 4-8 player single-elimination cut; 2 and 3 are the degenerate
+/// finals and semifinal-plus-bye fields the same seeded formula already covers
+/// with no extra machinery, and [`MatchArity::HEAD_TO_HEAD`] is itself 2, so a
+/// two-player "bracket" is simply a finals match with nothing to reject.
+pub const SINGLE_ELIMINATION_MIN_PLAYERS: usize = 2;
+
+/// Largest field [`BracketShape::SingleElimination`] accepts — the top of MTR
+/// Appendix E's single-elimination cut. Larger fields run Swiss, whose
+/// round-count default (`default_total_rounds`) covers 9 players upward.
+pub const SINGLE_ELIMINATION_MAX_PLAYERS: usize = 8;
+
 /// Builds one single-elimination round. Head-to-head only (enforced at
-/// construction), and gated to the MTR Appendix E bracket sizes this design
-/// scopes: a power-of-two field of at most 8, matching `draft-core`'s own
-/// fixed-size single-elimination gate.
+/// construction), for any field from [`SINGLE_ELIMINATION_MIN_PLAYERS`] to
+/// [`SINGLE_ELIMINATION_MAX_PLAYERS`] — the whole contiguous MTR Appendix E
+/// range, not only the power-of-two counts.
 ///
-/// Round 1 seeds standard `i` versus `n - 1 - i`; later rounds pair the
-/// winners of adjacent prior-round matches. A prior round that is unreported
-/// or drawn has no winner to advance, which is an error rather than a silently
-/// dropped seat.
+/// Round 1 rounds the field up to the next power of two and applies the same
+/// standard `i` versus `slots - 1 - i` seeding the power-of-two case already
+/// used; the slots past the end of the field are empty, so a seat drawn
+/// against one is emitted as an already-resolved [`PairingOutcome::Bye`] —
+/// the same bye representation the Swiss path uses, not a second one. Because
+/// the empty slots sit at the *bottom* of the seeding, the byes land on the
+/// *top* seeds. That is the defining property of a seeded bracket (the best
+/// finishers get the shortest path) and is deliberately the opposite of the
+/// Swiss bye rule in [`build_swiss_round`], where a bye is a free win handed
+/// to the bottom of the standings precisely to keep it away from the leader.
+///
+/// Later rounds pair the winners of adjacent prior-round matches. A bye's
+/// winner is its single occupant ([`TournamentPairing::winner`]), so a bye
+/// recipient advances through exactly the same path as a match winner with no
+/// special case. A prior round that is unreported or drawn has no winner to
+/// advance, which is an error rather than a silently dropped seat.
 pub fn build_single_elimination_round(
     standings_order: &[String],
     history: &[TournamentPairing],
     round: u32,
     first_id: PairingId,
 ) -> Result<Vec<TournamentPairing>, String> {
-    let mut next_id = first_id;
-    let seats: Vec<String> = if round <= 1 {
+    let pods: Vec<Vec<String>> = if round <= 1 {
         let n = standings_order.len();
-        if !(n == 2 || n == 4 || n == 8) {
+        if !(SINGLE_ELIMINATION_MIN_PLAYERS..=SINGLE_ELIMINATION_MAX_PLAYERS).contains(&n) {
             return Err(format!(
-                "Single-elimination brackets support 2, 4 or 8 players (MTR Appendix E); got {n}"
+                "Single-elimination brackets support {SINGLE_ELIMINATION_MIN_PLAYERS}-{SINGLE_ELIMINATION_MAX_PLAYERS} players (MTR Appendix E's 4-8 cut, plus the degenerate 2- and 3-player finals); got {n}"
             ));
         }
-        (0..n / 2)
-            .flat_map(|i| {
-                [
-                    standings_order[i].clone(),
-                    standings_order[n - 1 - i].clone(),
-                ]
+        let slots = n.next_power_of_two();
+        (0..slots / 2)
+            .map(|i| match standings_order.get(slots - 1 - i) {
+                Some(lower_seed) => vec![standings_order[i].clone(), lower_seed.clone()],
+                // The opposing slot is past the end of the field: this seat
+                // draws a bye rather than an opponent.
+                None => vec![standings_order[i].clone()],
             })
             .collect()
     } else {
@@ -1265,20 +1317,24 @@ pub fn build_single_elimination_round(
             })?;
             winners.push(winner.to_string());
         }
-        winners
+        winners.chunks(2).map(<[String]>::to_vec).collect()
     };
 
-    Ok(seats
-        .chunks(2)
-        .map(|pair| {
-            let pairing = TournamentPairing {
-                id: next_id,
+    Ok(pods
+        .into_iter()
+        .enumerate()
+        .map(|(offset, players)| {
+            // A one-seat pairing is a bye and nothing else — the same
+            // predicate `had_bye` derives from, so there is no second
+            // representation to keep in sync. Only round 1 can produce one:
+            // every later round pairs a power-of-two count of winners.
+            let outcome = (players.len() == 1).then_some(PairingOutcome::Bye);
+            TournamentPairing {
+                id: first_id + offset as PairingId,
                 round,
-                players: pair.to_vec(),
-                outcome: None,
-            };
-            next_id += 1;
-            pairing
+                players,
+                outcome,
+            }
         })
         .collect())
 }
@@ -1427,6 +1483,11 @@ impl TournamentManager {
     /// Standings order is recomputed fresh from the pairing history on every
     /// call, so a correction to an earlier round is reflected in the next
     /// round's seeding without any cache to invalidate.
+    ///
+    /// Refuses to pair a new round while any pairing is still unresolved (see
+    /// [`TournamentMeta::first_unresolved_pairing`]) — the "a round is
+    /// finished before the next one is paired" invariant is enforced here
+    /// rather than merely assumed by the seeding that depends on it.
     pub fn generate_pairings(
         &mut self,
         code: &str,
@@ -1438,6 +1499,14 @@ impl TournamentManager {
             return Err(format!(
                 "Tournament {code} is no longer running (status {:?})",
                 meta.status
+            ));
+        }
+        if let Some(pending) = meta.first_unresolved_pairing() {
+            return Err(format!(
+                "Tournament {code} cannot pair round {} - pairing {} in round {} has no result yet",
+                meta.current_round + 1,
+                pending.id,
+                pending.round
             ));
         }
         let round = meta.current_round + 1;
@@ -1534,6 +1603,14 @@ impl TournamentManager {
     /// A pairing every one of whose players has dropped is left pending: there
     /// is no active player to credit, and a dropped player must never be
     /// credited a win.
+    ///
+    /// The scan covers every *unresolved* pairing this player is seated in,
+    /// not only [`TournamentMeta::current_round`]'s. Round advancement now
+    /// refuses to leave an unresolved pairing behind
+    /// ([`TournamentMeta::first_unresolved_pairing`]), so in practice only the
+    /// current round can hold one — but the rule "a drop settles any pairing
+    /// it reduces to a single active player" is unconditionally correct and
+    /// does not need that invariant to hold in order to be right.
     pub fn drop_player(
         &mut self,
         code: &str,
@@ -1561,13 +1638,9 @@ impl TournamentManager {
             .filter(|p| p.dropped)
             .map(|p| p.player_key.as_str())
             .collect();
-        let current_round = meta.current_round;
         let mut forfeits: Vec<(usize, String)> = Vec::new();
         for (index, pairing) in meta.pairings.iter().enumerate() {
-            if pairing.round != current_round
-                || pairing.outcome.is_some()
-                || !pairing.seats(player_key)
-            {
+            if pairing.outcome.is_some() || !pairing.seats(player_key) {
                 continue;
             }
             let mut active = pairing
@@ -1588,6 +1661,21 @@ impl TournamentManager {
     /// Freezes a tournament as [`TournamentStatus::Completed`] — all rounds
     /// finished normally. Terminal: no further mutation is accepted, and the
     /// 30-day retention clock starts now.
+    ///
+    /// Refused while any pairing is still unresolved, through the same
+    /// [`TournamentMeta::first_unresolved_pairing`] authority
+    /// [`Self::generate_pairings`] uses: completing is terminal, and a
+    /// tournament frozen with a pending pairing could never report it
+    /// afterwards, leaving a permanently unfinished record whose final
+    /// standings are wrong by exactly that match.
+    ///
+    /// Deliberately *not* gated on `current_round >= total_rounds()`. The
+    /// design leaves round count an organizer-overridable default
+    /// ([`default_total_rounds`], MTR Appendix E), so an organizer cutting an
+    /// event short once the current round is settled — a concession, a
+    /// venue closing, a top-cut decided early — is a legitimate call the
+    /// organizer already owns, not an invariant violation. "Every pairing has
+    /// a result" is the property that actually keeps the record honest.
     pub fn complete_tournament(&mut self, code: &str, env: &impl BrokerEnv) -> Result<(), String> {
         let now = env.now_ms() / 1000;
         let meta = self.meta_mut(code)?;
@@ -1595,6 +1683,12 @@ impl TournamentManager {
             return Err(format!(
                 "Tournament {code} is already finished (status {:?})",
                 meta.status
+            ));
+        }
+        if let Some(pending) = meta.first_unresolved_pairing() {
+            return Err(format!(
+                "Tournament {code} cannot be completed - pairing {} in round {} has no result yet",
+                pending.id, pending.round
             ));
         }
         meta.status = TournamentStatus::Completed;
@@ -2822,17 +2916,303 @@ mod tests {
             .collect();
         assert_eq!(round_two, vec![vec![key(0), key(1)], vec![key(2), key(3)]]);
 
-        // A field that is not a supported bracket size is rejected outright.
-        let mut odd = TournamentManager::new();
+        // A field outside the supported range is rejected outright — above
+        // MTR Appendix E's cut, and below a pairable field. Counts *inside*
+        // the range that are not powers of two are not rejected; they take
+        // byes (see `single_elimination_byes_seed_the_top_of_the_bracket`).
+        for n in [SINGLE_ELIMINATION_MAX_PLAYERS + 1, 12] {
+            let mut oversized = TournamentManager::new();
+            let code = format!("SE{n}");
+            create(
+                &mut oversized,
+                &code,
+                MatchArity::HEAD_TO_HEAD,
+                BracketShape::SingleElimination,
+                &env,
+            );
+            join_n(&mut oversized, &code, n, &env);
+            let err = oversized
+                .generate_pairings(&code, &env)
+                .expect_err("field is larger than the Appendix E cut");
+            assert!(err.contains(&n.to_string()), "{err}");
+        }
+
+        let mut solo = TournamentManager::new();
         create(
-            &mut odd,
+            &mut solo,
+            "SE1",
+            MatchArity::HEAD_TO_HEAD,
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut solo, "SE1", SINGLE_ELIMINATION_MIN_PLAYERS - 1, &env);
+        assert!(solo.generate_pairings("SE1", &env).is_err());
+    }
+
+    /// A 5/6/7-player single-elimination field — squarely inside MTR
+    /// Appendix E's 4-8 cut, and previously rejected outright — pairs by
+    /// rounding up to the next power of two and giving the surplus slots to
+    /// the *top* seeds as byes, then advances bye recipients and real match
+    /// winners through the identical path.
+    #[test]
+    fn single_elimination_byes_seed_the_top_of_the_bracket() {
+        let env = FakeEnv::new();
+
+        // The whole accepted range pairs; the byes always land on the top
+        // seeds, and the count is exactly the shortfall to the next power of
+        // two.
+        for n in SINGLE_ELIMINATION_MIN_PLAYERS..=SINGLE_ELIMINATION_MAX_PLAYERS {
+            let mut mgr = TournamentManager::new();
+            create(
+                &mut mgr,
+                "SE",
+                MatchArity::HEAD_TO_HEAD,
+                BracketShape::SingleElimination,
+                &env,
+            );
+            join_n(&mut mgr, "SE", n, &env);
+            mgr.generate_pairings("SE", &env)
+                .unwrap_or_else(|e| panic!("{n}-player bracket must pair: {e}"));
+
+            let meta = mgr.get("SE").expect("t");
+            let slots = n.next_power_of_two();
+            assert_eq!(meta.pairings.len(), slots / 2, "{n} players");
+
+            let byes: Vec<String> = meta
+                .pairings
+                .iter()
+                .filter(|p| p.outcome == Some(PairingOutcome::Bye))
+                .map(|p| p.players[0].clone())
+                .collect();
+            let expected_byes: Vec<String> = (0..slots - n).map(key).collect();
+            assert_eq!(
+                byes, expected_byes,
+                "{n} players: byes belong to the top seeds, in seed order"
+            );
+            // Every non-bye pairing seats exactly two players, and nobody is
+            // seated twice or dropped from the bracket.
+            let mut seated: Vec<String> = meta
+                .pairings
+                .iter()
+                .flat_map(|p| p.players.clone())
+                .collect();
+            seated.sort();
+            let mut everyone: Vec<String> = (0..n).map(key).collect();
+            everyone.sort();
+            assert_eq!(seated, everyone, "{n} players: every entrant is seated");
+            for pairing in &meta.pairings {
+                assert!(
+                    (1..=2).contains(&pairing.players.len()),
+                    "{n} players: head-to-head seats or a single-seat bye"
+                );
+                assert_eq!(
+                    pairing.outcome.is_some(),
+                    pairing.players.len() == 1,
+                    "{n} players: exactly the one-seat pairings are pre-resolved byes"
+                );
+            }
+        }
+
+        // Six players in detail: seeds 1-2 bye, 3v6 and 4v5 played, and both
+        // kinds of round-1 result advance together into round 2.
+        let mut six = TournamentManager::new();
+        create(
+            &mut six,
+            "SE6",
+            MatchArity::HEAD_TO_HEAD,
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut six, "SE6", 6, &env);
+        six.generate_pairings("SE6", &env).expect("round 1");
+        let round_one: Vec<Vec<String>> = six
+            .get("SE6")
+            .expect("t")
+            .pairings
+            .iter()
+            .map(|p| p.players.clone())
+            .collect();
+        assert_eq!(
+            round_one,
+            vec![
+                vec![key(0)],
+                vec![key(1)],
+                vec![key(2), key(5)],
+                vec![key(3), key(4)],
+            ]
+        );
+        // A bye scores as a win, exactly as it does in Swiss.
+        let rows = six.get("SE6").expect("t").standings();
+        assert_eq!(standing_of(&rows, &key(0)).match_points, 3);
+        assert_eq!(standing_of(&rows, &key(5)).match_points, 0);
+
+        report_all_pending(&mut six, "SE6", &env);
+        six.generate_pairings("SE6", &env).expect("round 2");
+        let round_two: Vec<Vec<String>> = six
+            .get("SE6")
+            .expect("t")
+            .pairings
+            .iter()
+            .filter(|p| p.round == 2)
+            .map(|p| p.players.clone())
+            .collect();
+        assert_eq!(
+            round_two,
+            vec![vec![key(0), key(1)], vec![key(2), key(3)]],
+            "both bye recipients and both match winners advance"
+        );
+
+        // ...and on to a single final, in the Appendix E default 3 rounds for
+        // a 4-8 player field.
+        assert_eq!(six.get("SE6").expect("t").total_rounds(), 3);
+        report_all_pending(&mut six, "SE6", &env);
+        six.generate_pairings("SE6", &env).expect("round 3");
+        let final_round: Vec<Vec<String>> = six
+            .get("SE6")
+            .expect("t")
+            .pairings
+            .iter()
+            .filter(|p| p.round == 3)
+            .map(|p| p.players.clone())
+            .collect();
+        assert_eq!(final_round, vec![vec![key(0), key(2)]]);
+        report_all_pending(&mut six, "SE6", &env);
+        assert!(
+            six.generate_pairings("SE6", &env).is_err(),
+            "the bracket is decided"
+        );
+
+        // Five players: three byes, one match, and a bye recipient meets a
+        // match winner in round 2.
+        let mut five = TournamentManager::new();
+        create(
+            &mut five,
             "SE5",
             MatchArity::HEAD_TO_HEAD,
             BracketShape::SingleElimination,
             &env,
         );
-        join_n(&mut odd, "SE5", 5, &env);
-        assert!(odd.generate_pairings("SE5", &env).is_err());
+        join_n(&mut five, "SE5", 5, &env);
+        five.generate_pairings("SE5", &env).expect("round 1");
+        assert_eq!(
+            five.get("SE5")
+                .expect("t")
+                .pairings
+                .iter()
+                .map(|p| p.players.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![key(0)],
+                vec![key(1)],
+                vec![key(2)],
+                vec![key(3), key(4)],
+            ]
+        );
+        report_all_pending(&mut five, "SE5", &env);
+        five.generate_pairings("SE5", &env).expect("round 2");
+        assert_eq!(
+            five.get("SE5")
+                .expect("t")
+                .pairings
+                .iter()
+                .filter(|p| p.round == 2)
+                .map(|p| p.players.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![key(0), key(1)], vec![key(2), key(3)]]
+        );
+    }
+
+    // -- round-advancement and completion guards --------------------------------
+
+    /// A round is finished before the next one is paired. Pairing around an
+    /// unreported match would seed the new round from standings that are wrong
+    /// by exactly that match, and strand a pairing that a later
+    /// `complete_tournament` would make permanently unreportable.
+    #[test]
+    fn generate_pairings_rejects_an_unfinished_round() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let round_one: Vec<(PairingId, Vec<String>)> = mgr
+            .get("T")
+            .expect("t")
+            .pairings
+            .iter()
+            .map(|p| (p.id, p.players.clone()))
+            .collect();
+        assert_eq!(round_one.len(), 2);
+
+        // Report one of the two; the other is still pending.
+        let (reported, seats) = round_one[0].clone();
+        mgr.report_result(
+            "T",
+            reported,
+            PodOutcome::Decisive {
+                winner: seats[0].clone(),
+                game_wins: bo3(&seats[0], 2, &seats[1], 0),
+            },
+            &env,
+        )
+        .expect("report");
+
+        let straggler = round_one[1].0;
+        let err = mgr
+            .generate_pairings("T", &env)
+            .expect_err("round 2 must wait for round 1");
+        assert!(err.contains(&straggler.to_string()), "{err}");
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.current_round, 1, "the rejected call advanced nothing");
+        assert_eq!(meta.pairings.len(), 2, "no pairing was generated");
+
+        // Settling the straggler unblocks the next round.
+        report_all_pending(&mut mgr, "T", &env);
+        mgr.generate_pairings("T", &env).expect("round 2");
+        assert_eq!(mgr.get("T").expect("t").current_round, 2);
+
+        // A drop that auto-forfeits is the other way to settle one.
+        let env2 = FakeEnv::new();
+        let mut dropped = swiss(4, 2, &env2);
+        dropped.generate_pairings("T", &env2).expect("round 1");
+        assert!(dropped.generate_pairings("T", &env2).is_err());
+        for i in 0..4 {
+            dropped.drop_player("T", &key(i), &env2).expect("drop");
+        }
+        // Every pairing lost a player, so every pairing forfeited.
+        assert!(dropped
+            .get("T")
+            .expect("t")
+            .first_unresolved_pairing()
+            .is_none());
+    }
+
+    /// Completing is terminal, so it may not freeze a tournament around a
+    /// pairing that could then never be reported.
+    #[test]
+    fn complete_tournament_rejects_an_unfinished_round() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let pending = mgr.get("T").expect("t").pairings[0].id;
+
+        let err = mgr
+            .complete_tournament("T", &env)
+            .expect_err("a pending pairing blocks completion");
+        assert!(err.contains(&pending.to_string()), "{err}");
+        assert_eq!(
+            mgr.get("T").expect("t").status,
+            TournamentStatus::InProgress,
+            "the rejected call left the tournament running"
+        );
+        // Still running means the pairing is still reportable — the exact
+        // property a premature `Completed` would have destroyed.
+        report_all_pending(&mut mgr, "T", &env);
+        mgr.complete_tournament("T", &env).expect("complete");
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.status, TournamentStatus::Completed);
+        // Deliberately no `current_round >= total_rounds()` gate: ending an
+        // event early, once the current round is settled, is the organizer's
+        // call (see `complete_tournament`).
+        assert!(meta.current_round < meta.total_rounds());
     }
 
     // -- unit 11: expiry --------------------------------------------------------

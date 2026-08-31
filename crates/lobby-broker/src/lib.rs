@@ -45,6 +45,7 @@ pub use tournament::{
     CreateTournamentRequest, MatchArity, PairingId, PairingOutcome, PodOutcome, RawScoringPolicy,
     RoundPartition, ScoringPolicy, TiebreakOrder, Tiebreaks, TournamentExpiryEvent,
     TournamentManager, TournamentMeta, TournamentPairing, TournamentPlayer, TournamentStanding,
-    TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS, TERMINAL_RETENTION_SECS,
+    TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
+    SINGLE_ELIMINATION_MAX_PLAYERS, SINGLE_ELIMINATION_MIN_PLAYERS, TERMINAL_RETENTION_SECS,
 };
 pub use validation::validate_lobby_message;
