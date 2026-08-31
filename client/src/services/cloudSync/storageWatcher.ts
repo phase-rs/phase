@@ -24,36 +24,64 @@ import { isUserOwnedStorageKey } from "../../constants/storage";
  * semantics) is the only path that actually intercepts. The
  * `this === localStorage` guard keeps sessionStorage writes uninstrumented.
  *
- * Idempotent: a second install is a no-op. Returns an uninstaller.
+ * Subscribers share one prototype wrapper, but each registration has its own
+ * lifetime. Returns an idempotent uninstaller for this registration.
  */
-let installed = false;
-let paused = false;
+interface StorageWatcherRegistration {
+  onDirty: (key: string) => void;
+}
+
+const registrations = new Set<StorageWatcherRegistration>();
+let originalSetItem: typeof Storage.prototype.setItem | null = null;
+let originalRemoveItem: typeof Storage.prototype.removeItem | null = null;
+let suppressionDepth = 0;
 
 export function watchUserStorage(onDirty: (key: string) => void): () => void {
-  if (installed) return () => {};
-  installed = true;
+  const registration = { onDirty };
+  registrations.add(registration);
 
-  const origSet = Storage.prototype.setItem;
-  const origRemove = Storage.prototype.removeItem;
+  if (registrations.size === 1) {
+    const nativeSetItem = Storage.prototype.setItem;
+    const nativeRemoveItem = Storage.prototype.removeItem;
+    originalSetItem = nativeSetItem;
+    originalRemoveItem = nativeRemoveItem;
 
-  Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-    origSet.call(this, key, value);
-    if (this === localStorage && !paused && isUserOwnedStorageKey(key)) {
-      onDirty(key);
-    }
-  };
-  Storage.prototype.removeItem = function (this: Storage, key: string) {
-    origRemove.call(this, key);
-    if (this === localStorage && !paused && isUserOwnedStorageKey(key)) {
-      onDirty(key);
-    }
-  };
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      nativeSetItem.call(this, key, value);
+      notifyUserStorageWrite(this, key);
+    };
+    Storage.prototype.removeItem = function (this: Storage, key: string) {
+      nativeRemoveItem.call(this, key);
+      notifyUserStorageWrite(this, key);
+    };
+  }
 
+  let unsubscribed = false;
   return () => {
-    Storage.prototype.setItem = origSet;
-    Storage.prototype.removeItem = origRemove;
-    installed = false;
+    if (unsubscribed) return;
+    unsubscribed = true;
+    registrations.delete(registration);
+    if (registrations.size > 0) return;
+
+    Storage.prototype.setItem = originalSetItem!;
+    Storage.prototype.removeItem = originalRemoveItem!;
+    originalSetItem = null;
+    originalRemoveItem = null;
   };
+}
+
+function notifyUserStorageWrite(storage: Storage, key: string): void {
+  if (
+    storage !== localStorage ||
+    suppressionDepth > 0 ||
+    !isUserOwnedStorageKey(key)
+  ) {
+    return;
+  }
+
+  registrations.forEach(({ onDirty }) => {
+    onDirty(key);
+  });
 }
 
 /**
@@ -62,10 +90,10 @@ export function watchUserStorage(onDirty: (key: string) => void): () => void {
  * and schedule a redundant push of data we just pulled.
  */
 export function withStorageWatchSuppressed(fn: () => void): void {
-  paused = true;
+  suppressionDepth += 1;
   try {
     fn();
   } finally {
-    paused = false;
+    suppressionDepth -= 1;
   }
 }

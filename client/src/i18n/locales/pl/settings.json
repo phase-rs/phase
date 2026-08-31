@@ -222,12 +222,13 @@
     "selector": {
       "title": "Wybór katalogu",
       "core": "Podstawowe wizualizacje",
-      "printing": "Nadruki zestawów angielskich",
-      "locale": "Zlokalizowane wydruki setów",
+      "printing": "Wydania z dodatku",
       "complete": "Uzupełnij aktualny katalog",
       "curated": "Jeden obraz na kartę",
+      "deck_library": "Biblioteka talii",
       "curatedNote": "Jeden obraz na kartę, wybrany według twoich Preferencji grafiki kart w zakładce Grafika. Zmień je tam, a ten wybór podąży za nimi.",
       "curatedDefaultNote": "Jeden obraz na kartę. Nie masz żadnych reguł grafiki, więc pobierana jest domyślna grafika każdej karty — dodaj reguły w Preferencjach grafiki kart w zakładce Grafika, aby wybrać inne wydania.",
+      "deckLibraryNote": "Jeden obraz na każdą kartę używaną we wspólnej bibliotece talii, w tym w gotowych taliach Commander dla SI. Wybór korzysta z Preferencji grafiki kart. Po instalacji aplikacja podczas działania pobiera dodatki i usuwa niepotrzebne już obrazy; usunięcie tego pakietu zatrzymuje tę synchronizację.",
       "driftNone": "Zainstalowane obrazy już odpowiadają tym ustawieniom.",
       "driftSummary": "Zainstalowane obrazy są nieaktualne: {{add}} do dodania, {{remove}} do usunięcia, {{refresh}} do odświeżenia.",
       "setCode": "Ustaw kod",
@@ -341,6 +342,7 @@
       "core": "Podstawowe wizualizacje",
       "complete": "Uzupełnij aktualny katalog",
       "curated": "Jeden obraz na kartę",
+      "deckLibrary": "Biblioteka talii",
       "printing": "Wydania {{set}}",
       "locale": "Wydania {{set}} ({{language}})"
     },

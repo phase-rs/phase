@@ -37,6 +37,7 @@ export function packLabel(id: PackId, t: TFunction<"settings">): string {
   if (id === "core") return t("visualPacks.packs.core");
   if (id === "complete") return t("visualPacks.packs.complete");
   if (id === "curated") return t("visualPacks.packs.curated");
+  if (id === "deck_library") return t("visualPacks.packs.deckLibrary");
   const printing = PRINTING.exec(id);
   if (printing) return t("visualPacks.packs.printing", { set: printing[1].toUpperCase() });
   const locale = LOCALE.exec(id);

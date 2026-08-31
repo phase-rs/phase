@@ -155,18 +155,22 @@ export function VisualPackManager() {
             <PackSelector
               summary={manager.summary}
               curatedSelector={manager.curatedSelector}
+              deckLibrarySelector={manager.deckLibrarySelector}
               curatedDrift={manager.curatedDrift}
+              deckLibraryDrift={manager.deckLibraryDrift}
               estimate={manager.estimate}
               estimateProgress={manager.estimateProgress}
               pendingActions={manager.pendingActions}
               durableMutationActive={manager.durableMutationActive}
               onSelectCurated={manager.resolveCuratedSelector}
+              onSelectDeckLibrary={manager.resolveDeckLibrarySelector}
               onEstimate={manager.estimateInstall}
               onInstall={manager.install}
             />
             <PackStatus
               summary={manager.summary}
               curatedDrift={manager.curatedDrift}
+              deckLibraryDrift={manager.deckLibraryDrift}
               verification={manager.verification?.value ?? null}
               removal={manager.removal}
               pendingActions={manager.pendingActions}

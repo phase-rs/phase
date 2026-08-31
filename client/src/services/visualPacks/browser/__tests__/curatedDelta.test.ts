@@ -1113,23 +1113,36 @@ describe("curated delta install", () => {
     // assertion below then holds or fails on timing rather than on behaviour.
     let seen = 0;
     let parked = false;
+    let heldSource: string | null = null;
     const release = holdImages((source) => {
       if (!source.startsWith("https://cards.scryfall.io/")) return false;
       if ((seen += 1) !== 2) return false;
       parked = true;
+      heldSource = source;
       return true;
     });
     const started = await startCurated(backend);
     await vi.waitFor(() => { expect(parked).toBe(true); }, { timeout: 5000 });
 
-    // Released on a timer rather than inline: `cancel()` now waits for the
-    // worker, so it cannot return until this fires, while a `cancel()` that
-    // did NOT wait returns first and reports a count the parked task then
-    // moves. That ordering is what the assertion reads.
+    // Wait until the cancellation is durable before releasing the held image:
+    // its promotion therefore proves the legacy non-Deck path is allowed to
+    // finish while `cancel()` is still waiting for its worker.
     const pending = backend.cancel(started.operation);
-    setTimeout(release, 150);
+    await vi.waitFor(async () => {
+      expect((await backend.operationStatus(started.operation)).state).toBe("cancel_requested");
+    }, { timeout: 5000 });
+    if (!heldSource) throw new Error("held source missing");
+    expect((await objectRows()).filter((row) =>
+      row.root === started.digest && row.packId === packId("curated") && row.sourceUrl === heldSource,
+    )).toHaveLength(0);
+    release();
     const status = await pending;
     expect(status.state).toBe("cancelled");
+    // Curated cancellation waits for the held non-Deck task to promote before
+    // returning. The deck-library removal fence intentionally stays stricter.
+    expect((await objectRows()).filter((row) =>
+      row.root === started.digest && row.packId === packId("curated") && row.sourceUrl === heldSource,
+    )).toHaveLength(1);
 
     // THE INVARIANT, asserted on the SNAPSHOT `cancel()` returns, because that
     // is the value the panel publishes its terminal outcome from. Once it is

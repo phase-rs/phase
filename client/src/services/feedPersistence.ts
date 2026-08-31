@@ -67,17 +67,51 @@ export function useFeedCacheSnapshot(): Record<string, Feed> {
   return useFeedCacheStore((s) => s.cache);
 }
 
+/** True only after the existing feed-cache hydration has populated the store. */
+export function useFeedCacheHydrated(): boolean {
+  return useFeedCacheStore((s) => s.hydrated);
+}
+
 // ── Hydration + legacy migration ────────────────────────────────────────
 
 const LEGACY_FEED_CACHE_PREFIX = "phase-feed:";
+
+async function readFeedCache(): Promise<Record<string, Feed>> {
+  const cache: Record<string, Feed> = {};
+  const rows = (await entries(getFeedStore())) as Array<[IDBValidKey, Feed]>;
+  for (const [id, feed] of rows) cache[String(id)] = feed;
+  return cache;
+}
+
+/**
+ * Refresh the in-memory feed cache from its durable mirror.
+ *
+ * A receiving tab can have a hydrated, but outdated cache after another tab
+ * refreshes a feed. Local writes may race this read, so preserve any key whose
+ * reference changed after the snapshot rather than putting an older durable
+ * answer back over the tab's own set or removal.
+ */
+export async function refreshFeedCache(): Promise<void> {
+  const before = useFeedCacheStore.getState().cache;
+  const durable = await readFeedCache();
+  const current = useFeedCacheStore.getState().cache;
+  const next: Record<string, Feed> = {};
+  const ids = new Set([...Object.keys(before), ...Object.keys(current), ...Object.keys(durable)]);
+  for (const id of ids) {
+    const value = current[id] !== before[id] ? current[id] : durable[id];
+    if (value) next[id] = value;
+  }
+  const currentIds = Object.keys(current);
+  if (currentIds.length === Object.keys(next).length && currentIds.every((id) => current[id] === next[id])) return;
+  useFeedCacheStore.setState({ cache: next });
+}
 
 export async function hydrateFeedCache(): Promise<void> {
   if (useFeedCacheStore.getState().hydrated) return;
 
   let fromIdb: Record<string, Feed> = {};
   try {
-    const rows = (await entries(getFeedStore())) as Array<[IDBValidKey, Feed]>;
-    for (const [id, feed] of rows) fromIdb[String(id)] = feed;
+    fromIdb = await readFeedCache();
   } catch (err) {
     console.warn("[hydrateFeedCache] IDB read failed:", err);
     fromIdb = {};

@@ -258,7 +258,7 @@ describe("curated install selector", () => {
     const status = await backend.operationStatus(operation);
     expect(status.catalogRoot).toBe(summary.catalogRoot);
     expect(status.catalogRoot).not.toBe(digest);
-    expect(summary.selectorCount).toBe(5);
+    expect(summary.selectorCount).toBe(6);
   });
 
   it("records the curated pack at its membership digest and starts at the catalog root", async () => {

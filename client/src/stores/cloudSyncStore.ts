@@ -137,8 +137,9 @@ export const useCloudSyncStore = create<CloudSyncState>()(
 
       init: () => {
         // Each call to init() runs to completion. Idempotency is provided
-        // by the inner singletons it talks to (watchUserStorage's `installed`
-        // flag, armRealtime's `unsubscribeRealtime?.()` teardown-before-resub)
+        // by the inner lifecycles it talks to (watchUserStorage's
+        // registration-owned cleanup, armRealtime's
+        // `unsubscribeRealtime?.()` teardown-before-resub)
         // — NOT by a module-level "already initialized" gate, which used to
         // strand the UI across HMR: the OLD bundle's init flipped the flag
         // true, the NEW bundle's init early-returned, and the OLD init's

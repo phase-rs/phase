@@ -1,7 +1,9 @@
 import { Gunzip } from "fflate";
 
+import { VisualPackBackendError } from "../backend.ts";
 import { cardBackCandidate, cardCandidateGroups, setIconCandidate } from "../candidateKeys.ts";
 import { curatedDescriptors } from "../curatedPack.ts";
+import { planDeckLibraryPack } from "../deckLibraryPack.ts";
 import { assetKey, catalogRoot, packId, type CatalogRoot, type CatalogScanProgress, type InstallSelector, type PackId } from "../types.ts";
 import { descriptor, englishDescriptors } from "./descriptors.ts";
 import type { CardIdentity, ScryfallAssetDescriptor } from "./descriptors.ts";
@@ -311,6 +313,19 @@ export async function forEachScryfallAsset(
     }
     return;
   }
+  // Deck-library membership is likewise planned from local data. Its digest
+  // must still name the current plan before any objects can be written under
+  // it, so stale selectors fail without opening the bulk archive.
+  if (selector.kind === "deck_library") {
+    const membership = await planDeckLibraryPack(packId("deck_library"));
+    if (membership.membershipDigest !== selector.membershipDigest) throw new VisualPackBackendError("conflict");
+    for (const value of membership.descriptors) {
+      if (signal.aborted) return;
+      const pending = visit(value);
+      if (pending) await pending;
+    }
+    return;
+  }
   try {
     const selectedPack = selector.kind === "complete" ? packId("complete")
       : selector.kind === "printing" ? packId(`printing:${selector.set}`)
@@ -368,6 +383,11 @@ export async function countScryfallAssets(
 ): Promise<number> {
   if (selector.kind === "core") return coreDescriptors().length;
   if (selector.kind === "curated") return (await curatedDescriptors(selector.membershipDigest)).length;
+  if (selector.kind === "deck_library") {
+    const membership = await planDeckLibraryPack(packId("deck_library"));
+    if (membership.membershipDigest !== selector.membershipDigest) throw new VisualPackBackendError("conflict");
+    return membership.descriptors.length;
+  }
   try {
     let count = selector.kind === "printing" ? 1 : 0;
     let compressedBytesRead = 0;

@@ -222,12 +222,13 @@
     "selector": {
       "title": "Sélection du catalogue",
       "core": "Visuels de base",
-      "printing": "Impressions de décors anglais",
-      "locale": "Impressions de décors localisées",
+      "printing": "Éditions de l’extension",
       "complete": "Catalogue actuel complet",
       "curated": "Une image par carte",
+      "deck_library": "Bibliothèque de decks",
       "curatedNote": "Une image par carte, choisie par vos Préférences d'illustration des cartes dans l'onglet Visuel. Modifiez-les là-bas et cette sélection suit.",
       "curatedDefaultNote": "Une image par carte. Vous n'avez aucune règle d'illustration, donc l'illustration par défaut de chaque carte est téléchargée — ajoutez des règles dans Préférences d'illustration des cartes, onglet Visuel, pour choisir d'autres éditions.",
+      "deckLibraryNote": "Une image par carte utilisée dans la bibliothèque de decks partagée, y compris les préconstruits Commander pour l'IA. Cette sélection suit les Préférences d'illustration des cartes. Après l'installation, l'application télécharge les ajouts et supprime les images devenues inutiles pendant son exécution ; supprimer ce pack arrête cette synchronisation.",
       "driftNone": "Vos images installées correspondent déjà à ces réglages.",
       "driftSummary": "Vos images installées ne sont plus à jour : {{add}} à ajouter, {{remove}} à retirer, {{refresh}} à actualiser.",
       "setCode": "Définir le code",
@@ -341,6 +342,7 @@
       "core": "Visuels de base",
       "complete": "Catalogue actuel complet",
       "curated": "Une image par carte",
+      "deckLibrary": "Bibliothèque de decks",
       "printing": "Éditions {{set}}",
       "locale": "Éditions {{set}} ({{language}})"
     },

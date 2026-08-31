@@ -187,6 +187,28 @@ describe("planCuratedMembership", () => {
     expect(lookups.filter((id) => id === GIANT)).toHaveLength(1);
   });
 
+  it("limits descriptors to an optional Oracle-id membership", async () => {
+    const allCards = await planCuratedMembership(input());
+    const explicitAllCards = await planCuratedMembership(input({
+      includedOracleIds: new Set([BOLT, GIANT, SOLO, SHORT]),
+    }));
+    const filtered = await planCuratedMembership(input({
+      includedOracleIds: new Set([BOLT.toUpperCase()]),
+    }));
+
+    expect(explicitAllCards).toEqual(allCards);
+    expect(exactPrintingIds(filtered.descriptors)).toEqual(new Set([BOLT_NEW.id]));
+    expect(filtered.descriptors).toHaveLength(3);
+    expect(filtered.membershipDigest).not.toBe(allCards.membershipDigest);
+  });
+
+  it("plans an empty supplied membership deterministically", async () => {
+    const membership = await planCuratedMembership(input({ includedOracleIds: new Set() }));
+
+    expect(membership.descriptors).toEqual([]);
+    expect(membership.membershipDigest).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  });
+
   it("skips token: keys entirely", async () => {
     const { descriptors } = await planCuratedMembership(input());
 

@@ -34,6 +34,7 @@ const OPERATION = operationId("c".repeat(32));
  *  neither of the catalog roots above — an estimate that matched one of those
  *  would hide a selector-identity bug rather than expose it. */
 const CURATED_DIGEST = catalogRoot("d".repeat(64));
+const DECK_LIBRARY_DIGEST = catalogRoot("e".repeat(64));
 
 /** The storage half of an `InstallEstimate`, as a browser that answers reports
  *  it. These tests are about the panel, not about storage, so every fixture
@@ -75,6 +76,27 @@ function curatedSummary(digest = CURATED_DIGEST, revision = "90071992547409930")
   };
 }
 
+/** A deck-library-only fixture keeps its membership digest distinct from the
+ * catalog root, so a bulk-root comparison cannot accidentally satisfy a local
+ * membership assertion. */
+function deckLibrarySummary(digest = DECK_LIBRARY_DIGEST, revision = "90071992547409930"): CatalogSummary {
+  return {
+    ...summary(ROOT_A, revision),
+    installedPacks: [{ packId: packId("core"), catalogRoot: ROOT_A }, { packId: packId("deck_library"), catalogRoot: digest }],
+  };
+}
+
+function localPackSummary(revision = "90071992547409930"): CatalogSummary {
+  return {
+    ...summary(ROOT_A, revision),
+    installedPacks: [
+      { packId: packId("core"), catalogRoot: ROOT_A },
+      { packId: packId("curated"), catalogRoot: CURATED_DIGEST },
+      { packId: packId("deck_library"), catalogRoot: DECK_LIBRARY_DIGEST },
+    ],
+  };
+}
+
 function summary(root = ROOT_A, revision = "90071992547409930"): CatalogSummary {
   return {
     catalogRoot: root,
@@ -94,13 +116,16 @@ function backend(status: VisualPackBackend["catalogStatus"] = vi.fn(async () => 
     catalogStatus: status,
     curatedSelector: vi.fn(async () => ({ kind: "curated" as const, membershipDigest: CURATED_DIGEST })),
     curatedDrift: vi.fn(async () => noDrift()),
+    deckLibrarySelector: vi.fn(async () => ({ kind: "deck_library" as const, membershipDigest: DECK_LIBRARY_DIGEST })),
+    deckLibraryDrift: vi.fn(async () => null),
+    reconcileDeckLibrary: vi.fn(async () => {}),
     refreshCatalog: vi.fn(async () => summary()),
     catalogSummary: vi.fn(async () => summary()),
     estimateInstall: vi.fn(async (selector) => ({
       catalogRoot: ROOT_A,
       installedRevision: installedRevision("90071992547409930"),
       selector: selector.kind,
-      packIds: [packId(selector.kind === "curated" ? "curated" : "core")],
+      packIds: [packId(selector.kind === "curated" || selector.kind === "deck_library" ? selector.kind : "core")],
       assetRecords: "1",
       uniqueObjects: "1",
       logicalImageBytes: "2",
@@ -422,6 +447,46 @@ describe("VisualPackManager initialization", () => {
     });
   });
 
+  it.each(["en", "de", "es", "fr", "it", "pt"])("installs %s through the combined set-printings selector", async (language) => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockImplementation(async (selector) => {
+      const id = selector.kind === "printing" ? `printing:${selector.set}`
+        : selector.kind === "locale" ? `locale:${selector.language}:${selector.set}` : "core";
+      return {
+        catalogRoot: ROOT_A, installedRevision: summary().installedRevision,
+        selector: id, packIds: [packId(id)],
+        assetRecords: "1", uniqueObjects: "1", logicalImageBytes: "2", uniqueImageBytes: "2",
+        shardCount: "1", shardBytes: "3", estimatedImageBytes: estimatedImageBytes(1),
+        storage: STORAGE, headroom: "sufficient",
+      };
+    });
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    fireEvent.click(await screen.findByRole("radio", { name: /^Set printings$/i }));
+    expect(screen.queryByRole("radio", { name: /English set printings|Localized set printings/i })).not.toBeInTheDocument();
+    const languages = screen.getByRole("combobox", { name: /image language/i });
+    expect(languages).toHaveValue("en");
+    expect(screen.getByRole("option", { name: "English" })).toHaveValue("en");
+    expect(screen.getByRole("button", { name: /scan catalog and estimate/i })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/set code/i), { target: { value: " FIN " } });
+
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /install selection/i })).toBeEnabled());
+    expect(fixture.value.estimateInstall).toHaveBeenLastCalledWith({ kind: "printing", set: "fin" }, expect.any(Function));
+    if (language !== "en") {
+      fireEvent.change(languages, { target: { value: language } });
+      expect(screen.getByRole("button", { name: /install selection/i })).toBeDisabled();
+      expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+      await waitFor(() => expect(screen.getByRole("button", { name: /install selection/i })).toBeEnabled());
+    }
+    const selector = language === "en" ? { kind: "printing", set: "fin" }
+      : { kind: "locale", language, set: "fin" };
+    expect(fixture.value.estimateInstall).toHaveBeenLastCalledWith(selector, expect.any(Function));
+    fireEvent.click(screen.getByRole("button", { name: /install selection/i }));
+    expect(fixture.value.start).toHaveBeenCalledWith({ kind: "install", selector, objectEstimate: 1 });
+  });
+
   it("allows unrelated estimate and verification reads to overlap", async () => {
     const fixture = backend();
     const estimate = deferred<Awaited<ReturnType<VisualPackBackend["estimateInstall"]>>>();
@@ -604,6 +669,15 @@ describe("VisualPackManager initialization", () => {
     };
   }
 
+  function deckLibraryEstimate(overrides: Partial<InstallEstimate> = {}): InstallEstimate {
+    return {
+      ...curatedEstimate(),
+      selector: "deck_library",
+      packIds: [packId("deck_library")],
+      ...overrides,
+    };
+  }
+
   /** Longer than PackSelector's curated debounce, so an estimate that was
    *  going to fire has fired by the time this resolves. */
   /** A `complete` estimate — what displaces a curated one from the panel. */
@@ -622,6 +696,10 @@ describe("VisualPackManager initialization", () => {
 
   function chooseCurated(): void {
     fireEvent.click(screen.getByRole("radio", { name: /one image per card/i }));
+  }
+
+  function chooseDeckLibrary(): void {
+    fireEvent.click(screen.getByRole("radio", { name: /deck library/i }));
   }
 
   it("estimates the curated pack on selection and installs it without a second click", async () => {
@@ -657,6 +735,560 @@ describe("VisualPackManager initialization", () => {
       selector: { kind: "curated", membershipDigest: CURATED_DIGEST },
       objectEstimate: 6,
     });
+  });
+
+  it("keeps the deck library opt-in idle until selected, then estimates before its explicit install", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate({ assetRecords: "7", uniqueObjects: "7" }));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(fixture.value.deckLibrarySelector).not.toHaveBeenCalled();
+    expect(fixture.value.estimateInstall).not.toHaveBeenCalled();
+    expect(fixture.value.start).not.toHaveBeenCalled();
+
+    const deckChoice = screen.getByRole("radio", { name: /deck library/i });
+    deckChoice.focus();
+    fireEvent.click(deckChoice);
+    expect(deckChoice).toHaveFocus();
+    expect(await screen.findByText(/one image per card used in the shared deck library, including AI Commander precons/i)).toBeInTheDocument();
+    expect(screen.getByText(/removing this pack stops that synchronization/i)).toBeInTheDocument();
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST },
+      expect.any(Function),
+    ));
+    expect(fixture.value.start).not.toHaveBeenCalled();
+
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+    expect(fixture.value.start).toHaveBeenCalledWith({
+      kind: "install",
+      selector: { kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST },
+      objectEstimate: 7,
+    });
+  });
+
+  it("binds automatic estimates to the local pack identity when digests match", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.deckLibrarySelector).mockResolvedValue({ kind: "deck_library", membershipDigest: CURATED_DIGEST });
+    vi.mocked(fixture.value.estimateInstall).mockImplementation(async (selector) =>
+      selector.kind === "deck_library" ? deckLibraryEstimate() : curatedEstimate(),
+    );
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(fixture.value.estimateInstall).mock.calls.map(([selector]) => selector.kind))
+      .toEqual(["curated", "deck_library"]);
+  });
+
+  it("retries a rejected deck-library selector only after explicit reselection", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockRejectedValueOnce(new VisualPackBackendError("network"))
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Scryfall catalog or image download failed/i);
+    await pastCuratedDebounce();
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+  });
+
+  it("does not retry a failed deck-library resolver when an older curated resolver completes", async () => {
+    const fixture = backend();
+    const pendingCurated = deferred<Awaited<ReturnType<VisualPackBackend["curatedSelector"]>>>();
+    vi.mocked(fixture.value.curatedSelector).mockReturnValueOnce(pendingCurated.promise);
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockRejectedValueOnce(new VisualPackBackendError("network"))
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.curatedSelector).toHaveBeenCalledTimes(1));
+    chooseDeckLibrary();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Scryfall catalog or image download failed/i);
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1);
+
+    pendingCurated.resolve({ kind: "curated", membershipDigest: CURATED_DIGEST });
+    await pastCuratedDebounce();
+
+    expect(fixture.value.curatedSelector).toHaveBeenCalledTimes(1);
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(/Scryfall catalog or image download failed/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /recalculate size/i }));
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Estimated download size/i)).toBeInTheDocument();
+  });
+
+  it("refreshes a stale deck-library request after art preferences invalidate it", async () => {
+    const fixture = backend();
+    const stale = deferred<Awaited<ReturnType<VisualPackBackend["deckLibrarySelector"]>>>();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+    stale.resolve({ kind: "deck_library", membershipDigest: CURATED_DIGEST });
+
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST },
+      expect.any(Function),
+    ));
+  });
+
+  it("shows deck-library membership and removes only that pack", async () => {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: localPackSummary() })));
+    vi.mocked(fixture.value.catalogSummary).mockResolvedValue(curatedSummary(CURATED_DIGEST, "90071992547409931"));
+    vi.mocked(fixture.value.deckLibraryDrift).mockResolvedValue({
+      membershipDigest: ROOT_B,
+      installedDigest: DECK_LIBRARY_DIGEST,
+      add: 3,
+      remove: 2,
+      refresh: 1,
+    });
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    expect(await screen.findByText(/Membership fingerprint: e{12}…/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Upgrade available/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /deck library/i }));
+    fireEvent.click(screen.getByRole("button", { name: /remove selected/i }));
+    await waitFor(() => expect(fixture.value.remove).toHaveBeenCalledWith(
+      { kind: "packs", packIds: [packId("deck_library")] },
+      "reject_dependents",
+    ));
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /deck library/i })).not.toBeInTheDocument());
+    expect(screen.getByRole("checkbox", { name: /one image per card/i })).toBeInTheDocument();
+  });
+
+  it("keeps an installed deck library unmeasured when its drift is unavailable", async () => {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: deckLibrarySummary() })));
+    vi.mocked(fixture.value.deckLibraryDrift).mockResolvedValue(null);
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.deckLibraryDrift).toHaveBeenCalledTimes(1));
+
+    chooseDeckLibrary();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /sync images/i })).toBeEnabled());
+    expect(screen.queryByText(/already match/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/to add/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+  });
+
+  it("uses the deck-library membership digest rather than a catalog root or curated drift", async () => {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: deckLibrarySummary() })));
+    vi.mocked(fixture.value.deckLibraryDrift).mockResolvedValue({
+      membershipDigest: DECK_LIBRARY_DIGEST,
+      installedDigest: DECK_LIBRARY_DIGEST,
+      add: 0,
+      remove: 0,
+      refresh: 0,
+    });
+    vi.mocked(fixture.value.curatedDrift).mockResolvedValue({
+      membershipDigest: ROOT_B,
+      installedDigest: CURATED_DIGEST,
+      add: 7,
+      remove: 5,
+      refresh: 3,
+    });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+
+    expect(await screen.findByText(/already match/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /sync images/i })).toBeEnabled());
+    expect(screen.queryByText(/Upgrade available/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/7 to add, 5 to remove, 3 to refresh/i)).not.toBeInTheDocument();
+  });
+
+  it("reports deck-library drift counts from the deck membership and keeps Sync available", async () => {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: deckLibrarySummary() })));
+    vi.mocked(fixture.value.deckLibraryDrift).mockResolvedValue({
+      membershipDigest: ROOT_B,
+      installedDigest: DECK_LIBRARY_DIGEST,
+      add: 7,
+      remove: 5,
+      refresh: 3,
+    });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+
+    expect(await screen.findByText(/7 to add, 5 to remove, 3 to refresh/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /sync images/i })).toBeEnabled());
+    expect(await screen.findByText(/Upgrade available/i)).toBeInTheDocument();
+  });
+
+  it("clears stale scan progress when a newer summary invalidates a pending bulk estimate", async () => {
+    const fixture = backend();
+    const scan = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall).mockImplementationOnce((_selector, onProgress) => {
+      onProgress?.({ compressedBytesRead: 10, compressedBytesTotal: 20, recordsScanned: 1, assetRecords: 1 });
+      return scan.promise;
+    });
+    vi.mocked(fixture.value.refreshCatalog).mockResolvedValue(summary(ROOT_B, "90071992547409931"));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    fireEvent.click(screen.getByRole("radio", { name: /all current english card images/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scan catalog and estimate/i }));
+    expect(await screen.findByRole("progressbar")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /check Scryfall catalog/i }));
+    await screen.findByText(shortDigest(ROOT_B));
+    scan.resolve(bulkEstimate());
+
+    await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
+    expect(screen.queryByText(/Scryfall snapshot scan/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("re-estimates a selected deck library after art preferences change to the same digest", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a selected deck library estimate after its catalog membership changes", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST })
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: ROOT_B });
+    vi.mocked(fixture.value.estimateInstall)
+      .mockRejectedValueOnce(new VisualPackBackendError("conflict"))
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenNthCalledWith(
+      2,
+      { kind: "deck_library", membershipDigest: ROOT_B },
+      expect.any(Function),
+    ));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    expect(fixture.value.start).not.toHaveBeenCalled();
+    expect(fixture.value.curatedSelector).not.toHaveBeenCalled();
+  });
+
+  it("requires a second explicit click after recovering a deck-library install conflict", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST })
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: ROOT_B });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate({ assetRecords: "7" }));
+    vi.mocked(fixture.value.start)
+      .mockRejectedValueOnce(new VisualPackBackendError("conflict"))
+      .mockResolvedValueOnce({ status: "healthy" });
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalledTimes(1));
+
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenNthCalledWith(
+      2,
+      { kind: "deck_library", membershipDigest: ROOT_B },
+      expect.any(Function),
+    ));
+    const recoveredInstall = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(recoveredInstall).toBeEnabled());
+    expect(fixture.value.start).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(recoveredInstall);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalledTimes(2));
+    expect(fixture.value.start).toHaveBeenLastCalledWith({
+      kind: "install",
+      selector: { kind: "deck_library", membershipDigest: ROOT_B },
+      objectEstimate: 7,
+    });
+  });
+
+  it("ignores a stale deck-library estimate conflict after a newer art selection succeeds", async () => {
+    const fixture = backend();
+    const stale = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST })
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: ROOT_B });
+    vi.mocked(fixture.value.estimateInstall)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2));
+    stale.reject(new VisualPackBackendError("conflict"));
+
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenNthCalledWith(
+      2,
+      { kind: "deck_library", membershipDigest: ROOT_B },
+      expect.any(Function),
+    ));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2);
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+    expect(fixture.value.start).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale deck-library install conflict after a newer art selection succeeds", async () => {
+    const fixture = backend();
+    const stale = deferred<Awaited<ReturnType<VisualPackBackend["start"]>>>();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST })
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: ROOT_B });
+    vi.mocked(fixture.value.estimateInstall).mockResolvedValue(deckLibraryEstimate());
+    vi.mocked(fixture.value.start).mockReturnValue(stale.promise);
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenNthCalledWith(
+      2,
+      { kind: "deck_library", membershipDigest: ROOT_B },
+      expect.any(Function),
+    ));
+    stale.reject(new VisualPackBackendError("conflict"));
+
+    const recoveredInstall = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(recoveredInstall).toBeEnabled());
+    await pastCuratedDebounce();
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2);
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+    expect(fixture.value.start).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("preserves a pending curated estimate when an older deck-library start conflicts", async () => {
+    const fixture = backend();
+    const staleStart = deferred<Awaited<ReturnType<VisualPackBackend["start"]>>>();
+    const pendingCuratedEstimate = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockResolvedValueOnce(deckLibraryEstimate())
+      .mockReturnValueOnce(pendingCuratedEstimate.promise);
+    vi.mocked(fixture.value.start).mockReturnValue(staleStart.promise);
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    const install = await screen.findByRole("button", { name: /install selection/i });
+    await waitFor(() => expect(install).toBeEnabled());
+    fireEvent.click(install);
+    await waitFor(() => expect(fixture.value.start).toHaveBeenCalledTimes(1));
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    staleStart.reject(new VisualPackBackendError("conflict"));
+    pendingCuratedEstimate.resolve(curatedEstimate());
+
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(1);
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops conflict recovery after a fresh deck-library selector network failure until the user retries", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.deckLibrarySelector)
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: DECK_LIBRARY_DIGEST })
+      .mockRejectedValueOnce(new VisualPackBackendError("network"))
+      .mockResolvedValueOnce({ kind: "deck_library", membershipDigest: ROOT_B });
+    vi.mocked(fixture.value.estimateInstall)
+      .mockRejectedValueOnce(new VisualPackBackendError("conflict"))
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+
+    expect(await screen.findByText(/Scryfall catalog or image download failed/i)).toBeInTheDocument();
+    await pastCuratedDebounce();
+    expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(2);
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1);
+    expect(fixture.value.start).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /recalculate size/i }));
+    await waitFor(() => expect(fixture.value.deckLibrarySelector).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "deck_library", membershipDigest: ROOT_B },
+      expect.any(Function),
+    ));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+  });
+
+  it("retries a failed deck estimate after visiting a curated estimate that already matches", async () => {
+    const fixture = backend();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockResolvedValueOnce(curatedEstimate())
+      .mockRejectedValueOnce(new VisualPackBackendError("network"))
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseCurated();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+
+    chooseDeckLibrary();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Scryfall catalog or image download failed/i);
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+
+    chooseCurated();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a stale pending deck estimate and performs one fresh estimate", async () => {
+    const fixture = backend();
+    const stale = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+    stale.resolve(deckLibraryEstimate());
+
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a stale pending deck-estimate failure and does not retry it", async () => {
+    const fixture = backend();
+    const stale = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(deckLibraryEstimate());
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    usePreferencesStore.setState({ artChain: [{ type: "newest" }] });
+    stale.reject(new VisualPackBackendError("network"));
+
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers one fresh deck estimate after an installed-revision invalidation releases its pending slot", async () => {
+    const fixture = backend();
+    const stale = deferred<InstallEstimate>();
+    vi.mocked(fixture.value.estimateInstall)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({ ...deckLibraryEstimate(), installedRevision: installedRevision("90071992547409931") });
+    vi.mocked(fixture.value.catalogSummary).mockResolvedValue(summary(ROOT_A, "90071992547409931"));
+    platform.load.mockResolvedValue(fixture.value);
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+
+    chooseDeckLibrary();
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(1));
+    fixture.emitRevision({ cause: "install", operationId: null, catalogRoot: ROOT_A, revision: installedRevision("90071992547409931") });
+    await screen.findByText("90071992547409931");
+    stale.resolve(deckLibraryEstimate());
+
+    await waitFor(() => expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: /install selection/i })).toBeEnabled();
+    await pastCuratedDebounce();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(2);
   });
 
   it("leaves the bulk selectors' catalog scan behind a deliberate click", async () => {

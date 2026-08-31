@@ -4,6 +4,8 @@ import type {
   CatalogScanProgress,
   CuratedDrift,
   CuratedInstallSelector,
+  DeckLibraryDrift,
+  DeckLibraryInstallSelector,
   InstallEstimate,
   InstallSelector,
   OperationId,
@@ -95,6 +97,20 @@ export interface VisualPackBackend {
    * asked for.
    */
   curatedDrift(): Promise<CuratedDrift | null>;
+  /** The current deck-library membership selector. This is intentionally not
+   * part of `InstallSelector` until its lifecycle exists. */
+  deckLibrarySelector(): Promise<DeckLibraryInstallSelector>;
+  /**
+   * The planned deck-library membership against its installed rows, if card
+   * data is resident. `null` means unmeasured and must not trigger a load.
+   */
+  deckLibraryDrift(): Promise<DeckLibraryDrift | null>;
+  /**
+   * Reconcile the already-installed deck-library membership without creating
+   * an opt-in or requesting persistent storage. Background callers use this
+   * after a deck or art-preference input changes.
+   */
+  reconcileDeckLibrary(): Promise<void>;
   refreshCatalog(): Promise<CatalogSummary>;
   catalogSummary(): Promise<CatalogSummary>;
   estimateInstall(selector: InstallSelector, onProgress?: (progress: CatalogScanProgress) => void): Promise<InstallEstimate>;

@@ -32,13 +32,17 @@ let fetchPromise: Promise<DeckMap | null> | null = null;
 
 export function loadPreconDeckMap(): Promise<DeckMap | null> {
   if (!fetchPromise) {
-    fetchPromise = fetch(__DECKS_URL__)
+    const pending = fetch(__DECKS_URL__)
       .then((res) => (res.ok ? (res.json() as Promise<DeckMap>) : null))
       .then((data) => {
         if (data && typeof data === "object") cached = data;
         return cached;
       })
       .catch(() => null);
+    fetchPromise = pending;
+    void pending.then((data) => {
+      if (!data && fetchPromise === pending) fetchPromise = null;
+    });
   }
   return fetchPromise;
 }

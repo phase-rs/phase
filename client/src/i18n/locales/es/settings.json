@@ -222,12 +222,13 @@
     "selector": {
       "title": "Selección de catálogo",
       "core": "Reverso de carta",
-      "printing": "Impresiones en inglés",
-      "locale": "Impresiones de conjuntos localizados",
+      "printing": "Impresiones de la colección",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
+      "deck_library": "Biblioteca de mazos",
       "curatedNote": "Una imagen por carta, elegida por tus Preferencias de ilustración de cartas en la pestaña Visual. Si las cambias allí, esta selección las sigue.",
       "curatedDefaultNote": "Una imagen por carta. No tienes reglas de ilustración, así que se descarga la ilustración predeterminada de cada carta: añade reglas en Preferencias de ilustración de cartas, en la pestaña Visual, para elegir otras ediciones.",
+      "deckLibraryNote": "Una imagen por cada carta usada en la biblioteca compartida de mazos, incluidos los preconstruidos de Commander para IA. Sigue las Preferencias de ilustración de cartas. Tras instalarse, la aplicación descarga las incorporaciones y elimina las imágenes que ya no se necesitan mientras está en ejecución; quitar este paquete detiene esa sincronización.",
       "driftNone": "Tus imágenes instaladas ya coinciden con estos ajustes.",
       "driftSummary": "Tus imágenes instaladas están desactualizadas: {{add}} por añadir, {{remove}} por quitar, {{refresh}} por actualizar.",
       "setCode": "Código de colección",
@@ -341,6 +342,7 @@
       "core": "Reverso de carta",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
+      "deckLibrary": "Biblioteca de mazos",
       "printing": "Impresiones de {{set}}",
       "locale": "Impresiones de {{set}} ({{language}})"
     },

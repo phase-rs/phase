@@ -14,6 +14,7 @@ import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
 import { useHostingSession } from "./hooks/useHostingSession";
 import { migrateSavedDecks } from "./services/deckMigrations";
+import { useDeckLibraryAutoSync } from "./services/visualPacks/deckLibraryAutoSync";
 import { ensurePreload, subscribePreload } from "./startup/preloadAssets";
 import { useCloudSyncStore } from "./stores/cloudSyncStore";
 import { MenuPage } from "./pages/MenuPage";
@@ -77,6 +78,8 @@ function AppContent() {
   // on boot. init() returns an uninstaller so listeners are cleaned up on
   // unmount / hot reload rather than stacking.
   useEffect(() => useCloudSyncStore.getState().init(), []);
+
+  useDeckLibraryAutoSync();
 
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);

@@ -226,12 +226,13 @@
     "selector": {
       "title": "Download selection",
       "core": "Card back",
-      "printing": "English set printings",
-      "locale": "Localized set printings",
+      "printing": "Set printings",
       "complete": "All current English card images",
       "curated": "One image per card",
+      "deck_library": "Deck library",
       "curatedNote": "One image per card, chosen by your Card Art Preferences on the Visual tab. Change them there and this selection follows.",
       "curatedDefaultNote": "One image per card. You have no card art rules, so this downloads each card's default art — add rules under Card Art Preferences on the Visual tab to pick different printings.",
+      "deckLibraryNote": "One image per card used in the shared deck library, including AI Commander precons. It follows Card Art Preferences. After installation, the app updates additions and removes images no longer needed while it is running; removing this pack stops that synchronization.",
       "driftNone": "Your installed images already match these settings.",
       "driftSummary": "Your installed images are out of date: {{add}} to add, {{remove}} to remove, {{refresh}} to refresh.",
       "setCode": "Set code",
@@ -343,6 +344,7 @@
       "core": "Card back",
       "complete": "All current English card images",
       "curated": "One image per card",
+      "deckLibrary": "Deck library",
       "printing": "{{set}} printings",
       "locale": "{{set}} printings ({{language}})"
     },

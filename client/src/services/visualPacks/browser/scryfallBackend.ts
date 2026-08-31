@@ -3,6 +3,7 @@ import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import { VisualPackBackendError, VisualPackStorageRefusalError, type VisualPackBackend } from "../backend.ts";
 import { isCardDataResident } from "../../scryfall.ts";
 import { curatedDescriptors, planCuratedPack } from "../curatedPack.ts";
+import { invalidateDeckLibraryPack, planDeckLibraryPack } from "../deckLibraryPack.ts";
 import {
   estimatedImageBytes,
   installedRevision,
@@ -17,6 +18,8 @@ import {
   type CatalogScanProgress,
   type CuratedDrift,
   type CuratedInstallSelector,
+  type DeckLibraryDrift,
+  type DeckLibraryInstallSelector,
   type InstallEstimate,
   type InstallSelector,
   type OperationId,
@@ -69,6 +72,8 @@ type PackRecord = Readonly<{
   root: CatalogRoot;
   dependencies: readonly PackId[];
   operationId: OperationId;
+  /** Stable opt-in identity, retained across normal deck-library promotions. */
+  optInGeneration?: OperationId;
 }>;
 
 type ObjectRecord = Readonly<{
@@ -103,6 +108,13 @@ type ObjectContent = Readonly<{
   path: string;
 }>;
 
+type MembershipDiff = Readonly<{
+  installedDigest: CatalogRoot | null;
+  add: number;
+  remove: number;
+  refresh: number;
+}>;
+
 type OperationObjectRecord = Readonly<{
   id: string;
   operationId: OperationId;
@@ -112,7 +124,7 @@ type OperationObjectRecord = Readonly<{
 
 type ScryfallOperationRecord = Readonly<{
   id: OperationId;
-  kind: "install";
+  kind: "install" | "repair";
   state: "downloading" | "cancel_requested" | "finalizing" | "completed" | "cancelled";
   catalog: CatalogRecord;
   selectors: readonly InstallSelector[];
@@ -123,7 +135,15 @@ type ScryfallOperationRecord = Readonly<{
   objectEstimate?: number;
   objectsPromoted: number;
   completedRevision: string | null;
+  /** Receipt-root descriptors captured for deck-library repair. */
+  repairDescriptors?: readonly ScryfallAssetDescriptor[];
+  /** Expected durable deck-library opt-in identity for guarded background work. */
+  deckLibraryGeneration?: OperationId;
+  /** This record was created by installed-only reconciliation, never by the UI. */
+  background?: boolean;
 }>;
+
+const DECK_LIBRARY_LOCK = "phase-visual-packs:deck-library";
 
 interface ScryfallVisualPackSchema extends DBSchema {
   state: { key: string; value: StateRecord };
@@ -167,7 +187,7 @@ function operationStatus(record: ScryfallOperationRecord): OperationStatus {
   return {
     operationId: record.id,
     catalogRoot: record.catalog.root,
-    kind: record.kind,
+    kind: record.kind ?? "install",
     state: record.state,
     packTotal: record.packTotal,
     packsPromoted: record.packsPromoted,
@@ -225,7 +245,7 @@ function errorKind(error: unknown): VisualPackErrorKind {
  * statement about a future caller rather than about the refusal path.
  */
 function retryable(kind: VisualPackErrorKind): boolean {
-  return kind !== "conflict" && kind !== "internal";
+  return kind !== "conflict" && kind !== "internal" && kind !== "cancelled";
 }
 
 function backendError(error: unknown): VisualPackBackendError {
@@ -240,6 +260,7 @@ function selectorPack(selector: InstallSelector): PackId {
     case "locale": return packId(`locale:${selector.language}:${selector.set}`);
     case "complete": return packId("complete");
     case "curated": return packId("curated");
+    case "deck_library": return packId("deck_library");
   }
 }
 
@@ -252,18 +273,46 @@ function selectorPack(selector: InstallSelector): PackId {
  * of packs — so it is derived here rather than stored on the record.
  */
 function selectorRoot(selector: InstallSelector, catalog: CatalogRecord): CatalogRoot {
-  return selector.kind === "curated" ? selector.membershipDigest : catalog.root;
+  return selector.kind === "curated" || selector.kind === "deck_library" ? selector.membershipDigest : catalog.root;
 }
 
 function selectorForPack(selectedPack: PackId, root: CatalogRoot): InstallSelector {
   if (selectedPack === packId("core")) return { kind: "core" };
   if (selectedPack === packId("complete")) return { kind: "complete", rootSha256: root };
   if (selectedPack === packId("curated")) return { kind: "curated", membershipDigest: root };
+  if (selectedPack === packId("deck_library")) return { kind: "deck_library", membershipDigest: root };
   const printing = /^printing:([a-z0-9]{3,6})$/.exec(selectedPack);
   if (printing) return { kind: "printing", set: printing[1] };
   const locale = /^locale:(de|es|fr|it|pt):([a-z0-9]{3,6})$/.exec(selectedPack);
   if (locale) return { kind: "locale", language: locale[1], set: locale[2] };
   throw new VisualPackBackendError("invalid_input");
+}
+
+function localPack(selectedPack: PackId): boolean {
+  return selectedPack === packId("curated") || selectedPack === packId("deck_library");
+}
+
+function deckLibraryGeneration(receipt: PackRecord): OperationId {
+  return receipt.optInGeneration ?? receipt.operationId;
+}
+
+function deckLibraryOperation(operation: ScryfallOperationRecord): boolean {
+  return operation.packIds.includes(packId("deck_library"));
+}
+
+function webLocks(): LockManager | undefined {
+  return globalThis.navigator?.locks;
+}
+
+function descriptorFromObject(row: ObjectRecord): ScryfallAssetDescriptor {
+  if (!row.sourceUrl) throw new VisualPackBackendError("invalid_input");
+  return {
+    packId: row.packId,
+    assetKey: row.assetKey,
+    candidateKeys: row.candidateKeys,
+    sourceUrl: row.sourceUrl,
+    media: row.media,
+  };
 }
 
 function sameResolutionKey(record: ObjectRecord, key: ResolutionKey): boolean {
@@ -372,6 +421,20 @@ async function cacheContains(cache: Cache, path: string): Promise<boolean> {
   return (await cache.match(path)) !== undefined;
 }
 
+async function cacheMatchesObject(cache: Cache, record: ObjectRecord): Promise<boolean> {
+  const response = await cache.match(record.path);
+  if (!response) return false;
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return bytes.byteLength === record.byteLength && await sha256(bytes) === record.object;
+}
+
+async function allCachedObjectsMatch(cache: Cache, records: readonly ObjectRecord[]): Promise<boolean> {
+  for (const record of records) {
+    if (!await cacheMatchesObject(cache, record)) return false;
+  }
+  return true;
+}
+
 async function sha256(bytes: Uint8Array): Promise<CatalogRoot> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("") as CatalogRoot;
@@ -405,9 +468,12 @@ async function storeVerifiedObject(cache: Cache, path: string, media: VisualPack
 export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   private readonly progressListeners = new Set<(event: ProgressEvent) => void>();
   private readonly revisionListeners = new Set<(event: RevisionEvent) => void>();
+  private lastPublishedRevision: string | null = null;
   /** Each running worker's abort handle AND the promise that settles when it
    *  has finished writing, so `cancel()` can wait for it. */
   private readonly workers = new Map<OperationId, { controller: AbortController; settled: Promise<void> }>();
+  private readonly workerFailures = new Map<OperationId, VisualPackBackendError>();
+  private readonly reconciliationControllers = new Set<AbortController>();
   private work = Promise.resolve();
 
   private constructor(private readonly database: IDBPDatabase<ScryfallVisualPackSchema>) {}
@@ -428,6 +494,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   }
 
   private publish(event: RevisionEvent): void {
+    this.lastPublishedRevision = event.revision;
     for (const listener of this.revisionListeners) {
       try { listener(event); } catch { /* UI listeners never affect installation. */ }
     }
@@ -435,6 +502,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
 
   private run(selectedOperation: OperationId): void {
     if (this.workers.has(selectedOperation)) return;
+    this.workerFailures.delete(selectedOperation);
     const controller = new AbortController();
     const task = this.work.then(async () => this.resume(selectedOperation, controller.signal));
     this.work = task.catch(() => undefined);
@@ -451,6 +519,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         ? await this.database.get("operations", selectedOperation)
         : await this.updateOperation(selectedOperation, (current) =>
             current.state === "completed" ? current : { ...current, state: "cancelled" }).catch(() => undefined);
+      this.workerFailures.set(selectedOperation, backendError(error));
       if (operation) this.emit({ phase: "failed", operation: operationStatus(operation), error: kind });
     }).catch(() => undefined).finally(() => this.workers.delete(selectedOperation));
     void settled;
@@ -458,6 +527,13 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     // safe to do so: `run()` returns before any microtask, so the `has` guard
     // above still sees a worker that a synchronous caller registered first.
     this.workers.set(selectedOperation, { controller, settled });
+  }
+
+  private async runAndWait(selectedOperation: OperationId): Promise<void> {
+    this.run(selectedOperation);
+    await this.workers.get(selectedOperation)?.settled;
+    const failure = this.workerFailures.get(selectedOperation);
+    if (failure) throw failure;
   }
 
   private async updateOperation(
@@ -474,9 +550,16 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   }
 
   private async markSeen(selectedOperation: OperationId, selectedObject: string): Promise<OperationObjectRecord> {
-    const transaction = this.database.transaction(["operations", "operationObjects"], "readwrite");
+    const transaction = this.database.transaction(["packs", "operations", "operationObjects"], "readwrite");
     const operation = await transaction.objectStore("operations").get(selectedOperation);
     if (!operation) throw new VisualPackBackendError("invalid_input");
+    if (deckLibraryOperation(operation) && operation.state !== "downloading") throw new VisualPackBackendError("cancelled");
+    if (operation.deckLibraryGeneration) {
+      const receipt = await transaction.objectStore("packs").get(packId("deck_library"));
+      if (!receipt || deckLibraryGeneration(receipt) !== operation.deckLibraryGeneration) {
+        throw new VisualPackBackendError("cancelled");
+      }
+    }
     const id = operationObjectId(selectedOperation, selectedObject);
     const existing = await transaction.objectStore("operationObjects").get(id);
     if (existing) {
@@ -491,10 +574,17 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   }
 
   private async markComplete(selectedOperation: OperationId, selectedObject: string, metadata: ObjectRecord): Promise<void> {
-    const transaction = this.database.transaction(["operations", "operationObjects", "objects"], "readwrite");
+    const transaction = this.database.transaction(["packs", "operations", "operationObjects", "objects"], "readwrite");
     const operation = await transaction.objectStore("operations").get(selectedOperation);
     const completion = await transaction.objectStore("operationObjects").get(operationObjectId(selectedOperation, selectedObject));
     if (!operation || !completion) throw new VisualPackBackendError("storage");
+    if (deckLibraryOperation(operation) && operation.state !== "downloading") throw new VisualPackBackendError("cancelled");
+    if (operation.deckLibraryGeneration) {
+      const receipt = await transaction.objectStore("packs").get(packId("deck_library"));
+      if (!receipt || deckLibraryGeneration(receipt) !== operation.deckLibraryGeneration) {
+        throw new VisualPackBackendError("cancelled");
+      }
+    }
     await transaction.objectStore("objects").put(metadata);
     if (!completion.complete) {
       await transaction.objectStore("operationObjects").put({ ...completion, complete: true });
@@ -552,16 +642,22 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     signal: AbortSignal,
     cache: Cache,
     donors: () => Promise<Map<string, ObjectContent>>,
+    verifyExisting: boolean,
   ): Promise<void> {
     const id = objectId(root, descriptor.packId, descriptor.assetKey);
     const completion = await this.markSeen(operation.id, id);
     const existing = await this.database.get("objects", id);
-    if (completion.complete && existing && await cacheContains(cache, existing.path)) return;
+    if (completion.complete && existing && (verifyExisting
+      ? await cacheMatchesObject(cache, existing)
+      : await cacheContains(cache, existing.path))) return;
     if (completion.complete) await this.invalidateCompletion(operation.id, id);
-    if (existing && await cacheContains(cache, existing.path)) {
+    if (existing && (verifyExisting
+      ? await cacheMatchesObject(cache, existing)
+      : await cacheContains(cache, existing.path))) {
       await this.markComplete(operation.id, id, existing);
       return;
     }
+    if (existing && verifyExisting) await cache.delete(existing.path);
     // A preference change gives the curated pack a new root, so nothing above
     // matched even though most of the membership is byte-for-byte the images
     // already on disk. Reuse them; the cache, not the row, is the authority on
@@ -607,7 +703,14 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     // still reach `completed` and the only symptom would be a progress figure
     // permanently short by however many images were reused — a wrong number no
     // fetch count can see. One exit is what makes that unrepresentable.
-    await this.markComplete(operation.id, id, metadata);
+    try {
+      await this.markComplete(operation.id, id, metadata);
+    } catch (error) {
+      // Removal can win after the cache write but before this guarded durable
+      // row write. Sweep only if no other pack references the content.
+      await this.sweepUnreferenced(new Set([content.path]), cache);
+      throw error;
+    }
   }
 
   /** `root` is the SELECTOR's root, supplied by the per-selector loop — the
@@ -628,11 +731,16 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       return dropped;
     }
     const existing = await transaction.objectStore("packs").get(selectedPack);
+    if (current.deckLibraryGeneration) {
+      if (!existing || deckLibraryGeneration(existing) !== current.deckLibraryGeneration) {
+        throw new VisualPackBackendError("cancelled");
+      }
+    }
     if (existing?.operationId === operation.id && existing.root === root) {
       await transaction.done;
       return dropped;
     }
-    if (existing) {
+    if (existing && existing.root !== root) {
       const index = transaction.objectStore("objects").index("by-pack");
       let cursor = await index.openCursor(existing.packId);
       while (cursor) {
@@ -649,6 +757,9 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       root,
       dependencies: [],
       operationId: operation.id,
+      ...(selectedPack === packId("deck_library")
+        ? { optInGeneration: existing ? deckLibraryGeneration(existing) : current.deckLibraryGeneration ?? current.id }
+        : {}),
     });
     await transaction.objectStore("operations").put({ ...current, packsPromoted: current.packsPromoted + 1 });
     await transaction.done;
@@ -711,21 +822,25 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
    * operations are deliberately NOT kept — a cancelled or completed record's
    * root is exactly the garbage this collects.
    */
-  private async collectCuratedGarbage(root: CatalogRoot, dropped: ReadonlySet<string>, cache: Cache): Promise<void> {
-    const curated = packId("curated");
+  private async collectLocalPackGarbage(
+    selectedPack: PackId,
+    root: CatalogRoot,
+    dropped: ReadonlySet<string>,
+    cache: Cache,
+  ): Promise<void> {
     const paths = new Set(dropped);
     const transaction = this.database.transaction(["packs", "objects", "operations"], "readwrite");
-    const installed = await transaction.objectStore("packs").get(curated);
+    const installed = await transaction.objectStore("packs").get(selectedPack);
     const keep = new Set<CatalogRoot>([root]);
     if (installed) keep.add(installed.root);
     for (const operation of await transaction.objectStore("operations").getAll()) {
       if (operation.state === "completed" || operation.state === "cancelled") continue;
       for (const [position, selector] of operation.selectors.entries()) {
-        if (operation.packIds[position] === curated) keep.add(selectorRoot(selector, operation.catalog));
+        if (operation.packIds[position] === selectedPack) keep.add(selectorRoot(selector, operation.catalog));
       }
     }
     const index = transaction.objectStore("objects").index("by-pack");
-    let cursor = await index.openCursor(curated);
+    let cursor = await index.openCursor(selectedPack);
     while (cursor) {
       if (!keep.has(cursor.value.root)) {
         paths.add(cursor.value.path);
@@ -737,16 +852,32 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     await this.sweepUnreferenced(paths, cache);
   }
 
+  private async collectCuratedGarbage(root: CatalogRoot, dropped: ReadonlySet<string>, cache: Cache): Promise<void> {
+    await this.collectLocalPackGarbage(packId("curated"), root, dropped, cache);
+  }
+
   private async finish(selectedOperation: OperationId): Promise<void> {
     const finishing = await this.updateOperation(selectedOperation, (current) =>
       current.state === "downloading" ? { ...current, state: "finalizing" } : current,
     );
     if (finishing.state !== "finalizing") return;
-    const transaction = this.database.transaction(["state", "operations"], "readwrite");
+    const transaction = this.database.transaction(["state", "packs", "operations"], "readwrite");
     const currentOperation = await transaction.objectStore("operations").get(selectedOperation);
     if (!currentOperation || currentOperation.state !== "finalizing") {
       await transaction.done;
       return;
+    }
+    if (currentOperation.deckLibraryGeneration) {
+      const receipt = await transaction.objectStore("packs").get(packId("deck_library"));
+      if (
+        !receipt
+        || deckLibraryGeneration(receipt) !== currentOperation.deckLibraryGeneration
+        || receipt.operationId !== currentOperation.id
+      ) {
+        await transaction.objectStore("operations").put({ ...currentOperation, state: "cancelled" });
+        await transaction.done;
+        return;
+      }
     }
     const currentState = (await transaction.objectStore("state").get(STATE)) ?? initialState();
     const revision = String(BigInt(currentState.revision) + 1n);
@@ -755,10 +886,27 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     await transaction.done;
     const completed = await this.operationStatus(selectedOperation);
     this.emit({ phase: "completed", operation: completed, error: null });
-    this.publish({ cause: "install", operationId: selectedOperation, catalogRoot: finishing.catalog.root, revision: installedRevision(revision) });
+    this.publish({ cause: finishing.kind ?? "install", operationId: selectedOperation, catalogRoot: finishing.catalog.root, revision: installedRevision(revision) });
   }
 
-  private async resume(selectedOperation: OperationId, signal: AbortSignal): Promise<void> {
+  private async resume(
+    selectedOperation: OperationId,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const operation = await this.database.get("operations", selectedOperation);
+    if (!operation || !deckLibraryOperation(operation)) {
+      return this.resumeOwned(selectedOperation, signal);
+    }
+    const locks = webLocks();
+    if (!locks) {
+      if (operation.background) throw new VisualPackBackendError("unavailable");
+      return this.resumeOwned(selectedOperation, signal);
+    }
+    return locks.request(DECK_LIBRARY_LOCK, { mode: "exclusive", signal }, () =>
+      this.resumeOwned(selectedOperation, signal));
+  }
+
+  private async resumeOwned(selectedOperation: OperationId, signal: AbortSignal): Promise<void> {
     let operation = await this.database.get("operations", selectedOperation);
     if (!operation || operation.state === "completed" || operation.state === "cancelled") return;
     if (operation.state === "cancel_requested" || signal.aborted) {
@@ -768,7 +916,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     const cache = await caches.open(CACHE);
     for (const [index, selector] of operation.selectors.entries()) {
       operation = await this.database.get("operations", selectedOperation);
-      if (!operation || operation.state === "cancel_requested" || signal.aborted) break;
+      if (!operation || operation.state === "cancel_requested" || operation.state === "cancelled" || signal.aborted) break;
       const selectedPack = operation.packIds[index];
       const root = selectorRoot(selector, operation.catalog);
       const installed = await this.database.get("packs", selectedPack);
@@ -797,7 +945,10 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       // install reads every row in the store, `complete`/`printing`/`locale`
       // included.
       let adoptable: Promise<Map<string, ObjectContent>> | null = null;
-      const donors = selectedPack === packId("curated")
+      // Repair trusts only the receipt row it is restoring. A cache donor may
+      // be present yet corrupt, and validating every possible donor would turn
+      // a targeted repair into a store-wide full verification pass.
+      const donors = operation.kind !== "repair" && localPack(selectedPack)
         ? () => (adoptable ??= this.adoptableContent())
         : NO_DONORS;
       let failure: unknown = null;
@@ -816,14 +967,8 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         if (failure) throw failure;
         const task: Promise<void> = (async () => {
           const current = await this.database.get("operations", selectedOperation);
-          // `cancel_requested` is the only terminal state this needs to name.
-          // The other writer of a terminal state while a task is live is
-          // `cancel()`, and it calls `.abort()` BEFORE writing `cancelled` —
-          // so a task that could see `cancelled` has already seen
-          // `signal.aborted`. `run()`'s `cancelled` write cannot race at all:
-          // the `finally` below holds it until every task here has settled.
-          if (!current || current.state === "cancel_requested" || signal.aborted) return;
-          await this.installObject(current, descriptor, root, signal, cache, donors);
+          if (!current || current.state === "cancel_requested" || current.state === "cancelled" || signal.aborted) return;
+          await this.installObject(current, descriptor, root, signal, cache, donors, current.kind === "repair" && selectedPack === packId("deck_library"));
           reportProgress();
         })().catch((error) => {
           failure ??= error;
@@ -832,7 +977,18 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         return inFlight.size >= DOWNLOAD_CONCURRENCY ? Promise.race(inFlight) : undefined;
       };
       try {
-        await forEachScryfallAsset(operation.catalog, selector, signal, schedule);
+        const repairDescriptors = operation.kind === "repair" && selector.kind === "deck_library"
+          ? operation.repairDescriptors
+          : undefined;
+        if (repairDescriptors) {
+          for (const descriptor of repairDescriptors) {
+            if (signal.aborted) break;
+            const pending = schedule(descriptor);
+            if (pending) await pending;
+          }
+        } else {
+          await forEachScryfallAsset(operation.catalog, selector, signal, schedule);
+        }
       } finally {
         // `schedule` re-throws a recorded `failure` synchronously on its next
         // call, and that throw unwinds through `forEachScryfallAsset`. Without
@@ -854,18 +1010,20 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       reportProgress(true);
       await progressUpdate;
       operation = await this.database.get("operations", selectedOperation);
-      if (!operation || operation.state === "cancel_requested" || signal.aborted) break;
+      if (!operation || operation.state === "cancel_requested" || operation.state === "cancelled" || signal.aborted) break;
       const dropped = await this.completePack(operation, selectedPack, root);
       // Curated is the only pack whose root moves under the user rather than
       // under Scryfall, so it is the only one that strands rows and images
       // behind on a change of preference. Every other selector is left exactly
       // as it was: it discards `dropped` and collects no garbage.
       if (selectedPack === packId("curated")) await this.collectCuratedGarbage(root, dropped, cache);
+      else if (selectedPack === packId("deck_library")) await this.collectLocalPackGarbage(selectedPack, root, dropped, cache);
       this.emit({ phase: "running", operation: await this.operationStatus(selectedOperation), error: null });
     }
     operation = await this.database.get("operations", selectedOperation);
     if (!operation) return;
-    if (operation.state === "cancel_requested" || signal.aborted) {
+    if (operation.state === "cancel_requested" || operation.state === "cancelled" || signal.aborted) {
+      if (operation.state === "cancelled") return;
       const cancelled = await this.updateOperation(selectedOperation, (current) => ({ ...current, state: "cancelled" }));
       this.emit({ phase: "cancelled", operation: operationStatus(cancelled), error: null });
       return;
@@ -923,8 +1081,8 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     // curated has a recoverable installed membership to diff against; every
     // other selector keeps the caller's count.
     const floorBytes = minimumImageBytes(
-      request.selector.kind === "curated"
-        ? await this.curatedFetchCount(request.selector.membershipDigest)
+      request.selector.kind === "curated" || request.selector.kind === "deck_library"
+        ? await this.localFetchCount(selectorPack(request.selector), request.selector.membershipDigest)
         : request.objectEstimate,
     );
     const outlook = await storageOutlook(persistence);
@@ -978,8 +1136,8 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     //
     // For every non-curated selector the two are the same number, so nothing
     // but the curated re-sync moves.
-    const downloadRecords = selector.kind === "curated"
-      ? await this.curatedFetchCount(selector.membershipDigest)
+    const downloadRecords = selector.kind === "curated" || selector.kind === "deck_library"
+      ? await this.localFetchCount(selectorPack(selector), selector.membershipDigest)
       : assetRecords;
     const projectedBytes = estimatedImageBytes(downloadRecords);
     const storage = await storageOutlook(await currentPersistence());
@@ -1003,8 +1161,8 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       // A curated pack reads no shard of the bulk archive, so reporting that
       // archive's compressed size would show the user the multi-gigabyte
       // download this selector exists to avoid.
-      shardCount: selector.kind === "curated" ? "0" : "1",
-      shardBytes: selector.kind === "curated" ? "unknown" : String(source.compressedBytes),
+      shardCount: selector.kind === "curated" || selector.kind === "deck_library" ? "0" : "1",
+      shardBytes: selector.kind === "curated" || selector.kind === "deck_library" ? "unknown" : String(source.compressedBytes),
       // The size question every selector must answer, curated and bulk alike:
       // the whole point of the curated pack is that this figure is far smaller
       // than `complete`'s, and a user cannot see that unless both report one.
@@ -1055,16 +1213,16 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
    * would report a sync as having work to remove that `completePack` is going
    * to remove anyway.
    */
-  private async curatedDiff(
+  private async membershipDiff(
+    selectedPack: PackId,
     descriptors: readonly ScryfallAssetDescriptor[],
-  ): Promise<Omit<CuratedDrift, "membershipDigest">> {
-    const curated = packId("curated");
-    const installedPack = await this.database.get("packs", curated);
+  ): Promise<MembershipDiff> {
+    const installedPack = await this.database.get("packs", selectedPack);
     // Nothing installed: every descriptor is an add, which is what the
     // first-install estimate has always reported.
     if (!installedPack) return { installedDigest: null, add: descriptors.length, remove: 0, refresh: 0 };
     const installed = new Map<AssetKey, string | undefined>();
-    for (const row of await this.database.getAllFromIndex("objects", "by-pack", curated)) {
+    for (const row of await this.database.getAllFromIndex("objects", "by-pack", selectedPack)) {
       if (row.root === installedPack.root) installed.set(row.assetKey, row.sourceUrl);
     }
     const planned = new Set<AssetKey>();
@@ -1110,13 +1268,17 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
    * `storage` failure, which is retryable, and the resume re-fetches almost
    * nothing.
    */
-  private async curatedFetchCount(digest: CatalogRoot): Promise<number> {
-    const diff = await this.curatedDiff(await curatedDescriptors(digest));
+  private async localFetchCount(selectedPack: PackId, digest: CatalogRoot): Promise<number> {
+    const membership = selectedPack === packId("curated")
+      ? { membershipDigest: digest, descriptors: await curatedDescriptors(digest) }
+      : await planDeckLibraryPack(packId("deck_library"));
+    if (membership.membershipDigest !== digest) throw new VisualPackBackendError("conflict");
+    const diff = await this.membershipDiff(selectedPack, membership.descriptors);
     return diff.add + diff.refresh;
   }
 
   /**
-   * `curatedDiff` against the membership preferences and decks name right now,
+   * The shared membership diff against the preferences and decks name right now,
    * for the panel to render before a sync runs.
    *
    * Reached through `VisualPackBackend`: the panel reads it whenever the
@@ -1141,10 +1303,168 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     try {
       if (!isCardDataResident()) return null;
       const { membershipDigest, descriptors } = await planCuratedPack();
-      return { membershipDigest, ...await this.curatedDiff(descriptors) };
+      return { membershipDigest, ...await this.membershipDiff(packId("curated"), descriptors) };
     } catch (error) {
       throw backendError(error);
     }
+  }
+
+  async deckLibrarySelector(): Promise<DeckLibraryInstallSelector> {
+    try {
+      const { membershipDigest } = await planDeckLibraryPack(packId("deck_library"));
+      return { kind: "deck_library", membershipDigest };
+    } catch (error) {
+      throw backendError(error);
+    }
+  }
+
+  async deckLibraryDrift(): Promise<DeckLibraryDrift | null> {
+    try {
+      if (!isCardDataResident()) return null;
+      const { membershipDigest, descriptors } = await planDeckLibraryPack(packId("deck_library"));
+      return { membershipDigest, ...await this.membershipDiff(packId("deck_library"), descriptors) };
+    } catch (error) {
+      throw backendError(error);
+    }
+  }
+
+  /**
+   * Reconcile only an extant deck-library receipt. This deliberately bypasses
+   * `start()` because that public UI path requests persistence before writing;
+   * a background refresh is not user activation and must never prompt.
+   */
+  async reconcileDeckLibrary(): Promise<void> {
+    try {
+      const receipt = await this.database.get("packs", packId("deck_library"));
+      if (!receipt) return;
+      const revisionBefore = (await state(this.database)).revision;
+      const locks = webLocks();
+      if (!locks) throw new VisualPackBackendError("unavailable");
+      const controller = new AbortController();
+      this.reconciliationControllers.add(controller);
+      let selectedOperation: OperationId | null = null;
+      try {
+        selectedOperation = await locks.request(
+          DECK_LIBRARY_LOCK,
+          { mode: "exclusive", signal: controller.signal },
+          () => this.selectDeckLibraryReconciliation(deckLibraryGeneration(receipt), controller.signal),
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        throw error;
+      } finally {
+        this.reconciliationControllers.delete(controller);
+      }
+      if (!selectedOperation) {
+        const after = await this.database.get("packs", packId("deck_library"));
+        if (after && deckLibraryGeneration(after) === deckLibraryGeneration(receipt)) {
+          await this.publishObservedDeckLibraryRevision(revisionBefore, null);
+        }
+        return;
+      }
+      try {
+        await this.runAndWait(selectedOperation);
+      } catch (error) {
+        const afterFailure = await this.database.get("packs", packId("deck_library"));
+        if (!afterFailure || deckLibraryGeneration(afterFailure) !== deckLibraryGeneration(receipt)) return;
+        throw error;
+      }
+      const after = await this.database.get("packs", packId("deck_library"));
+      if (!after || deckLibraryGeneration(after) !== deckLibraryGeneration(receipt)) return;
+      await this.publishObservedDeckLibraryRevision(revisionBefore, selectedOperation);
+    } catch (error) {
+      throw backendError(error);
+    }
+  }
+
+  private async publishObservedDeckLibraryRevision(
+    revisionBefore: string,
+    selectedOperation: OperationId | null,
+  ): Promise<void> {
+    const current = await state(this.database);
+    if (current.revision === revisionBefore || current.revision === this.lastPublishedRevision) return;
+    this.publish({
+      cause: "install",
+      operationId: selectedOperation,
+      catalogRoot: current.catalog?.root ?? null,
+      revision: installedRevision(current.revision),
+    });
+  }
+
+  private async selectDeckLibraryReconciliation(
+    expectedGeneration: OperationId,
+    signal: AbortSignal,
+  ): Promise<OperationId | null> {
+    if (signal.aborted) return null;
+    const installed = await this.database.get("packs", packId("deck_library"));
+    if (!installed || deckLibraryGeneration(installed) !== expectedGeneration) return null;
+
+    // A completed receipt is the opt-in lease; only after proving it exists do
+    // we invalidate/replan, so absent-pack calls cannot load Scryfall/card data.
+    invalidateDeckLibraryPack();
+    const membership = await planDeckLibraryPack(packId("deck_library"));
+    if (signal.aborted) return null;
+
+    const transaction = this.database.transaction(["state", "packs", "operations"], "readwrite");
+    const receipt = await transaction.objectStore("packs").get(packId("deck_library"));
+    if (!receipt || deckLibraryGeneration(receipt) !== expectedGeneration) {
+      await transaction.done;
+      return null;
+    }
+    const operations = await transaction.objectStore("operations").getAll();
+    let superseded = false;
+    const active = operations.find((operation) =>
+      deckLibraryOperation(operation)
+      && operation.deckLibraryGeneration === expectedGeneration
+      && operation.state !== "completed"
+      && operation.state !== "cancelled");
+    if (active) {
+      const activeRoot = selectorRoot(active.selectors[active.packIds.indexOf(packId("deck_library"))]!, active.catalog);
+      if (activeRoot === membership.membershipDigest) {
+        await transaction.done;
+        return active.id;
+      }
+      await transaction.objectStore("operations").put({ ...active, state: "cancelled" });
+      superseded = true;
+    }
+    if (receipt.root === membership.membershipDigest) {
+      await transaction.done;
+      if (superseded) {
+        await this.collectLocalPackGarbage(
+          packId("deck_library"),
+          receipt.root,
+          new Set(),
+          await caches.open(CACHE),
+        );
+      }
+      return null;
+    }
+    const current = (await transaction.objectStore("state").get(STATE)) ?? initialState();
+    if (!current.catalog) {
+      await transaction.done;
+      throw new VisualPackBackendError("unavailable");
+    }
+    const selectedOperation = operationToken();
+    const operation = Object.freeze({
+      id: selectedOperation,
+      kind: "install",
+      state: "downloading",
+      catalog: current.catalog,
+      selectors: [{ kind: "deck_library", membershipDigest: membership.membershipDigest }],
+      packIds: [packId("deck_library")],
+      packTotal: 1,
+      packsPromoted: 0,
+      objectTotal: 0,
+      objectEstimate: membership.descriptors.length,
+      objectsPromoted: 0,
+      completedRevision: null,
+      deckLibraryGeneration: expectedGeneration,
+      background: true,
+    } satisfies ScryfallOperationRecord);
+    await transaction.objectStore("operations").put(operation);
+    await transaction.done;
+    this.emit({ phase: "started", operation: operationStatus(operation), error: null });
+    return selectedOperation;
   }
 
   async catalogStatus(): Promise<CatalogStatus> {
@@ -1176,7 +1496,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     return {
       catalogRoot: current.catalog.root,
       epoch: 0,
-      selectorCount: 5,
+      selectorCount: 6,
       shardCount: 1,
       installedRevision: installedRevision(current.revision),
       installedPacks: installed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })),
@@ -1203,6 +1523,8 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const installed = await this.database.getAll("packs");
       let catalog: CatalogRecord;
       let selectors: InstallSelector[];
+      let repairDescriptors: readonly ScryfallAssetDescriptor[] | undefined;
+      let deckLibraryRepairNeedsWork = false;
       if (request.kind === "resume") {
         const operation = await this.database.get("operations", request.operationId);
         if (!operation) throw new VisualPackBackendError("invalid_input");
@@ -1224,8 +1546,18 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         // current bulk root. For a curated pack the two differ by definition,
         // and repairing at the bulk root would write objects there and then
         // let completePack cursor-delete the entire installed membership.
-        selectors = request.packIds.map((selectedPack) =>
-          selectorForPack(selectedPack, installed.find((entry) => entry.packId === selectedPack)?.root ?? catalog.root));
+        selectors = [];
+        for (const selectedPack of request.packIds) {
+          const receipt = installed.find((entry) => entry.packId === selectedPack);
+          if (selectedPack === packId("deck_library") && receipt) {
+            const rows = (await this.database.getAllFromIndex("objects", "by-pack", selectedPack))
+              .filter((row) => row.root === receipt.root)
+            repairDescriptors = rows.map(descriptorFromObject);
+            const cache = await caches.open(CACHE);
+            deckLibraryRepairNeedsWork = !await allCachedObjectsMatch(cache, rows);
+          }
+          selectors.push(selectorForPack(selectedPack, receipt?.root ?? catalog.root));
+        }
       } else {
         catalog = current.catalog ?? await loadScryfallBulkSource();
         if (request.selector.kind === "complete" && request.selector.rootSha256 !== catalog.root) {
@@ -1238,13 +1570,18 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         // then install — and catching it before any record exists leaves
         // nothing behind to unwedge.
         if (request.selector.kind === "curated") await curatedDescriptors(request.selector.membershipDigest);
+        if (request.selector.kind === "deck_library") {
+          const membership = await planDeckLibraryPack(packId("deck_library"));
+          if (membership.membershipDigest !== request.selector.membershipDigest) throw new VisualPackBackendError("conflict");
+        }
         selectors = [request.selector];
       }
       // Filtered over the SELECTORS rather than their pack ids: a pack id
       // alone cannot say which root that selector installs at, and mapping
       // first discards the curated selector's digest.
       selectors = selectors.filter((selector) =>
-        !installed.some((entry) => entry.packId === selectorPack(selector) && entry.root === selectorRoot(selector, catalog)));
+        request.kind === "repair" && selector.kind === "deck_library" && deckLibraryRepairNeedsWork
+          || !installed.some((entry) => entry.packId === selectorPack(selector) && entry.root === selectorRoot(selector, catalog)));
       if (selectors.length === 0) return { status: "healthy" };
       // After the short-circuit above, never before it: a sync that turns out
       // to have nothing to do must not ask for a persistence grant, and it
@@ -1252,9 +1589,10 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const persistence = await this.reserveStorage(request);
       const packIds = selectors.map(selectorPack);
       const selectedOperation = operationToken();
+      const existingDeckLibrary = installed.find((entry) => entry.packId === packId("deck_library"));
       const operation: ScryfallOperationRecord = Object.freeze({
         id: selectedOperation,
-        kind: "install",
+        kind: request.kind === "repair" ? "repair" : "install",
         state: "downloading",
         catalog,
         selectors,
@@ -1265,6 +1603,10 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         objectEstimate: request.kind === "install" ? request.objectEstimate : undefined,
         objectsPromoted: 0,
         completedRevision: null,
+        repairDescriptors,
+        deckLibraryGeneration: packIds.includes(packId("deck_library"))
+          ? existingDeckLibrary ? deckLibraryGeneration(existingDeckLibrary) : undefined
+          : undefined,
       });
       const transaction = this.database.transaction(["state", "operations"], "readwrite");
       await transaction.objectStore("state").put({ ...current, catalog });
@@ -1317,16 +1659,40 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
           : new Set(selector.packIds);
       const removed = installed.filter((entry) => selected.has(entry.packId));
       const paths = new Set<string>();
-      const transaction = this.database.transaction(["state", "packs", "objects"], "readwrite");
+      const transaction = this.database.transaction(["state", "packs", "objects", "operations"], "readwrite");
+      const deckLibrary = packId("deck_library");
+      const deckLibrarySelected = selected.has(deckLibrary);
+      const invalidatedDeckLibraryOperations: OperationId[] = [];
+      if (deckLibrarySelected) {
+        for (const operation of await transaction.objectStore("operations").getAll()) {
+          if (operation.state === "completed" || operation.state === "cancelled") continue;
+          for (const [position] of operation.selectors.entries()) {
+            if (operation.packIds[position] === deckLibrary) {
+              invalidatedDeckLibraryOperations.push(operation.id);
+              await transaction.objectStore("operations").put({ ...operation, state: "cancelled" });
+              break;
+            }
+          }
+        }
+      }
       for (const entry of removed) {
         await transaction.objectStore("packs").delete(entry.id);
         const index = transaction.objectStore("objects").index("by-pack");
         let cursor = await index.openCursor(entry.packId);
         while (cursor) {
-          if (cursor.value.root === entry.root) {
+          if (cursor.value.root === entry.root || entry.packId === deckLibrary) {
             paths.add(cursor.value.path);
             await cursor.delete();
           }
+          cursor = await cursor.continue();
+        }
+      }
+      if (deckLibrarySelected && !removed.some((entry) => entry.packId === deckLibrary)) {
+        const index = transaction.objectStore("objects").index("by-pack");
+        let cursor = await index.openCursor(deckLibrary);
+        while (cursor) {
+          paths.add(cursor.value.path);
+          await cursor.delete();
           cursor = await cursor.continue();
         }
       }
@@ -1334,6 +1700,14 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const revision = String(BigInt(current.revision) + 1n);
       await transaction.objectStore("state").put({ ...current, revision });
       await transaction.done;
+      if (deckLibrarySelected) {
+        for (const controller of this.reconciliationControllers) controller.abort();
+        for (const selectedOperation of invalidatedDeckLibraryOperations) {
+          this.workers.get(selectedOperation)?.controller.abort();
+        }
+        await Promise.all([...new Set(invalidatedDeckLibraryOperations)].map(async (selectedOperation) =>
+          this.workers.get(selectedOperation)?.settled));
+      }
       await this.sweepUnreferenced(paths, await caches.open(CACHE));
       this.publish({ cause: "remove", operationId: null, catalogRoot: null, revision: installedRevision(revision) });
       return { removed: removed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })), revision: installedRevision(revision), cleanupIssues: [] };

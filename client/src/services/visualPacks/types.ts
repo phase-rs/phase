@@ -16,7 +16,7 @@ export type OperationId = Brand<string, "OperationId">;
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
 const LOWER_HEX_32 = /^[0-9a-f]{32}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
-const PACK_ID = /^(complete|core|curated|printing:[a-z0-9]{3,6}|locale:(de|es|fr|it|pt):[a-z0-9]{3,6})$/;
+const PACK_ID = /^(complete|core|curated|deck_library|printing:[a-z0-9]{3,6}|locale:(de|es|fr|it|pt):[a-z0-9]{3,6})$/;
 const ASSET_KEY = /^asset:v1:(canonical_card|exact_printing|localized_printing|token|card_back|mana_symbol|set_icon):[A-Za-z0-9_-]+$/;
 const CANDIDATE_KEY = /^candidate:v1:(localized_printing|localized_alias|english_printing|english_alias|oracle|oracle_alias|token_reference|token_alias|card_back|mana_symbol|set_icon):([A-Za-z0-9_-]+)$/;
 const CANDIDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -189,12 +189,16 @@ export type InstallSelector =
   // The curated pack IS its membership: the digest names both the selection
   // and the catalog root that selection's packs and objects are stored at, so
   // a changed preference reads as an ordinary root change.
-  | { kind: "curated"; membershipDigest: CatalogRoot };
+  | { kind: "curated"; membershipDigest: CatalogRoot }
+  | { kind: "deck_library"; membershipDigest: CatalogRoot };
 
 /** The curated arm of `InstallSelector`, named so a resolver can return it
  *  without widening to the union and making every caller re-narrow to read the
  *  digest it exists to carry. */
 export type CuratedInstallSelector = Extract<InstallSelector, { kind: "curated" }>;
+
+/** The deck-library arm of `InstallSelector`, named for selector resolvers. */
+export type DeckLibraryInstallSelector = Extract<InstallSelector, { kind: "deck_library" }>;
 
 export type StartRequest =
   | { kind: "install"; selector: InstallSelector; objectEstimate: number }
@@ -403,6 +407,20 @@ export interface CuratedDrift {
   /** Installed asset keys the current membership no longer names. */
   remove: number;
   /** Asset keys in both whose installed `sourceUrl` is not the planned one. */
+  refresh: number;
+}
+
+/** The deck-library equivalent of `CuratedDrift`.
+ *
+ * The planned digest comes from the shared deck-catalog membership planner;
+ * the installed digest is the deck-library pack root, if that pack exists.
+ * Its row counts retain the same add/remove/refresh meaning as curated drift.
+ */
+export interface DeckLibraryDrift {
+  membershipDigest: CatalogRoot;
+  installedDigest: CatalogRoot | null;
+  add: number;
+  remove: number;
   refresh: number;
 }
 

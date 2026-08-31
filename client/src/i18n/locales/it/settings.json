@@ -222,12 +222,13 @@
     "selector": {
       "title": "Selezione del catalogo",
       "core": "Retro della carta",
-      "printing": "Stampe inglesi",
-      "locale": "Stampe di set localizzate",
+      "printing": "Stampe del set",
       "complete": "Tutte le immagini attuali delle carte inglesi",
       "curated": "Un'immagine per carta",
+      "deck_library": "Raccolta mazzi",
       "curatedNote": "Un'immagine per carta, scelta dalle tue Preferenze illustrazione carte nella scheda Grafica. Modificale lì e questa selezione le segue.",
       "curatedDefaultNote": "Un'immagine per carta. Non hai regole di illustrazione, quindi viene scaricata l'illustrazione predefinita di ogni carta: aggiungi regole in Preferenze illustrazione carte, scheda Grafica, per scegliere altre stampe.",
+      "deckLibraryNote": "Un'immagine per ogni carta usata nella raccolta condivisa dei mazzi, inclusi i preconfezionati Commander per l'IA. Segue le Preferenze illustrazione carte. Dopo l'installazione, l'app scarica le aggiunte e rimuove le immagini non più necessarie mentre è in esecuzione; rimuovere questo pacchetto interrompe la sincronizzazione.",
       "driftNone": "Le immagini installate corrispondono già a queste impostazioni.",
       "driftSummary": "Le immagini installate non sono aggiornate: {{add}} da aggiungere, {{remove}} da rimuovere, {{refresh}} da aggiornare.",
       "setCode": "Codice del set",
@@ -341,6 +342,7 @@
       "core": "Retro della carta",
       "complete": "Tutte le immagini attuali delle carte inglesi",
       "curated": "Un'immagine per carta",
+      "deckLibrary": "Raccolta mazzi",
       "printing": "Stampe {{set}}",
       "locale": "Stampe {{set}} ({{language}})"
     },

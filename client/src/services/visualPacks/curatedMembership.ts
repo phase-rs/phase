@@ -51,6 +51,11 @@ export interface CuratedMembershipInput {
   readonly printings: Readonly<Record<string, PrintingEntry[]>>;
   readonly artChain: ArtChainEntry[];
   readonly artOverrides: Record<string, CardArtOverride>;
+  /**
+   * When supplied, plans only these Oracle identities. Omitting this keeps the
+   * curated pack's all-card membership semantics unchanged.
+   */
+  readonly includedOracleIds?: ReadonlySet<string>;
   readonly deckPrintings?: readonly CuratedDeckPrinting[];
 }
 
@@ -241,6 +246,13 @@ async function sha256Hex(value: string): Promise<string> {
 export async function planCuratedMembership(
   input: CuratedMembershipInput,
 ): Promise<CuratedMembership> {
+  // A resolver can return the stored identity's original casing while the
+  // data map is deduplicated case-insensitively below. Fold the optional
+  // boundary once so a deck-scoped caller has the same matching semantics as
+  // the existing source-printing path.
+  const includedOracleIds = input.includedOracleIds === undefined
+    ? undefined
+    : new Set([...input.includedOracleIds].map((oracleId) => oracleId.toLowerCase()));
   // Case-folded on both sides: whether a caller's oracle id arrived from the
   // engine or from a `scryfall-data` entry, the same card must match.
   const sourcesByOracleId = new Map<string, SourcePrinting[]>();
@@ -261,6 +273,7 @@ export async function planCuratedMembership(
     const oracleId = entry.oracle_id.toLowerCase();
     if (seen.has(oracleId)) continue;
     seen.add(oracleId);
+    if (includedOracleIds && !includedOracleIds.has(oracleId)) continue;
     for (const value of cardDescriptors(entry, input, sourcesByOracleId.get(oracleId) ?? [])) {
       byAssetKey.set(value.assetKey, value);
     }
