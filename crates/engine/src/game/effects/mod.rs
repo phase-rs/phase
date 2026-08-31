@@ -19458,6 +19458,24 @@ mod tests {
         )
     }
 
+    fn assert_outer_forwarded_result(events: &[GameEvent], object_id: ObjectId) {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id: changed_id,
+                        to: Zone::Battlefield,
+                        ..
+                    } if *changed_id == object_id
+                ))
+                .count(),
+            1,
+            "the outer producer must supply the stale forwarded result exactly once"
+        );
+    }
+
     #[test]
     fn empty_forward_result_replaces_a_stale_context_before_an_any_rider() {
         let mut state = GameState::new_two_player(42);
@@ -19487,8 +19505,10 @@ mod tests {
             empty_result,
         );
 
-        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
+        assert_outer_forwarded_result(&events, declared_target);
         assert!(state.objects[&declared_target]
             .replacement_definitions
             .is_empty());
@@ -19532,8 +19552,10 @@ mod tests {
             empty_result,
         );
 
-        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
+        assert_outer_forwarded_result(&events, declared_target);
         assert!(state.objects[&declared_target]
             .replacement_definitions
             .is_empty());
@@ -19574,8 +19596,10 @@ mod tests {
             empty_result,
         );
 
-        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
+        assert_outer_forwarded_result(&events, declared_target);
         assert!(state.objects[&declared_target]
             .replacement_definitions
             .is_empty());
