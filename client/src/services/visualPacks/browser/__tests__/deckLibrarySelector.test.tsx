@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { VisualPackBackendError } from "../../backend.ts";
 import { assetKey, catalogRoot, estimatedImageBytes, minimumImageBytes, operationId, packId } from "../../types.ts";
-import type { DeckLibraryInstallSelector, InstallSelector } from "../../types.ts";
+import type { DeckLibraryInstallSelector, InstallSelector, ProgressEvent } from "../../types.ts";
 import type { ScryfallAssetDescriptor } from "../descriptors.ts";
 import { ScryfallBrowserVisualPackBackend } from "../scryfallBackend.ts";
 
