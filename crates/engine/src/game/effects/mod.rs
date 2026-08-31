@@ -13451,9 +13451,9 @@ fn resolve_chain_body(
             // from ordinary declared targets. A nested producer replaces this
             // value after its own parent context has been applied; `Some([])`
             // deliberately records a completed zero-object move.
-            sub_with_context.context.forwarded_result_context = Some(
+            sub_with_context.context.forwarded_result_context = Some(Box::new(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
-            );
+            ));
             bind_forwarded_result_targets_for_legacy_effect(&mut sub_with_context);
             if !attachment_candidates.is_empty() {
                 sub_with_context.bind_attach_attachment_candidates(attachment_candidates);

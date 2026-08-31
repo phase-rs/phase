@@ -23534,7 +23534,7 @@ pub struct SpellContext {
     /// is a completed producer that moved no objects and intentionally blocks
     /// inherited-target fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forwarded_result_context: Option<ForwardedResultContext>,
+    pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -29520,10 +29520,10 @@ mod tests {
         .expect("empty forward-result context deserializes");
         assert_eq!(
             empty_forwarded.forwarded_result_context,
-            Some(ForwardedResultContext {
+            Some(Box::new(ForwardedResultContext {
                 targets: vec![],
                 object_incarnations: vec![],
-            })
+            }))
         );
 
         let empty: SpellContext = serde_json::from_value(serde_json::json!({

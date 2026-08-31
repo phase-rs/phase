@@ -1305,8 +1305,9 @@ mod tests {
         )
         .duration(Duration::UntilEndOfTurn);
         ability.set_cost_paid_object_recursive(snapshot);
-        ability.context.forwarded_result_context =
-            Some(crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[]));
+        ability.context.forwarded_result_context = Some(Box::new(
+            crate::types::ability::ForwardedResultContext::from_object_ids(&state, &[]),
+        ));
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1355,7 +1356,7 @@ mod tests {
             PlayerId(0),
         )
         .duration(Duration::UntilEndOfTurn);
-        ability.context.forwarded_result_context = Some(context);
+        ability.context.forwarded_result_context = Some(Box::new(context));
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1397,12 +1398,12 @@ mod tests {
             PlayerId(0),
         )
         .duration(Duration::UntilEndOfTurn);
-        ability.context.forwarded_result_context = Some(
+        ability.context.forwarded_result_context = Some(Box::new(
             crate::types::ability::ForwardedResultContext::from_object_ids(
                 &state,
                 &[reanimated_creature],
             ),
-        );
+        ));
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
