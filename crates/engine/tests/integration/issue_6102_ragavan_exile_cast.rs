@@ -237,6 +237,46 @@ fn ragavan_cast_permission_does_not_authorize_the_exiled_land() {
     assert_eq!(state.objects[&opponent_land].zone, Zone::Exile);
     assert_eq!(state.battlefield.len(), battlefield_before);
     assert_eq!(state.lands_played_this_turn, lands_played_before);
+
+    let CastingPermission::PlayFromExile { mode, .. } = runner
+        .state_mut()
+        .objects
+        .get_mut(&opponent_land)
+        .expect("exiled land remains in the scenario")
+        .casting_permissions
+        .iter_mut()
+        .find(|permission| {
+            matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    granted_to: P0,
+                    mode: CardPlayMode::Cast,
+                    ..
+                }
+            )
+        })
+        .expect("Ragavan's parsed Cast permission remains attached")
+    else {
+        unreachable!("matched PlayFromExile permission")
+    };
+    *mode = CardPlayMode::Play;
+
+    assert!(
+        exile_lands_playable_by_permission(runner.state(), P0)
+            .iter()
+            .any(|(object_id, _)| *object_id == opponent_land),
+        "the same permission must authorize a land once its mode is Play"
+    );
+    runner
+        .act(GameAction::PlayLand {
+            object_id: opponent_land,
+            card_id,
+        })
+        .expect("the public land action must accept a Play-mode exile permission");
+    let state = runner.state();
+    assert_eq!(state.objects[&opponent_land].zone, Zone::Battlefield);
+    assert_eq!(state.battlefield.len(), battlefield_before + 1);
+    assert_eq!(state.lands_played_this_turn, lands_played_before + 1);
 }
 
 #[test]

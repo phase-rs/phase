@@ -14088,7 +14088,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
-                mode: CardPlayMode::Cast,
+                mode: CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,

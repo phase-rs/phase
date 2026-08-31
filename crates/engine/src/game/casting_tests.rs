@@ -47158,8 +47158,8 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
     );
 }
 
-/// A cast-only exile grant still surfaces its card for spell casting, but it
-/// cannot authorize the distinct land-play special action.
+/// CR 305.1: a cast-only exile grant still surfaces its card for spell casting,
+/// but it cannot authorize the distinct land-play special action.
 #[test]
 fn cast_mode_play_from_exile_does_not_authorize_an_exiled_land() {
     let mut state = setup_game_at_main_phase();
@@ -47206,8 +47206,8 @@ fn cast_mode_play_from_exile_does_not_authorize_an_exiled_land() {
     assert_eq!(state.lands_played_this_turn, land_drops_before);
 }
 
-/// The land-entry rider belongs to the exact authority elected for the play,
-/// rather than any sibling exile permission on the same card.
+/// CR 614.12: the land-entry rider belongs to the exact authority elected for
+/// the play, rather than any sibling exile permission on the same card.
 #[test]
 fn exiled_land_entry_rider_uses_the_elected_permission_only() {
     let mut state = setup_game_at_main_phase();

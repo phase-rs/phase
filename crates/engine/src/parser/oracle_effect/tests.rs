@@ -45546,12 +45546,14 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     let CastingPermission::PlayFromExile {
         frequency,
         mana_spend_permission,
+        mode,
         ..
     } = permission
     else {
         panic!("expected PlayFromExile permission, got {permission:?}");
     };
     assert_eq!(*frequency, CastFrequency::OncePerTurn);
+    assert_eq!(*mode, CardPlayMode::Play);
     assert_eq!(
         *mana_spend_permission,
         Some(ManaSpendPermission::AnyTypeOrColor)
