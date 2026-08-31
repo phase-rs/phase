@@ -167,7 +167,7 @@ describe("HostControls", () => {
     cleanup();
     draftState.phase = "drafting";
     draftState.sideboardPrompt = null;
-    render(<HostControls />);
+    render(<HostControls draftTopActions={[]} />);
     expect(screen.getByRole("button", { name: "End Draft" })).toBeInTheDocument();
   });
 
