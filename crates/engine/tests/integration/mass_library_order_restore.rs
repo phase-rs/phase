@@ -306,14 +306,14 @@ fn single_owner_mass_library_order_completes_through_change_zone_all() {
         .push(engine::types::card_type::CoreType::Artifact);
     let mut substituted = state.clone();
     let WaitingFor::EffectZoneChoice {
-        cards,
+        cards: prompt_cards,
         mass_library_order,
         ..
     } = &mut substituted.waiting_for
     else {
         panic!("the production prompt must remain an EffectZoneChoice");
     };
-    *cards = vec![first, nonmatching];
+    *prompt_cards = vec![first, nonmatching];
     *mass_library_order = None;
     assert!(
         apply_as_current(
