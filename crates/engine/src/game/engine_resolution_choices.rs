@@ -121,7 +121,7 @@ fn legacy_mass_library_order_prompt_is_current(
     }
 
     let Some(pending) = state.pending_mass_library_order_choice.as_ref() else {
-        return cards.len() >= 2;
+        return false;
     };
     if pending.source_id != source_id
         || pending.library_position != *library_position.expect("checked above")
@@ -130,6 +130,25 @@ fn legacy_mass_library_order_prompt_is_current(
         || pending.legacy_remaining_batches.is_empty()
         || !pending.remaining_batches.is_empty()
     {
+        return false;
+    }
+    let Some(entry) = state.resolving_stack_entry.as_ref() else {
+        return false;
+    };
+    let stack_entry_is_exact_mass_order_producer = entry.source_id == source_id
+        && entry.ability().is_some_and(|ability| {
+            ability.source_id == source_id
+                && matches!(
+                    &ability.effect,
+                    Effect::ChangeZoneAll {
+                        destination: Zone::Library,
+                        library_position: Some(position),
+                        random_order: false,
+                        ..
+                    } if position == library_position.expect("checked above")
+                )
+        });
+    if !stack_entry_is_exact_mass_order_producer {
         return false;
     }
     pending

@@ -883,6 +883,7 @@ mod mana_target_recipient_and_count_source;
 mod manifest_dread_that_creature_anaphor;
 mod maraxus_team_pump_anthem;
 mod martial_impetus_other_attacker_exclusion_6017;
+mod mass_library_order_restore;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod masters_councillors;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
@@ -4248,7 +4249,7 @@ struct PendingMassLibraryOrderChoiceWire {
     remaining_batches: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingMassLibraryOrderChoice {
     pub source_id: ObjectId,
     pub library_position: crate::types::ability::LibraryPosition,
@@ -4258,10 +4259,34 @@ pub struct PendingMassLibraryOrderChoice {
     /// Remaining exact owner batches in APNAP order after the current prompt.
     pub remaining_batches: Vec<MassLibraryOrderBatch>,
     /// Old archives encoded `remaining_batches` as `(owner, object_ids)` tuples.
-    /// This field is never emitted for new saves and is promoted to a typed batch
-    /// before the successor prompt is published.
-    #[serde(skip)]
+    /// Keep that precise legacy representation through a save/reload cycle: it
+    /// is the only provenance the narrow compatibility gate can use before the
+    /// successor prompt is promoted to a typed batch.
     pub legacy_remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl Serialize for PendingMassLibraryOrderChoice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "PendingMassLibraryOrderChoice",
+            4 + usize::from(self.duration.is_some()),
+        )?;
+        state.serialize_field("source_id", &self.source_id)?;
+        state.serialize_field("library_position", &self.library_position)?;
+        state.serialize_field("track_exiled_by_source", &self.track_exiled_by_source)?;
+        if let Some(duration) = &self.duration {
+            state.serialize_field("duration", duration)?;
+        }
+        if self.remaining_batches.is_empty() && !self.legacy_remaining_batches.is_empty() {
+            state.serialize_field("remaining_batches", &self.legacy_remaining_batches)?;
+        } else {
+            state.serialize_field("remaining_batches", &self.remaining_batches)?;
+        }
+        state.end()
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for PendingMassLibraryOrderChoice {
@@ -34095,6 +34120,13 @@ mod tests {
         assert_eq!(
             decoded.legacy_remaining_batches,
             vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
+        );
+
+        let reserialized = serde_json::to_value(decoded).unwrap();
+        assert_eq!(
+            reserialized["remaining_batches"],
+            serde_json::json!([[1, [2, 3]]]),
+            "a legacy mass-order queue must retain its migration authority across a save"
         );
     }
 
