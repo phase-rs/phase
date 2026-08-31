@@ -43,7 +43,7 @@ interface DraftResponsiveStackLayout {
 
 const DRAFT_RESPONSIVE_STACK_LAYOUTS: Readonly<Record<Exclude<ResponsiveDraftLayout, "desktop">, DraftResponsiveStackLayout>> = {
   "phone-portrait": { columnCount: 2, columnGapPx: 8, exposedStepPx: 56 },
-  "phone-landscape": { columnCount: 2, columnGapPx: 6, exposedStepPx: 24 },
+  "phone-landscape": { columnCount: 2, columnGapPx: 6, exposedStepPx: 32 },
   "tablet-portrait": { columnCount: 3, columnGapPx: 8, exposedStepPx: 72 },
   "tablet-landscape": { columnCount: 1, columnGapPx: 0, exposedStepPx: 40 },
 };

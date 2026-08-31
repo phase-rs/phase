@@ -797,7 +797,7 @@ describe("draft workspace shell", () => {
 
     rerender(<DraftWorkspace {...props} responsiveLayout="phone-landscape" />);
     expect(stack()).toHaveAttribute("data-sideboard-column-count", "2");
-    expect(cardAt(1, 0).style.top).toBe("24px");
+    expect(cardAt(1, 0).style.top).toBe("32px");
     expect(cardAt(0, 1).style.left).toBe("calc(50% + 3px)");
 
     rerender(<DraftWorkspace {...props} responsiveLayout="tablet-portrait" />);
