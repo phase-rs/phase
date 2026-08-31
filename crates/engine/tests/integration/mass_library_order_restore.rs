@@ -12,7 +12,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    GameState, MassLibraryOrderBatch, MassLibraryOrderMember, PersistedGameState, WaitingFor,
+    GameState, MassLibraryOrderBatch, MassLibraryOrderMember, PersistedGameState, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::player::PlayerId;
@@ -249,11 +250,28 @@ fn single_owner_mass_library_order_completes_through_change_zone_all() {
         ObjectId(900),
         PlayerId(0),
     );
+    state.resolving_stack_entry = Some(StackEntry {
+        id: ObjectId(901),
+        source_id: ability.source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ability.source_id,
+            ability: Box::new(ability.clone()),
+        },
+    });
 
     resolve_all(&mut state, &ability, &mut Vec::new())
         .expect("production ChangeZoneAll opens a mass ordering prompt");
-    let cards = match &state.waiting_for {
-        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+    let cards = match &mut state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            cards,
+            mass_library_order,
+            ..
+        } => {
+            assert!(mass_library_order.is_some());
+            *mass_library_order = None;
+            cards.clone()
+        }
         other => panic!("expected mass ordering prompt, got {other:?}"),
     };
     assert_eq!(cards.len(), 2);

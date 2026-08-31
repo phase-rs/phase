@@ -33,7 +33,8 @@ mod tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::game_state::{
-        ActiveLibrarySearch, MassLibraryOrderBatch, MassLibraryOrderMember, WaitingFor,
+        ActiveLibrarySearch, MassLibraryOrderBatch, MassLibraryOrderMember,
+        PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
@@ -417,6 +418,20 @@ mod tests {
             "Island".to_string(),
             Zone::Library,
         );
+        let queued_card_a = create_object(
+            &mut state,
+            CardId(24),
+            PlayerId(1),
+            "Queued Swamp".to_string(),
+            Zone::Library,
+        );
+        let queued_card_b = create_object(
+            &mut state,
+            CardId(25),
+            PlayerId(1),
+            "Queued Mountain".to_string(),
+            Zone::Library,
+        );
         let members = [card_a, card_b]
             .into_iter()
             .map(|id| MassLibraryOrderMember {
@@ -454,6 +469,22 @@ mod tests {
             enters_modified_if: None,
             duration: None,
         };
+        state.pending_mass_library_order_choice = Some(PendingMassLibraryOrderChoice {
+            source_id: ObjectId(100),
+            library_position: LibraryPosition::Bottom,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                members: [queued_card_a, queued_card_b]
+                    .into_iter()
+                    .map(|id| MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
+                        origin: Zone::Library,
+                    })
+                    .collect(),
+            }]),
+        });
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
         match filtered.waiting_for {
@@ -471,6 +502,10 @@ mod tests {
         }
         assert_eq!(filtered.objects[&card_a].name, "Hidden Card");
         assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
+        assert!(
+            filtered.pending_mass_library_order_choice.is_none(),
+            "a future owner must not receive queued mass-order provenance"
+        );
     }
 
     /// CR 603.3b: `WaitingFor::OrderTriggers` carries only public information
