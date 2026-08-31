@@ -346,13 +346,13 @@ describe("useDeckLibraryAutoSync", () => {
       await rehydrated;
       usePreferencesStore.getState().setArtChain([{ type: "newest" }]);
     });
-    const observed = vi.fn<(membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void>();
+    let resolvePlan!: (membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void;
+    const planned = new Promise<Awaited<ReturnType<typeof planDeckLibraryPack>>>((resolve) => { resolvePlan = resolve; });
     const mounted = renderHook(() => useDeckLibraryAutoSync());
     await flush();
     backend.reconcileDeckLibrary.mockClear();
-    observed.mockClear();
     backend.reconcileDeckLibrary.mockImplementation(async () => {
-      observed(await planDeckLibraryPack(packId("deck_library")));
+      resolvePlan(await planDeckLibraryPack(packId("deck_library")));
     });
 
     act(() => window.dispatchEvent(new StorageEvent("storage", {
@@ -365,7 +365,7 @@ describe("useDeckLibraryAutoSync", () => {
     await flush();
 
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
-    expect(observed.mock.calls[0][0].descriptors.map((descriptor) => String(descriptor.assetKey)))
+    expect((await planned).descriptors.map((descriptor) => String(descriptor.assetKey)))
       .toContain("asset:v1:exact_printing:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-0-full_card-normal");
     mounted.unmount();
   });
@@ -380,13 +380,13 @@ describe("useDeckLibraryAutoSync", () => {
       await rehydrated;
       usePreferencesStore.getState().setArtChain([{ type: "newest" }]);
     });
-    const observed = vi.fn<(membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void>();
+    let resolvePlan!: (membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void;
+    const planned = new Promise<Awaited<ReturnType<typeof planDeckLibraryPack>>>((resolve) => { resolvePlan = resolve; });
     const mounted = renderHook(() => useDeckLibraryAutoSync());
     await flush();
     backend.reconcileDeckLibrary.mockClear();
-    observed.mockClear();
     backend.reconcileDeckLibrary.mockImplementation(async () => {
-      observed(await planDeckLibraryPack(packId("deck_library")));
+      resolvePlan(await planDeckLibraryPack(packId("deck_library")));
     });
 
     act(() => window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT)));
@@ -396,7 +396,7 @@ describe("useDeckLibraryAutoSync", () => {
     await flush();
 
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
-    expect(observed.mock.calls[0][0].descriptors.map((descriptor) => String(descriptor.assetKey)))
+    expect((await planned).descriptors.map((descriptor) => String(descriptor.assetKey)))
       .toContain("asset:v1:exact_printing:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-0-full_card-normal");
     mounted.unmount();
   });
@@ -408,8 +408,12 @@ describe("useDeckLibraryAutoSync", () => {
     vi.spyOn(usePreferencesStore.persist, "hasHydrated").mockReturnValue(true);
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const observed = vi.fn<(membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void>();
+    let resolvePlan!: (membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void;
+    const planned = new Promise<Awaited<ReturnType<typeof planDeckLibraryPack>>>((resolve) => { resolvePlan = resolve; });
     backend.reconcileDeckLibrary.mockImplementation(async () => {
-      observed(await planDeckLibraryPack(packId("deck_library")));
+      const membership = await planDeckLibraryPack(packId("deck_library"));
+      observed(membership);
+      resolvePlan(membership);
     });
     const mounted = renderHook(() => useDeckLibraryAutoSync());
     await flush();
@@ -425,7 +429,7 @@ describe("useDeckLibraryAutoSync", () => {
     await flush();
 
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(2);
-    expect(observed.mock.calls[0][0].descriptors.map((descriptor) => String(descriptor.assetKey)))
+    expect((await planned).descriptors.map((descriptor) => String(descriptor.assetKey)))
       .toContain("asset:v1:canonical_card:11111111-abcd-4111-8111-111111111111-0-full_card-normal");
     mounted.unmount();
   });
