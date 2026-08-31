@@ -21,7 +21,7 @@ fn issue_8215_hellkite_courser_returns_the_forwarded_commander_at_end_step() {
         db.get_face_by_name("Hellkite Courser")
             .expect("fixture must contain Hellkite Courser")
             .oracle_text,
-        HELLKITE_COURSER_ORACLE,
+        Some(HELLKITE_COURSER_ORACLE.to_string()),
         "the regression must use Hellkite Courser's exact Oracle text"
     );
 
