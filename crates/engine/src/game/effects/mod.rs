@@ -13369,11 +13369,11 @@ fn resolve_chain_body(
             return Ok(());
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
-            let attachment_candidates = (!forwarded_objects.is_empty())
-                .then(|| {
-                    attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects)
-                })
-                .unwrap_or_default();
+            let attachment_candidates = if forwarded_objects.is_empty() {
+                Vec::new()
+            } else {
+                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects)
+            };
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
