@@ -143,7 +143,10 @@ export interface SeatPublicView {
   connected: boolean;
   has_submitted_deck: boolean;
   pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
-  /** Engine-owned active-pack presence: exactly 0 or 1, never a card count. */
+  /**
+   * Engine-owned active-pack presence: exactly 0 or 1, never a card count.
+   * Required by P2P draft v24 and the full WebSocket protocol v49.
+   */
   active_pack_count: number;
   face_up_draft_cards: DraftCardInstance[];
 }

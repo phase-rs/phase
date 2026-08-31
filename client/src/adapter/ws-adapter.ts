@@ -202,12 +202,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 49 — Full-server DraftPlayerView payloads require public-seat
+ *      active_pack_count. An older v48 server can complete the handshake yet
+ *      omit that additive field while this client accepts the JSON, leaving it
+ *      unable to render a seat's active-pack presence. The Full handshake
+ *      refuses that capability mismatch. Lobby messages are unchanged.
  * 48 — Full-server DraftPlayerView payloads require the engine-owned
- *      pick_selection_mode and public-seat active_pack_count. An older server
- *      can omit either while this client accepts the JSON, then silently
- *      treats an ordered Commander Draft pick as direct selection or loses a
- *      seat's active-pack presence. The Full handshake refuses that capability
- *      mismatch. Lobby messages are unchanged.
+ *      pick_selection_mode. An older server can omit it while this client
+ *      accepts the JSON, then silently treats an ordered Commander Draft pick
+ *      as direct selection. Lobby messages are unchanged.
  * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
  * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -340,7 +343,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 48;
+export const PROTOCOL_VERSION = 49;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -12195,8 +12195,12 @@ mod handshake_tests {
     }
 
     #[test]
-    fn rejects_previous_protocol_for_breaking_planechase_release() {
-        let previous = PROTOCOL_VERSION.saturating_sub(1);
+    fn rejects_v48_before_it_can_omit_public_active_pack_count() {
+        // v48 added `pick_selection_mode`, but it predates the public-seat
+        // `active_pack_count` required by v49. Full games must reject it at
+        // hello rather than let a client render a DraftPlayerView without the
+        // required field.
+        let previous = 48;
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {
