@@ -172,7 +172,7 @@ pub fn resolve(
         .context
         .forwarded_result_context
         .as_ref()
-        .and_then(|_| ability.trigger_source.as_ref())
+        .and(ability.trigger_source.as_ref())
         .map(|source| source.identity.reference.object_id)
         .unwrap_or(ability.source_id);
     let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def(
