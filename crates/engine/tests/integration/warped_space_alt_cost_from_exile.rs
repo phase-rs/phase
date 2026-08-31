@@ -14,7 +14,7 @@
 //! concern, not this one.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{CastingPermission, Duration};
+use engine::types::ability::{CardPlayMode, CastingPermission, Duration};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -30,6 +30,7 @@ fn exile_permission() -> CastingPermission {
         provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
         duration: Duration::UntilEndOfTurn,
         granted_to: P0,
+        mode: CardPlayMode::Play,
         frequency: CastFrequency::Unlimited,
         source_id: None,
         invalidation: None,

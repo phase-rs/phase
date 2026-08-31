@@ -1,6 +1,22 @@
 {
   "entries": [
     {
+      "id": 201,
+      "date": "2026-08-31",
+      "title": "Offline packs learn your decks",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "multiplayer",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Offline visual packs can now download one image per card from the art you actually use, then re-sync only the changes; the optional Deck Library pack follows saved decks, precons, cached feeds, and built-in AI decks\n• Cards that exile a batch and say \"you may cast … from among them\" now offer those spells while the ability resolves, as the rules intend (27 cards including Kotis, the Fangkeeper, Etali, and Villainous Wealth)\n• Static abilities can now check the defending player's board and groups sharing a creature type (Ayesha Tanaka, Graxiplon, Littjara Kinseekers, and Synchronized Eviction)\n• New cards: Galion, Elvenking's Butler; Master's Councillors; and Glamdring, Foe-hammer\n\n🛠️ Cards That Now Work Right\n• Granted Blitz, Spectacle, Dash, Prowl, Surge, Freerunning, and Emerge pay the referenced card's real mana cost instead of accidentally becoming free (Henzie \"Toolbox\" Torre and the wider class)\n• Exiled and graveyard cards being put back into a library no longer freeze the game at an unanswerable choice, including existing affected saves (Codie, Vociferous Codex)\n• Delayed \"sacrifice them\" effects still sacrifice the surviving tokens when another one has already died (Voice of Victory and similar token riders)\n• Aura-count gates, surveil prompts, both directions of \"can't block or be blocked by,\" and becomes-target triggers now apply to the right cards and players\n• Padeem, Consul of Innovation; Jace, Vryn's Prodigy; Princess Yue; Awesome Presence; and Hipparion now follow their printed text\n\n⚔️ Combat & Gameplay\n• Saved games distinguish a display-only player view from rules authority, and compatible older in-progress saves can identify their correct resolution format instead of being decoded as the wrong one\n• Resolve All no longer asks for consent from a player who cannot grant it; AI mana payments finish through the correct casting step, and the AI will not crew an already-crewed Vehicle again\n• Auto-pass keeps the blockers you chose, while follow-up results keep their targets and replacement context through nested resolution\n\n🖥️ Interface\n• Custom starting life and commander-damage totals can be edited normally and carry into rematches instead of snapping back to defaults\n• Sealed full runs resume at the right tournament phase and preserve their selected format, with the desktop draft workspace and live procedure values restored\n• Shared dialogs keep keyboard focus where it belongs, and P2P setup now reports a cancelled connection attempt instead of silently failing\n• Fresh setup generates the set list needed by Draft and Sealed pickers\n\n🌍 Localization\n• Your saved language preference is normalized consistently, and shared documents keep their language metadata in sync\n\n🌐 Multiplayer\n• Opponents are displayed clockwise from your own seat, and menu and multiplayer screens can show an operator status message\n\n🤖 AI\n• AI casting no longer stalls at mana payment; its bounded payment search also handles multi-step improvise paths more reliably",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1544006472222908449"
+    },
+    {
       "id": 200,
       "date": "2026-08-29",
       "title": "Multi-set draft, and X spells stop freezing",

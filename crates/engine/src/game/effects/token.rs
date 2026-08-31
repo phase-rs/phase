@@ -3780,6 +3780,7 @@ fn junk_ability() -> AbilityDefinition {
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,

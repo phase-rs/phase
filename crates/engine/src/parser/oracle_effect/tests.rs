@@ -23925,6 +23925,7 @@ fn parse_play_from_exile_this_turn() {
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     duration: Duration::UntilEndOfTurn,
+                    mode: Play,
                     ..
                 },
                 ..
@@ -23985,6 +23986,7 @@ fn parse_impulse_play_that_card_this_turn_stays_play_from_exile() {
             permission:
                 CastingPermission::PlayFromExile {
                     duration: Duration::UntilEndOfTurn,
+                    mode: Play,
                     ..
                 },
             target,
@@ -24023,7 +24025,7 @@ fn parse_exile_until_nonland_play_that_card_stays_play_from_exile() {
         .expect("exile-until chain must produce a permission sub-ability");
     match &*sub.effect {
         Effect::GrantCastingPermission {
-            permission: CastingPermission::PlayFromExile { .. },
+            permission: CastingPermission::PlayFromExile { mode: Cast, .. },
             target,
             ..
         } => {
@@ -24061,6 +24063,7 @@ fn parse_play_the_exiled_card_this_turn_targets_tracked_set() {
         permission,
         CastingPermission::PlayFromExile {
             duration: Duration::UntilEndOfTurn,
+            mode: Play,
             ..
         }
     ));
@@ -24348,6 +24351,7 @@ fn parse_daxos_shape_emits_play_from_exile_with_tracked_set() {
                     permission,
                     CastingPermission::PlayFromExile {
                         duration: Duration::UntilEndOfTurn,
+                        mode: Cast,
                         ..
                     }
                 ),
@@ -24390,6 +24394,7 @@ fn parse_act_on_impulse_targets_tracked_set() {
                     permission,
                     CastingPermission::PlayFromExile {
                         duration: Duration::UntilEndOfTurn,
+                        mode: Play,
                         ..
                     }
                 ),
@@ -45541,12 +45546,14 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     let CastingPermission::PlayFromExile {
         frequency,
         mana_spend_permission,
+        mode,
         ..
     } = permission
     else {
         panic!("expected PlayFromExile permission, got {permission:?}");
     };
     assert_eq!(*frequency, CastFrequency::OncePerTurn);
+    assert_eq!(*mode, CardPlayMode::Play);
     assert_eq!(
         *mana_spend_permission,
         Some(ManaSpendPermission::AnyTypeOrColor)

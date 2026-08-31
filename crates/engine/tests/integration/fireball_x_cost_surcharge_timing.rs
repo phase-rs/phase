@@ -39,7 +39,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
-use engine::types::ability::{CastingPermission, ManaSpendPermission, TargetRef};
+use engine::types::ability::{CardPlayMode, CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, CastingPermissionIndex, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -338,6 +338,7 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P1,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -353,6 +354,7 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P0,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,

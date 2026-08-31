@@ -398,6 +398,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1902,6 +1903,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1963,6 +1965,7 @@ fn add_play_from_exile_test_spell(
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::Permanent,
             granted_to,
             frequency: CastFrequency::Unlimited,
@@ -2253,6 +2256,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -2304,6 +2308,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -11676,6 +11681,7 @@ fn undaunted_no_op_without_keyword() {
 fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> CastingPermission {
     CastingPermission::PlayFromExile {
         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+        mode: crate::types::ability::CardPlayMode::Play,
         duration: Duration::Permanent,
         granted_to,
         frequency: CastFrequency::Unlimited,
@@ -19042,6 +19048,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -19144,6 +19151,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -19317,6 +19325,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -19700,6 +19709,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 cast_cost_raise: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
             });
     }
 
@@ -20748,6 +20758,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -20822,6 +20833,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -27756,6 +27768,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
         },
         CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: Duration::UntilEndOfTurn,
             granted_to: PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -45678,6 +45691,7 @@ fn play_from_exile_grant(
     companion: bool,
 ) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::PlayFromExile {
+        mode: CardPlayMode::Play,
         duration: crate::types::ability::Duration::Permanent,
         granted_to: player,
         frequency: CastFrequency::Unlimited,
@@ -46573,6 +46587,7 @@ fn add_impulse_exiled_card(
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -46861,6 +46876,7 @@ fn grant_object_exile_land_play_permission(
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -47113,6 +47129,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -47138,6 +47155,115 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
     assert!(
         !spell_objects_available_to_cast(&state, player).contains(&land),
         "impulse-granted lands must not surface on the cast path"
+    );
+}
+
+/// CR 305.1: a cast-only exile grant still surfaces its card for spell casting,
+/// but it cannot authorize the distinct land-play special action.
+#[test]
+fn cast_mode_play_from_exile_does_not_authorize_an_exiled_land() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let land = add_exiled_land(&mut state, player, "Cast-only Exiled Island");
+    grant_object_exile_land_play_permission(
+        &mut state,
+        land,
+        player,
+        ObjectId(99_004),
+        CastFrequency::Unlimited,
+    );
+    let CastingPermission::PlayFromExile { mode, .. } = state.objects[&land]
+        .casting_permissions
+        .first_mut()
+        .expect("test helper attaches one permission")
+    else {
+        unreachable!("test helper attaches PlayFromExile")
+    };
+    *mode = CardPlayMode::Cast;
+
+    assert!(
+        !exile_lands_playable_by_permission(&state, player)
+            .iter()
+            .any(|(id, _)| *id == land),
+        "a Cast grant must not become land-play authority"
+    );
+    let card_id = state.objects[&land].card_id;
+    let battlefield_before = state.battlefield.len();
+    let land_drops_before = state.lands_played_this_turn;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "the real PlayLand action must reject Cast-only authority"
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+    assert_eq!(state.battlefield.len(), battlefield_before);
+    assert_eq!(state.lands_played_this_turn, land_drops_before);
+}
+
+/// CR 614.12: the land-entry rider belongs to the exact authority elected for
+/// the play, rather than any sibling exile permission on the same card.
+#[test]
+fn exiled_land_entry_rider_uses_the_elected_permission_only() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let land = add_exiled_land(&mut state, player, "Two-authority Exiled Island");
+    grant_object_exile_land_play_permission(
+        &mut state,
+        land,
+        player,
+        ObjectId(99_005),
+        CastFrequency::Unlimited,
+    );
+    grant_object_exile_land_play_permission(
+        &mut state,
+        land,
+        player,
+        ObjectId(99_006),
+        CastFrequency::Unlimited,
+    );
+    let CastingPermission::PlayFromExile {
+        land_enter_tapped, ..
+    } = state.objects[&land].casting_permissions[1]
+    else {
+        unreachable!("test helper attaches PlayFromExile")
+    };
+    assert_eq!(
+        land_enter_tapped,
+        crate::types::zones::EtbTapState::Unspecified
+    );
+    let CastingPermission::PlayFromExile {
+        land_enter_tapped, ..
+    } = state
+        .objects
+        .get_mut(&land)
+        .unwrap()
+        .casting_permissions
+        .get_mut(1)
+        .unwrap()
+    else {
+        unreachable!("test helper attaches PlayFromExile")
+    };
+    *land_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+
+    let card_id = state.objects[&land].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the first object-attached permission authorizes the land");
+
+    assert!(
+        !state.objects[&land].tapped,
+        "the later tapped sibling must not affect the elected first permission"
     );
 }
 
@@ -53451,6 +53577,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,

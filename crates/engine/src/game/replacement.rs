@@ -5063,6 +5063,7 @@ fn bind_search_found_definition(
                         land_enter_tapped,
                         invalidation: None,
                         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                        mode: crate::types::ability::CardPlayMode::Play,
                     },
                 target: TargetFilter::ParentTarget,
                 grantee: PermissionGrantee::AbilityController,
