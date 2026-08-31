@@ -1210,11 +1210,12 @@ export function DraftPodPage() {
   );
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const compactHostControlsLayout = phoneLayout || responsiveLayout === "tablet-portrait";
   const phoneDrafting = phase === "drafting" && phoneLayout;
   const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
   const hostDraftTopActions = useHostDraftTopActions({
-    enabled: phase === "drafting" && (phoneLayout || tabletLayout),
+    enabled: phase === "drafting" && compactHostControlsLayout,
   });
   const betweenGamesEditorActive = screen === "betweenGames"
     && sideboardPrompt !== null
@@ -1412,7 +1413,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!(phase === "drafting" && (phoneLayout || tabletLayout)) && <HostControls />}
+      {!(phase === "drafting" && compactHostControlsLayout) && <HostControls />}
     </div>
   );
 }

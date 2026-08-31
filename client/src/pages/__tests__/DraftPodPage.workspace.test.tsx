@@ -326,9 +326,9 @@ describe("DraftPodPage workspace", () => {
   });
 
   it.each([
-    ["tablet-portrait", 768, 1024],
-    ["tablet-landscape", 1024, 768],
-  ] as const)("uses_quick_draft_tablet_contracts_on_%s", (responsiveLayout, width, height) => {
+    ["tablet-portrait", 768, 1024, true],
+    ["tablet-landscape", 1024, 768, false],
+  ] as const)("uses_the_correct_host_controls_presentation_on_%s", (responsiveLayout, width, height, useCompactHostControls) => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
 
@@ -344,10 +344,16 @@ describe("DraftPodPage workspace", () => {
     expect(captured.workspace).not.toHaveProperty("tabletSideboardAccessory");
     expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
     expect(screen.queryByTestId("seat-status-ring")).not.toBeInTheDocument();
-    expect(captured.topActions.map((action) => action.id)).toEqual(["pause-resume", "end-draft"]);
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
-    expect(captured.hostPresentations).toEqual([]);
-    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    expect(captured.topActions.map((action) => action.id)).toEqual(
+      useCompactHostControls ? ["pause-resume", "end-draft"] : [],
+    );
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(useCompactHostControls);
+    expect(captured.hostPresentations).toEqual(useCompactHostControls ? [] : ["floating"]);
+    if (useCompactHostControls) {
+      expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    }
 
     act(() => captured.phoneAction?.onClick());
     expect(screen.getByRole("dialog", { name: "Pod Draft in Progress" })).toBeInTheDocument();
@@ -356,10 +362,14 @@ describe("DraftPodPage workspace", () => {
 
     act(() => { store.state.role = "guest"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(useCompactHostControls);
     expect(captured.topActions).toEqual([]);
     expect(captured.phoneAction?.label).toBe("Pod Draft in Progress");
-    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    if (useCompactHostControls) {
+      expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    }
 
     act(() => {
       store.state.role = "host";
