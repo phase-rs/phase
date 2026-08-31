@@ -72,13 +72,16 @@ export function useHostDraftTopActions({ enabled }: { enabled: boolean }): reado
  * Floating host-only control panel for tournament management.
  * Renders nothing when the local player is not the host.
  */
-export function HostControls() {
+export function HostControls({
+  draftTopActions,
+}: {
+  draftTopActions: readonly DraftShellTopAction[];
+}) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
   const [endingDraft, setEndingDraft] = useState(false);
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
-  const draftTopActions = useHostDraftTopActions({ enabled: phase === "drafting" });
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
   const advanceRound = useMultiplayerDraftStore((s) => s.advanceRound);
   const pairings = useMultiplayerDraftStore((s) => s.pairings);

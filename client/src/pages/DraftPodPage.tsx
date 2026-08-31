@@ -1215,7 +1215,7 @@ export function DraftPodPage() {
   const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
   const hostDraftTopActions = useHostDraftTopActions({
-    enabled: phase === "drafting" && compactHostControlsLayout,
+    enabled: phase === "drafting",
   });
   const betweenGamesEditorActive = screen === "betweenGames"
     && sideboardPrompt !== null
@@ -1413,7 +1413,9 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!(phase === "drafting" && compactHostControlsLayout) && <HostControls />}
+      {!(phase === "drafting" && compactHostControlsLayout) && (
+        <HostControls draftTopActions={hostDraftTopActions} />
+      )}
     </div>
   );
 }
