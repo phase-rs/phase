@@ -1536,6 +1536,23 @@ impl TournamentManager {
     /// [`TournamentMeta::first_unresolved_pairing`]) — the "a round is
     /// finished before the next one is paired" invariant is enforced here
     /// rather than merely assumed by the seeding that depends on it.
+    ///
+    /// Also refuses to pair past [`TournamentMeta::total_rounds`]. The
+    /// asymmetry with [`Self::complete_tournament`] — which is deliberately
+    /// *not* gated on the round count — is intentional and runs in one
+    /// direction only: an organizer may end an event *early*, but the
+    /// scheduled length is a ceiling, not a suggestion. Without this guard an
+    /// event created with `total_rounds: Some(1)` could settle round 1 and
+    /// then pair round 2, 3, ... indefinitely, which would make both the
+    /// override and the advertised default ([`default_total_rounds`]) purely
+    /// decorative.
+    ///
+    /// The three guards are ordered most- to least-permanent, so the first
+    /// error a caller sees is the one that actually describes their
+    /// situation: terminal status (the tournament is over), then the round
+    /// ceiling (no further round is scheduled, and settling pairings will
+    /// never change that), then an unresolved pairing (transient — report it
+    /// and retry).
     pub fn generate_pairings(
         &mut self,
         code: &str,
@@ -1547,6 +1564,25 @@ impl TournamentManager {
             return Err(format!(
                 "Tournament {code} is no longer running (status {:?})",
                 meta.status
+            ));
+        }
+        // The scheduled length is a ceiling. `total_rounds()` is the single
+        // authority for it — the organizer's override if set, else the
+        // bracket- and arity-selected default resolved against the live field
+        // — so this guard cannot drift from the count clients are shown or
+        // from the one `complete_tournament`'s rationale refers to.
+        //
+        // A `total_rounds()` of 0 is a single-elimination field below
+        // `SINGLE_ELIMINATION_MIN_PLAYERS`: "there is no bracket to run", per
+        // `default_total_rounds`. Refusing it here agrees with
+        // `build_single_elimination_round`, which rejects the same field a few
+        // lines below; this guard simply reaches it first.
+        let total_rounds = meta.total_rounds();
+        if meta.current_round >= total_rounds {
+            return Err(format!(
+                "Tournament {code} cannot pair round {} - it is scheduled for {total_rounds} round(s) and is already at round {}",
+                meta.current_round + 1,
+                meta.current_round
             ));
         }
         if let Some(pending) = meta.first_unresolved_pairing() {
@@ -1878,6 +1914,29 @@ mod tests {
     fn swiss(n: usize, a: u8, env: &FakeEnv) -> TournamentManager {
         let mut mgr = TournamentManager::new();
         create(&mut mgr, "T", arity(a), BracketShape::Swiss, env);
+        join_n(&mut mgr, "T", n, env);
+        mgr
+    }
+
+    /// A Swiss tournament of `n` players at `a` seats per pairing whose
+    /// organizer set an explicit round-count override, so `total_rounds()`
+    /// resolves through [`TournamentMeta::total_rounds_override`] instead of
+    /// [`default_total_rounds`].
+    fn swiss_capped(n: usize, a: u8, total_rounds: u32, env: &FakeEnv) -> TournamentManager {
+        let mut mgr = TournamentManager::new();
+        let a = arity(a);
+        mgr.create_tournament(
+            "T",
+            CreateTournamentRequest {
+                name: "Test Event".to_string(),
+                arity: a,
+                scoring: ScoringPolicy::default_for_arity(a),
+                bracket: BracketShape::Swiss,
+                total_rounds: Some(total_rounds),
+            },
+            env,
+        )
+        .expect("create_tournament");
         join_n(&mut mgr, "T", n, env);
         mgr
     }
@@ -3369,6 +3428,116 @@ mod tests {
             .expect("t")
             .first_unresolved_pairing()
             .is_none());
+    }
+
+    /// The configured round count is a ceiling on round *generation*. Without
+    /// this an event created with `total_rounds: Some(1)` could settle round 1
+    /// and pair round 2, then repeat indefinitely, leaving the override — and
+    /// the schedule every client is shown — with no authority at all.
+    #[test]
+    fn generate_pairings_refuses_to_pair_past_the_override_round_total() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss_capped(4, 2, 1, &env);
+        assert_eq!(
+            mgr.get("T").expect("t").total_rounds(),
+            1,
+            "the override is the authority"
+        );
+
+        mgr.generate_pairings("T", &env).expect("round 1");
+        report_all_pending(&mut mgr, "T", &env);
+
+        // Snapshotting the whole record, not just `current_round`: the
+        // rejection has to be a pure no-op, and a `Debug` comparison catches a
+        // field this test never thought to name (a bumped `last_activity_at`,
+        // a half-extended pairing list, a status flip).
+        let before = format!("{:?}", mgr.get("T").expect("t"));
+        let err = mgr
+            .generate_pairings("T", &env)
+            .expect_err("round 2 is past the configured total");
+        assert!(err.contains("scheduled for 1 round(s)"), "{err}");
+        assert!(err.contains("already at round 1"), "{err}");
+        assert_eq!(
+            format!("{:?}", mgr.get("T").expect("t")),
+            before,
+            "the rejected call mutated the tournament"
+        );
+
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.current_round, 1, "no round was advanced");
+        assert_eq!(meta.pairings.len(), 2, "no pairing was generated");
+        assert_eq!(meta.status, TournamentStatus::InProgress);
+
+        // Guard ordering: a tournament that is both terminal *and* at its
+        // ceiling reports that it is over, not that it is full.
+        mgr.complete_tournament("T", &env).expect("complete");
+        let terminal = mgr
+            .generate_pairings("T", &env)
+            .expect_err("a completed tournament pairs nothing");
+        assert!(terminal.contains("no longer running"), "{terminal}");
+    }
+
+    /// The paired positive case for the ceiling: a tournament below its total
+    /// still advances normally, so the guard costs no legitimate round.
+    #[test]
+    fn generate_pairings_still_advances_below_the_round_total() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss_capped(4, 2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        report_all_pending(&mut mgr, "T", &env);
+
+        // 1 < 2 — the round the ceiling still allows.
+        mgr.generate_pairings("T", &env).expect("round 2");
+        assert_eq!(mgr.get("T").expect("t").current_round, 2);
+        report_all_pending(&mut mgr, "T", &env);
+
+        // 2 >= 2 — the first one it does not.
+        let err = mgr
+            .generate_pairings("T", &env)
+            .expect_err("round 3 is past the configured total");
+        assert!(err.contains("scheduled for 2 round(s)"), "{err}");
+        assert_eq!(mgr.get("T").expect("t").current_round, 2);
+    }
+
+    /// The same ceiling, with no override in play: `total_rounds()` resolves
+    /// through `default_total_rounds`, and the computed count binds exactly as
+    /// hard as an organizer-set one.
+    #[test]
+    fn generate_pairings_refuses_to_pair_past_the_default_round_total() {
+        let env = FakeEnv::new();
+        // 8 players in 4-player pods: MSTR's table gives 2 rounds — the
+        // smallest count the Swiss default produces, so the ceiling is two
+        // reported rounds away rather than three.
+        let mut mgr = swiss(8, 4, &env);
+        {
+            let meta = mgr.get("T").expect("t");
+            assert!(
+                meta.total_rounds_override.is_none(),
+                "this is the computed-default path"
+            );
+            assert_eq!(meta.total_rounds(), 2);
+        }
+
+        mgr.generate_pairings("T", &env).expect("round 1");
+        report_all_pending(&mut mgr, "T", &env);
+        mgr.generate_pairings("T", &env).expect("round 2");
+        report_all_pending(&mut mgr, "T", &env);
+
+        let before = format!("{:?}", mgr.get("T").expect("t"));
+        let err = mgr
+            .generate_pairings("T", &env)
+            .expect_err("round 3 is past the computed total");
+        assert!(err.contains("scheduled for 2 round(s)"), "{err}");
+        assert!(err.contains("already at round 2"), "{err}");
+        assert_eq!(
+            format!("{:?}", mgr.get("T").expect("t")),
+            before,
+            "the rejected call mutated the tournament"
+        );
+
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.current_round, 2, "no round was advanced");
+        assert_eq!(meta.status, TournamentStatus::InProgress);
     }
 
     /// Completing is terminal, so it may not freeze a tournament around a
