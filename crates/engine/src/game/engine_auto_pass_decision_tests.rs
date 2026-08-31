@@ -368,21 +368,150 @@ fn blockers_declaration_state(must_block: bool) -> GameState {
     state
 }
 
+/// CR 509.1a: A defender may choose which creatures, if any, will block.
+/// A turn-boundary shortcut cannot make that optional choice on the defender's
+/// behalf, regardless of which boundary was requested.
 #[test]
-fn turn_boundary_auto_pass_submits_a_legal_empty_blocker_declaration() {
-    let mut state = blockers_declaration_state(false);
+fn turn_boundary_auto_pass_retains_optional_blocker_declaration_for_both_boundaries() {
+    for until in [
+        TurnBoundary::EndOfCurrentTurn,
+        TurnBoundary::MyNextTurnStart,
+    ] {
+        let mut state = blockers_declaration_state(false);
+        let (blocker, attacker) = match &state.waiting_for {
+            WaitingFor::DeclareBlockers {
+                valid_blocker_ids,
+                valid_block_targets,
+                ..
+            } => {
+                let blocker = *valid_blocker_ids
+                    .first()
+                    .expect("fixture supplies one legal blocker");
+                let attacker = *valid_block_targets
+                    .get(&blocker)
+                    .and_then(|targets| targets.first())
+                    .expect("fixture supplies one legal block target");
+                (blocker, attacker)
+            }
+            waiting_for => panic!("expected DeclareBlockers fixture, got {waiting_for:?}"),
+        };
 
-    let result = apply(
-        &mut state,
-        PlayerId(0),
-        GameAction::SetAutoPass {
-            mode: AutoPassRequest::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
             },
-        },
-    )
-    .expect("a legal empty block declaration may be auto-submitted");
+        )
+        .expect("turn-boundary auto-pass is a valid standing preference");
 
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilTurnBoundary { until }),
+            "the selected boundary remains stored while the defender decides"
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::BlockersDeclared { .. })),
+            "the preference must not submit the optional declaration"
+        );
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DeclareBlockers {
+                assignments: vec![(blocker, attacker)],
+            },
+        )
+        .expect("the defender can still submit an actual legal block");
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::BlockersDeclared { assignments }
+                if assignments == &vec![(blocker, attacker)]
+        )));
+    }
+}
+
+#[test]
+fn no_legal_blockers_auto_submit_without_a_turn_boundary_preference() {
+    let mut state = priority_state();
+    let attacker = add_untapped_creature(&mut state, PlayerId(1), 914);
+    state.phase = Phase::DeclareBlockers;
+    state.active_player = PlayerId(1);
+    state.combat = Some(crate::game::combat::CombatState {
+        attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+            attacker,
+            PlayerId(0),
+        )],
+        ..Default::default()
+    });
+    state.waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(0),
+        valid_blocker_ids: Vec::new(),
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+    };
+    let waiting_for = state.waiting_for.clone();
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+
+    assert!(run_auto_pass_loop(&mut state, &mut result));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::BlockersDeclared { assignments } if assignments.is_empty()
+    )));
+    assert!(!matches!(
+        result.waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
+}
+
+#[test]
+fn blockers_auto_submit_when_all_attackers_left_play() {
+    let mut state = blockers_declaration_state(false);
+    let attacker = match &state.waiting_for {
+        WaitingFor::DeclareBlockers {
+            valid_blocker_ids,
+            valid_block_targets,
+            ..
+        } => {
+            let blocker = *valid_blocker_ids
+                .first()
+                .expect("fixture supplies one legal blocker");
+            *valid_block_targets
+                .get(&blocker)
+                .and_then(|targets| targets.first())
+                .expect("fixture supplies one legal block target")
+        }
+        waiting_for => panic!("expected DeclareBlockers fixture, got {waiting_for:?}"),
+    };
+    state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
+    let waiting_for = state.waiting_for.clone();
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+
+    assert!(run_auto_pass_loop(&mut state, &mut result));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::BlockersDeclared { assignments } if assignments.is_empty()
+    )));
     assert!(!matches!(
         result.waiting_for,
         WaitingFor::DeclareBlockers { .. }

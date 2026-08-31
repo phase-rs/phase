@@ -8007,8 +8007,8 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
 
 /// True when `player` has an active turn-boundary auto-pass session (either
 /// boundary). Both `EndOfCurrentTurn` and `MyNextTurnStart` drive the
-/// DeclareAttackers/DeclareBlockers empty auto-submit arms, since both
-/// auto-submit empty attackers within the current turn.
+/// DeclareAttackers empty auto-submit arm, since both pre-commit that player
+/// to declaring no attackers within the current turn.
 fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
     matches!(
         state.auto_pass.get(&player),
@@ -8678,13 +8678,12 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // Auto-submit empty blockers when nothing can be chosen, and submit
-            // an empty declaration for a live turn-boundary preference just as
-            // Declare Attackers does above.
-            // CR 509.1 says the turn-based action still runs when no legal blocks
-            // are available, and CR 117.1c requires the active player to receive
-            // priority during the step (instants and Ninjutsu-family activations
-            // per CR 702.49 — notably Sneak, which is restricted to this step).
+            // Auto-submit empty blockers only when there is no blocking choice:
+            // no legal blocker exists, or every attacker has left the battlefield.
+            // Unlike declaring attackers, a turn-boundary preference does not
+            // pre-commit the defender to declining optional blocks.
+            // CR 509.1 performs the defender's declaration, and CR 509.2 then
+            // gives the active player priority after that declaration completes.
             // A phase stop on Declare Blockers overrides this even without an
             // auto-pass session: if the player explicitly asked to pause here,
             // honor it.
@@ -8694,8 +8693,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 ..
             } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
-                    || !super::combat::has_attackers_in_play(state)
-                    || end_of_turn_active(state, *player)) =>
+                    || !super::combat::has_attackers_in_play(state)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
