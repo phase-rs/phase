@@ -1285,7 +1285,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
 
   recordMatchResult: async (gameId, result) => {
     const meta = await inspectActiveQuickDraftLifecycle("inspect");
-    if (!meta?.runFormat) return;
+    if (!meta) return;
     const persisted = await recordDraftMatchResult({
       draftId: meta.id,
       gameId,
@@ -1296,6 +1296,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         const draws = run.results.filter((entry) => entry.result === "draw").length;
         return {
           ...meta,
+          // Legacy metadata may predate the runFormat field; the durable run
+          // is the only authoritative source for it. Without this, a later
+          // recordMatchResult would gate out on the absent field and drop
+          // the next match's result too.
+          runFormat: run.format,
           phase: draftRunPhase(run),
           updatedAt: Date.now(),
           runWins: wins,

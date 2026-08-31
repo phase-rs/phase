@@ -12,6 +12,11 @@ import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
 } from "../../components/draft/workspace/workspaceMigration";
+import type {
+  ActiveQuickDraftMeta,
+  DraftMatchResult,
+  DraftRunState,
+} from "../../services/quickDraftPersistence";
 import {
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
@@ -56,7 +61,14 @@ const persistence = vi.hoisted(() => ({
     async () => undefined,
   ),
   publishStagedDraftMatch: vi.fn(async () => undefined),
-  recordDraftMatchResult: vi.fn(async () => null),
+  recordDraftMatchResult: vi.fn<
+    (input: {
+      draftId: string;
+      gameId: string;
+      result: DraftMatchResult;
+      makeMeta: (run: DraftRunState) => ActiveQuickDraftMeta;
+    }) => Promise<{ run: DraftRunState; meta: ActiveQuickDraftMeta } | null>
+  >(async () => null),
   runLimits: vi.fn((format: string) => (
     format === "run" ? { maxWins: 7, maxLosses: 3 } : { maxWins: 1, maxLosses: 1 }
   )),
@@ -882,6 +894,85 @@ describe("draft store workspace authority", () => {
 
     expect(useDraftStore.getState().phase).toBe("complete");
     expect(useDraftStore.getState().runState?.results).toHaveLength(3);
+  });
+
+  it("records a resumed run's result with legacy metadata lacking runFormat", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    // ActiveQuickDraftMeta deliberately permits an absent runFormat (legacy
+    // metadata shape). Resume restores the format from the durable run —
+    // result recording must not gate out on the absent meta field and drop
+    // the match, and the replacement metadata must learn the run's format so
+    // a later recording is not dropped the same way.
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "legacy-meta-id",
+      setCode: "TST",
+      setName: "Test",
+      difficulty: 2,
+      kind: "Sealed",
+      phase: "playing",
+      // no runFormat field — legacy shape
+    });
+    persistence.loadQuickDraftSession.mockResolvedValueOnce({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: {},
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValueOnce({
+      format: "run",
+      results: [{ gameId: "g1", result: "win" }],
+      playerDeck: ["C1", "C2"],
+      opponentDeck: ["O1", "O2"],
+      usedBotSeats: [1],
+      activeMatch: undefined,
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind: "Sealed",
+      status: "Pairing",
+    });
+
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().phase).toBe("playing");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+
+    const recorded: Array<{
+      gameId: string;
+      result: DraftMatchResult;
+      metaRunFormat?: string;
+      metaPhase?: string;
+    }> = [];
+    persistence.recordDraftMatchResult.mockImplementation(async (input) => {
+      const nextRun: DraftRunState = {
+        format: "run",
+        results: [{ gameId: input.gameId, result: input.result }],
+        playerDeck: ["C1", "C2"],
+        opponentDeck: ["O1", "O2"],
+        usedBotSeats: [1],
+      };
+      const meta = input.makeMeta(nextRun);
+      recorded.push({
+        gameId: input.gameId,
+        result: input.result,
+        metaRunFormat: meta.runFormat,
+        metaPhase: meta.phase,
+      });
+      return { run: nextRun, meta };
+    });
+
+    await useDraftStore.getState().recordMatchResult("g2", "win");
+
+    // The result reached the durable writer at all (not gated out), and the
+    // replacement metadata carries the run's format for future recordings.
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.gameId).toBe("g2");
+    expect(recorded[0]?.result).toBe("win");
+    expect(recorded[0]?.metaRunFormat).toBe("run");
+    expect(recorded[0]?.metaPhase).toBe("playing");
+    expect(useDraftStore.getState().runState?.results).toHaveLength(1);
+    expect(useDraftStore.getState().phase).toBe("playing");
   });
 
   it.each([
