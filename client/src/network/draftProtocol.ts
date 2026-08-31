@@ -132,11 +132,17 @@ import type {
  *       and its acknowledgement both carry the exact protocol version and
  *       capability token, so a guest clears recoverable state only after the
  *       host has durably revoked that exact seat.
- *  23 — `active_pack_count` on public seats: the engine-owned `0|1` presence
- *       signal for a seat's active pack. It never reveals a pack's cards or
- *       remaining-card count, and an older host cannot provide it.
+ *  23 — `pick_selection_mode` on player views. A v22 peer lacks the
+ *       engine-owned selection procedure and can render Commander Draft as a
+ *       direct selection, so the first-contact gate must refuse the pairing.
+ *  24 — the merged P2P contract requires both v23's `pick_selection_mode` on
+ *       player views and `active_pack_count` on public seats: the engine-owned
+ *       `0|1` presence signal for a seat's active pack. It never reveals a
+ *       pack's cards or remaining-card count. The independently released
+ *       `active_pack_count` contract had also claimed v23, so v24 explicitly
+ *       rejects a v23 first contact rather than conflating the two shapes.
  */
-export const DRAFT_PROTOCOL_VERSION = 23 as const;
+export const DRAFT_PROTOCOL_VERSION = 24 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {

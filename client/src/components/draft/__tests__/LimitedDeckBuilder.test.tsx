@@ -168,6 +168,7 @@ const TEST_VIEW: BuilderView = {
   pass_direction: "Left",
   current_pack: null,
   required_pick_count: 0,
+  pick_selection_mode: "Direct",
   pool: [
     {
       instance_id: "card-1",

@@ -36,6 +36,7 @@ const view: DraftPlayerView = {
   pass_direction: "Left",
   // Premier (CR 905.1a): one card per pick step.
   required_pick_count: 1,
+  pick_selection_mode: "Direct",
   current_pack: [
     {
       instance_id: "card-1",
@@ -152,7 +153,7 @@ describe("PackDisplay pod controller", () => {
 
   it("submits_the_engine_defined_two_card_commander_pick_step", () => {
     const second = { ...card, instance_id: "card-2", name: "Island" };
-    const commanderView = { ...view, kind: "CommanderDraft" as const, required_pick_count: 2, current_pack: [card, second] };
+    const commanderView = { ...view, kind: "CommanderDraft" as const, required_pick_count: 2, pick_selection_mode: "Ordered" as const, current_pack: [card, second] };
     const pickCardStep = vi.fn(async () => ({ status: "acknowledged" as const }));
     render(
       <PackDisplay controller={workspaceController({ view: commanderView, selectedCard: "card-1", pickCardStep })} presentation={presentation} onCardHover={vi.fn()} />,

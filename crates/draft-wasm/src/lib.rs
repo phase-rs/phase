@@ -1189,6 +1189,7 @@ struct DraftProcedureDto {
     min_pod_size: u8,
     packs_per_player: u8,
     cards_per_pick: u8,
+    pick_selection_mode: draft_core::types::PickSelectionMode,
     min_deck_size: usize,
     commanders_required: u8,
     match_config: engine::types::match_config::MatchConfig,
@@ -1220,6 +1221,7 @@ fn draft_procedure_dto(kind: u8) -> Result<DraftProcedureDto, String> {
         min_pod_size: procedure.min_pod_size,
         packs_per_player: procedure.packs_per_player,
         cards_per_pick: procedure.cards_per_pick,
+        pick_selection_mode: procedure.pick_selection_mode,
         min_deck_size: procedure.min_deck_size,
         commanders_required: procedure.commanders_required,
         match_config: procedure.match_config,
@@ -2401,6 +2403,10 @@ mod create_multiplayer_draft_tests {
             assert_eq!(
                 dto.cards_per_pick, procedure.cards_per_pick,
                 "cards_per_pick ({kind:?})"
+            );
+            assert_eq!(
+                dto.pick_selection_mode, procedure.pick_selection_mode,
+                "pick_selection_mode ({kind:?})"
             );
             assert_eq!(
                 dto.min_deck_size, procedure.min_deck_size,

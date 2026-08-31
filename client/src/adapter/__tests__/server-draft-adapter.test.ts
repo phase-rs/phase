@@ -67,6 +67,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pass_direction: "Left",
     current_pack: null,
     required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pool: [],
     draft_effects: [],
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
@@ -156,6 +157,66 @@ describe("ServerDraftAdapter", () => {
       }),
     );
     await createPromise;
+  });
+
+  it("rejects a stale Full server before setup or draft updates can mutate state", async () => {
+    MockWebSocket.last = null;
+    const staleAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const listener = vi.fn();
+    staleAdapter.onEvent(listener);
+    const createPromise = staleAdapter.createDraft({
+      displayName: "Alice",
+      setCodes: ["MKM"],
+      kind: "CommanderDraft",
+      public: true,
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      podSize: 8,
+    });
+
+    await Promise.resolve();
+    const staleWs = MockWebSocket.last!;
+    staleWs.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ServerHello",
+        data: {
+          server_version: "0.0.0-stale",
+          build_commit: "stalehash",
+          protocol_version: PROTOCOL_VERSION - 1,
+          mode: "Full",
+        },
+      }),
+    );
+
+    await expect(createPromise).rejects.toThrow("older than supported");
+    expect(staleWs.close).toHaveBeenCalledOnce();
+    expect(staleWs.send).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "serverHello",
+        compatible: false,
+        info: expect.objectContaining({ protocolVersion: PROTOCOL_VERSION - 1, mode: "Full" }),
+      }),
+    );
+
+    staleWs.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftStateUpdate",
+        data: {
+          view: {
+            ...createMockDraftView({ kind: "CommanderDraft", pick_selection_mode: "Ordered" }),
+            pick_selection_mode: undefined,
+          },
+        },
+      }),
+    );
+
+    expect(staleAdapter.currentDraftView).toBeNull();
+    expect(listener).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "draftViewUpdated" }),
+    );
   });
 
   it("transitions phase to match on DraftMatchStart", () => {

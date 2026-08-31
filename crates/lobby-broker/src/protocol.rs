@@ -43,6 +43,12 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 48 — Full-server `DraftPlayerView` payloads require the engine-owned
+///      `pick_selection_mode` and public-seat `active_pack_count`. An older
+///      server can omit either while the TypeScript client accepts the JSON,
+///      then silently treats an ordered Commander Draft pick as direct
+///      selection or loses a seat's active-pack presence. Full handshakes must
+///      refuse the capability mismatch. Lobby messages are unchanged.
 /// 47 — Resolution-time optional fixed sacrifice payments add a typed
 ///      replacement-resumable continuation to `GameState`.
 /// 46 — `QuantityRef::Aggregate` and `QuantityRef::TrackedSetAggregate` were
@@ -197,7 +203,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 47;
+pub const PROTOCOL_VERSION: u32 = 48;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -647,12 +653,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 47);
+        assert_eq!(PROTOCOL_VERSION, 48);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 46);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 47);
     }
 
     #[test]

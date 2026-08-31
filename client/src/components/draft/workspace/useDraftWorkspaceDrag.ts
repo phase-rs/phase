@@ -74,6 +74,8 @@ type CompatibilitySuppression =
     readonly kind: "pointer-sequence";
     readonly pointerId: number;
     readonly pointerType: "mouse" | "pen" | "touch";
+    readonly surface: "pack" | "workspace";
+    readonly sourceInstanceId: string;
     readonly phase: "awaiting-click" | "awaiting-double-click";
   };
 
@@ -455,6 +457,10 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
         kind: "pointer-sequence",
         pointerId: session.pointerId,
         pointerType: session.pointerType,
+        surface: session.source.kind === "workspace" ? "workspace" : "pack",
+        sourceInstanceId: session.source.kind === "workspace"
+          ? session.source.instanceIds[0]
+          : session.source.sourceInstanceId,
         phase: "awaiting-click",
       };
       setAnnouncement(t("workspace.drag.started", { card: session.source.cards.map((card) => card.name).join(", ") }));
@@ -611,7 +617,25 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
   const consumeCompatibilityActivation = useCallback((activation: PackCompatibilityActivation) => {
     const suppression = suppressionRef.current;
     if (suppression.kind === "none") return false;
-    if (activation.detail === 0 || (activation.pointerType !== undefined && activation.pointerType !== suppression.pointerType)) {
+    if (
+      suppression.phase === "awaiting-double-click"
+      && activation.kind === "double-click"
+      && activation.detail !== 0
+      && activation.pointerId === null
+      && activation.surface === suppression.surface
+      && activation.sourceInstanceId === suppression.sourceInstanceId
+    ) {
+      suppressionRef.current = { kind: "none" };
+      return true;
+    }
+    if (
+      activation.detail === 0
+      || activation.pointerId === null
+      || activation.pointerId !== suppression.pointerId
+      || activation.pointerType !== suppression.pointerType
+      || activation.surface !== suppression.surface
+      || activation.sourceInstanceId !== suppression.sourceInstanceId
+    ) {
       suppressionRef.current = { kind: "none" };
       return false;
     }

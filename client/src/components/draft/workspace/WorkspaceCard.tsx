@@ -35,6 +35,10 @@ export interface WorkspaceCardProps {
   onHover?(card: WorkspaceCardEntryModel | null): void;
   onBlur?(): void;
   onActivate(card: WorkspaceCardEntryModel): void;
+  onDoubleClick?(
+    event: React.MouseEvent<HTMLButtonElement>,
+    card: WorkspaceCardEntryModel,
+  ): void;
   onKeyDown?(
     event: KeyboardEvent<HTMLButtonElement>,
     card: WorkspaceCardEntryModel,
@@ -51,6 +55,7 @@ export function WorkspaceCard({
   onHover,
   onBlur,
   onActivate,
+  onDoubleClick,
   onKeyDown,
   drag,
   stackStyle,
@@ -87,13 +92,28 @@ export function WorkspaceCard({
         onFocus={() => onHover?.(card)}
         onBlur={() => onBlur?.()}
         onClick={(event) => {
-          const pointerType = (event.nativeEvent as MouseEvent & { pointerType?: string }).pointerType;
+          const pointerEvent = event.nativeEvent as MouseEvent & { pointerId?: number; pointerType?: string };
           if (drag?.controller.consumeCompatibilityActivation({
             kind: "click",
             detail: event.detail,
-            ...(pointerType === undefined ? {} : { pointerType }),
+            pointerId: pointerEvent.pointerId ?? null,
+            ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+            surface: "workspace",
+            sourceInstanceId: card.instanceId,
           })) return;
           onActivate(card);
+        }}
+        onDoubleClick={(event) => {
+          const pointerEvent = event.nativeEvent as MouseEvent & { pointerId?: number; pointerType?: string };
+          if (drag?.controller.consumeCompatibilityActivation({
+            kind: "double-click",
+            detail: event.detail,
+            pointerId: pointerEvent.pointerId ?? null,
+            ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+            surface: "workspace",
+            sourceInstanceId: card.instanceId,
+          })) return;
+          onDoubleClick?.(event, card);
         }}
         onKeyDown={(event) => onKeyDown?.(event, card)}
         onPointerDown={(event) => {

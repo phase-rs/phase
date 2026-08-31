@@ -57,7 +57,7 @@ describe("P2P draft first-contact gate", () => {
     });
   });
 
-  it("rejects an old first frame before it can allocate a seat", async () => {
+  it("rejects a v23 peer before it can allocate a seat because v24 requires active_pack_count", async () => {
     sessionState.firstContact = null;
     sessionState.send.mockClear();
     sessionState.close.mockClear();
@@ -83,6 +83,10 @@ describe("P2P draft first-contact gate", () => {
     const rejected = sessionState.firstContact!({
       type: "draft_join",
       displayName: "Alice",
+      // v23 is the upstream pick_selection_mode contract. It lacks this
+      // merged client's active_pack_count public-seat field and must not
+      // complete first contact under the same version number.
+      draftProtocolVersion: 23,
     } as never);
 
     expect(allocate).not.toHaveBeenCalled();
