@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 
 vi.mock("../../../stores/multiplayerDraftStore", () => ({
   useMultiplayerDraftStore: (selector: (state: Record<string, unknown>) => unknown) =>
@@ -58,7 +58,9 @@ describe("SeatStatusRing", () => {
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getByText("1 packs at Drafter")).toBeInTheDocument();
     expect(container.querySelector("[data-seat-status-ring]")).toHaveClass(
-      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+4.5rem),1fr))]",
+      "grid-cols-[repeat(auto-fit,minmax(calc(15ch+4rem),1fr))]",
+      "mb-3",
+      "gap-1.5",
       "text-xs",
     );
     const units = container.querySelectorAll<HTMLElement>("[data-seat-pass-unit]");
@@ -66,9 +68,20 @@ describe("SeatStatusRing", () => {
     for (const unit of units) {
       expect(unit.firstElementChild).toHaveAttribute("data-seat-badge");
       expect(unit.lastElementChild).toHaveAttribute("data-pass-arrow");
-      expect(unit.querySelector("[data-seat-badge]")).toHaveClass("min-w-[15ch]", "min-h-[52px]");
+      const badge = unit.querySelector<HTMLElement>("[data-seat-badge]")!;
+      expect(badge).toHaveClass("min-w-[15ch]", "min-h-[44px]", "gap-0.5", "py-0.5", "pr-9");
       expect(unit.querySelector("[data-pass-arrow]")).toHaveTextContent("→");
     }
+    const packIcon = screen.getByText("1", { selector: "[aria-hidden='true'] span" }).parentElement!;
+    expect(packIcon).toHaveClass("h-8", "w-8");
+    expect(within(packIcon).getByText("1")).toHaveClass(
+      "inset-[5px]",
+      "rounded-full",
+      "border",
+      "border-jade/80",
+      "bg-slate-950/80",
+      "text-xs",
+    );
   });
 
   it("places right-pass arrows before their equal-width seat badges", () => {

@@ -35,6 +35,19 @@ interface CompactSideboardProps {
   responsiveContext?: "draft" | "builder";
 }
 
+interface DraftResponsiveStackLayout {
+  columnCount: number;
+  columnGapPx: number;
+  exposedStepPx: number;
+}
+
+const DRAFT_RESPONSIVE_STACK_LAYOUTS: Readonly<Record<Exclude<ResponsiveDraftLayout, "desktop">, DraftResponsiveStackLayout>> = {
+  "phone-portrait": { columnCount: 2, columnGapPx: 8, exposedStepPx: 56 },
+  "phone-landscape": { columnCount: 2, columnGapPx: 6, exposedStepPx: 24 },
+  "tablet-portrait": { columnCount: 3, columnGapPx: 8, exposedStepPx: 72 },
+  "tablet-landscape": { columnCount: 1, columnGapPx: 0, exposedStepPx: 40 },
+};
+
 export function CompactSideboard({
   pool,
   poolGroups,
@@ -62,12 +75,10 @@ export function CompactSideboard({
   const cards = sideboard.columns.flatMap((column) => (
     column.rows.flatMap((row) => row.cards)
   ));
-  const responsiveStackStyle = (stackIndex: number): CSSProperties | undefined => {
+  const builderResponsiveStackStyle = (stackIndex: number): CSSProperties | undefined => {
     switch (responsiveLayout) {
       case "phone-portrait":
-        return responsiveContext === "builder"
-          ? { position: "absolute", top: 5, left: 5 + stackIndex * 54, width: 70 }
-          : { position: "absolute", top: 6 + stackIndex * 24, left: 6, width: "calc(100% - 12px)" };
+        return { position: "absolute", top: 5, left: 5 + stackIndex * 54, width: 70 };
       case "phone-landscape":
         return { position: "absolute", top: stackIndex * 24, left: 4, width: "calc(100% - 8px)" };
       case "tablet-portrait":
@@ -102,6 +113,15 @@ export function CompactSideboard({
     && responsiveLayout === "phone-portrait"
     && !collapsed;
   const draftResponsiveStack = responsiveContext === "draft" && (draftPhoneLayout || tabletLayout);
+  const draftStackLayout = draftResponsiveStack && responsiveLayout !== "desktop"
+    ? DRAFT_RESPONSIVE_STACK_LAYOUTS[responsiveLayout]
+    : undefined;
+  const maximumDraftStackRow = draftStackLayout === undefined || cards.length === 0
+    ? 0
+    : Math.floor((cards.length - 1) / draftStackLayout.columnCount);
+  const draftCardWidth = draftStackLayout === undefined
+    ? undefined
+    : `calc((100% - ${(draftStackLayout.columnCount - 1) * draftStackLayout.columnGapPx}px) / ${draftStackLayout.columnCount})`;
   const naturalCardLayout = draftResponsiveStack;
   const scrollableCardLayout = draftResponsiveStack || isLandscapeBuilderPhone;
   const collapsibleCompactSideboard = builderPhoneLayout || draftPhoneLayout || tabletLayout;
@@ -280,15 +300,40 @@ export function CompactSideboard({
         ) : (
           <div
             data-card-stack
+            data-sideboard-column-count={draftStackLayout?.columnCount}
             className={draftResponsiveStack
-              ? "relative h-full min-w-0"
+              ? "relative min-h-full min-w-0"
               : builderPhoneLayout
               ? isLandscapeBuilderPhone
                 ? "flex min-w-0 flex-col"
                 : "grid min-w-0 grid-cols-2 gap-2"
               : "relative h-full min-w-0 [grid-area:1/1]"}
           >
-            {cards.map((card, stackIndex) => (
+            {draftStackLayout !== undefined && draftCardWidth !== undefined && (
+              <span
+                aria-hidden="true"
+                data-sideboard-stack-spacer
+                className="block aspect-[488/680]"
+                style={{
+                  width: draftCardWidth,
+                  marginBottom: maximumDraftStackRow * draftStackLayout.exposedStepPx,
+                }}
+              />
+            )}
+            {cards.map((card, stackIndex) => {
+              const column = draftStackLayout === undefined ? 0 : stackIndex % draftStackLayout.columnCount;
+              const row = draftStackLayout === undefined ? stackIndex : Math.floor(stackIndex / draftStackLayout.columnCount);
+              const draftStackStyle: CSSProperties | undefined = draftStackLayout === undefined || draftCardWidth === undefined
+                ? undefined
+                : {
+                  position: "absolute",
+                  top: row * draftStackLayout.exposedStepPx,
+                  left: column === 0
+                    ? 0
+                    : `calc(${column * 100 / draftStackLayout.columnCount}% + ${column * draftStackLayout.columnGapPx / draftStackLayout.columnCount}px)`,
+                  width: draftCardWidth,
+                };
+              const workspaceCard = (
               <WorkspaceCard
                 key={card.key}
                 card={card}
@@ -298,12 +343,12 @@ export function CompactSideboard({
                 onBlur={() => onCardHover?.(null)}
                 onActivate={(activatedCard) => activate(activatedCard.instanceId)}
                 stackStyle={draftResponsiveStack
-                  ? responsiveStackStyle(stackIndex)
+                  ? draftStackStyle
                   : isLandscapeBuilderPhone
                   ? { width: "100%", marginTop: stackIndex === 0 ? undefined : "-72%" }
                   : builderPhoneLayout
                     ? { width: "100%" }
-                    : responsiveStackStyle(stackIndex)}
+                    : builderResponsiveStackStyle(stackIndex)}
                 {...(dragController === undefined
                   ? {}
                   : {
@@ -315,7 +360,18 @@ export function CompactSideboard({
                     },
                   })}
               />
-            ))}
+              );
+              return draftStackLayout === undefined ? workspaceCard : (
+                <div
+                  key={card.key}
+                  className="contents"
+                  data-sideboard-column={column}
+                  data-sideboard-row={row}
+                >
+                  {workspaceCard}
+                </div>
+              );
+            })}
           </div>
         )}
         {cards.length > 0 && cards.map((card) => (

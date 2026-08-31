@@ -767,6 +767,74 @@ describe("draft workspace shell", () => {
     expect(deckCard()).toHaveClass("touch-pan-y");
   });
 
+  it("lays_out_the_draft_sideboard_in_ordered_overlapping_responsive_columns", () => {
+    const cards = Array.from({ length: 7 }, (_, index) => card(`side-${index}`));
+    const workspace = state(Object.fromEntries(cards.map((entry, index) => [
+      entry.instance_id,
+      { zone: "sideboard" as const, row: 0 as const, column: 0, order: index },
+    ])));
+    const props = {
+      pool: cards,
+      poolGroups: groups(cards),
+      workspace,
+      preferences: preferences({ sideboardCollapsed: false }),
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+    };
+    const { rerender } = render(<DraftWorkspace {...props} responsiveLayout="phone-portrait" />);
+    const stack = () => screen.getByRole("region", { name: "Compact sideboard" })
+      .querySelector<HTMLElement>("[data-card-stack]")!;
+    const positions = () => [...stack().querySelectorAll<HTMLElement>("[data-sideboard-column]")]
+      .map((node) => [node.dataset.sideboardColumn, node.dataset.sideboardRow]);
+    const cardAt = (row: number, column: number) => stack()
+      .querySelector<HTMLElement>(`[data-sideboard-row="${row}"][data-sideboard-column="${column}"] [data-instance-id]`)!;
+
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "2");
+    expect(positions().slice(0, 4)).toEqual([["0", "0"], ["1", "0"], ["0", "1"], ["1", "1"]]);
+    expect(cardAt(1, 0).style.top).toBe("56px");
+    expect(cardAt(0, 1).style.left).toBe("calc(50% + 4px)");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("168px");
+
+    rerender(<DraftWorkspace {...props} responsiveLayout="phone-landscape" />);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "2");
+    expect(cardAt(1, 0).style.top).toBe("24px");
+    expect(cardAt(0, 1).style.left).toBe("calc(50% + 3px)");
+
+    rerender(<DraftWorkspace {...props} responsiveLayout="tablet-portrait" />);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "3");
+    expect(positions().slice(0, 4)).toEqual([["0", "0"], ["1", "0"], ["2", "0"], ["0", "1"]]);
+    expect(cardAt(1, 0).style.top).toBe("72px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("144px");
+
+    rerender(<DraftWorkspace {...props} responsiveLayout="tablet-landscape" />);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "1");
+    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["0", "1"], ["0", "2"]]);
+    expect(cardAt(1, 0).style.top).toBe("40px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("240px");
+  });
+
+  it("integrates_the_half_width_host_accessory_only_above_tablet_portrait_sideboard", () => {
+    const props = {
+      pool: [] as DraftCardInstance[],
+      poolGroups: groups([]),
+      workspace: state({}),
+      preferences: preferences({ sideboardCollapsed: false }),
+      tabletSideboardAccessory: <div data-testid="tablet-host-controls">Host</div>,
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+    };
+    const { container, rerender } = render(
+      <DraftWorkspace {...props} responsiveLayout="tablet-portrait" />,
+    );
+
+    const accessory = container.querySelector<HTMLElement>("[data-tablet-sideboard-accessory]")!;
+    expect(accessory).toHaveClass("ml-auto", "w-1/2", "shrink-0");
+    expect(accessory.nextElementSibling?.querySelector('[data-zone="sideboard"]')).toBeInTheDocument();
+
+    rerender(<DraftWorkspace {...props} responsiveLayout="tablet-landscape" />);
+    expect(container.querySelector("[data-tablet-sideboard-accessory]")).not.toBeInTheDocument();
+  });
+
   it("renders_one_fixed_ordered_pointer_following_overlay", () => {
     const cards = [card("effect-a"), card("effect-b")];
     const source = {

@@ -46,7 +46,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
   return (
     <div
       data-seat-badge
-      className={`relative flex h-full min-h-[52px] w-full min-w-[15ch] flex-col items-start gap-1 rounded-[12px] border bg-black/18 px-2 py-1 pr-11 backdrop-blur-md ${borderColor}`}
+      className={`relative flex h-full min-h-[44px] w-full min-w-[15ch] flex-col items-start gap-0.5 rounded-[10px] border bg-black/18 px-2 py-0.5 pr-9 backdrop-blur-md ${borderColor}`}
     >
       <div className="flex min-w-0 items-center gap-1.5">
         <div
@@ -77,9 +77,9 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
         </span>
       )}
       <span className="sr-only">{t("seat.activePackCount", { count: activePackCount, player: seat.display_name || t("seat.label", { number: seat.seat_index + 1 }) })}</span>
-      <span className="absolute right-1 top-1/2 h-10 w-10 -translate-y-1/2" aria-hidden="true">
+      <span className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2" aria-hidden="true">
         <img src="/icons/packs.svg" alt="" className={`h-full w-full object-contain ${activePackCount === 0 ? "opacity-35 grayscale" : ""}`} />
-        <span className="absolute inset-0 flex items-center justify-center pt-0.5 font-mono text-sm font-bold tabular-nums text-white [text-shadow:0_1px_3px_rgb(0_0_0_/_0.95)]">{activePackCount}</span>
+        <span className="absolute inset-[5px] flex items-center justify-center rounded-full border border-jade/80 bg-slate-950/80 font-mono text-xs font-bold tabular-nums text-white shadow-[0_0_0_1px_rgb(3_139_6_/_0.3)]">{activePackCount}</span>
       </span>
     </div>
   );
@@ -113,7 +113,7 @@ export function SeatStatusRingLayout({
     <div
       data-seat-status-ring
       data-pass-direction={passDirection ?? "Left"}
-      className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(calc(15ch+4.5rem),1fr))] gap-2 text-xs"
+      className="mb-3 grid grid-cols-[repeat(auto-fit,minmax(calc(15ch+4rem),1fr))] gap-1.5 text-xs"
     >
       <span className="sr-only">{passDirectionLabel}</span>
       {seats.map((seat) => (

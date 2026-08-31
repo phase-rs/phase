@@ -459,7 +459,14 @@ describe("PackDisplay local workspace controller", () => {
 
     fireEvent.pointerDown(cardElement, { button: 0, isPrimary: true, pointerId: 91, pointerType: "mouse" });
     expect(cardElement).toHaveAttribute("data-visual-state", "selected");
-    expect(cardElement).toHaveClass("ring-2", "ring-[rgb(3,139,6)]", "shadow-[0_0_4px_2px_rgb(3,139,6)]");
+    expect(cardElement).toHaveClass(
+      "duration-150",
+      "ring-2",
+      "ring-[rgb(3,139,6)]",
+      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
+    );
+    expect(cardElement).not.toHaveClass("!duration-0");
 
     fireEvent.doubleClick(cardElement);
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
@@ -580,7 +587,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const firstCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const cardButton = within(firstCard).getByRole("button", { name: "Same" });
-    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.02]", "hover:ring-white/20");
+    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.08]", "hover:ring-white/20");
 
     fireEvent.click(cardButton, { detail: 1, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
@@ -588,7 +595,8 @@ describe("PackDisplay local workspace controller", () => {
     expect(selectCard).toHaveBeenCalledWith("unknown");
 
     rendered.rerender(<PackDisplay controller={{ ...initial, selectedCard: "unknown" }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
-    expect(firstCard).toHaveClass("ring-2", "ring-[rgb(3,139,6)]", "shadow-[0_0_4px_2px_rgb(3,139,6)]");
+    expect(firstCard).toHaveClass("duration-150", "ring-2", "ring-[rgb(3,139,6)]", "shadow-[0_0_7px_3px_rgb(3,139,6)]");
+    expect(firstCard).not.toHaveClass("!duration-0");
     expect(firstCard).not.toHaveClass("scale-105");
     expect(within(firstCard).queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const confirmButton = screen.getByRole("button", { name: "Confirm Pick" });

@@ -547,7 +547,7 @@ export function DraftWorkspace({
               data-zone="sideboard"
               data-drop-target="collapsed-sideboard"
               data-drop-state={sideboardDropActive ? "active" : "idle"}
-              className={`${tabletLayout && tabletSideboardAccessory ? "grid grid-rows-[auto_minmax(0,1fr)] gap-2" : ""} ${tabletPortraitLayout
+              className={`${tabletPortraitLayout && tabletSideboardAccessory ? "grid grid-rows-[auto_minmax(0,1fr)] gap-2" : ""} ${tabletPortraitLayout
                 ? sideboardCollapsed
                   ? "h-full min-h-0 min-w-0"
                   : "absolute inset-0 z-20 min-h-0 min-w-0"
@@ -557,12 +557,12 @@ export function DraftWorkspace({
                   ? "min-w-0 shrink-0"
                   : "min-w-0"}`}
             >
-              {tabletLayout && tabletSideboardAccessory && (
-                <div data-tablet-sideboard-accessory className="shrink-0">
+              {tabletPortraitLayout && tabletSideboardAccessory && (
+                <div data-tablet-sideboard-accessory className="ml-auto w-1/2 shrink-0">
                   {tabletSideboardAccessory}
                 </div>
               )}
-              <div className={tabletLayout && tabletSideboardAccessory ? "min-h-0" : "contents"}>
+              <div className={tabletPortraitLayout && tabletSideboardAccessory ? "min-h-0" : "contents"}>
                 <CompactSideboard
                   pool={pool}
                   poolGroups={poolGroups}
