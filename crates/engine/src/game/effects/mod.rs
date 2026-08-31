@@ -2783,6 +2783,24 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
     })
 }
 
+// CR 608.2c: Most legacy effect resolvers bind `ParentTarget` through the
+// resolved ability's target slots. Preserve that compatibility while
+// `GenericEffect` reads the separate forwarded-result carrier directly:
+// copying the result into a GenericEffect would make an unrelated
+// `TriggeringSource` grant look like it had declared targets. Only fill an
+// empty child that actually references the parent, so a child-specific target
+// selection continues to take precedence.
+fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) {
+    if !matches!(&child.effect, Effect::GenericEffect { .. })
+        && child.targets.is_empty()
+        && effect_refs_parent_target(&child.effect)
+    {
+        if let Some(context) = &child.context.forwarded_result_context {
+            child.targets = context.targets.clone();
+        }
+    }
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -2790,6 +2808,7 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    bind_forwarded_result_targets_for_legacy_effect(child);
     // CR 701.20e + CR 608.2c: Look-result membership is owned by precisely
     // one immediate looping child. Ordinary hand-offs must not let it leak to
     // a later grandchild with a different instruction scope.
@@ -13438,6 +13457,7 @@ fn resolve_chain_body(
                     .map(TargetRef::Object)
                     .collect(),
             });
+            bind_forwarded_result_targets_for_legacy_effect(&mut sub_with_context);
             if !attachment_candidates.is_empty() {
                 sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
             }
