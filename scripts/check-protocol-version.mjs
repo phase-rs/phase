@@ -3,18 +3,18 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 48;
+const EXPECTED_PROTOCOL_VERSION = 49;
 // The LOBBY message-set version. Deliberately separate from the full-game
 // number above and deliberately NOT derived from it: a GameState-only bump must
 // not move the lobby's compatibility window. See the assertions at the bottom.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 2;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 3;
 // The P2P wire version. A THIRD independent surface: host/guest first-contact
 // frames carry it, and the same GameState shape change that moves
 // EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 36;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 37;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
