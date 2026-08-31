@@ -50,7 +50,10 @@ fn assert_select_cards_is_publicly_legal(
     );
 }
 
-fn real_single_owner_mass_library_order_state(origin: Zone) -> (GameState, Vec<ObjectId>) {
+fn real_single_owner_mass_library_order_state(
+    origin: Zone,
+    target: TargetFilter,
+) -> (GameState, Vec<ObjectId>) {
     let mut state = GameState::new_two_player(42);
     let first = engine::game::zones::create_object(
         &mut state,
@@ -79,7 +82,7 @@ fn real_single_owner_mass_library_order_state(origin: Zone) -> (GameState, Vec<O
         Effect::ChangeZoneAll {
             origin: Some(origin),
             destination: Zone::Library,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target,
             enters_under: None,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
@@ -279,7 +282,10 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
 /// submitted order and finish at priority.
 #[test]
 fn single_owner_mass_library_order_completes_through_change_zone_all() {
-    let (mut state, cards) = real_single_owner_mass_library_order_state(Zone::Battlefield);
+    let (mut state, cards) = real_single_owner_mass_library_order_state(
+        Zone::Battlefield,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    );
     let &[first, _second] = cards.as_slice() else {
         panic!("production prompt must contain exactly two cards");
     };
@@ -336,7 +342,10 @@ fn single_owner_mass_library_order_completes_through_change_zone_all() {
 #[test]
 fn legacy_marker_removed_real_continuation_preserves_hand_and_graveyard_origins() {
     for origin in [Zone::Hand, Zone::Graveyard] {
-        let (mut state, cards) = real_single_owner_mass_library_order_state(origin);
+        let (mut state, cards) = real_single_owner_mass_library_order_state(
+            origin,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        );
         let WaitingFor::EffectZoneChoice {
             mass_library_order, ..
         } = &mut state.waiting_for
@@ -349,6 +358,23 @@ fn legacy_marker_removed_real_continuation_preserves_hand_and_graveyard_origins(
             .expect("the legacy continuation accepts its producer's origin");
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
+}
+
+#[test]
+fn legacy_marker_removed_hand_controller_continuation_reaches_priority() {
+    let (mut state, cards) =
+        real_single_owner_mass_library_order_state(Zone::Hand, TargetFilter::Controller);
+    let WaitingFor::EffectZoneChoice {
+        mass_library_order, ..
+    } = &mut state.waiting_for
+    else {
+        panic!("the production prompt must remain an EffectZoneChoice");
+    };
+    *mass_library_order = None;
+
+    apply_as_current(&mut state, GameAction::SelectCards { cards })
+        .expect("the legacy continuation preserves ChangeZoneAll controller scope");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// The compatibility gate proves a very specific archived producer. A prompt

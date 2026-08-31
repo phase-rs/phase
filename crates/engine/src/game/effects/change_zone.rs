@@ -227,6 +227,57 @@ pub(crate) fn change_zone_all_origin_zones(
     }
 }
 
+pub(crate) fn change_zone_all_player_scope(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerId> {
+    match target_filter {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::Player => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+            .or(Some(ability.controller)),
+        TargetFilter::ParentTarget => ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            _ => None,
+        }),
+        TargetFilter::ParentTargetController => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetController,
+        ),
+        TargetFilter::ParentTargetOwner => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetOwner,
+        ),
+        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ScopedPlayer,
+        ),
+        _ => None,
+    }
+}
+
+pub(crate) fn change_zone_all_player_scope_member_matches(
+    object: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    origin_zones: &[Zone],
+) -> bool {
+    origin_zones.contains(&object.zone)
+        && if object.zone == Zone::Battlefield {
+            object.controller == player
+        } else {
+            object.owner == player
+        }
+}
+
 /// CR 400.7 + CR 603.7c: A delayed tracked-set move retains an object-anaphor
 /// member predicate until its creation-time pin has been recorded. At firing,
 /// bind that predicate to the stored referent before the mass scan: the object
@@ -1756,48 +1807,7 @@ pub fn resolve_all(
     // into their library" (Player / ParentTarget / ParentTargetController).
     // Translate them here to "all cards owned by that player in the origin zone"
     // — the object-level matcher would otherwise reject them outright.
-    let player_scope: Option<crate::types::player::PlayerId> = match &target_filter {
-        TargetFilter::Controller => Some(ability.controller),
-        TargetFilter::Player => ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                crate::types::ability::TargetRef::Player(p) => Some(*p),
-                _ => None,
-            })
-            .or(Some(ability.controller)),
-        TargetFilter::ParentTarget => ability.targets.iter().find_map(|t| match t {
-            crate::types::ability::TargetRef::Player(p) => Some(*p),
-            _ => None,
-        }),
-        // CR 608.2c + CR 109.4: "that player shuffles their hand into their
-        // library" (Jace, the Mind Sculptor −12) binds the mass move to the
-        // parent instruction's chosen player via `ParentTargetController`.
-        TargetFilter::ParentTargetController => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ParentTargetController,
-        ),
-        // CR 108.3 + CR 608.2c: "its owner shuffles their graveyard into their
-        // library" mass moves key off owner, not controller.
-        TargetFilter::ParentTargetOwner => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ParentTargetOwner,
-        ),
-        // CR 603.2b + CR 102.1: "At the beginning of each player's draw step,
-        // that player puts the cards in their hand on the bottom of their
-        // library" (Teferi's Puzzle Box). The per-player trigger binds "that
-        // player" to `ScopedPlayer` (the active player whose step it is), so the
-        // whole-hand move must scan that player's hand, not the source
-        // controller's.
-        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ScopedPlayer,
-        ),
-        _ => None,
-    };
+    let player_scope = change_zone_all_player_scope(state, ability, &target_filter);
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, &target_filter);
@@ -1905,12 +1915,7 @@ pub fn resolve_all(
             .objects
             .iter()
             .filter(|(_, obj)| {
-                origin_zones.contains(&obj.zone)
-                    && if obj.zone == Zone::Battlefield {
-                        obj.controller == player
-                    } else {
-                        obj.owner == player
-                    }
+                change_zone_all_player_scope_member_matches(obj, player, &origin_zones)
             })
             .map(|(id, _)| *id)
             .collect()

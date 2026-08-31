@@ -132,17 +132,38 @@ fn legacy_mass_library_order_prompt_is_current(
         return false;
     }
 
-    let filter_context = super::filter::FilterContext::from_ability(ability);
     let permitted_origins =
         effects::change_zone::change_zone_all_origin_zones(state, *origin, target);
+    let player_scope = effects::change_zone::change_zone_all_player_scope(state, ability, target);
+    let filter_context = super::filter::FilterContext::from_ability_with_controller(
+        ability,
+        effects::controller_for_relative_filter(ability, target),
+    );
+    let member_is_current = |card_id: ObjectId, expected_owner| {
+        state.objects.get(&card_id).is_some_and(|object| {
+            permitted_origins.contains(&object.zone)
+                && object.owner == expected_owner
+                && match player_scope {
+                    Some(scope) => {
+                        effects::change_zone::change_zone_all_player_scope_member_matches(
+                            object,
+                            scope,
+                            &permitted_origins,
+                        )
+                    }
+                    None => super::filter::matches_target_filter(
+                        state,
+                        card_id,
+                        target,
+                        &filter_context,
+                    ),
+                }
+        })
+    };
     let mut all_members = std::collections::HashSet::new();
-    let current_batch_is_valid = cards.iter().all(|card_id| {
-        all_members.insert(*card_id)
-            && state.objects.get(card_id).is_some_and(|object| {
-                permitted_origins.contains(&object.zone) && object.owner == player
-            })
-            && super::filter::matches_target_filter(state, *card_id, target, &filter_context)
-    });
+    let current_batch_is_valid = cards
+        .iter()
+        .all(|card_id| all_members.insert(*card_id) && member_is_current(*card_id, player));
     if !current_batch_is_valid {
         return false;
     }
@@ -159,17 +180,7 @@ fn legacy_mass_library_order_prompt_is_current(
                         if !batches.is_empty() && batches.iter().all(|(owner, batch)| {
                         !batch.is_empty()
                             && batch.iter().all(|card_id| {
-                                all_members.insert(*card_id)
-                                    && state.objects.get(card_id).is_some_and(|object| {
-                                        permitted_origins.contains(&object.zone)
-                                            && object.owner == *owner
-                                    })
-                                    && super::filter::matches_target_filter(
-                                        state,
-                                        *card_id,
-                                        target,
-                                        &filter_context,
-                                    )
+                                all_members.insert(*card_id) && member_is_current(*card_id, *owner)
                             })
                         })
                 )
