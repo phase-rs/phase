@@ -24,7 +24,7 @@ use crate::types::game_state::{
     LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
     ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
     TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
-    WaitingFor,
+    TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -13063,6 +13063,94 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
     })
 }
 
+/// CR 603.4 + CR 608.2h + CR 113.7a: Selects the ONE authority that answers a
+/// subject-relative intervening-if leaf ("if you cast **it**").
+///
+/// CR 603.4: a `ZoneChanged` trigger event NAMES its subject, and that subject —
+/// never the trigger source — is what the pronoun binds to. The subject's live
+/// object may answer only while it is still THIS entrant:
+///   * CR 400.7: a leave + re-entry reuses the same `ObjectId` but bumps the
+///     object's incarnation, so a re-entered object is a different object for
+///     this trigger. `ZoneChangeRecord::entered_incarnation` is the entrant's
+///     post-entry incarnation; `None` (legacy / synthesized records) falls back
+///     to the zone-only check.
+///   * CR 400.7: `reset_for_battlefield_exit` clears the cast/play provenance
+///     stamps on the live object, so a departed subject answers "not cast" from
+///     information that is no longer valid.
+///
+/// CR 608.2h + CR 113.7a: once the subject is no longer in the zone it was
+/// expected to be in, its LAST KNOWN INFORMATION is used. The event's own
+/// `ZoneChangeRecord` owns the exact event-time projection of the subject
+/// (`GameObject::snapshot_for_zone_change`, captured pre-move at
+/// `game/zones.rs`), and `zone_changed_condition_provenance_is_coherent` has
+/// already proven that projection coherent with this event, so it is consumed
+/// here without re-deriving coherence.
+///
+/// PRECONDITION FOR THE LKI BRANCH — READ BEFORE REUSING THIS HELPER.
+/// The record's projection is snapshotted BEFORE the move that produced the
+/// record. It can therefore only answer for provenance that was stamped on the
+/// object BEFORE that move. That holds for `cast_from_zone` / `cast_controller`,
+/// which are written on the STACK object during casting
+/// (`game/casting_costs.rs`, `game/stack.rs`) and so are captured by the
+/// Stack->Battlefield snapshot. It does NOT hold universally: for example
+/// `entered_via_ability_source` (behind `TriggerCondition::PlacedByAbilitySource`)
+/// is written AFTER the move, inside `apply_resolved_entry_provenance`, so the record
+/// context never carries it and this helper's `Latched` branch would report
+/// `None` for it. Any migration of another condition arm onto this helper MUST
+/// first establish that the provenance it reads is stamped pre-move.
+///
+/// Returns `None` when the event names a subject that nothing can answer for —
+/// fail closed. A different object's provenance is NEVER substituted for the
+/// subject's; that substitution is issue #8163.
+///
+/// When the trigger event names no subject at all (a `SpellCast`-shaped event —
+/// Cascade, Ripple, Discover — or a CR 603.4 re-check with no stored event), the
+/// trigger SOURCE is the subject and its own `source_read` is the authority.
+///
+/// Mirrors the battlefield-entry LKI dispatch in `game/filter.rs`
+/// (`matches_zone_change_event_object_filter`), which solves the same problem for ETB
+/// trigger FILTERS.
+fn trigger_subject_read<'event, 'state>(
+    state: &'state GameState,
+    trigger_event: Option<&'event GameEvent>,
+    source_context: Option<&'event TriggerSourceContext>,
+) -> Option<TriggerSourceRead<'event, 'state>> {
+    let Some(GameEvent::ZoneChanged {
+        object_id, record, ..
+    }) = trigger_event
+    else {
+        // CR 603.4: no named subject — the trigger source IS the subject.
+        return source_context.map(|source| source.source_read(state));
+    };
+
+    let live = state.objects.get(object_id);
+    // CR 400.7: the live object answers only while it is still THIS entrant.
+    let is_entrant = live.is_some_and(|object| {
+        object.zone == record.to_zone
+            && record
+                .entered_incarnation
+                .is_none_or(|incarnation| object.incarnation == incarnation)
+    });
+    if is_entrant {
+        return live.map(TriggerSourceRead::ExactLive);
+    }
+
+    // CR 608.2h + CR 113.7a: the subject has left the zone it was expected in —
+    // its last known information is the event record's own projection.
+    record
+        .trigger_source_context()
+        .map(TriggerSourceRead::Latched)
+        // DEFENSIVE ONLY — unreachable in production. Every production
+        // `ZoneChanged` trigger event carries a record built by
+        // `GameObject::snapshot_for_zone_change`, whose context is always
+        // `Some` (token battlefield entries included, via
+        // `zones::record_and_emit_entry_from_no_zone`). Context-free records
+        // exist only in `#[cfg(test)]` fixtures (`ZoneChangeRecord::test_minimal`)
+        // and in hand-built / deserialized states; this arm keeps them
+        // answerable from the live object. NEVER the trigger source.
+        .or_else(|| live.map(TriggerSourceRead::ExactLive))
+}
+
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
 ///
@@ -13328,16 +13416,24 @@ fn evaluate_trigger_condition_with_source(
         // cast as a spell (regardless of origin zone). For ETB-based triggers like
         // Light-Paws, Emperor's Voice ("Whenever an Aura you control enters, if you
         // cast it..."), the trigger source is the permanent with the ability, not the
-        // entering Aura — so we must check the entering object from the trigger event,
-        // falling back to source_id for self-referential cases (Cascade's SpellCast
-        // event, Discover ETBs where source == cast spell).
+        // entering Aura — so the event's own SUBJECT is the authority. It is read
+        // live while it is still the entrant, and through its own event-record last
+        // known information (CR 608.2h + CR 113.7a) once it is not. The trigger
+        // SOURCE is consulted only when the event names no subject at all
+        // (Cascade's SpellCast event, Discover ETBs where source == cast spell).
+        // See `trigger_subject_read` and issue #8163.
         //
         // Negation ("if it wasn't cast" / "if none of them were cast") wraps via
-        // `Not { Box::new(WasCast) }`. The `Not` arm inverts the result, so a
-        // missing entering-object resolves Not(WasCast) to `true` (consistent
-        // with CR 603.4's intervening-if being permissive when source state is
-        // indeterminate; the ability is removed from the stack at resolution
-        // anyway per CR 603.4 if the source has left the relevant zone).
+        // `Not { Box::new(WasCast) }`. The `Not` arm inverts the result, so an
+        // unanswerable subject resolves Not(WasCast) to `true`. This is NOT because
+        // CR 603.4 removes the ability when the source leaves its zone — CR 603.4
+        // (`docs/MagicCompRules.txt:2596`) says nothing about the source's zone, and
+        // CR 113.7a explicitly says the opposite for abilities ("Destruction or
+        // removal of the source after that time won't affect the ability"). Rather,
+        // a subject the engine cannot answer for yields `false` for the plain
+        // condition, and `Not` inverts that `false` to `true` — the same
+        // "unanswerable is not a licence to substitute a different object" contract
+        // `trigger_subject_read` documents.
         // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
         // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
         // from zone z (Twilight Diviner: graveyard). Two independent scope axes:
@@ -13351,45 +13447,24 @@ fn evaluate_trigger_condition_with_source(
         //     cast from your graveyard"). An opponent casting your card from your
         //     graveyard satisfies owner=You; you casting from an opponent's
         //     graveyard does not.
-        // Reads the ENTERING object's cast provenance, never the trigger source.
+        // Reads the EVENT SUBJECT's cast provenance, never the trigger source —
+        // enforced by `trigger_subject_read`, not merely asserted here.
         TriggerCondition::WasCast {
             zone,
             controller: caster_scope,
             owner: owner_scope,
-        } => {
-            let event_object_id = trigger_event.and_then(|e| match e {
-                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                _ => None,
-            });
-            let event_matches =
-                event_object_id
-                    .and_then(|id| state.objects.get(&id))
-                    .is_some_and(|object| {
-                        object.cast_from_zone.is_some_and(|cast_zone| {
-                            zone.is_none_or(|expected| expected == cast_zone)
-                        }) && caster_scope.as_ref().is_none_or(|scope| {
-                            object.cast_controller.is_some_and(|caster| {
-                                controller_ref_matches_player(caster, controller, scope)
-                            })
-                        }) && owner_scope.as_ref().is_none_or(|scope| {
-                            controller_ref_matches_player(object.owner, controller, scope)
-                        })
-                    });
-            event_object_id.is_some_and(|_| event_matches)
-                || source_context.is_some_and(|source| {
-                    let read = source.source_read(state);
-                    read.cast_from_zone()
-                        .is_some_and(|cast_zone| zone.is_none_or(|expected| expected == cast_zone))
-                        && caster_scope.as_ref().is_none_or(|scope| {
-                            read.cast_controller().is_some_and(|caster| {
-                                controller_ref_matches_player(caster, controller, scope)
-                            })
-                        })
-                        && owner_scope.as_ref().is_none_or(|scope| {
-                            controller_ref_matches_player(read.owner(), controller, scope)
-                        })
+        } => trigger_subject_read(state, trigger_event, source_context).is_some_and(|read| {
+            read.cast_from_zone()
+                .is_some_and(|cast_zone| zone.is_none_or(|expected| expected == cast_zone))
+                && caster_scope.as_ref().is_none_or(|scope| {
+                    read.cast_controller().is_some_and(|caster| {
+                        controller_ref_matches_player(caster, controller, scope)
+                    })
                 })
-        }
+                && owner_scope.as_ref().is_none_or(|scope| {
+                    controller_ref_matches_player(read.owner(), controller, scope)
+                })
+        }),
         // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
         // the entering object was placed by THIS trigger's source ability.
         // Resolve the entering object from the ZoneChanged event (self-referential
@@ -33540,8 +33615,12 @@ pub mod tests {
         ));
     }
 
+    /// Issue #8163: Light-Paws was itself cast from hand — the normal way it
+    /// reaches the battlefield. The renamed assertion below only discriminates
+    /// the bug if the SOURCE's own cast provenance is realistic (i.e., present)
+    /// while the entering Aura's is not.
     #[test]
-    fn was_cast_false_when_aura_put_onto_battlefield_not_cast() {
+    fn was_cast_false_when_aura_put_onto_battlefield_even_though_source_was_cast() {
         let mut state = setup();
         let light_paws = create_object(
             &mut state,
@@ -33559,7 +33638,11 @@ pub mod tests {
         );
         // Aura entered via reanimation / Academy Rector-style "put onto battlefield".
         state.objects.get_mut(&aura).unwrap().cast_from_zone = None;
-        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = None;
+        // REALISTIC PROVENANCE (issue #8163): Light-Paws was itself cast from hand —
+        // the normal way it reaches the battlefield. Nulling the SOURCE's
+        // `cast_from_zone`, as this test previously did, masks the source fallback and
+        // makes the assertion vacuous: it passed even while the trigger recursed.
+        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = Some(Zone::Hand);
 
         let event = zone_changed_event(
             aura,
@@ -33826,6 +33909,522 @@ pub mod tests {
                 "both-axes-scoped gravecast mismatch: {label}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #8163: `TriggerCondition::WasCast` must read the TRIGGER EVENT's
+    // subject — live while it is still the entrant, its own event-record last
+    // known information once it is not (CR 608.2h + CR 113.7a) — and read the
+    // trigger SOURCE only when the event names no subject at all. See
+    // `trigger_subject_read` above the `WasCast` arm.
+    // ---------------------------------------------------------------------
+
+    /// The entry event's record owns the subject's exact event-time projection
+    /// (`GameObject::snapshot_for_zone_change`), which is what CR 608.2h reads once
+    /// the entrant has left. Built from the live STACK object so `cast_from_zone`
+    /// and `cast_controller` are the real cast stamps.
+    fn battlefield_entry_event_from_live(state: &GameState, object_id: ObjectId) -> GameEvent {
+        let object = state.objects.get(&object_id).expect("entrant exists");
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(object.snapshot_for_zone_change(
+                object_id,
+                Some(Zone::Stack),
+                Zone::Battlefield,
+            )),
+        }
+    }
+
+    /// Shared U4-U7 fixture: a separate SOURCE permanent (Light-Paws shape,
+    /// deliberately stamped `cast_from_zone = None` so a wrongly-consulted
+    /// source fallback answers `false`) and an ENTRANT (Feasting Troll King
+    /// shape) that was genuinely cast from hand, then left the battlefield
+    /// before the CR 603.4 re-check with its live cast provenance cleared —
+    /// exactly as `reset_for_battlefield_exit` clears it. Returns
+    /// `(state, source, entrant, entry_event)`.
+    fn was_cast_lki_fixture() -> (GameState, ObjectId, ObjectId, GameEvent) {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().cast_from_zone = None;
+
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Feasting Troll King".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.cast_controller = Some(PlayerId(0));
+        }
+        let event = battlefield_entry_event_from_live(&state, entrant);
+
+        // Simulate `reset_for_battlefield_exit`: the entrant left before the
+        // CR 603.4 re-check, and its live cast provenance is cleared (CR 400.7).
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.cast_from_zone = None;
+            obj.cast_controller = None;
+        }
+
+        (state, source, entrant, event)
+    }
+
+    /// Issue #8163, primary unit discriminator: the trigger SOURCE having been
+    /// cast must never license a different, entering SUBJECT that was NOT
+    /// cast. CR 603.4: "if you cast it" binds to the trigger event's subject,
+    /// not the ability's source.
+    #[test]
+    fn light_paws_source_was_cast_entering_aura_was_not() {
+        let mut state = setup();
+        let light_paws = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = Some(Zone::Hand);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fetched Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().cast_from_zone = None;
+
+        let event = zone_changed_event(
+            aura,
+            Zone::Library,
+            Zone::Battlefield,
+            vec![CoreType::Enchantment],
+            vec!["Aura"],
+        );
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(light_paws),
+                Some(&event),
+            ),
+            "the source's own cast provenance must never answer for a different, uncast subject"
+        );
+    }
+
+    /// Paired reach-guard for `light_paws_source_was_cast_entering_aura_was_not`:
+    /// an entrant that WAS cast must still fire, proving the negative above is
+    /// not vacuous.
+    #[test]
+    fn light_paws_entering_aura_was_cast_fires() {
+        let mut state = setup();
+        let light_paws = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = Some(Zone::Hand);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cast Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        let event = zone_changed_event(
+            aura,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Enchantment],
+            vec!["Aura"],
+        );
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(light_paws),
+                Some(&event),
+            ),
+            "paired reach-guard for U1: an entrant that WAS cast must still fire"
+        );
+    }
+
+    /// CR 603.4: source fallback survives only when the event names no
+    /// subject at all (Cascade / Ripple / Discover / a resolution re-check
+    /// with no stored event).
+    #[test]
+    fn was_cast_source_fallback_survives_for_spell_cast_shape() {
+        let mut state = setup();
+        let cascade_spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cascading Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&cascade_spell)
+            .unwrap()
+            .cast_from_zone = Some(Zone::Hand);
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(cascade_spell),
+                None,
+            ),
+            "the source fallback must still answer when the event names no subject at all"
+        );
+
+        state
+            .objects
+            .get_mut(&cascade_spell)
+            .unwrap()
+            .cast_from_zone = None;
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(cascade_spell),
+                None,
+            ),
+            "the source fallback answers `false` once its own cast provenance is cleared"
+        );
+    }
+
+    /// Blocker-1 unit guard: once the entrant has left the zone it was
+    /// expected in, its own event-record last known information answers the
+    /// intervening-if — never the trigger source, which is deliberately
+    /// stamped `cast_from_zone = None` in the shared fixture.
+    #[test]
+    fn was_cast_reads_event_record_lki_when_entrant_has_left() {
+        let (state, source, _entrant, event) = was_cast_lki_fixture();
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "the event record's own LKI must answer once the entrant has left, per \
+             CR 608.2h — never the trigger source, which is separately stamped as NOT cast"
+        );
+    }
+
+    /// This test retires the `cast_controller` caveat (plan §3.3): it fails if
+    /// `cast_controller` is unreachable from the event record's
+    /// `TriggerSourceContext`.
+    #[test]
+    fn was_cast_record_lki_answers_zone_caster_and_owner_scopes() {
+        let (state, source, _entrant, event) = was_cast_lki_fixture();
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: Some(Zone::Hand),
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "fails if `cast_controller` is unreachable from the record — this test \
+             retires the cast_controller caveat (issue #8163 plan §3.3)"
+        );
+    }
+
+    /// Paired negative for `was_cast_record_lki_answers_zone_caster_and_owner_scopes`.
+    #[test]
+    fn was_cast_record_lki_rejects_wrong_caster_scope() {
+        let (state, source, _entrant, event) = was_cast_lki_fixture();
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: Some(Zone::Hand),
+                    controller: Some(ControllerRef::Opponent),
+                    owner: Some(ControllerRef::You),
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "paired negative: the record LKI's caster does not match the Opponent scope"
+        );
+    }
+
+    /// CR 400.7: a leave + re-entry reuses the same `ObjectId` but bumps the
+    /// object's incarnation, so a re-entered object is a different object for
+    /// this trigger — it must not answer for the ORIGINAL entrant's
+    /// provenance. Mirrors `filter.rs:3026-3032`.
+    #[test]
+    fn was_cast_reads_original_entrant_lki_after_leave_and_reentry() {
+        let (mut state, source, entrant, mut event) = was_cast_lki_fixture();
+        let entered_incarnation = 5;
+        if let GameEvent::ZoneChanged { record, .. } = &mut event {
+            record.entered_incarnation = Some(entered_incarnation);
+        }
+        // The entrant left and came back as a NEW object at the same storage
+        // id, two incarnations later, with no memory of its old cast stamps.
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.incarnation = entered_incarnation + 2;
+            obj.cast_from_zone = None;
+            obj.cast_controller = None;
+        }
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "CR 400.7: a later incarnation at the same storage id must not answer for \
+             the original entrant — the record LKI of the ORIGINAL entry must still be read"
+        );
+    }
+
+    /// Pins the fail-closed contract: an unanswerable subject (absent from
+    /// `state.objects`, with a context-free `test_minimal` record) must never
+    /// fall back to the trigger source, even though the source WAS cast.
+    #[test]
+    fn was_cast_false_when_subject_absent_and_record_has_no_context() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws, Emperor's Voice".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        // A subject id absent from `state.objects`, with a context-free
+        // `test_minimal` record — no authority can answer for it.
+        let vanished = ObjectId(999_999);
+        let event = zone_changed_event(
+            vanished,
+            Zone::Library,
+            Zone::Battlefield,
+            vec![CoreType::Enchantment],
+            vec!["Aura"],
+        );
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "fail-closed: an unanswerable subject must never fall back to the source, \
+             even though the source WAS cast"
+        );
+    }
+
+    /// Proves authority selection is upstream of the zone/caster/owner axes:
+    /// the source's own `{Hand, You, You}` must not satisfy a zone-scoped
+    /// check for an entrant that wasn't cast, even though the source's stamp
+    /// would exactly satisfy the scope if it were (wrongly) consulted.
+    #[test]
+    fn was_cast_zone_scoped_reads_event_subject_not_source() {
+        let mut state = setup();
+        let wild_pair = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wild Pair".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&wild_pair).unwrap();
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.cast_controller = Some(PlayerId(0));
+        }
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&entering).unwrap().cast_from_zone = None;
+
+        let event = zone_changed_event(
+            entering,
+            Zone::Library,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::WasCast {
+                    zone: Some(Zone::Hand),
+                    controller: Some(ControllerRef::You),
+                    owner: Some(ControllerRef::You),
+                },
+                PlayerId(0),
+                Some(wild_pair),
+                Some(&event),
+            ),
+            "authority selection must be upstream of the scope axes: the source's \
+             matching {{Hand, You, You}} must not satisfy the check for an entrant \
+             that wasn't cast"
+        );
+    }
+
+    /// Issue #8163, opposite-polarity discriminator: `Not(WasCast)` must
+    /// invert the CORRECTED result. Preston-shaped: a reanimated (put, not
+    /// cast) creature enters while the source WAS cast from hand — today's bug
+    /// makes this a false NEGATIVE (the mirror of Light-Paws' false positive).
+    #[test]
+    fn not_was_cast_true_for_put_permanent_when_source_was_cast() {
+        let mut state = setup();
+        let preston = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Preston, the Vanisher".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&preston).unwrap().cast_from_zone = Some(Zone::Hand);
+        let reanimated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Reanimated Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&reanimated).unwrap().cast_from_zone = None;
+
+        let event = zone_changed_event(
+            reanimated,
+            Zone::Graveyard,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        let condition = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+                owner: None,
+            }),
+        };
+
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(preston), Some(&event),),
+            "issue #8163, opposite polarity: a put (not cast) subject must satisfy \
+             Not(WasCast) even though the source WAS cast"
+        );
+    }
+
+    /// Paired reach-guard for `not_was_cast_true_for_put_permanent_when_source_was_cast`.
+    #[test]
+    fn not_was_cast_false_for_cast_permanent() {
+        let mut state = setup();
+        let preston = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Preston, the Vanisher".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&preston).unwrap().cast_from_zone = Some(Zone::Hand);
+        let cast_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cast Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cast_creature)
+            .unwrap()
+            .cast_from_zone = Some(Zone::Hand);
+
+        let event = zone_changed_event(
+            cast_creature,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        let condition = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+                owner: None,
+            }),
+        };
+
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(preston), Some(&event),),
+            "paired reach-guard: a cast subject must not satisfy Not(WasCast)"
+        );
     }
 
     /// CR 603.4 + CR 601.2h: Satoru's intervening-if must fail at resolution
