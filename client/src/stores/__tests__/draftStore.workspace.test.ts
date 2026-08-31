@@ -57,7 +57,9 @@ const persistence = vi.hoisted(() => ({
   ),
   publishStagedDraftMatch: vi.fn(async () => undefined),
   recordDraftMatchResult: vi.fn(async () => null),
-  runLimits: vi.fn(() => ({ maxWins: 1, maxLosses: 1 })),
+  runLimits: vi.fn((format: string) => (
+    format === "run" ? { maxWins: 7, maxLosses: 3 } : { maxWins: 1, maxLosses: 1 }
+  )),
 }));
 
 vi.mock("@wasm/draft", () => wasm);
@@ -785,6 +787,101 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().phase).toBe("launching");
     expect(useDraftStore.getState().runFormat).toBe("run");
     expect(useDraftStore.getState().runState).toBeNull();
+  });
+
+  it("resumes an interrupted first-match launch from the durable run (stale launching meta)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    // Crash between publishInitialDraftMatch's run write and meta write:
+    // meta still says "launching", but the durable run is committed with an
+    // active staged match. Resume must show Between Matches, not the picker.
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValueOnce({
+      id: "interrupted-launch-id",
+      setCode: "TST",
+      setName: "Test",
+      difficulty: 2,
+      kind: "Sealed",
+      phase: "launching",
+      runFormat: "run",
+    });
+    persistence.loadQuickDraftSession.mockResolvedValueOnce({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: {},
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValueOnce({
+      format: "run",
+      results: [],
+      playerDeck: ["C1", "C2"],
+      opponentDeck: ["O1", "O2"],
+      usedBotSeats: [1],
+      activeMatch: {
+        draftId: "interrupted-launch-id",
+        gameId: "g1",
+        format: "run",
+        resultCountAtLaunch: 0,
+        botSeat: 1,
+        opponentDeck: ["O1", "O2"],
+      },
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind: "Sealed",
+      status: "Pairing",
+    });
+
+    await useDraftStore.getState().resumeDraft();
+
+    expect(useDraftStore.getState().phase).toBe("playing");
+    expect(useDraftStore.getState().runState?.activeMatch?.gameId).toBe("g1");
+  });
+
+  it("resumes a terminal run as complete (stale playing meta)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    // Crash between recordDraftMatchResult's run write and meta write: meta
+    // still says "playing", but the durable run has hit the 3-loss limit.
+    // Resume must show RunComplete — Between Matches would reject Next Match.
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValueOnce({
+      id: "interrupted-result-id",
+      setCode: "TST",
+      setName: "Test",
+      difficulty: 2,
+      kind: "Sealed",
+      phase: "playing",
+      runFormat: "run",
+    });
+    persistence.loadQuickDraftSession.mockResolvedValueOnce({
+      sessionJson: "session",
+      mainDeck: ["C1", "C2"],
+      landCounts: {},
+      poolSortMode: "color",
+      poolPanelOpen: true,
+      workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValueOnce({
+      format: "run",
+      results: [
+        { gameId: "g1", result: "loss" },
+        { gameId: "g2", result: "loss" },
+        { gameId: "g3", result: "loss" },
+      ],
+      playerDeck: ["C1", "C2"],
+      opponentDeck: ["O1", "O2"],
+      usedBotSeats: [1],
+      activeMatch: undefined,
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("c1", "C1"), card("c2", "C2")]),
+      kind: "Sealed",
+      status: "Pairing",
+    });
+
+    await useDraftStore.getState().resumeDraft();
+
+    expect(useDraftStore.getState().phase).toBe("complete");
+    expect(useDraftStore.getState().runState?.results).toHaveLength(3);
   });
 
   it.each([
