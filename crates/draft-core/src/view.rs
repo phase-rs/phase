@@ -2264,7 +2264,7 @@ mod tests {
 
         let assert_counts = |session: &DraftSession, expected: &[u8]| {
             assert_eq!(
-                filter_for_player(&session, 0)
+                filter_for_player(session, 0)
                     .seats
                     .iter()
                     .map(|seat| seat.active_pack_count)
@@ -2272,7 +2272,7 @@ mod tests {
                 expected,
             );
             assert_eq!(
-                filter_for_spectator(&session, SpectatorVisibility::Public)
+                filter_for_spectator(session, SpectatorVisibility::Public)
                     .seats
                     .iter()
                     .map(|seat| seat.active_pack_count)

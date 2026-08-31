@@ -187,7 +187,7 @@ function PackCard({
     <motion.div
       data-instance-id={card.instance_id}
       data-visual-state={state}
-      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 transition-all duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.08]" : ""}`} ${state === "selected" ? "z-10 !duration-0 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_7px_3px_rgb(3,139,6)] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
+      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.08]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_7px_3px_rgb(3,139,6)] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
       style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
       onMouseEnter={() => onHover(cardInfo(card))}
       onMouseLeave={() => onHover(null)}
