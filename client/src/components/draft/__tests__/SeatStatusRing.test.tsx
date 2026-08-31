@@ -81,7 +81,9 @@ describe("SeatStatusRing", () => {
       "border-jade/80",
       "bg-slate-950/80",
       "text-xs",
+      "text-jade",
     );
+    expect(within(packIcon).getByText("1")).not.toHaveClass("text-white");
   });
 
   it("places right-pass arrows before their equal-width seat badges", () => {

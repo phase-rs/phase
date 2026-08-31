@@ -320,12 +320,19 @@ describe("DraftPodPage workspace", () => {
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.workspace?.responsiveLayout).toBe(responsiveLayout);
-    expect(captured.workspace?.tabletSideboardAccessory).toBeDefined();
     expect(captured.menuShell).toMatchObject({ compactTopPadding: false });
     expect(screen.getByTestId("seat-status-ring")).toBeInTheDocument();
-    expect(captured.hostPresentations).toEqual(["integrated"]);
-    expect(screen.getByTestId("host-controls-integrated")).toBeInTheDocument();
-    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    if (responsiveLayout === "tablet-portrait") {
+      expect(captured.workspace?.tabletSideboardAccessory).toBeDefined();
+      expect(captured.hostPresentations).toEqual(["integrated"]);
+      expect(screen.getByTestId("host-controls-integrated")).toBeInTheDocument();
+      expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    } else {
+      expect(captured.workspace?.tabletSideboardAccessory).toBeUndefined();
+      expect(captured.hostPresentations).toEqual(["floating"]);
+      expect(screen.queryByTestId("host-controls-integrated")).not.toBeInTheDocument();
+      expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    }
 
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);

@@ -79,7 +79,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
       <span className="sr-only">{t("seat.activePackCount", { count: activePackCount, player: seat.display_name || t("seat.label", { number: seat.seat_index + 1 }) })}</span>
       <span className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2" aria-hidden="true">
         <img src="/icons/packs.svg" alt="" className={`h-full w-full object-contain ${activePackCount === 0 ? "opacity-35 grayscale" : ""}`} />
-        <span className="absolute inset-[5px] flex items-center justify-center rounded-full border border-jade/80 bg-slate-950/80 font-mono text-xs font-bold tabular-nums text-white shadow-[0_0_0_1px_rgb(3_139_6_/_0.3)]">{activePackCount}</span>
+        <span className="absolute inset-[5px] flex items-center justify-center rounded-full border border-jade/80 bg-slate-950/80 font-mono text-xs font-bold tabular-nums text-jade shadow-[0_0_0_1px_rgb(3_139_6_/_0.3)]">{activePackCount}</span>
       </span>
     </div>
   );
