@@ -609,6 +609,78 @@ fn format_config_deserialization_rejects_matching_id_but_structurally_contradict
 }
 
 #[test]
+fn format_config_deserialization_rejects_a_built_in_with_a_looser_forged_copy_limit() {
+    // The exact hostile payload named in the maintainer's Finding 1 review:
+    // {"format":"Standard","default_deck_copy_limit":{"type":"Unlimited"},...}.
+    // Built as a real FormatConfig value and round-tripped through
+    // serde_json — a hand-typed bare-string literal like
+    // "default_deck_copy_limit":"Unlimited" would fail with a type
+    // mismatch before ever reaching the new check (DeckCopyLimit's
+    // `#[serde(tag = "type", content = "data")]` shape only accepts
+    // {"type":"Unlimited"}), which would make this test pass for the wrong
+    // reason. Standard's true CR 100.2a ceiling is UpTo(4); accepting
+    // Unlimited would let max_deck_copies (and, pre-fix, admission)
+    // disclose/enforce a 60-copy Lightning Bolt deck as legal.
+    let mut forged = FormatConfig::standard();
+    forged.default_deck_copy_limit = DeckCopyLimit::Unlimited;
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Standard payload forging Unlimited copies must be rejected");
+    assert!(
+        error.to_string().contains("more permissive"),
+        "expected the copy-limit rejection message (proving this specific check fired, \
+         not some other deserialize failure), got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_commander_with_a_looser_forged_copy_limit() {
+    // Same attack against a command-zone singleton format: forging UpTo(4)
+    // in place of Commander's true CR 903.5b ceiling (UpTo(1)) would let a
+    // 4-of Sol Ring through.
+    let mut forged = FormatConfig::commander();
+    forged.default_deck_copy_limit = DeckCopyLimit::UpTo(4);
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Commander payload forging UpTo(4) copies must be rejected");
+    assert!(
+        error.to_string().contains("more permissive"),
+        "expected the copy-limit rejection message, got: {error}"
+    );
+}
+
+#[test]
+fn format_config_deserialization_accepts_every_builtin_registry_default_copy_limit() {
+    // Paired positive control: every registry built-in's own correct,
+    // untouched default_deck_copy_limit must still round-trip successfully
+    // — the new check must not reject legitimate payloads. Iterates
+    // GameFormat::registry() dynamically rather than a hardcoded count, so
+    // this stays correct as formats are added.
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: a config using the format's own real default_deck_copy_limit must be accepted",
+            meta.format
+        );
+    }
+}
+
+#[test]
+fn format_config_deserialization_accepts_a_stricter_than_truth_copy_limit() {
+    // A declared value STRICTER than truth (including the pre-existing
+    // default_deck_copy_limit_fallback() == UpTo(1) that a legacy payload
+    // predating this field resolves to) can only under-permit, never admit
+    // an illegal deck, and must not be rejected — this is the backward-
+    // compatibility case the strict-equality alternative would have broken.
+    let mut stricter = FormatConfig::standard();
+    stricter.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+    let json = serde_json::to_value(&stricter).unwrap();
+    assert!(serde_json::from_value::<FormatConfig>(json).is_ok());
+}
+
+#[test]
 fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
     // Paired positive control for the rejection test below: a normal
     // built-in game's persisted state must still round-trip successfully,

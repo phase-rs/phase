@@ -56,6 +56,25 @@ pub struct DeckCompatibilityRequest {
         deserialize_with = "deserialize_draft_set_codes"
     )]
     pub draft_set_codes: Vec<String>,
+    /// The resolved copy-limit ceiling to enforce for this request's
+    /// `selected_format`, threaded in by a trusted caller from an
+    /// already-validated `FormatConfig.default_deck_copy_limit` (see
+    /// `FormatConfig`'s `Deserialize` impl in `types::format`, which refuses
+    /// to let a built-in format's stored value be more permissive than
+    /// `GameFormat::default_deck_copy_limit()` allows). `None` means "no
+    /// resolved config available" — every consumer falls back to the bare
+    /// `GameFormat::default_deck_copy_limit()` method via
+    /// `resolved_copy_limit`, identical to this crate's pre-fix behavior.
+    ///
+    /// `#[serde(skip_deserializing)]`: this field can NEVER be set from an
+    /// external deserialization boundary — the WASM bridge's
+    /// `evaluate_deck_compatibility_js` and friends deserialize
+    /// `DeckCompatibilityRequest` directly from untrusted client JSON, and
+    /// this field must never become a second, independently-forgeable
+    /// channel for the same claim `FormatConfig::deserialize` already gates.
+    /// Only trusted Rust code building this struct by hand may populate it.
+    #[serde(skip_deserializing)]
+    pub default_deck_copy_limit: Option<DeckCopyLimit>,
 }
 
 /// Engine-authored deck-builder state for selecting an Oathbreaker's signature
@@ -417,6 +436,7 @@ pub fn validate_name_deck_for_format_full(
         player_count,
         summary_only: false,
         draft_set_codes: draft_set_codes.to_vec(),
+        default_deck_copy_limit: Some(format_config.default_deck_copy_limit),
     };
     validate_deck_for_format(db, &request)
 }
@@ -430,6 +450,7 @@ fn evaluate_standard(
         db,
         request,
         unknown_cards,
+        GameFormat::Standard,
         LegalityFormat::Standard,
         "Standard",
         GameFormat::Standard.sideboard_policy(),
@@ -448,6 +469,7 @@ fn evaluate_constructed(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
+    format: GameFormat,
     legality_format: LegalityFormat,
     format_label: &str,
     sideboard_policy: SideboardPolicy,
@@ -480,15 +502,13 @@ fn evaluate_constructed(
         }
     }
 
-    // CR 100.2a + CR 100.4a: The 4-card limit applies to main + sideboard combined.
+    // CR 100.2a + CR 100.4a: The copy limit applies to main + sideboard
+    // combined, at the ceiling the request's resolved format config carries.
+    let limit = resolved_copy_limit(request, format);
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
+    let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
-        reasons.push(summarize_cards(
-            "More than 4 copies (main + sideboard combined)",
-            &over_limit,
-            6,
-        ));
+        reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
     }
 
     let mut illegal_cards = BTreeSet::new();
@@ -569,14 +589,11 @@ fn evaluate_planechase(
         ));
     }
 
+    let limit = resolved_copy_limit(request, GameFormat::Planechase);
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
+    let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
-        reasons.push(summarize_cards(
-            "More than 4 copies (main + sideboard combined)",
-            &over_limit,
-            6,
-        ));
+        reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
     }
 
     if request.planar_deck.is_empty() {
@@ -677,14 +694,11 @@ fn evaluate_archenemy(
         ));
     }
 
+    let limit = resolved_copy_limit(request, GameFormat::Archenemy);
     let counts = combined_copy_counts(db, request);
-    let over_limit = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4));
+    let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
-        reasons.push(summarize_cards(
-            "More than 4 copies (main + sideboard combined)",
-            &over_limit,
-            6,
-        ));
+        reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
     }
 
     if !request.scheme_deck.is_empty() {
@@ -1056,7 +1070,7 @@ fn evaluate_commander_with_format(
     // caller.
     let counts = combined_copy_counts(db, request);
     let singleton_violations =
-        copy_limit_violations(db, &counts, game_format.default_deck_copy_limit());
+        copy_limit_violations(db, &counts, resolved_copy_limit(request, game_format));
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1231,7 +1245,8 @@ fn evaluate_brawl(
     // CR 903.5b (Brawl variant): singleton rule, basic lands exempt, canonicalized
     // via CR 201.3 in the shared helper.
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
+    let singleton_violations =
+        copy_limit_violations(db, &counts, resolved_copy_limit(request, game_format));
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1475,7 +1490,11 @@ fn evaluate_tiny_leaders(
     }
 
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
+    let singleton_violations = copy_limit_violations(
+        db,
+        &counts,
+        resolved_copy_limit(request, GameFormat::TinyLeaders),
+    );
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -1808,7 +1827,11 @@ fn evaluate_oathbreaker(
     // singleton command-zone formats). `all_deck_cards` now includes `signature_spell`
     // so a card in both the main deck and signature-spell slot is caught here.
     let counts = combined_copy_counts(db, request);
-    let singleton_violations = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(1));
+    let singleton_violations = copy_limit_violations(
+        db,
+        &counts,
+        resolved_copy_limit(request, GameFormat::Oathbreaker),
+    );
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
             "Singleton violations",
@@ -2067,6 +2090,7 @@ fn evaluate_selected_format_summary(
         GameFormat::Standard => quick_constructed_check(
             db,
             request,
+            GameFormat::Standard,
             LegalityFormat::Standard,
             "Standard",
             GameFormat::Standard.sideboard_policy(),
@@ -2081,6 +2105,7 @@ fn evaluate_selected_format_summary(
         | GameFormat::Pauper => quick_constructed_check(
             db,
             request,
+            format,
             format.legality_format().unwrap(),
             &format.label(),
             format.sideboard_policy(),
@@ -2173,6 +2198,7 @@ impl QuickCheckResult {
 fn quick_constructed_check(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
+    format: GameFormat,
     legality_format: LegalityFormat,
     format_label: &str,
     sideboard_policy: SideboardPolicy,
@@ -2226,13 +2252,9 @@ fn quick_constructed_check(
         }
     }
 
-    if let Some(reason) = copy_limit_violations(db, &counts, DeckCopyLimit::UpTo(4))
-        .into_iter()
-        .next()
-    {
-        return QuickCheckResult::incompatible(format!(
-            "More than 4 copies (main + sideboard combined): {reason}"
-        ));
+    let limit = resolved_copy_limit(request, format);
+    if let Some(reason) = copy_limit_violations(db, &counts, limit).into_iter().next() {
+        return QuickCheckResult::incompatible(format!("{}: {reason}", copy_limit_label(limit)));
     }
     if let Some(reason) = restricted_copy_violations(db, &counts, &restricted)
         .into_iter()
@@ -2416,9 +2438,10 @@ fn quick_commander_check(
     // have a different English name — but CR 903.13f(2) disapplies that for
     // Commander Draft. The limit is a format axis, so this asks `game_format`
     // the same question the full validator asks and the two cannot disagree.
-    if let Some(reason) = copy_limit_violations(db, &counts, game_format.default_deck_copy_limit())
-        .into_iter()
-        .next()
+    if let Some(reason) =
+        copy_limit_violations(db, &counts, resolved_copy_limit(request, game_format))
+            .into_iter()
+            .next()
     {
         return QuickCheckResult::incompatible(format!("Singleton violations: {reason}"));
     }
@@ -2532,6 +2555,7 @@ fn evaluate_selected_format(
                 db,
                 request,
                 unknown_cards,
+                format,
                 format.legality_format().unwrap(),
                 &format.label(),
                 format.sideboard_policy(),
@@ -2956,6 +2980,42 @@ fn restricted_copy_violations(
         violations.insert(format!("{display} ({count} copies)"));
     }
     violations
+}
+
+/// CR 100.2a / CR 100.2b / CR 903.5b: the copy-limit ceiling every
+/// `evaluate_*`/`quick_*` dispatch function must enforce for `format`,
+/// honoring a caller-threaded resolved value
+/// (`DeckCompatibilityRequest::default_deck_copy_limit`) when present and
+/// falling back to the bare `GameFormat::default_deck_copy_limit()`
+/// otherwise — identical to every one of these functions' pre-fix
+/// behavior when no resolved config is threaded in. This is admission's
+/// single authority for the format-default half of the copy rule, mirroring
+/// `max_deck_copies`'s query-shaped counterpart so the two can never
+/// diverge for a request that carries a resolved config.
+fn resolved_copy_limit(request: &DeckCompatibilityRequest, format: GameFormat) -> DeckCopyLimit {
+    request
+        .default_deck_copy_limit
+        .unwrap_or_else(|| format.default_deck_copy_limit())
+}
+
+/// CR 100.2a / CR 100.4a: the violation-message prefix for an overrun of
+/// `limit`, derived from the limit actually enforced rather than a hardcoded
+/// "More than 4" — the resolved ceiling can legitimately be stricter than a
+/// format's bare default, and a message naming the wrong number is a lie to
+/// the deck builder. Single authority for this label so the four
+/// combined-main+sideboard consumers can never disagree.
+fn copy_limit_label(limit: DeckCopyLimit) -> String {
+    match limit {
+        DeckCopyLimit::UpTo(n) => format!("More than {n} copies (main + sideboard combined)"),
+        // `copy_limit_violations` never populates violations under
+        // `DeckCopyLimit::Unlimited` (an unlimited ceiling has no overrun to
+        // report), so callers only reach this with a non-empty violation set
+        // under `UpTo(..)`. Kept total rather than `unreachable!` so a future
+        // caller that labels a limit without a violation set cannot panic.
+        DeckCopyLimit::Unlimited => {
+            "More than the allowed copies (main + sideboard combined)".to_string()
+        }
+    }
 }
 
 /// CR 100.2a / CR 205.4c / CR 903.5b: The copy ceiling that actually applies to
@@ -3996,6 +4056,7 @@ mod tests {
             player_count,
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         }
     }
 
@@ -4045,6 +4106,7 @@ mod tests {
             player_count: 4,
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         }
     }
 
@@ -4360,6 +4422,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4388,6 +4451,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4598,6 +4662,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let counts = combined_copy_counts(&db, &request);
@@ -4623,6 +4688,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4651,6 +4717,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: true,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4673,6 +4740,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4716,6 +4784,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4762,6 +4831,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4794,6 +4864,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let with_sideboard = DeckCompatibilityRequest {
             sideboard: vec!["Legal Standard".to_string()],
@@ -4828,6 +4899,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4857,6 +4929,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4932,6 +5005,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5008,6 +5082,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5083,6 +5158,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5113,6 +5189,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5140,6 +5217,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let thg_request = DeckCompatibilityRequest {
             signature_spell: Vec::new(),
@@ -5173,6 +5251,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let commander_request = DeckCompatibilityRequest {
             main_deck: expand("Legal Standard", 99),
@@ -5187,6 +5266,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let standard_result = evaluate_deck_compatibility(&db, &standard_request);
@@ -5226,6 +5306,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5247,6 +5328,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5270,6 +5352,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5297,6 +5380,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5325,6 +5409,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5346,6 +5431,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5369,6 +5455,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5460,6 +5547,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5487,11 +5575,13 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let check = evaluate_constructed(
             &db,
             &request,
             &unknown_cards,
+            GameFormat::Pioneer,
             LegalityFormat::Pioneer,
             "Pioneer",
             GameFormat::Pioneer.sideboard_policy(),
@@ -5520,6 +5610,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5541,6 +5632,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5562,6 +5654,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5590,6 +5683,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5615,6 +5709,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5640,6 +5735,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5665,6 +5761,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5706,6 +5803,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5737,6 +5835,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5769,6 +5868,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6188,6 +6288,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -6222,6 +6323,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6242,6 +6344,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -6281,6 +6384,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6301,6 +6405,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -6336,6 +6441,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6358,6 +6464,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6384,6 +6491,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6412,6 +6520,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6438,6 +6547,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6464,6 +6574,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6518,6 +6629,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6545,6 +6657,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(!result.commander.compatible);
@@ -6573,6 +6686,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -6638,6 +6752,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6702,6 +6817,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6731,6 +6847,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6760,6 +6877,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let err = validate_deck_for_format(&db, &request)
             .expect_err("16-card sideboard must be rejected at registration");
@@ -6785,6 +6903,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6817,6 +6936,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -6922,6 +7042,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6949,6 +7070,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6976,6 +7098,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -7007,6 +7130,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -7069,6 +7193,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -7100,6 +7225,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -7136,6 +7262,7 @@ mod tests {
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
         }
     }
 
@@ -7300,5 +7427,259 @@ mod tests {
         let check = evaluate_momir(&db, &request, &BTreeSet::new());
         assert!(!check.compatible, "Momir's Madness has no sideboard");
         assert!(check.reasons.iter().any(|r| r.contains("sideboard")));
+    }
+
+    #[test]
+    fn resolved_copy_limit_falls_back_to_the_bare_method_when_unset() {
+        let request = DeckCompatibilityRequest::default();
+        assert_eq!(
+            resolved_copy_limit(&request, GameFormat::Standard),
+            GameFormat::Standard.default_deck_copy_limit()
+        );
+    }
+
+    #[test]
+    fn resolved_copy_limit_prefers_a_threaded_resolved_value() {
+        let request = DeckCompatibilityRequest {
+            default_deck_copy_limit: Some(DeckCopyLimit::UpTo(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_copy_limit(&request, GameFormat::Standard),
+            DeckCopyLimit::UpTo(1)
+        );
+    }
+
+    #[test]
+    fn deck_compatibility_request_default_deck_copy_limit_is_wire_inert() {
+        // `#[serde(skip_deserializing)]` must hold: the WASM bridge
+        // deserializes this struct straight from untrusted client JSON, and
+        // this field must never become a second forgeable channel for the
+        // claim `FormatConfig::deserialize` already gates.
+        let json = serde_json::json!({
+            "selected_format": "Standard",
+            "default_deck_copy_limit": { "type": "Unlimited" }
+        });
+        let request: DeckCompatibilityRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(request.default_deck_copy_limit, None);
+    }
+
+    #[test]
+    fn admission_and_max_deck_copies_agree_on_the_format_default_copy_limit() {
+        // Filler is basic Plains (CR 205.4c-exempt, exactly as the shared
+        // `legal_60_main` helper does) so the only card the copy rule can
+        // bind on is "Red Card" — a non-basic filler would itself blow the
+        // ceiling and make both halves pass for the wrong reason.
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let format_config = FormatConfig::standard();
+
+        assert_eq!(
+            max_deck_copies(&db, "Red Card", &format_config),
+            DeckCopyLimit::UpTo(4)
+        );
+
+        let mut at_limit = expand("Plains", 56);
+        at_limit.extend(expand("Red Card", 4));
+        assert!(validate_name_deck_for_format_full(
+            &db,
+            &at_limit,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &format_config,
+            None,
+            default_player_count(),
+        )
+        .is_ok());
+
+        let mut over_limit = expand("Plains", 55);
+        over_limit.extend(expand("Red Card", 5));
+        match validate_name_deck_for_format_full(
+            &db,
+            &over_limit,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &format_config,
+            None,
+            default_player_count(),
+        ) {
+            Err(reasons) => assert!(reasons.iter().any(|r| r.contains("More than 4 copies"))),
+            Ok(()) => panic!("5 copies of Red Card must exceed Standard's CR 100.2a ceiling"),
+        }
+    }
+
+    #[test]
+    fn validate_name_deck_for_format_full_honors_a_stricter_resolved_copy_limit() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let stricter_config = FormatConfig {
+            default_deck_copy_limit: DeckCopyLimit::UpTo(1),
+            ..FormatConfig::standard()
+        };
+        let mut deck = expand("Plains", 58);
+        deck.extend(expand("Red Card", 2));
+        match validate_name_deck_for_format_full(
+            &db,
+            &deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &stricter_config,
+            None,
+            default_player_count(),
+        ) {
+            Err(reasons) => assert!(reasons.iter().any(|r| r.contains("Red Card"))),
+            Ok(()) => panic!(
+                "2 copies of Red Card must be rejected under a FormatConfig whose resolved \
+                 default_deck_copy_limit is UpTo(1) — proves evaluate_constructed reads the \
+                 threaded field rather than the hardcoded UpTo(4)"
+            ),
+        }
+    }
+
+    #[test]
+    fn evaluate_planechase_honors_a_stricter_resolved_copy_limit() {
+        let db = planechase_test_db();
+        let mut main = expand("Legal Standard", 2);
+        main.extend(expand("Plains", 58));
+        let base = DeckCompatibilityRequest {
+            main_deck: main,
+            ..planechase_request(2, plane_names(20))
+        };
+
+        let unthreaded = evaluate_planechase(&db, &base, &BTreeSet::new());
+        assert!(unthreaded.compatible, "reasons: {:?}", unthreaded.reasons);
+
+        let stricter = DeckCompatibilityRequest {
+            default_deck_copy_limit: Some(DeckCopyLimit::UpTo(1)),
+            ..base
+        };
+        let check = evaluate_planechase(&db, &stricter, &BTreeSet::new());
+        assert!(!check.compatible, "reasons: {:?}", check.reasons);
+        assert!(check.reasons.iter().any(|r| r.contains("Legal Standard")));
+    }
+
+    #[test]
+    fn evaluate_archenemy_honors_a_stricter_resolved_copy_limit() {
+        let db = archenemy_test_db();
+        let mut main = expand("Legal Standard", 2);
+        main.extend(expand("Plains", 58));
+        let base = DeckCompatibilityRequest {
+            main_deck: main,
+            ..archenemy_request(scheme_names(20))
+        };
+
+        let unthreaded = evaluate_archenemy(&db, &base, &BTreeSet::new());
+        assert!(unthreaded.compatible, "reasons: {:?}", unthreaded.reasons);
+
+        let stricter = DeckCompatibilityRequest {
+            default_deck_copy_limit: Some(DeckCopyLimit::UpTo(1)),
+            ..base
+        };
+        let check = evaluate_archenemy(&db, &stricter, &BTreeSet::new());
+        assert!(!check.compatible, "reasons: {:?}", check.reasons);
+        assert!(check.reasons.iter().any(|r| r.contains("Legal Standard")));
+    }
+
+    #[test]
+    fn evaluate_tiny_leaders_honors_a_looser_resolved_copy_limit() {
+        let db = CardDatabase::from_json_str(&tiny_leaders_test_db_json()).unwrap();
+        let mut main = expand("Big Spell", 2);
+        main.extend(expand("Plains", 47));
+        let base = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["White Tiny Leader".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::TinyLeaders),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
+        };
+
+        let unthreaded = evaluate_tiny_leaders(&db, &base, &BTreeSet::new());
+        assert!(
+            unthreaded
+                .reasons
+                .iter()
+                .any(|r| r.contains("Singleton violations")),
+            "reasons: {:?}",
+            unthreaded.reasons
+        );
+
+        let looser = DeckCompatibilityRequest {
+            default_deck_copy_limit: Some(DeckCopyLimit::Unlimited),
+            ..base
+        };
+        let check = evaluate_tiny_leaders(&db, &looser, &BTreeSet::new());
+        assert!(
+            !check
+                .reasons
+                .iter()
+                .any(|r| r.contains("Singleton violations")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn evaluate_oathbreaker_honors_a_looser_resolved_copy_limit() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let base = DeckCompatibilityRequest {
+            main_deck: expand("Red Card", 60),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Oathbreaker),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
+        };
+
+        let unthreaded = evaluate_oathbreaker(&db, &base, &BTreeSet::new());
+        assert!(
+            unthreaded
+                .reasons
+                .iter()
+                .any(|r| r.contains("Singleton violations")),
+            "reasons: {:?}",
+            unthreaded.reasons
+        );
+
+        let looser = DeckCompatibilityRequest {
+            default_deck_copy_limit: Some(DeckCopyLimit::Unlimited),
+            ..base
+        };
+        let check = evaluate_oathbreaker(&db, &looser, &BTreeSet::new());
+        assert!(
+            !check
+                .reasons
+                .iter()
+                .any(|r| r.contains("Singleton violations")),
+            "reasons: {:?}",
+            check.reasons
+        );
     }
 }
