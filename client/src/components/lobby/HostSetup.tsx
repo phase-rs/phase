@@ -6,7 +6,6 @@ import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
-  normalizeRememberedHostConfig,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore";
 import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
@@ -201,11 +200,10 @@ export function HostSetup({
   // when they're still hostable in this connection mode. A remembered format
   // whose minimum exceeds the P2P mesh ceiling can't run over P2P, so we drop
   // back to defaults rather than seed an unhostable configuration.
-  const normalizedLastHostConfig = normalizeRememberedHostConfig(lastHostConfig);
   const remembered =
-    normalizedLastHostConfig != null &&
-    (!isP2P || FORMAT_DEFAULTS[normalizedLastHostConfig.format].min_players <= P2P_MAX_PEERS)
-      ? normalizedLastHostConfig
+    lastHostConfig != null
+    && (!isP2P || FORMAT_DEFAULTS[lastHostConfig.format].min_players <= P2P_MAX_PEERS)
+      ? lastHostConfig
       : null;
   const initialFormatConfig =
     remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;

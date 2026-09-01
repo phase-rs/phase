@@ -1,4 +1,4 @@
-import { waitFor } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const localStorageItems = vi.hoisted(() => {
@@ -483,6 +483,34 @@ describe("multiplayerStore", () => {
   it("does not re-migrate a store already at v5", () => {
     const state = { lastHostConfig: { format: "Commander", loopDetection: { type: "On" } } };
     expect(migratePersistedMultiplayerState(state, 5)).toBe(state);
+  });
+
+  it("normalizes current-version persisted host settings during hydration", () => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({
+        state: {
+          lastHostConfig: {
+            format: "Commander",
+            formatConfig: { deck_size: 100 },
+            playerCount: 2,
+            matchType: "Bo1",
+            loopDetection: { type: "Off" },
+            isPublic: true,
+            startWhenFull: true,
+            ranked: false,
+            aiSeats: [],
+          },
+        },
+        version: 5,
+      }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().lastHostConfig?.formatConfig).toEqual(
+      FORMAT_DEFAULTS.Commander,
+    );
   });
 
   it("strips AI seats from team-based server host settings", async () => {

@@ -1667,6 +1667,19 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // (such as `deck_size: 100` becoming `{ type: "Exactly", data: 100 }`)
       // cannot leave hosting stuck before GameCreated.
       migrate: migratePersistedMultiplayerState,
+      // Persisted state is external input. Migration only runs when the schema
+      // version changes, so hydrate current-version blobs through the same
+      // normalizer before the store exposes them to host setup.
+      merge: (persisted, current) => {
+        const saved = persisted && typeof persisted === "object"
+          ? persisted as Partial<MultiplayerState>
+          : {};
+        return {
+          ...current,
+          ...saved,
+          lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
+        };
+      },
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,
