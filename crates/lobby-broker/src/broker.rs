@@ -228,6 +228,27 @@ impl Broker {
         &mut self.tournaments
     }
 
+    /// `true` when neither the lobby nor the tournament registry holds any
+    /// entries.
+    ///
+    /// The sole authority for whether a shell may stop rescheduling its
+    /// cleanup alarm/reaper — checking only one registry here is exactly the
+    /// bug that let a tournament-only Durable Object stop its alarm while the
+    /// tournament was still live and un-reaped: the last sweep to run landed
+    /// inside the registration window, so the record was never removed and the
+    /// seat it holds in the bounded registry
+    /// ([`MAX_TOURNAMENT_ENTRIES`]) never came back.
+    ///
+    /// It lives here rather than in the WASM shim because "is this broker
+    /// durably empty" is registry knowledge: the predicate must stay in
+    /// lockstep with [`Broker::reap_expired`], which sweeps BOTH registries,
+    /// so every registry that sweep can empty must also be able to keep the
+    /// alarm alive. A boundary layer that recomputed this would drift the
+    /// moment a third registry is added.
+    pub fn is_empty(&self) -> bool {
+        self.lobby.is_empty() && self.tournaments.is_empty()
+    }
+
     /// Every tournament as a wire summary, ordered by code.
     ///
     /// [`TournamentManager::iter`] promises no order (it wraps
@@ -3189,6 +3210,84 @@ mod tests {
                 LobbyServerMessage::LobbyGameRemoved { game_code }
             )],
             "no TournamentListUpdate may be emitted when nothing tournament-side changed"
+        );
+    }
+
+    /// Replays the Durable Object's alarm loop (`lobby-worker/src/lobby-do.ts`
+    /// `alarm()`: sweep -> snapshot -> `if (!broker.is_empty()) setAlarm(…)`)
+    /// against a broker holding a tournament and NO lobby entries.
+    ///
+    /// That shape is the whole bug. [`Broker::is_empty`] is the alarm's only
+    /// stop condition, so while it consulted the lobby alone it answered `true`
+    /// here: the sweep that ran *before* the registration window closed was the
+    /// last one ever scheduled, the tournament was never reaped, and the seat it
+    /// holds in the bounded registry ([`MAX_TOURNAMENT_ENTRIES`]) was never
+    /// returned. Nothing catches this from the lobby side — ordinary lobby
+    /// traffic keeps rescheduling the alarm right over the top of it — and in
+    /// production it stays silent until the registry is full.
+    #[test]
+    fn a_tournament_alone_keeps_the_broker_non_empty_until_it_is_reaped() {
+        // `REAP_TIMEOUT_SECONDS` in lobby-do.ts. Lobby-only, and deliberately
+        // NOT the tournament clock — see `Broker::reap_expired`.
+        const LOBBY_TIMEOUT_SECS: u64 = 300;
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+
+        // A broker holding nothing in either registry is still empty: the fix
+        // must not pin the predicate to `false`, or no DO could ever hibernate.
+        assert!(
+            broker.is_empty(),
+            "a fresh broker holds neither registry's state"
+        );
+
+        // Reach guard: `make_tournament` panics unless dispatch really replied
+        // `TournamentCreated`, so the assertions below cannot pass vacuously on
+        // a broker that rejected the frame and stored nothing.
+        let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        assert!(
+            broker.lobby().is_empty(),
+            "no lobby entries — the exact condition the bug needs"
+        );
+
+        // THE regression assertion: a lobby-only predicate reports this
+        // live-tournament broker as empty and lets `alarm()` stop rescheduling.
+        assert!(
+            !broker.is_empty(),
+            "a live tournament must keep the reaper alarm scheduled"
+        );
+
+        // An alarm tick inside the registration window: nothing to reap yet,
+        // and the shell must still reschedule.
+        env.advance_secs(60);
+        let early = broker.reap_expired(LOBBY_TIMEOUT_SECS, &env);
+        assert!(
+            early.is_empty(),
+            "nothing expires inside the registration window: {early:?}"
+        );
+        assert!(
+            !broker.is_empty(),
+            "the tournament outlived an early sweep, so the alarm must too"
+        );
+
+        // The tick after the registration window closes — reachable only
+        // because every sweep above rescheduled the alarm.
+        env.advance_secs(REGISTRATION_TIMEOUT_SECS + 1);
+        let swept = broker.reap_expired(LOBBY_TIMEOUT_SECS, &env);
+        assert!(
+            subscriber_msgs(&swept).iter().any(|m| matches!(
+                m,
+                LobbyServerMessage::TournamentRemoved { code: c } if *c == code
+            )),
+            "the idle tournament must be reaped, not merely uncounted: {swept:?}"
+        );
+
+        // Capacity recovered: the record is out of the bounded registry, and
+        // only now may the shell stop its alarm and hibernate.
+        assert!(
+            broker.is_empty(),
+            "both registries are empty once the timed-out tournament is reaped"
         );
     }
 

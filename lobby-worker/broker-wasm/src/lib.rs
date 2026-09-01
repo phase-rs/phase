@@ -174,11 +174,18 @@ impl WasmBroker {
         serde_json::to_string(&self.inner).expect("broker state always serializes")
     }
 
-    /// `true` when no lobby entries are registered. Lets the DO shell stop
-    /// rescheduling the reaper alarm so a truly idle lobby hibernates fully
-    /// (alarms keep a DO awake).
+    /// `true` when the broker holds nothing in any durable registry. Lets the
+    /// DO shell stop rescheduling the reaper alarm so a truly idle Durable
+    /// Object hibernates fully (alarms keep a DO awake).
+    ///
+    /// Purely the boundary exposure: `Broker::is_empty` decides it, because
+    /// which registries count is broker knowledge and must stay in lockstep
+    /// with the sweep (`Broker::reap_expired`) rather than being recomputed
+    /// out here. Do not re-derive the predicate at this layer — a shim that
+    /// spelled it as "the lobby is empty" is what let a DO holding a live
+    /// tournament and zero lobby entries stop its alarm and never reap.
     pub fn is_empty(&self) -> bool {
-        self.inner.lobby().is_empty()
+        self.inner.is_empty()
     }
 
     /// Number of currently registered lobby entries (games waiting for players).
