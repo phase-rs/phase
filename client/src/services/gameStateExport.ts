@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 
 import type { EngineAdapter, GameState } from "../adapter/types.ts";
-import { useGameStore } from "../stores/gameStore.ts";
+import { canExportAuthoritativeState, useGameStore } from "../stores/gameStore.ts";
 import { copyText } from "./copyText";
 
 interface GameStateDebugSnapshot {
@@ -101,6 +101,9 @@ export async function exportGameStateDebugZip(gameState: GameState): Promise<str
  * diagnose and restore the game accurately.
  */
 export async function exportAuthoritativeGameStateZip(adapter: EngineAdapter): Promise<string> {
+  if (!canExportAuthoritativeState(useGameStore.getState().gameMode)) {
+    throw new Error("Authoritative state export is unavailable for shared games");
+  }
   if (!adapter.exportPersistenceState) {
     throw new Error("The current game authority cannot export a trusted state");
   }

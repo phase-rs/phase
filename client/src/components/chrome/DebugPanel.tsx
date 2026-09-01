@@ -14,7 +14,7 @@ import {
   exportAuthoritativeGameStateZip,
 } from "../../services/gameStateExport";
 import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
-import { useGameStore } from "../../stores/gameStore";
+import { canExportAuthoritativeState, useGameStore } from "../../stores/gameStore";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugActions } from "./DebugActions";
@@ -71,6 +71,8 @@ export function DebugPanel({
   const adapter = useGameStore((s) => s.adapter);
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
+  const canExportAuthoritative = canExportAuthoritativeState(gameMode)
+    && adapter?.exportPersistenceState !== undefined;
   // The transport, not the mode, decides whether a rollback request can be
   // bound to an authenticated session — same idiom as `supportsMatchConcede`.
   const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
@@ -518,7 +520,7 @@ export function DebugPanel({
           </button>
           <button
             onClick={handleExportGameState}
-            disabled={!adapter?.exportPersistenceState}
+            disabled={!canExportAuthoritative}
             className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
             title={t("debug.exportAuthoritativeTitle")}
           >

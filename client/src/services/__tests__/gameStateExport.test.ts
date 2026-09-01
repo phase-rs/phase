@@ -91,6 +91,7 @@ describe("gameStateExport", () => {
     const adapter = buildEngineAdapterMock(undefined, {
       exportPersistenceState: vi.fn().mockResolvedValue(trustedState),
     });
+    useGameStore.setState({ gameMode: "ai" });
 
     const filename = await exportAuthoritativeGameStateZip(adapter);
 
@@ -100,5 +101,18 @@ describe("gameStateExport", () => {
     const [entryName] = Object.keys(entries);
     expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
     expect(strFromU8(entries[entryName])).toBe(trustedState);
+  });
+
+  it("does not expose the trusted envelope from a shared game", async () => {
+    const exportPersistenceState = vi.fn().mockResolvedValue(JSON.stringify({
+      state: { players: [{ hand: ["hidden-card"] }] },
+    }));
+    const adapter = buildEngineAdapterMock(undefined, { exportPersistenceState });
+    useGameStore.setState({ gameMode: "p2p-host" });
+
+    await expect(exportAuthoritativeGameStateZip(adapter)).rejects.toThrow(
+      "Authoritative state export is unavailable for shared games",
+    );
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 });
