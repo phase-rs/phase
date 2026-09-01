@@ -73,6 +73,7 @@ fn add_free_exile_spell(runner: &mut GameRunner, mana_value: u32) -> ObjectId {
     Arc::make_mut(&mut obj.base_abilities).push(ability);
     obj.casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,

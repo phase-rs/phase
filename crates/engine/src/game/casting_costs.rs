@@ -10674,6 +10674,8 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 granted_to,
                 resolution_cleanup: None,
                 duration: None,
+                // CR 611.2a: no duration, so no host to bind to.
+                source_id: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
@@ -19731,6 +19733,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -19851,6 +19854,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -19923,6 +19927,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -19975,6 +19980,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20033,6 +20039,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: selected_cost.clone(),
                     cast_transformed: false,
@@ -20052,6 +20059,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(5),
                     cast_transformed: false,
@@ -20102,6 +20110,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20169,6 +20178,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: selected_cost.clone(),
                     cast_transformed: false,
@@ -20188,6 +20198,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20247,6 +20258,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20271,6 +20283,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -24286,6 +24299,8 @@ its replicate cost was paid.)\nDraw a card.";
                 },
                 constraint: None,
                 granted_to: Some(PlayerId(0)),
+                duration: None,
+                source_id: None,
             });
 
         let ability = ResolvedAbility::new(

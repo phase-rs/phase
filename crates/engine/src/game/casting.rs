@@ -11996,6 +11996,8 @@ pub(super) fn initiate_cast_during_resolution(
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
                 duration: None,
+                // CR 611.2a: no duration, so no host to bind to.
+                source_id: None,
                 graveyard_replacement: graveyard_replacement.clone(),
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
@@ -22181,6 +22183,7 @@ mod castable_zone_authority_tests {
         );
 
         let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22241,6 +22244,7 @@ mod castable_zone_authority_tests {
         let bare = state.objects[&id].clone();
 
         let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22466,6 +22470,7 @@ mod castable_zone_authority_tests {
     fn the_graveyard_alt_cost_disjunct_refuses_a_land_and_admits_a_non_land() {
         let mut state = GameState::new_two_player(7);
         let permission = |granted_to: PlayerId| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22598,6 +22603,7 @@ mod castable_zone_authority_tests {
                 {
                     let obj = state.objects.get_mut(&id).expect("just inserted");
                     obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                        source_id: None,
                         cost: ManaCost::default(),
                         cost_provenance:
                             crate::types::ability::ExileGrantCostProvenance::Alternative,

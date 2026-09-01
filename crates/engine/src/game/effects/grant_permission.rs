@@ -143,6 +143,8 @@ pub fn resolve(
         PermissionGrantee::ObjectOwner => None, // per-iteration
     };
 
+    // CR 611.2b: set when a host-bound lifetime was attached below.
+    let mut needs_lifetime_check = false;
     for obj_id in target_ids {
         // Compute `granted_to` for this object. For `ObjectOwner` we read the
         // object's owner here so each iteration binds independently (CR 108.3).
@@ -160,6 +162,31 @@ pub fn resolve(
         // branch; harmless to precompute for other permissions.
         let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
         let mut granted = permission.clone();
+        // CR 611.2a: refuse a stated lifetime no lifecycle seam can end, rather
+        // than attaching it as an unbounded permission. Placed BEFORE any of
+        // the stamping below, all of which has side effects on the object
+        // (`prune_replaced_play_from_exile_permissions`, and the `Foretold` arm
+        // setting `obj.foretold` / `obj.face_down`): refusing after those would
+        // leave the object mutated with no grant to show for it. The duration
+        // is carried by `permission` itself, so it is known this early.
+        //
+        // `exile_resident` decides one arm of that question (CR 611.2b
+        // conditional windows are ended by `zones::apply_zone_exit_cleanup`,
+        // which only fires on leaving exile), so it is read from the object
+        // this grant is being attached to rather than assumed.
+        let exile_resident = state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|o| o.zone == crate::types::zones::Zone::Exile);
+        if let Some(d) = granted.lifetime().duration {
+            debug_assert!(
+                crate::game::layers::casting_permission_duration_is_enforceable(d, exile_resident),
+                "casting permission granted with an unenforceable duration: {d:?}"
+            );
+            if !crate::game::layers::casting_permission_duration_is_enforceable(d, exile_resident) {
+                continue;
+            }
+        }
         if let CastingPermission::PlayFromExile {
             granted_to,
             source_id,
@@ -175,6 +202,24 @@ pub fn resolve(
             if *single_use {
                 *single_use_group = tracked_set_group;
             }
+        }
+        // CR 611.2a + CR 400.7: stamp the granting permanent onto the CAST
+        // half of the grant, mirroring the `PlayFromExile` arm above.
+        // Deliberately its own `if let` rather than a field added to the
+        // `granted_to` match below: that match fires only on a parser-emitted
+        // `None` placeholder, so a grant whose grantee was already bound
+        // (Jeleva class) would silently keep an unbindable host identity and
+        // outlive its source. `prune_host_left_casting_permissions` reads this.
+        if let CastingPermission::ExileWithAltCost {
+            source_id: source_id @ None,
+            ..
+        }
+        | CastingPermission::ExileWithAltAbilityCost {
+            source_id: source_id @ None,
+            ..
+        } = &mut granted
+        {
+            *source_id = Some(ability.source_id);
         }
         prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
         if let Some(obj) = state.objects.get_mut(&obj_id) {
@@ -244,7 +289,17 @@ pub fn resolve(
                 }
                 became_foretold = Some(obj_id);
             }
+            // CR 611.2b: see `cast_from_zone::record_lingering_permissions` —
+            // a host-bound lifetime has to be evaluated once right away, and
+            // attaching a permission does not dirty the layers by itself.
+            let host_bound = granted
+                .lifetime()
+                .duration
+                .is_some_and(crate::types::ability::Duration::ends_when_host_leaves_play);
             obj.casting_permissions.push(granted);
+            if host_bound {
+                needs_lifetime_check = true;
+            }
             if let Some(player_id) = plotted_for {
                 events.push(GameEvent::BecomesPlotted {
                     object_id: obj_id,
@@ -255,6 +310,10 @@ pub fn resolve(
                 events.push(GameEvent::BecameForetold { object_id });
             }
         }
+    }
+
+    if needs_lifetime_check {
+        state.layers_dirty.mark_full();
     }
 
     events.push(GameEvent::EffectResolved {
@@ -1207,11 +1266,11 @@ mod tests {
         );
     }
 
-    /// CR 502.3: `prune_until_next_turn_casting_permissions` at the
+    /// CR 500.4: `prune_untap_step_casting_permissions` at the
     /// untap step must NOT touch `UntilNextStepOf { step: End }` permissions either.
     #[test]
     fn untap_prune_retains_until_next_end_step_permissions() {
-        use crate::game::layers::prune_until_next_turn_casting_permissions;
+        use crate::game::layers::prune_untap_step_casting_permissions;
         use crate::types::statics::CastFrequency;
 
         let mut state = GameState::new_two_player(1);
@@ -1244,7 +1303,7 @@ mod tests {
                 invalidation: None,
             }];
 
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
 
         assert_eq!(
             state.objects[&card].casting_permissions.len(),

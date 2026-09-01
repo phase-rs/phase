@@ -4033,6 +4033,11 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
             acc
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
+        // CR 611.2b: payload-free, exactly like `UntilHostLeavesPlay` — the
+        // controller it is measured against lives on the carrier.
+        Duration::WhileControllingHost => Axes::NONE,
+        // CR 611.2b + CR 702.26f: presence-bound sibling, likewise payload-free.
+        Duration::WhileHostOnBattlefield => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
         Duration::UntilNextStepOf { player, .. } => {

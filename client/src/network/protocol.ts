@@ -95,6 +95,23 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  38 — Casting permissions gained a typed lifetime. Two parts, with different
+ *       compatibility consequences:
+ *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
+ *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+ *           `duration` it already carried. `source_id` is the granting
+ *           permanent whose presence bounds the stated lifetime. Additive
+ *           behind serde defaults, like entry 34's `prepared_copy_source`.
+ *       (b) `Duration` gained the `WhileControllingHost` ("for as long as
+ *           you control ~") and `WhileHostOnBattlefield` ("for as long as ~
+ *           remains on the battlefield") variants (CR 611.2b). Each new tag
+ *           is a PARSE BREAK in the v38 -> v37 direction, in the same shape
+ *           as the full-game bump at entry 46 (new tag emitted, old peer
+ *           cannot parse it; the break runs ONE way, unlike entry 32's
+ *           two-way break): a v37 peer deserializing a snapshot that contains
+ *           either new tag fails on an unknown variant. There is no serde
+ *           default that can rescue it, which is why the handshake must
+ *           refuse the pairing rather than degrade.
  *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *       and the deck-compatibility admission path now both read. The field
@@ -216,7 +233,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 37 as const;
+export const WIRE_PROTOCOL_VERSION = 38 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

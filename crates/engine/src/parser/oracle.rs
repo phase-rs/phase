@@ -7185,7 +7185,637 @@ pub fn parse_oracle_text(
     let mut parsed = lower_oracle_ir(&mut ir);
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
+    demote_unenforceable_replacement_lifetimes(&mut parsed);
     parsed
+}
+
+/// CR 611.2a: Post-lowering coverage-honesty net for an `AddTargetReplacement`
+/// whose stated duration the install seam cannot enforce.
+///
+/// The install seam refuses such a rider (`game::effects::add_target_replacement::
+/// replacement_install_is_refused` — the single authority, consulted here rather
+/// than restated). Without this net the refusal is invisible at parse time: the
+/// card reports as fully supported, and the printed replacement only fails when
+/// the ability actually resolves. That is the "parser lie" `swallow_check`'s
+/// module doc names — every clause must either be represented in the AST or fail
+/// the line into `Effect::Unimplemented`.
+///
+/// The shape is reachable from ordinary Oracle text, not merely in principle:
+/// "That creature can't become untapped for as long as ~ remains on the
+/// battlefield" and its "until ~ leaves the battlefield" sibling both lower to
+/// this replacement path under `Duration::WhileHostOnBattlefield` /
+/// `Duration::UntilHostLeavesPlay`, neither of which has an enforceable lifetime
+/// at that seam (only the CONTROL wording does, via
+/// `ReplacementCondition::ControllerControlsSource`). The current corpus happens
+/// to print only the control wording; that is an accident of printing, not a
+/// guard.
+///
+/// Like `demote_unbound_delayed_sweeps` this runs as a post-lowering invariant
+/// rather than inside one grammar arm, and for the same reason: the ability
+/// duration is attached by many builders, so the honesty requirement is a
+/// property of the FINAL tree, not of any single production.
+///
+/// # Why the walk is wildcard-free
+///
+/// The carrier set is MIRRORED from `types::ability_visit` — the engine's single
+/// complete `AbilityDefinition` / `Effect` traversal — because the pairing this
+/// net tests (a node's `duration` beside its `effect`) is an ABILITY-NODE
+/// property, and that module's walk is read-only. A first version walked only
+/// `sub_ability` / `else_ability` and missed three of the corpus's 96
+/// `AddTargetReplacement` nodes (two under `FlipCoin`'s win/lose payloads, one
+/// under `mode_abilities`). For `mode_abilities` the parser also emits the
+/// refused durations at that position on other effects, so that miss was
+/// reachable rather than theoretical; under the coin-flip payloads the corpus
+/// shows only `None` and `UntilEndOfTurn` today, and the miss is a carrier gap
+/// rather than a measured one. Hence: no `_` arm anywhere below. A new `Effect` or
+/// `ContinuousModification` variant is a compile error here, which forces a
+/// descend-or-leaf decision at the one place that owns the answer.
+fn demote_unenforceable_replacement_lifetimes(parsed: &mut ParsedAbilities) {
+    for def in &mut parsed.abilities {
+        demote_lifetimes_in_ability(def);
+    }
+    for trigger in &mut parsed.triggers {
+        demote_lifetimes_in_trigger(trigger);
+    }
+    for static_def in &mut parsed.statics {
+        demote_lifetimes_in_static(static_def);
+    }
+    for replacement in &mut parsed.replacements {
+        demote_lifetimes_in_replacement(replacement);
+    }
+}
+
+/// The decision node: `duration` and `effect` sit on the SAME
+/// `AbilityDefinition`, which is exactly the pairing the resolver sees
+/// (`game::ability_utils::build_resolved_from_def` copies `def.duration` onto the
+/// `ResolvedAbility` built from `def.effect`, node for node).
+///
+/// The gap key is a stable snake_case pattern-class key (CLAUDE.md), distinct
+/// from every previously-supported handler so the resulting coverage flip lands
+/// in `coverage-regression-check.sh`'s non-fatal "coverage honesty" bucket.
+fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
+    let refused = match &*def.effect {
+        Effect::AddTargetReplacement { replacement, .. } => {
+            crate::game::effects::add_target_replacement::replacement_install_is_refused(
+                replacement,
+                def.duration.as_ref(),
+            )
+        }
+        // CR 615 + CR 611.2a: a prevention shield is a replacement effect too,
+        // and its install seam refuses the same unenforceable lifetimes. Old
+        // Fat Spider Can't See Me chapter II is the printed member: "prevent
+        // all damage … for as long as this Saga remains on the battlefield".
+        // Same gap key as the rider above on purpose — one class, one coverage
+        // bucket.
+        Effect::PreventDamage {
+            prevention_duration,
+            ..
+        } => crate::game::effects::prevent_damage::prevention_shield_is_refused(
+            prevention_duration.as_ref(),
+            def.duration.as_ref(),
+        ),
+        _ => false,
+    };
+    if refused {
+        let fragment = def.description.clone().unwrap_or_default();
+        // Replace in place rather than reallocating the Box (clippy::replace_box).
+        *def.effect = Effect::unimplemented("unenforceable_replacement_lifetime", &fragment);
+    } else {
+        demote_lifetimes_in_effect(def.effect.as_mut());
+    }
+    // CR 602.1a: the activation cost, and CR 118.12 the "unless … pays" cost —
+    // both can carry an `AbilityCost::EffectCost`, and `types::ability_visit`
+    // descends both. Mijo, the Bull prints a full nested ability chain in a
+    // cost today, so this axis is a live carrier, not a formality.
+    if let Some(cost) = def.cost.as_mut() {
+        demote_lifetimes_in_cost(cost);
+    }
+    if let Some(unless_pay) = def.unless_pay.as_mut() {
+        demote_lifetimes_in_cost(&mut unless_pay.cost);
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        demote_lifetimes_in_ability(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        demote_lifetimes_in_ability(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        demote_lifetimes_in_ability(mode);
+    }
+}
+
+/// CR 602.1a: an activation cost can itself carry an effect
+/// (`AbilityCost::EffectCost`), and that effect can carry a whole ability
+/// chain. Wildcard-free for the same reason as the walks above.
+fn demote_lifetimes_in_cost(cost: &mut AbilityCost) {
+    match cost {
+        AbilityCost::EffectCost { effect } => demote_lifetimes_in_effect(effect),
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(..)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => {}
+    }
+}
+
+fn demote_lifetimes_in_trigger(trigger: &mut TriggerDefinition) {
+    if let Some(execute) = trigger.execute.as_deref_mut() {
+        demote_lifetimes_in_ability(execute);
+    }
+    if let Some(unless_pay) = trigger.unless_pay.as_mut() {
+        demote_lifetimes_in_cost(&mut unless_pay.cost);
+    }
+}
+
+fn demote_lifetimes_in_static(static_def: &mut StaticDefinition) {
+    for modification in static_def.modifications.iter_mut() {
+        demote_lifetimes_in_modification(modification);
+    }
+}
+
+fn demote_lifetimes_in_replacement(replacement: &mut ReplacementDefinition) {
+    if let Some(execute) = replacement.execute.as_deref_mut() {
+        demote_lifetimes_in_ability(execute);
+    }
+    match &mut replacement.mode {
+        crate::types::ability::ReplacementMode::MayCost { cost, decline } => {
+            demote_lifetimes_in_cost(cost);
+            if let Some(decline) = decline.as_deref_mut() {
+                demote_lifetimes_in_ability(decline);
+            }
+        }
+        crate::types::ability::ReplacementMode::Optional { decline } => {
+            if let Some(decline) = decline.as_deref_mut() {
+                demote_lifetimes_in_ability(decline);
+            }
+        }
+        // `runtime_execute` holds a resolution-time continuation that never
+        // exists on a parsed face, so there is nothing to walk there.
+        crate::types::ability::ReplacementMode::Mandatory => {}
+    }
+}
+
+/// Descend into every nested `AbilityDefinition` an `Effect` can carry.
+///
+/// The arms below are the union of `types::ability_visit`'s nested-ability
+/// carriers and `render_effect_descriptions`' (documented there as a strict
+/// superset at the `Effect`-arm level). Wildcard-free on purpose — see the
+/// header on `demote_unenforceable_replacement_lifetimes`.
+fn demote_lifetimes_in_effect(effect: &mut Effect) {
+    match effect {
+        // --- nested effect, same shape ---
+        Effect::CreateDrawReplacement { replacement_effect }
+        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            demote_lifetimes_in_effect(replacement_effect)
+        }
+        // --- nested ability definitions ---
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for sub in per_choice_effect.iter_mut() {
+                demote_lifetimes_in_ability(sub);
+            }
+            if let crate::types::ability::VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                demote_lifetimes_in_ability(outcome_template);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            demote_lifetimes_in_ability(chosen_pile_effect);
+            if let Some(unchosen) = unchosen_pile_effect.as_deref_mut() {
+                demote_lifetimes_in_ability(unchosen);
+            }
+        }
+        Effect::RevealFromHand { on_decline, .. } => {
+            if let Some(sub) = on_decline.as_deref_mut() {
+                demote_lifetimes_in_ability(sub);
+            }
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => demote_lifetimes_in_ability(effect),
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(sub) = win_effect.as_deref_mut() {
+                demote_lifetimes_in_ability(sub);
+            }
+            if let Some(sub) = lose_effect.as_deref_mut() {
+                demote_lifetimes_in_ability(sub);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => demote_lifetimes_in_ability(win_effect),
+        Effect::RollDie { results, .. } => {
+            for branch in results.iter_mut() {
+                demote_lifetimes_in_ability(&mut branch.effect);
+            }
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches.iter_mut() {
+                demote_lifetimes_in_ability(branch);
+            }
+        }
+        // --- nested statics / triggers / replacements ---
+        Effect::GenericEffect {
+            static_abilities, ..
+        }
+        | Effect::Token {
+            static_abilities, ..
+        } => {
+            for static_def in static_abilities.iter_mut() {
+                demote_lifetimes_in_static(static_def);
+            }
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            for static_def in statics.iter_mut() {
+                demote_lifetimes_in_static(static_def);
+            }
+            for trigger in triggers.iter_mut() {
+                demote_lifetimes_in_trigger(trigger);
+            }
+        }
+        Effect::AddTargetReplacement { replacement, .. } => {
+            demote_lifetimes_in_replacement(replacement)
+        }
+        Effect::Counter { source_rider, .. } => {
+            if let Some(crate::types::ability::CounterSourceRider::LosesAbilities {
+                static_def,
+                ..
+            }) = source_rider.as_mut()
+            {
+                demote_lifetimes_in_static(static_def);
+            }
+        }
+        // LEAF, deliberately: the rider's `timing` is a `DelayedTriggerCondition`
+        // whose embedded trigger is a MATCHER with `execute: None` by
+        // construction, so it carries no ability payload to demote. Same call
+        // made, and documented, in `types::ability_visit`.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {}
+        // --- nested continuous modifications ---
+        Effect::AddPendingEntersModifications { modifications, .. } => {
+            for m in modifications.iter_mut() {
+                demote_lifetimes_in_modification(m);
+            }
+        }
+        Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } => {
+            for m in additional_modifications.iter_mut() {
+                demote_lifetimes_in_modification(m);
+            }
+        }
+        Effect::EachPlayerCopyChosen {
+            copy_modifications, ..
+        } => {
+            for m in copy_modifications.iter_mut() {
+                demote_lifetimes_in_modification(m);
+            }
+        }
+        Effect::ReturnAsAura { grants, .. } => {
+            for m in grants.iter_mut() {
+                demote_lifetimes_in_modification(m);
+            }
+        }
+        Effect::Mana { grants, .. } => {
+            for grant in grants.iter_mut() {
+                if let crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } = grant {
+                    demote_lifetimes_in_ability(ability);
+                }
+            }
+        }
+        // --- leaves: no nested AbilityDefinition ---
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::CounterAll { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::SwitchPT { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::RevealHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::Unimplemented { .. } => {}
+    }
+}
+
+/// CR 611.2: a granted ability lives inside a continuous modification. Same
+/// carrier set as `types::ability_visit::visit_continuous_mod_scoped`, and
+/// wildcard-free for the same reason.
+fn demote_lifetimes_in_modification(modification: &mut ContinuousModification) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            demote_lifetimes_in_ability(definition)
+        }
+        ContinuousModification::GrantTrigger { trigger } => demote_lifetimes_in_trigger(trigger),
+        ContinuousModification::GrantReplacement { replacement } => {
+            demote_lifetimes_in_replacement(replacement)
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            demote_lifetimes_in_static(definition)
+        }
+        // `CopyValues` carries copiable characteristics, not a parsed ability
+        // chain this net can demote — `ability_visit` descends it for conjure
+        // NAMES, which is a different question.
+        ContinuousModification::CopyValues { .. } => {}
+        ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => {}
+    }
 }
 
 /// CR 603.7a + CR 603.7c + CR 400.7: Post-lowering coverage-honesty net for the
