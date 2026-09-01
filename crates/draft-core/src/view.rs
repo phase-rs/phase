@@ -47,6 +47,13 @@ pub struct SeatPublicView {
     pub connected: bool,
     pub has_submitted_deck: bool,
     pub pick_status: PickStatus,
+    /// Engine-owned presence signal for a pack a seat is actively drafting.
+    ///
+    /// This deliberately exposes only `0` or `1`, never the pack's card
+    /// count or identity. It is `1` precisely while the session is drafting
+    /// and this seat has a nonempty current pack that it has not picked from in
+    /// the current round; otherwise it is `0`.
+    pub active_pack_count: u8,
     /// CR 905.2c: Draft cards that remain face up are visible to every player.
     pub face_up_draft_cards: Vec<DraftCardInstance>,
 }
@@ -535,6 +542,13 @@ pub fn filter_for_spectator(
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                active_pack_count: u8::from(
+                    is_drafting
+                        && session.current_pack[i]
+                            .as_ref()
+                            .is_some_and(|pack| !pack.0.is_empty())
+                        && !session.seats_picked_this_round.get(i as u8),
+                ),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
@@ -695,6 +709,13 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                active_pack_count: u8::from(
+                    is_drafting
+                        && session.current_pack[i]
+                            .as_ref()
+                            .is_some_and(|pack| !pack.0.is_empty())
+                        && !session.seats_picked_this_round.get(i as u8),
+                ),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
@@ -2238,6 +2259,77 @@ mod tests {
         let view = filter_for_player(&session, 0);
         for seat in &view.seats {
             assert_eq!(seat.pick_status, PickStatus::NotDrafting);
+        }
+    }
+
+    #[test]
+    fn public_active_pack_count_tracks_the_actual_pick_and_pass_round() {
+        let (mut session, source) = test_session(2);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let assert_counts = |session: &DraftSession, expected: &[u8]| {
+            assert_eq!(
+                filter_for_player(session, 0)
+                    .seats
+                    .iter()
+                    .map(|seat| seat.active_pack_count)
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+            assert_eq!(
+                filter_for_spectator(session, SpectatorVisibility::Public)
+                    .seats
+                    .iter()
+                    .map(|seat| seat.active_pack_count)
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+        };
+
+        assert_counts(&session, &[1, 1]);
+
+        let seat_zero_card = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session::apply(
+            &mut session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec![seat_zero_card],
+            },
+            None,
+        )
+        .unwrap();
+        // The pack remains until every seat picks, but seat 0 no longer has an
+        // active pack in this round.
+        assert_counts(&session, &[0, 1]);
+
+        let seat_one_card = session.current_pack[1].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session::apply(
+            &mut session,
+            DraftAction::Pick {
+                seat: 1,
+                card_instance_ids: vec![seat_one_card],
+            },
+            None,
+        )
+        .unwrap();
+        // The real pass resets the per-seat picked flags for the next round.
+        assert_counts(&session, &[1, 1]);
+
+        // A present-but-empty pack is not active either.
+        session.current_pack[0].as_mut().unwrap().0.clear();
+        assert_counts(&session, &[0, 1]);
+
+        // A stale current_pack is not an active pack once drafting has ended.
+        session.status = DraftStatus::Deckbuilding;
+        for seat in filter_for_player(&session, 0).seats {
+            assert_eq!(seat.active_pack_count, 0);
+        }
+        for seat in filter_for_spectator(&session, SpectatorVisibility::Public).seats {
+            assert_eq!(seat.active_pack_count, 0);
         }
     }
 

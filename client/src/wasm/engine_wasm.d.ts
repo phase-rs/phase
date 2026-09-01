@@ -350,18 +350,24 @@ export function load_card_database(json_str: string): number;
 export function load_replay_for_playback(json_str: string): number;
 
 /**
- * CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
- * legally contain across main deck, sideboard, and command zone combined
- * (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
- * already applies the basic-land exemption, the card's printed override, and
- * the format default, so the caller compares a count against it directly.
+ * CR 100.2a / CR 903.5b: How many copies of the named card a deck built under
+ * `format_config` may legally contain across main deck, sideboard, and command
+ * zone combined (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved*
+ * ceiling — it already applies the basic-land exemption, the card's printed
+ * override, and the format default, so the caller compares a count against it
+ * directly.
+ *
+ * `format_config` is a full `FormatConfig` JSON object (as published by
+ * `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+ * the config carries the resolved `default_deck_copy_limit` a custom format
+ * declares.
  *
  * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
  * `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
  * when the card database isn't loaded, so a not-yet-hydrated frontend never
  * blocks a legal add.
  */
-export function maxDeckCopies(name: string, format: any): any;
+export function maxDeckCopies(name: string, format_config: any): any;
 
 /**
  * Verify WASM integration works.
@@ -434,17 +440,6 @@ export function replay_seek_js(target: number): any;
 export function restore_game_state(json_str: string): void;
 
 /**
- * Explicitly resume a persisted stack-automation session after
- * `restore_game_state` has installed the snapshot.
- *
- * Generic restore is intentionally decode-only, so it never manufactures a
- * priority pass. This returns the engine-authored bounded presentation for the
- * resumed session (or an explicit no-op/repair); read the post-transition game
- * state through `get_game_state` or a filtered state export.
- */
-export function resume_restored_game_state(): any;
-
-/**
  * Resume a multiplayer host session from a persisted `GameState`.
  *
  * Called when a P2P host returns after a crash/reload and needs to restore
@@ -475,11 +470,21 @@ export function resume_restored_game_state(): any;
  *    session.
  *
  * Refuses when the engine is already in use — this is a fresh-instance
- * entry point. Callers must clear any existing state first. Returns the same
- * bounded engine-authored restored-automation presentation as
- * `resume_restored_game_state` before the host exposes its first snapshot.
+ * entry point. Callers must clear any existing state first.
  */
 export function resume_multiplayer_host_state(json_str: string): any;
+
+/**
+ * Explicitly drive any persisted stack automation after a successful restore.
+ *
+ * [`restore_game_state`] deliberately remains an undo/decode boundary: it
+ * installs a playable snapshot but never manufactures a priority pass. This
+ * separately-invoked transition is the only WASM owner allowed to ask the
+ * engine to resume a saved `StackResolutionSession` or legacy Ready latch.
+ * Its bounded engine-authored presentation describes the automated burst;
+ * callers read the final game snapshot through the normal state exports.
+ */
+export function resume_restored_game_state(): any;
 
 /**
  * Search the loaded card database. The engine is the single authority for the
@@ -503,9 +508,13 @@ export function search_cards_js(query: any): any;
 export function set_multiplayer_mode(enabled: boolean): void;
 
 /**
- * CR 100.4a: Returns the sideboard policy for a given game format as a
+ * CR 100.4a: Returns the sideboard policy stored on a `FormatConfig` as a
  * tagged union: `{"type": "Forbidden"}`, `{"type": "Limited", "data": 15}`,
  * or `{"type": "Unlimited"}`.
+ *
+ * `format_config` is a full `FormatConfig` JSON object (as published by
+ * `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+ * the config carries the resolved policy a custom format declares.
  *
  * The frontend must exhaustive-switch on `.type` — unit variants (`Forbidden`,
  * `Unlimited`) emit no `data` field under `#[serde(tag, content)]`.
@@ -513,7 +522,7 @@ export function set_multiplayer_mode(enabled: boolean): void;
  * The engine is the single authority for format sideboard rules; the frontend
  * never hardcodes 15 or any other cap.
  */
-export function sideboardPolicyForFormat(format: any): any;
+export function sideboardPolicyForFormat(format_config: any): any;
 
 /**
  * Returns the engine-authored Oathbreaker signature-spell selection policy.
@@ -604,8 +613,8 @@ export interface InitOutput {
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
-    readonly resume_restored_game_state: () => [number, number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
+    readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];

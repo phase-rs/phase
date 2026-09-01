@@ -43,11 +43,30 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
+///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
+///      `max_deck_copies` and the deck-compatibility admission path now both
+///      read, replacing per-function hardcoded literals and bare-`GameFormat`
+///      -derived defaults so the two authorities can't disagree. A CAPABILITY
+///      bump like 24: the field is `#[serde(default =
+///      "default_deck_copy_limit_fallback")]` (`UpTo(1)`, the tightest
+///      possible cap), so a peer missing it still deserializes `GameState`
+///      cleanly — but silently loses the format's real declared limit and
+///      falls back to the fail-closed singleton cap, wrongly rejecting a
+///      legal 4-of deck under Standard/Pioneer/etc. rather than admitting one
+///      it shouldn't. The direction is symmetric: whichever peer lacks the
+///      field degrades the same way, fail-closed, never fail-open. Lobby
+///      carriers move too; see `LOBBY_PROTOCOL_VERSION` 3.
+/// 49 — Full-server `DraftPlayerView` payloads require public-seat
+///      `active_pack_count`. An older v48 server can complete the handshake
+///      yet omit that serde-additive field while the TypeScript client accepts
+///      the JSON, leaving it unable to render a seat's active-pack presence.
+///      Full handshakes must refuse the capability mismatch. Lobby messages
+///      are unchanged.
 /// 48 — Full-server `DraftPlayerView` payloads require the engine-owned
-///      `pick_selection_mode`. An older server can omit the field while the
-///      TypeScript client accepts the JSON and then silently treats an ordered
-///      Commander Draft pick as direct selection, so Full handshakes must
-///      refuse the capability mismatch. Lobby messages are unchanged.
+///      `pick_selection_mode`. An older server can omit it while the
+///      TypeScript client accepts the JSON, then silently treats an ordered
+///      Commander Draft pick as direct selection. Lobby messages are unchanged.
 /// 47 — Resolution-time optional fixed sacrifice payments add a typed
 ///      replacement-resumable continuation to `GameState`.
 /// 46 — `QuantityRef::Aggregate` and `QuantityRef::TrackedSetAggregate` were
@@ -202,7 +221,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 48;
+pub const PROTOCOL_VERSION: u32 = 50;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -229,7 +248,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
-/// 3 — The tournament-organizer message set: seven [`LobbyClientMessage`]
+/// 4 — The tournament-organizer message set: seven [`LobbyClientMessage`]
 ///     variants (`CreateTournament`, `JoinTournament`, `GetTournament`,
 ///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament`,
 ///     `EndTournament`) and five [`LobbyServerMessage`] variants
@@ -249,9 +268,22 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     — receives no tournament frame at all unless it first subscribed to a
 ///     surface it has no code for. Raising the floor would evict that entire
 ///     cohort's lobby session to protect it from messages it cannot receive.
-///     On the client → broker half a v3-only tag reaching a v2 broker is
+///     On the client → broker half a v4-only tag reaching a v2 broker is
 ///     already answered per-frame by [`ParsedFrame::UnknownTag`], which is the
 ///     stated reason no upper bound exists either.
+/// 3 — `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
+///     50 for the full entry). Same three carriers as 2:
+///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
+///     `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker →
+///     client). Unlike 2, this is a CAPABILITY bump, not a parse bump — the
+///     field is `#[serde(default)]` and still deserializes cleanly on either
+///     side — so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: a v2 client
+///     can still create/join a game, it just can't declare or observe a
+///     non-default deck-copy-limit override, silently getting the fail-closed
+///     `UpTo(1)` fallback instead of the format's real default. That is a
+///     capability loss, not a broken session — the same shape as
+///     `PROTOCOL_VERSION`'s own capability-bump entries (24, 50), not this
+///     file's own entry 2.
 /// 2 — `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
 ///     tagged `DeckSizeRule` — a field TYPE change, one of the four triggers
 ///     listed above.
@@ -278,7 +310,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 3;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 4;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -606,7 +638,7 @@ pub enum LobbyClientMessage {
         game_code: String,
     },
 
-    // --- Tournament organizer (lobby protocol 3) --------------------------
+    // --- Tournament organizer (lobby protocol 4) --------------------------
     //
     // Authority on every gated variant below is the TOKEN carried in the
     // payload, compared against the stored `organizer_token`/`player_token` —
@@ -748,7 +780,7 @@ pub enum LobbyServerMessage {
         reservation_token: Option<String>,
     },
 
-    // --- Tournament organizer (lobby protocol 3) --------------------------
+    // --- Tournament organizer (lobby protocol 4) --------------------------
     //
     // `TournamentCreated`/`TournamentJoined` are the ONLY two variants that
     // carry a token, and both are point replies to the caller who just earned
@@ -912,9 +944,9 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 3);
-        // Deliberately still 2, not 3: lobby version 3 is a purely ADDITIVE
-        // variant set, so a version-2 client parses every frame it already
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 4);
+        // Deliberately still 2, not 4: lobby versions 3 and 4 are purely
+        // additive, so a version-2 client parses every frame it already
         // understood and is not evicted. See the constant's own changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
@@ -935,12 +967,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 48);
+        assert_eq!(PROTOCOL_VERSION, 50);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 47);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 49);
     }
 
     #[test]
@@ -994,7 +1026,7 @@ mod tests {
         ));
     }
 
-    // --- Tournament wire surface (lobby protocol 3) -----------------------
+    // --- Tournament wire surface (lobby protocol 4) -----------------------
 
     use crate::tournament::{
         BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentMeta,
@@ -1053,12 +1085,11 @@ mod tests {
         }
     }
 
-    /// Unit 1's literal-value pin. Stated as "exactly one past 2" rather than
-    /// a bare `== 3` so the reason the number moved stays legible at the
-    /// assertion, not only in the changelog.
+    /// The tournament additions follow the existing `FormatConfig` capability
+    /// bump, so they consume the next independent lobby wire version.
     #[test]
-    fn lobby_version_bumped_exactly_one_past_the_pre_tournament_value() {
-        const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 2;
+    fn tournament_lobby_version_follows_the_format_config_bump() {
+        const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         assert_eq!(LOBBY_PROTOCOL_VERSION, PRE_TOURNAMENT_LOBBY_VERSION + 1);
     }
 

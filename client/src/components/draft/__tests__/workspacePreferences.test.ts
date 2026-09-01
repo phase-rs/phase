@@ -31,7 +31,7 @@ describe("workspace preferences", () => {
       pinnedHeightRatio: 2,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
-      phoneDeckVisualColumnCaps: { portrait: 0, landscape: 7 },
+      phoneDeckVisualColumnCaps: { portrait: 0, landscape: 11 },
       tabletDeckVisualColumnCaps: { portrait: 0, landscape: 16 },
       deck: {
         sort: "type",
@@ -54,8 +54,8 @@ describe("workspace preferences", () => {
       packScale: 2.9,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
-      phoneDeckVisualColumnCaps: { portrait: 1, landscape: 5 },
-      tabletDeckVisualColumnCaps: { portrait: 1, landscape: 15 },
+      phoneDeckVisualColumnCaps: { portrait: 1, landscape: 10 },
+      tabletDeckVisualColumnCaps: { portrait: 1, landscape: 10 },
       deck: { sort: "type", columnCount: 2, rows: "two", showHeaders: false },
       sideboard: { sort: "cmc", columnCount: 20, rows: "one", showHeaders: true },
     });
@@ -84,15 +84,15 @@ describe("workspace preferences", () => {
 
   it("caps_visual_column_groups_by_context_and_orientation", () => {
     const phoneCaps = { portrait: 3, landscape: 5 };
-    const tabletCaps = { portrait: 12, landscape: 15 };
+    const tabletCaps = { portrait: 10, landscape: 10 };
     expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "draft", phoneCaps, tabletCaps)).toBe(3);
     expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "draft", phoneCaps, tabletCaps)).toBe(5);
     expect(resolveDraftWorkspaceVisualColumnCap("phone-portrait", "builder", phoneCaps, tabletCaps)).toBe(3);
     expect(resolveDraftWorkspaceVisualColumnCap("phone-landscape", "builder", phoneCaps, tabletCaps)).toBe(5);
     expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "draft", phoneCaps, tabletCaps)).toBe(3);
     expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "draft", phoneCaps, tabletCaps)).toBe(5);
-    expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "builder", phoneCaps, tabletCaps)).toBe(12);
-    expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "builder", phoneCaps, tabletCaps)).toBe(15);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-portrait", "builder", phoneCaps, tabletCaps)).toBe(10);
+    expect(resolveDraftWorkspaceVisualColumnCap("tablet-landscape", "builder", phoneCaps, tabletCaps)).toBe(10);
     expect(resolveDraftWorkspaceVisualColumnCap("desktop", "draft", phoneCaps, tabletCaps)).toBeUndefined();
   });
 
@@ -205,7 +205,7 @@ describe("workspace preferences", () => {
     })).toMatchObject({
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 2 },
-      tabletDeckVisualColumnCaps: { portrait: 3, landscape: 15 },
+      tabletDeckVisualColumnCaps: { portrait: 3, landscape: 10 },
     });
   });
 

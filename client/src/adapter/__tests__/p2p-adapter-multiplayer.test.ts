@@ -482,6 +482,7 @@ function twoHeadedGiantConfig(): FormatConfig {
     range_of_influence: null,
     team_based: true,
     sideboard_policy: { type: "Unlimited" },
+    default_deck_copy_limit: { type: "Unlimited" },
     uses_commander: false,
     allow_debug_actions: false,
   };
@@ -500,6 +501,7 @@ function commanderConfig(): FormatConfig {
     range_of_influence: null,
     team_based: false,
     sideboard_policy: { type: "Forbidden" },
+    default_deck_copy_limit: { type: "UpTo", data: 1 },
     uses_commander: true,
     allow_debug_actions: false,
   };
@@ -3629,14 +3631,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 36 → 35 and BOTH halves red: the v35 frame stops being
-  // refused, and the v36 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v35" is also satisfied by a client
+  // bump. Revert 37 → 36 and BOTH halves red: the v36 frame stops being
+  // refused, and the v37 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v36" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v35) and admits its own (v36)", async () => {
+  it("refuses the previous wire protocol (v36) and admits its own (v37)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(35));
+    await refusing.conn.simulateData(setupFrameAt(36));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3648,7 +3650,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(36));
+    await admitting.conn.simulateData(setupFrameAt(37));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

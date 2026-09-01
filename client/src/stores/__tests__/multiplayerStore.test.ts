@@ -234,11 +234,7 @@ describe("multiplayerStore", () => {
     // broker.
     expect(
       isServerCompatible(
-        server(
-          "LobbyOnly",
-          PROTOCOL_VERSION,
-          MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
-        ),
+        server("LobbyOnly", PROTOCOL_VERSION, MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1),
       ),
     ).toBe(false);
     // Full servers ignore the lobby field entirely.

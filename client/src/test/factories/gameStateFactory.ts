@@ -139,6 +139,7 @@ export const formatConfigFactory = Factory.define<FormatConfig>(() => ({
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Limited", data: 15 },
+  default_deck_copy_limit: { type: "UpTo", data: 4 },
   uses_commander: false,
   allow_debug_actions: false,
 }));
@@ -162,6 +163,7 @@ export const buildCommanderFormatConfig = (
     command_zone: true,
     commander_damage_threshold: 21,
     uses_commander: true,
+    default_deck_copy_limit: { type: "UpTo", data: 1 },
     ...overrides,
   });
 };

@@ -88,7 +88,11 @@
     "passingRight": "← Nach rechts geben ←",
     "connected": "Connected",
     "disconnected": "Disconnected",
-    "faceUpDraftCards": "Aufgedeckt: {{cards}}"
+    "faceUpDraftCards": "Aufgedeckt: {{cards}}",
+    "activePackCount_one": "{{count}} Booster bei {{player}}",
+    "activePackCount_few": "{{count}} Booster bei {{player}}",
+    "activePackCount_many": "{{count}} Booster bei {{player}}",
+    "activePackCount_other": "{{count}} Booster bei {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",
