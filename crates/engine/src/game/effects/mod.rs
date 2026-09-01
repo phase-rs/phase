@@ -5608,6 +5608,12 @@ pub fn is_known_effect(effect: &Effect) -> bool {
 /// for each of those cards") expose both exiled objects to the grant.
 ///
 /// The walk STOPS at a mode boundary — see [`crosses_modal_boundary`].
+///
+/// The walk itself is UNCHANGED by the in-place-producer veto: transitive
+/// publication of *in-place-population* producers (tap/counter/damage — see
+/// [`population_does_not_move`]) is now additionally gated by
+/// [`transitive_publish_superseded`] at the publish sites, which reuses this
+/// predicate (unmodified) as its publisher-position input.
 pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     branch_references_tracked_set(ability.sub_ability.as_deref())
 }
@@ -5712,6 +5718,15 @@ pub(crate) fn chain_references_tracked_set(ability: &ResolvedAbility) -> bool {
 /// root, pinned by `build_resolved_from_def_preserves_player_scope`, and 17
 /// corpus cards carry a mode-level `player_scope` — Rankle's Prank on all three
 /// modes.)
+///
+/// SIBLING GATE: [`transitive_publish_superseded`] now applies the same leg-2
+/// (later-publisher) and leg-3 (`DetachedRemainder`) verdicts at the tracked-set
+/// publish gates for EVENT-FUL in-place-population producers (tap/counter/damage),
+/// whose harvest never yields `[]` and therefore cannot use this function's
+/// empty fall-through. The two gates must stay semantically aligned: this
+/// function keeps leg 1 (`no_earlier_producer`), which the veto deliberately
+/// omits (a head with no earlier producer would always clear the veto and
+/// re-admit the tap population).
 fn is_sole_chain_producer(state: &GameState, ability: &ResolvedAbility) -> bool {
     let no_earlier_producer = state.chain_tracked_set_id.is_none_or(|id| {
         state
@@ -5785,6 +5800,127 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(node_or_later_is_publisher_position)
+}
+
+/// CR 608.2c: does this producer's tracked-set population STAY IN PLACE —
+/// i.e. is its harvest signal an event that is not a zone change? Tap/untap
+/// (CR 701.26a), counter addition (CR 122.1) and damage (CR 120.3) leave the
+/// affected objects in their zones, so a later instruction that moves
+/// *different* objects can never be naming them via zone provenance.
+///
+/// COVERED KINDS (doc-comment exhaustiveness contract — `matches!` variant
+/// patterns are NOT compiler-checked, so any future non-zone-change harvest
+/// kind MUST be added to both this list and the `matches!` below):
+/// SetTapState, PutCounter, PutCounterAll, MultiplyCounter,
+/// ReproduceEventCounters, MoveCounters, DealDamage, DamageAll.
+///
+/// Deliberately EXCLUDED (moving populations, harvested from ZoneChanged or
+/// leave-the-zone events): Counter, CounterAll, Destroy, Sacrifice, Discard,
+/// Mill, Dig, ExileTop, RevealUntil-with-destination. Also excluded — and
+/// this exclusion is MEASURED, not principled: reveal-only (`CardsRevealed`)
+/// and `GainControl`/`GainControlAll` are the same in-place class in
+/// principle but have ZERO corpus rows today and distinct consumer binding
+/// (Atraxa's "from among the revealed cards"). Widening to them is the
+/// documented extension point: one line here plus a full-suite run under the
+/// measurement protocol in `transitive_publish_superseded`.
+fn population_does_not_move(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState { .. }
+            | Effect::PutCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::DealDamage { .. }
+            | Effect::DamageAll { .. }
+    )
+}
+
+/// CR 608.2c nearest-antecedent: the event-ful companion of
+/// [`is_sole_chain_producer`]'s legs 2+3. An in-place-population producer
+/// (see [`population_does_not_move`]) whose chain is followed by another
+/// producer is not the antecedent a later "this way"/"it" reference names —
+/// the later producer is. Declining the publish keeps that population out of
+/// the chain tracked set entirely, so EVERY sentinel consumer (the interactive
+/// `EffectZoneChoice` scan and the `ChangeZoneAll` mass-move alike) sees only
+/// the later producer's population.
+///
+/// Zone-change producers are exempt on purpose: same-verb compound zone
+/// changes (Suspend Aggression's two exiles) are ONE antecedent and must
+/// unify (`compound_zone_change_chain_unifies_tracked_set`).
+///
+/// Scope of the supersession verdict (MEASURED, then narrowed — see below).
+/// A leg followed ONLY by TERMINAL consumers is never superseded — "terminal"
+/// means the consumer's subtree contains no further `TrackedSet` reference
+/// ([`ability_or_branch_references_tracked_set`]; Urge to Feed, Najeela, and
+/// the Sanar Vivid `Exile → PutCounterAll → caused_by` merge row all keep
+/// publishing — structurally guaranteed). A later node whose OWN subtree
+/// contains a further tracked-set reference IS in publisher position
+/// ([`node_or_later_is_publisher_position`]'s `node_or_later` disjunct) and
+/// supersedes — but ONLY when that later node is itself a MOVING
+/// (zone-change-class) producer: same-class in-place producers chained ahead
+/// of the consumer keep BACKWARD-MERGING, because the consumer's "… this way"
+/// aggregates over the whole same-verb instruction group.
+///
+/// The narrowing is corpus-forced, exactly per the veto's measurement protocol:
+/// Kathril, Aspect Warper (#6321 class) — "put a [keyword] counter on any
+/// creature you control if … Repeat this process for … Then put a +1/+1
+/// counter on Kathril for each counter put on a creature this way" — needs
+/// every `PutCounter` leg to publish into the set its SIBLING legs and the
+/// tail read. Under the un-narrowed chain-wide walk each leg's later sibling
+/// leg is in publisher position (its subtree reaches the tail's TrackedSetSize)
+/// and the veto declined every leg whose own gate was false, leaving the tail
+/// counting 0
+/// (`kathril_reaches_matching_counter_and_tail_past_false_earlier_gates` red).
+/// The distinguishing rule is CR 608.2c's nearest antecedent read on the VERB:
+/// a later producer of a DIFFERENT (zone-moving) harvest class is the
+/// antecedent a later zone-provenance "it" names (Shiva: tap → exile → "return
+/// it"), while a later producer of the SAME in-place class is part of the very
+/// action the "this way" counts. The walk therefore continues PAST a non-moving
+/// publisher node and only fires on a moving one: `tap → tap2 → exile →
+/// consumer` still vetoes the first tap (the exile is found deeper), while
+/// `tap → tap2 → consumer` keeps the full union (no moving producer
+/// intervenes). A later CONSUMER (e.g. `consumer{TrackedSet} →
+/// consumer2{TrackedSet}`) is not an in-place producer, so it still supersedes
+/// — the Motivated Pony LOADED GUN disclosed in
+/// [`later_node_is_publisher_position`]'s doc carries over in that shape.
+///
+/// `repeat_for: TrackedSetSize` consumers are not publisher positions (they
+/// publish nothing), so Seasoned Pyromancer (#740) is unaffected.
+fn transitive_publish_superseded(producer: &ResolvedAbility) -> bool {
+    population_does_not_move(&producer.effect)
+        && (later_node_is_moving_publisher_position(producer)
+            || producer.detached_remainder != DetachedRemainder::NoProducer)
+}
+
+/// CR 608.2c: the narrowed later-node term of
+/// [`transitive_publish_superseded`] — like
+/// [`later_node_is_publisher_position`], but only a later node that is BOTH in
+/// publisher position AND a MOVING (non-in-place, see
+/// [`population_does_not_move`]) producer supersedes. Walks past non-moving
+/// publisher nodes so a moving producer anywhere later still fires; stops at a
+/// mode boundary exactly like its sibling.
+fn later_node_is_moving_publisher_position(ability: &ResolvedAbility) -> bool {
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(node_or_later_is_moving_publisher_position)
+}
+
+fn node_or_later_is_moving_publisher_position(node: &ResolvedAbility) -> bool {
+    if crosses_modal_boundary(node) {
+        return false;
+    }
+    (next_sub_needs_tracked_set(node) && !population_does_not_move(&node.effect))
+        || node
+            .sub_ability
+            .as_deref()
+            .is_some_and(node_or_later_is_moving_publisher_position)
+        || node
+            .else_ability
+            .as_deref()
+            .is_some_and(node_or_later_is_moving_publisher_position)
 }
 
 fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
@@ -9094,17 +9230,19 @@ fn publish_player_scope_clause_results(
             state.last_effect_excess_amount = excess;
         }
     }
-    let affected_with_causes =
-        if next_sub_needs_tracked_set(outer) || after_scope_needs_linked_exile {
-            affected_objects_with_causes(
-                state,
-                scoped_template,
-                &scoped_template.effect,
-                scoped_events,
-            )
-        } else {
-            Vec::new()
-        };
+    let affected_with_causes = if (next_sub_needs_tracked_set(outer)
+        && !transitive_publish_superseded(scoped_template))
+        || after_scope_needs_linked_exile
+    {
+        affected_objects_with_causes(
+            state,
+            scoped_template,
+            &scoped_template.effect,
+            scoped_events,
+        )
+    } else {
+        Vec::new()
+    };
     let affected_ids: Vec<ObjectId> = affected_with_causes.iter().map(|(id, _)| *id).collect();
     if after_scope_needs_linked_exile {
         for id in &affected_ids {
@@ -9133,7 +9271,7 @@ fn publish_player_scope_clause_results(
     ids.sort_unstable_by_key(|id| id.0);
     ids.dedup();
     state.last_zone_changed_ids = ids;
-    if next_sub_needs_tracked_set(outer) {
+    if next_sub_needs_tracked_set(outer) && !transitive_publish_superseded(scoped_template) {
         publish_tracked_set_with_causes(state, affected_with_causes);
     }
     linked_exile_batch_from_events(state, outer.source_id, scoped_events)
@@ -12722,7 +12860,7 @@ fn resolve_chain_body(
     //   - Counter-adding effects → `CounterAdded` (CR 122.1), so "those
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
-    if next_sub_needs_tracked_set(ability) {
+    if next_sub_needs_tracked_set(ability) && !transitive_publish_superseded(ability) {
         let affected_with_causes =
             affected_objects_with_causes(state, ability, &ability.effect, &events[events_before..]);
         publish_tracked_set_with_causes(state, affected_with_causes);

@@ -1046,6 +1046,7 @@ mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
+mod shiva_chapter3_tap_publish_leak;
 mod shorten_efficacy;
 mod sin_spiras_punishment_repeat;
 mod skitterfang_reflexive_without_counter;
