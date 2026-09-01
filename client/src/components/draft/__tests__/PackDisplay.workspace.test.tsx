@@ -631,6 +631,27 @@ describe("PackDisplay local workspace controller", () => {
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
   });
 
+  it("selects_a_desktop_pack_card_when_pointer_capture_retargets_its_click_to_the_card_shell", async () => {
+    const onDrop = vi.fn();
+    const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<RealDragPackHarness onDrop={onDrop as never} confirmPick={confirmPick} />);
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 97, pointerType: "mouse" });
+    fireEvent.pointerUp(cardElement, { clientX: 10, clientY: 10, isPrimary: true, pointerId: 97, pointerType: "mouse" });
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 97, pointerType: "mouse" });
+
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(cardElement).toHaveClass("ring-arcane", "shadow-[0_0_7px_3px_#38bdf8]");
+    expect(screen.getByRole("button", { name: "Confirm Pick" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
+    await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
   it.each(["mouse", "pen"] as const)("selects_a_desktop_%s_pack_card_after_a_no_target_drag_release", async (pointerType) => {
     const onDrop = vi.fn();
     const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });

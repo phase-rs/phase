@@ -275,6 +275,13 @@ function PackCard({
       }}
       onLostPointerCapture={(event) => local?.dragController.handleLostPointerCapture(event)}
       onContextMenu={longPress.handlers.onContextMenu}
+      onClick={(event) => {
+        // The desktop drag controller captures the pointer on this shell. A
+        // browser may consequently target its trailing click here instead of
+        // the nested activation button; accept only that retargeted case.
+        if (!desktopLayout || event.target !== event.currentTarget) return;
+        if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
+      }}
       onDoubleClick={(event) => {
         const target = event.target as HTMLElement;
         if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;
