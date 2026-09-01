@@ -14,7 +14,7 @@ export function DiscordBadge({ className }: DiscordBadgeProps) {
       rel="noopener noreferrer"
       onClick={(e) => {
         e.preventDefault();
-        openExternal(DISCORD_INVITE_URL, e.nativeEvent);
+        openExternal(DISCORD_INVITE_URL);
       }}
       aria-label="Discord"
       className={

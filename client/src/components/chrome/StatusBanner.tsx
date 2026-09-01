@@ -91,7 +91,7 @@ export function StatusBanner() {
             // that rejects a non-http(s) href from a published payload.
             <button
               type="button"
-              onClick={(event) => openExternal(link.url, event.nativeEvent)}
+              onClick={() => openExternal(link.url)}
               className={`mt-1 self-start text-[11px] font-medium underline underline-offset-2 ${tone.text}`}
             >
               {link.label}

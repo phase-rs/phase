@@ -115,10 +115,7 @@ describe("StatusBanner", () => {
     render(<StatusBanner />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Details on Discord" }));
-    expect(openExternal).toHaveBeenCalledWith(
-      "https://discord.gg/example",
-      expect.any(MouseEvent),
-    );
+    expect(openExternal).toHaveBeenCalledWith("https://discord.gg/example");
   });
 
   it("renders no link affordance when the message carries none", async () => {

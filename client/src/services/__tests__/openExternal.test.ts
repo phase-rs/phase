@@ -14,8 +14,6 @@ vi.mock("@tauri-apps/plugin-opener", () => {
 
 import { openExternal } from "../openExternal";
 
-const trustedEvent = { isTrusted: true } as Event;
-
 afterEach(() => {
   mocks.tauri = false;
   mocks.openUrl.mockReset();
@@ -32,7 +30,7 @@ describe("direct external-link routing", () => {
     "phase://deck/1",
   ])("rejects %s before either browser route is reached", (url) => {
     const browserOpen = vi.spyOn(window, "open").mockImplementation(() => null);
-    openExternal(url, trustedEvent);
+    openExternal(url);
     expect(mocks.moduleLoaded).not.toHaveBeenCalled();
     expect(mocks.openUrl).not.toHaveBeenCalled();
     expect(browserOpen).not.toHaveBeenCalled();
@@ -40,7 +38,7 @@ describe("direct external-link routing", () => {
 
   it("uses the exact browser window.open contract for HTTPS", () => {
     const browserOpen = vi.spyOn(window, "open").mockImplementation(() => null);
-    openExternal("https://example.com/cards", trustedEvent);
+    openExternal("https://example.com/cards");
     expect(browserOpen).toHaveBeenCalledWith(
       "https://example.com/cards",
       "_blank",
@@ -52,7 +50,7 @@ describe("direct external-link routing", () => {
   it("dynamically routes Tauri HTTP URLs through opener", async () => {
     mocks.tauri = true;
     const browserOpen = vi.spyOn(window, "open").mockImplementation(() => null);
-    openExternal("http://example.com", trustedEvent);
+    openExternal("http://example.com");
     await vi.waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://example.com"));
     expect(browserOpen).not.toHaveBeenCalled();
   });
@@ -61,16 +59,7 @@ describe("direct external-link routing", () => {
     mocks.tauri = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     mocks.openUrl.mockRejectedValueOnce(new Error("denied"));
-    openExternal("https://example.com", trustedEvent);
+    openExternal("https://example.com");
     await vi.waitFor(() => expect(warn).toHaveBeenCalledOnce());
-  });
-
-  it("refuses an untrusted event before opening a browser window", () => {
-    const browserOpen = vi.spyOn(window, "open").mockImplementation(() => null);
-
-    openExternal("https://example.com/cards", new Event("click"));
-
-    expect(browserOpen).not.toHaveBeenCalled();
-    expect(mocks.moduleLoaded).not.toHaveBeenCalled();
   });
 });
