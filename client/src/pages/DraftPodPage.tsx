@@ -16,7 +16,11 @@ import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { useDraftShellChrome, type DraftShellPhoneAction } from "../components/chrome/ShellContext";
+import {
+  useDraftShellChrome,
+  type DraftShellPhoneAction,
+  type DraftShellTopAction,
+} from "../components/chrome/ShellContext";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -1203,6 +1207,8 @@ export function DraftPodPage() {
   }));
   const [podStatusOpen, setPodStatusOpen] = useState(false);
   const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
+  const endingDraftLatch = useRef(false);
+  const [endingDraft, setEndingDraft] = useState(false);
 
   const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
     responsiveViewport.width,
@@ -1210,12 +1216,38 @@ export function DraftPodPage() {
   );
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
-  const compactHostControlsLayout = phoneLayout || responsiveLayout === "tablet-portrait";
+  const compactHostControlsLayout = phoneLayout || tabletLayout;
   const phoneDrafting = phase === "drafting" && phoneLayout;
   const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const handleEndDraft = useCallback(() => {
+    if (endingDraftLatch.current) return;
+    if (!window.confirm(t("hostControls.endDraftConfirm"))) return;
+
+    endingDraftLatch.current = true;
+    setEndingDraft(true);
+    void (async () => {
+      try {
+        await leave(false);
+        resetPod();
+        navigate("/");
+      } catch (err) {
+        console.error("[DraftPodPage] failed to end draft:", err);
+        endingDraftLatch.current = false;
+        setEndingDraft(false);
+      }
+    })();
+  }, [leave, navigate, resetPod, t]);
+  const endDraftAction = useMemo<DraftShellTopAction>(() => ({
+    id: "end-draft",
+    label: t("hostControls.endDraft"),
+    tone: "danger",
+    disabled: endingDraft,
+    onClick: handleEndDraft,
+  }), [endingDraft, handleEndDraft, t]);
   const hostDraftTopActions = useHostDraftTopActions({
     enabled: phase === "drafting",
+    endDraftAction,
   });
   const betweenGamesEditorActive = screen === "betweenGames"
     && sideboardPrompt !== null
@@ -1414,7 +1446,10 @@ export function DraftPodPage() {
       )}
 
       {!(phase === "drafting" && compactHostControlsLayout) && (
-        <HostControls draftTopActions={hostDraftTopActions} />
+        <HostControls
+          draftTopActions={hostDraftTopActions}
+          endDraftAction={endDraftAction}
+        />
       )}
     </div>
   );

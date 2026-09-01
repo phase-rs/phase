@@ -29,6 +29,9 @@ const captured = vi.hoisted(() => ({
   phoneAction: undefined as DraftShellPhoneAction | undefined,
   topActions: [] as readonly DraftShellTopAction[],
   hostActionsEnabled: [] as boolean[],
+  hostEndActions: [] as DraftShellTopAction[],
+  floatingActions: [] as readonly DraftShellTopAction[],
+  floatingEndAction: undefined as DraftShellTopAction | undefined,
   progressVariant: null as string | null,
   showProgress: null as boolean | null,
   hostPresentations: [] as string[],
@@ -94,6 +97,14 @@ const store = vi.hoisted(() => {
   return { state };
 });
 
+const podStore = vi.hoisted(() => ({
+  reset: vi.fn(),
+  resumeHostedPod: vi.fn(),
+  enterKind: vi.fn(),
+}));
+
+const router = vi.hoisted(() => ({ navigate: vi.fn() }));
+
 vi.mock("../../stores/multiplayerDraftStore", () => {
   const hook = Object.assign(
     (selector: (state: typeof store.state) => unknown) => selector(store.state),
@@ -111,8 +122,12 @@ vi.mock("../../stores/multiplayerDraftStore", () => {
 
 vi.mock("../../stores/draftPodStore", () => ({
   useDraftPodStore: (selector: (state: { config: { podSize: number }; reset: () => void; resumeHostedPod: () => void; enterKind: () => void }) => unknown) => selector({
-    config: { podSize: 8 }, reset: vi.fn(), resumeHostedPod: vi.fn(), enterKind: vi.fn(),
+    config: { podSize: 8 }, ...podStore,
   }),
+}));
+vi.mock("react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router")>()),
+  useNavigate: () => router.navigate,
 }));
 vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
 vi.mock("../../components/chrome/ShellContext", async (importOriginal) => ({
@@ -130,15 +145,40 @@ vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { childre
   return <>{props.children}</>;
 } }));
 vi.mock("../../components/draft/HostControls", () => ({
-  HostControls: () => {
+  HostControls: ({
+    draftTopActions,
+    endDraftAction,
+  }: {
+    draftTopActions: readonly DraftShellTopAction[];
+    endDraftAction: DraftShellTopAction;
+  }) => {
     captured.hostPresentations.push("floating");
-    return <div data-testid="host-controls-floating" />;
+    captured.floatingActions = draftTopActions;
+    captured.floatingEndAction = endDraftAction;
+    if (store.state.role !== "host") return null;
+    const action = draftTopActions.find(({ id }) => id === "end-draft") ?? endDraftAction;
+    return (
+      <button
+        data-testid="host-controls-floating"
+        disabled={action.disabled}
+        onClick={action.onClick}
+      >
+        {action.label}
+      </button>
+    );
   },
-  useHostDraftTopActions: ({ enabled }: { enabled: boolean }): readonly DraftShellTopAction[] => {
+  useHostDraftTopActions: ({
+    enabled,
+    endDraftAction,
+  }: {
+    enabled: boolean;
+    endDraftAction: DraftShellTopAction;
+  }): readonly DraftShellTopAction[] => {
     captured.hostActionsEnabled.push(enabled);
+    captured.hostEndActions.push(endDraftAction);
     return enabled && store.state.role === "host" ? [
       { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
-      { id: "end-draft", label: "End Draft", tone: "danger", onClick: vi.fn() },
+      endDraftAction,
     ] : [];
   },
 }));
@@ -202,6 +242,9 @@ describe("DraftPodPage workspace", () => {
     captured.phoneAction = undefined;
     captured.topActions = [];
     captured.hostActionsEnabled = [];
+    captured.hostEndActions = [];
+    captured.floatingActions = [];
+    captured.floatingEndAction = undefined;
     captured.progressVariant = null;
     captured.showProgress = null;
     captured.hostPresentations = [];
@@ -212,11 +255,15 @@ describe("DraftPodPage workspace", () => {
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
     localStorage.clear();
     vi.clearAllMocks();
+    store.state.leave.mockReset();
+    store.state.leave.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     cleanup();
     localStorage.clear();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("pod_set_and_cube_views_use_same_workspace_and_controller_contract", async () => {
@@ -327,7 +374,7 @@ describe("DraftPodPage workspace", () => {
 
   it.each([
     ["tablet-portrait", 768, 1024, true],
-    ["tablet-landscape", 1024, 768, false],
+    ["tablet-landscape", 1024, 768, true],
   ] as const)("uses_the_correct_host_controls_presentation_on_%s", (responsiveLayout, width, height, useCompactHostControls) => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
@@ -347,6 +394,7 @@ describe("DraftPodPage workspace", () => {
     expect(captured.topActions.map((action) => action.id)).toEqual(
       useCompactHostControls ? ["pause-resume", "end-draft"] : [],
     );
+    expect(captured.topActions[1]).toBe(captured.hostEndActions[captured.hostEndActions.length - 1]);
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(useCompactHostControls);
     expect(captured.hostPresentations).toEqual(useCompactHostControls ? [] : ["floating"]);
     if (useCompactHostControls) {
@@ -386,5 +434,107 @@ describe("DraftPodPage workspace", () => {
     expect(captured.phoneAction).toBeUndefined();
     expect(screen.queryByRole("dialog", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
     expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+  });
+
+  it("keeps desktop drafting controls floating while guest and non-drafting states stay gated", () => {
+    const rendered = render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(captured.shellMode).toBe("default");
+    expect(captured.topActions.map(({ id }) => id)).toEqual(["pause-resume", "end-draft"]);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.hostPresentations).toEqual(["floating"]);
+    expect(captured.floatingActions[1]).toBe(captured.topActions[1]);
+    expect(captured.floatingEndAction).toBe(captured.topActions[1]);
+    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+
+    act(() => { store.state.role = "guest"; });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.topActions).toEqual([]);
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+
+    act(() => {
+      store.state.role = "host";
+      store.state.phase = "deckbuilding";
+    });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.topActions).toEqual([]);
+    expect(captured.floatingActions).toEqual([]);
+    expect(captured.floatingEndAction).toBe(captured.hostEndActions[captured.hostEndActions.length - 1]);
+    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+  });
+
+  it("latches two compact end actions from one act before React rerenders", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    let finishLeave: (() => void) | undefined;
+    store.state.leave.mockImplementation(() => new Promise<void>((resolve) => {
+      finishLeave = resolve;
+    }));
+
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const endDraftAction = captured.topActions.find(({ id }) => id === "end-draft");
+    if (!endDraftAction) throw new Error("compact end action was not installed");
+
+    act(() => {
+      endDraftAction.onClick();
+      endDraftAction.onClick();
+    });
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(store.state.leave).toHaveBeenCalledOnce();
+
+    finishLeave?.();
+    await vi.waitFor(() => {
+      expect(podStore.reset).toHaveBeenCalledOnce();
+      expect(router.navigate).toHaveBeenCalledWith("/");
+    });
+  });
+
+  it("keeps a pending compact end action disabled after the phase moves to floating controls", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    store.state.leave.mockImplementation(() => new Promise<void>(() => undefined));
+
+    const rendered = render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const endDraftAction = captured.topActions.find(({ id }) => id === "end-draft");
+    if (!endDraftAction) throw new Error("compact end action was not installed");
+    act(() => endDraftAction.onClick());
+    expect(store.state.leave).toHaveBeenCalledOnce();
+
+    act(() => { store.state.phase = "deckbuilding"; });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const floatingEndAction = captured.floatingEndAction;
+    expect(screen.getByTestId("host-controls-floating")).toBeDisabled();
+    expect(floatingEndAction).toMatchObject({ disabled: true });
+    act(() => floatingEndAction?.onClick());
+    expect(store.state.leave).toHaveBeenCalledOnce();
+  });
+
+  it("re-enables a rejected end action so a new confirmed attempt can leave", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    store.state.leave
+      .mockRejectedValueOnce(new Error("leave failed"))
+      .mockResolvedValueOnce(undefined);
+
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const firstEndDraftAction = captured.topActions.find(({ id }) => id === "end-draft");
+    if (!firstEndDraftAction) throw new Error("compact end action was not installed");
+    act(() => firstEndDraftAction.onClick());
+    expect(store.state.leave).toHaveBeenCalledOnce();
+
+    await vi.waitFor(() => {
+      const retryEndDraftAction = captured.topActions.find(({ id }) => id === "end-draft");
+      expect(retryEndDraftAction).toMatchObject({ disabled: false });
+    });
+    const retryEndDraftAction = captured.topActions.find(({ id }) => id === "end-draft");
+    if (!retryEndDraftAction) throw new Error("retry end action was not installed");
+    act(() => retryEndDraftAction.onClick());
+    expect(store.state.leave).toHaveBeenCalledTimes(2);
+    expect(window.confirm).toHaveBeenCalledTimes(2);
   });
   });

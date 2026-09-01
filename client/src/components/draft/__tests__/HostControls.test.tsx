@@ -16,14 +16,12 @@
  */
 
 import { cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
-import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { DraftShellTopAction } from "../../chrome/ShellContext";
 import { HostControls, useHostDraftTopActions } from "../HostControls";
 
-const { draftState, navigate, resetPod } = vi.hoisted(() => ({
-  navigate: vi.fn(),
-  resetPod: vi.fn(),
+const { draftState } = vi.hoisted(() => ({
   draftState: {
     role: "host" as string | null,
     phase: "matchInProgress",
@@ -74,20 +72,36 @@ vi.mock("../../../stores/multiplayerDraftStore", async (importOriginal) => ({
   useMultiplayerDraftStore: (selector: (state: typeof draftState) => unknown) => selector(draftState),
 }));
 
-vi.mock("../../../stores/draftPodStore", () => ({
-  useDraftPodStore: (selector: (state: { reset: () => void }) => unknown) => selector({ reset: resetPod }),
-}));
+const defaultEndDraftAction: DraftShellTopAction = {
+  id: "end-draft",
+  label: "End Draft",
+  tone: "danger",
+  onClick: vi.fn(),
+};
 
-vi.mock("react-router", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("react-router")>()),
-  useNavigate: () => navigate,
-}));
+function makeEndDraftAction(
+  overrides: Partial<DraftShellTopAction> = {},
+): DraftShellTopAction {
+  return {
+    ...defaultEndDraftAction,
+    onClick: vi.fn(),
+    ...overrides,
+  };
+}
 
-function HostControlsHarness() {
+function HostControlsHarness({
+  endDraftAction = defaultEndDraftAction,
+}: {
+  endDraftAction?: DraftShellTopAction;
+}) {
   const draftTopActions = useHostDraftTopActions({
     enabled: draftState.phase === "drafting",
+    endDraftAction,
   });
-  return <HostControls draftTopActions={draftTopActions} />;
+  return <HostControls
+    draftTopActions={draftTopActions}
+    endDraftAction={endDraftAction}
+  />;
 }
 
 describe("HostControls", () => {
@@ -111,8 +125,7 @@ describe("HostControls", () => {
     draftState.requestPause.mockClear();
     draftState.requestResume.mockClear();
     draftState.leave.mockClear();
-    navigate.mockClear();
-    resetPod.mockClear();
+    defaultEndDraftAction.onClick = vi.fn();
   });
 
   // H1a — pinning row (not red-first: the fixture states `phase` directly). It
@@ -167,16 +180,21 @@ describe("HostControls", () => {
     cleanup();
     draftState.phase = "drafting";
     draftState.sideboardPrompt = null;
-    render(<HostControls draftTopActions={[]} />);
-    expect(screen.getByRole("button", { name: "End Draft" })).toBeInTheDocument();
+    render(<HostControlsHarness />);
+    expect(screen.getByRole("button", { name: "Pause Draft" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "End Draft" })).toHaveLength(1);
   });
 
-  it("memoizes the responsive host draft descriptors and dispatches pause or resume", () => {
+  it("memoizes responsive pause/resume around the injected page end action", () => {
     draftState.phase = "drafting";
     draftState.sideboardPrompt = null;
+    const endDraftAction = makeEndDraftAction();
     const { result, rerender } = renderHook(
-      ({ enabled }) => useHostDraftTopActions({ enabled }),
-      { initialProps: { enabled: true } },
+      ({ enabled, action }) => useHostDraftTopActions({
+        enabled,
+        endDraftAction: action,
+      }),
+      { initialProps: { enabled: true, action: endDraftAction } },
     );
 
     expect(result.current.map(({ id, label, tone }) => ({ id, label, tone })))
@@ -184,14 +202,15 @@ describe("HostControls", () => {
         { id: "pause-resume", label: "Pause Draft", tone: "neutral" },
         { id: "end-draft", label: "End Draft", tone: "danger" },
       ]);
+    expect(result.current[1]).toBe(endDraftAction);
     const first = result.current;
-    rerender({ enabled: true });
+    rerender({ enabled: true, action: endDraftAction });
     expect(result.current).toBe(first);
     result.current[0].onClick();
     expect(draftState.requestPause).toHaveBeenCalledOnce();
 
     draftState.paused = true;
-    rerender({ enabled: true });
+    rerender({ enabled: true, action: endDraftAction });
     expect(result.current[0]).toMatchObject({
       id: "pause-resume",
       label: "Resume Draft",
@@ -203,8 +222,9 @@ describe("HostControls", () => {
 
   it("returns no responsive draft actions when disabled, non-drafting, or guest", () => {
     draftState.phase = "drafting";
+    const endDraftAction = makeEndDraftAction();
     const { result, rerender } = renderHook(
-      ({ enabled }) => useHostDraftTopActions({ enabled }),
+      ({ enabled }) => useHostDraftTopActions({ enabled, endDraftAction }),
       { initialProps: { enabled: false } },
     );
     expect(result.current).toEqual([]);
@@ -220,65 +240,55 @@ describe("HostControls", () => {
     expect(result.current).toEqual([]);
   });
 
-  it("confirms and ends the pod through the responsive end action", async () => {
+  it("forwards the supplied page action through responsive and floating controls", () => {
     draftState.phase = "drafting";
     draftState.sideboardPrompt = null;
-    vi.stubGlobal("confirm", vi.fn(() => true));
-    draftState.leave.mockResolvedValue(undefined);
-    const { result } = renderHook(() => useHostDraftTopActions({ enabled: true }));
-
-    result.current[1].onClick();
-
-    await vi.waitFor(() => expect(draftState.leave).toHaveBeenCalledWith(false));
-    expect(resetPod).toHaveBeenCalledOnce();
-    expect(navigate).toHaveBeenCalledWith("/");
-  });
-
-  it("keeps End Draft disabled when a pending leave survives a responsive presentation switch", async () => {
-    draftState.phase = "drafting";
-    draftState.sideboardPrompt = null;
-    vi.stubGlobal("confirm", vi.fn(() => true));
-    let finishLeave: (() => void) | undefined;
-    draftState.leave.mockImplementation(() => new Promise<void>((resolve) => {
-      finishLeave = resolve;
+    const endDraftAction = makeEndDraftAction();
+    const { result } = renderHook(() => useHostDraftTopActions({
+      enabled: true,
+      endDraftAction,
     }));
 
-    function ResponsiveHostControlsHarness() {
-      const [compact, setCompact] = useState(true);
-      const draftTopActions = useHostDraftTopActions({
-        enabled: draftState.phase === "drafting",
-      });
-      const endDraft = draftTopActions.find((action) => action.id === "end-draft");
-
-      return (
-        <>
-          <button type="button" onClick={() => setCompact(false)}>Switch layout</button>
-          {compact ? (
-            <button
-              type="button"
-              disabled={endDraft?.disabled}
-              onClick={endDraft?.onClick}
-            >
-              End Draft
-            </button>
-          ) : (
-            <HostControls draftTopActions={draftTopActions} />
-          )}
-        </>
-      );
-    }
-
-    render(<ResponsiveHostControlsHarness />);
+    expect(result.current[1]).toBe(endDraftAction);
+    render(
+      <HostControls
+        draftTopActions={result.current}
+        endDraftAction={endDraftAction}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
-    await vi.waitFor(() => expect(draftState.leave).toHaveBeenCalledOnce());
+    expect(endDraftAction.onClick).toHaveBeenCalledOnce();
+    expect(draftState.leave).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Switch layout" }));
-    const endDraft = screen.getByRole("button", { name: "End Draft" });
-    expect(endDraft).toBeDisabled();
-    fireEvent.click(endDraft);
-    expect(draftState.leave).toHaveBeenCalledOnce();
+    cleanup();
+    draftState.phase = "matchInProgress";
+    render(<HostControls draftTopActions={[]} endDraftAction={endDraftAction} />);
+    fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
+    expect(endDraftAction.onClick).toHaveBeenCalledTimes(2);
+    expect(draftState.leave).not.toHaveBeenCalled();
+  });
 
-    finishLeave?.();
-    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+  it("forwards the page action disabled state in both presentations", () => {
+    draftState.phase = "drafting";
+    draftState.sideboardPrompt = null;
+    const endDraftAction = makeEndDraftAction({ disabled: true });
+    const { result } = renderHook(() => useHostDraftTopActions({
+      enabled: true,
+      endDraftAction,
+    }));
+
+    expect(result.current[1]).toBe(endDraftAction);
+    render(
+      <HostControls
+        draftTopActions={result.current}
+        endDraftAction={endDraftAction}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "End Draft" })).toBeDisabled();
+
+    cleanup();
+    draftState.phase = "matchInProgress";
+    render(<HostControls draftTopActions={[]} endDraftAction={endDraftAction} />);
+    expect(screen.getByRole("button", { name: "End Draft" })).toBeDisabled();
   });
 });

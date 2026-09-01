@@ -1,9 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
 
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
-import { useDraftPodStore } from "../../stores/draftPodStore";
 import type { DraftShellTopAction } from "../chrome/ShellContext";
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -19,30 +17,19 @@ function winnerChoiceClass(selected: boolean): string {
 
 const EMPTY_HOST_DRAFT_TOP_ACTIONS: readonly DraftShellTopAction[] = [];
 
-export function useHostDraftTopActions({ enabled }: { enabled: boolean }): readonly DraftShellTopAction[] {
+export function useHostDraftTopActions({
+  enabled,
+  endDraftAction,
+}: {
+  enabled: boolean;
+  endDraftAction: DraftShellTopAction;
+}): readonly DraftShellTopAction[] {
   const { t } = useTranslation("draft");
-  const navigate = useNavigate();
-  const [endingDraft, setEndingDraft] = useState(false);
   const role = useMultiplayerDraftStore((state) => state.role);
   const phase = useMultiplayerDraftStore((state) => state.phase);
   const paused = useMultiplayerDraftStore((state) => state.paused);
   const requestPause = useMultiplayerDraftStore((state) => state.requestPause);
   const requestResume = useMultiplayerDraftStore((state) => state.requestResume);
-  const leave = useMultiplayerDraftStore((state) => state.leave);
-  const resetPod = useDraftPodStore((state) => state.reset);
-
-  const handleEndDraft = useCallback(async () => {
-    if (endingDraft || !window.confirm(t("hostControls.endDraftConfirm"))) return;
-    setEndingDraft(true);
-    try {
-      await leave(false);
-      resetPod();
-      navigate("/");
-    } catch (err) {
-      console.error("[HostControls] failed to end draft:", err);
-      setEndingDraft(false);
-    }
-  }, [endingDraft, leave, navigate, resetPod, t]);
 
   return useMemo(() => {
     if (!enabled || role !== "host" || phase !== "drafting") {
@@ -55,15 +42,9 @@ export function useHostDraftTopActions({ enabled }: { enabled: boolean }): reado
         tone: paused ? "emerald" : "neutral",
         onClick: paused ? requestResume : requestPause,
       },
-      {
-        id: "end-draft",
-        label: t("hostControls.endDraft"),
-        tone: "danger",
-        disabled: endingDraft,
-        onClick: () => { void handleEndDraft(); },
-      },
+      endDraftAction,
     ];
-  }, [enabled, endingDraft, handleEndDraft, paused, phase, requestPause, requestResume, role, t]);
+  }, [enabled, endDraftAction, paused, phase, requestPause, requestResume, role, t]);
 }
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -74,12 +55,12 @@ export function useHostDraftTopActions({ enabled }: { enabled: boolean }): reado
  */
 export function HostControls({
   draftTopActions,
+  endDraftAction,
 }: {
   draftTopActions: readonly DraftShellTopAction[];
+  endDraftAction: DraftShellTopAction;
 }) {
   const { t } = useTranslation("draft");
-  const navigate = useNavigate();
-  const [endingDraft, setEndingDraft] = useState(false);
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
@@ -88,8 +69,6 @@ export function HostControls({
   const overrideMatchResult = useMultiplayerDraftStore(
     (s) => s.overrideMatchResult,
   );
-  const leave = useMultiplayerDraftStore((s) => s.leave);
-  const resetPod = useDraftPodStore((s) => s.reset);
   const replaceSeatWithBot = useMultiplayerDraftStore(
     (s) => s.replaceSeatWithBot,
   );
@@ -116,21 +95,6 @@ export function HostControls({
     "kicked",
     "hostLeft",
   ].includes(phase);
-
-  const handleEndDraft = async () => {
-    if (endingDraft) return;
-    if (!window.confirm(t("hostControls.endDraftConfirm"))) return;
-
-    setEndingDraft(true);
-    try {
-      await leave(false);
-      resetPod();
-      navigate("/");
-    } catch (err) {
-      console.error("[HostControls] failed to end draft:", err);
-      setEndingDraft(false);
-    }
-  };
 
   if (
     draftTopActions.length === 0 &&
@@ -236,16 +200,16 @@ export function HostControls({
 
       {phase !== "drafting" && showEndDraft && (
         <button
-          onClick={() => void handleEndDraft()}
-          disabled={endingDraft}
+          onClick={endDraftAction.onClick}
+          disabled={endDraftAction.disabled}
           className={menuButtonClass({
-            tone: "red",
+            tone: endDraftAction.tone === "danger" ? "red" : endDraftAction.tone,
             size: "sm",
-            disabled: endingDraft,
+            disabled: endDraftAction.disabled,
             className: "mt-1",
           })}
         >
-          {t("hostControls.endDraft")}
+          {endDraftAction.label}
         </button>
       )}
     </div>
