@@ -6472,7 +6472,7 @@ async fn handle_client_message(
                     &deck.scheme_deck,
                     &deck.signature_spell,
                     &[],
-                    fc.format,
+                    fc,
                     Some(match_config.match_type),
                     usize::from(pc),
                 ) {
@@ -6525,7 +6525,7 @@ async fn handle_client_message(
                         &ai_deck_data.signature_spell,
                         // Constructed play, as above: no draft, no concession.
                         &[],
-                        fc.format,
+                        fc,
                         Some(match_config.match_type),
                         usize::from(pc),
                     ) {
@@ -12200,8 +12200,12 @@ mod handshake_tests {
     }
 
     #[test]
-    fn rejects_previous_protocol_for_breaking_planechase_release() {
-        let previous = PROTOCOL_VERSION.saturating_sub(1);
+    fn rejects_v49_before_it_can_omit_default_deck_copy_limit() {
+        // v49 added `active_pack_count`, but it predates the per-format
+        // `default_deck_copy_limit` required by v50. Full games must reject it
+        // at hello rather than let a client use the fail-closed singleton
+        // fallback instead of the format's declared copy limit.
+        let previous = 49;
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {

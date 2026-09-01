@@ -8,6 +8,7 @@ import {
 import {
   LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
   LOBBY_PROTOCOL_VERSION,
+  MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
 
@@ -94,10 +95,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects the previous protocol version for Full servers", async () => {
+  it("rejects v48 Full servers before they can omit active_pack_count", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION - 1 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 48 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -183,7 +184,7 @@ describe("openPhaseSocket", () => {
     ws.deliverMessage(
       helloFrame({
         mode: "LobbyOnly",
-        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+        lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );
 
@@ -254,7 +255,7 @@ describe("openPhaseSocket", () => {
       helloFrame({
         protocol_version: PROTOCOL_VERSION,
         mode: "Full",
-        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+        lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );
 

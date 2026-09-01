@@ -536,6 +536,7 @@ describe("WebSocketAdapter", () => {
         range_of_influence: null,
         team_based: false,
         sideboard_policy: { type: "Forbidden" },
+        default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
       };
@@ -653,6 +654,7 @@ describe("WebSocketAdapter", () => {
         range_of_influence: null,
         team_based: false,
         sideboard_policy: { type: "Forbidden" },
+        default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
       };

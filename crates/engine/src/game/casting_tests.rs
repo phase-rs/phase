@@ -410,6 +410,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -1915,6 +1916,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -1977,6 +1979,7 @@ fn add_play_from_exile_test_spell(
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     spell
@@ -2268,6 +2271,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -2320,6 +2324,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -11693,6 +11698,7 @@ fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> Casti
         single_use_group: None,
         single_use: false,
         cast_cost_raise: raise,
+        alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
     }
 }
@@ -19060,6 +19066,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19163,6 +19170,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19337,6 +19345,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19707,6 +19716,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 mode: crate::types::ability::CardPlayMode::Play,
@@ -20770,6 +20780,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -20845,6 +20856,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -27780,6 +27792,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
     ];
@@ -45703,6 +45716,7 @@ fn play_from_exile_grant(
         single_use_group: None,
         single_use: false,
         cast_cost_raise: None,
+        alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         provenance: if companion {
             crate::types::ability::PlayFromExileProvenance::LandLookCompanion
@@ -46608,6 +46622,7 @@ fn add_impulse_exiled_card(
             single_use_group: Some(single_use_group),
             single_use: true,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     exiled
@@ -46890,6 +46905,7 @@ fn grant_object_exile_land_play_permission(
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 }
@@ -47143,6 +47159,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 
@@ -53589,6 +53606,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }

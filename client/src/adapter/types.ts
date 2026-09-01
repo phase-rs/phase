@@ -115,6 +115,15 @@ export interface RangeOfInfluenceConfig {
   player_overrides: Record<string, number>;
 }
 
+/**
+ * CR 100.2a / CR 100.2b / CR 903.5b: a format's default deck-construction
+ * copy ceiling, before per-card printed overrides and the basic-land
+ * exemption, mirroring the engine's tagged `DeckCopyLimit` enum.
+ */
+export type DeckCopyLimit =
+  | { type: "Unlimited" }
+  | { type: "UpTo"; data: number };
+
 export interface FormatConfig {
   format: GameFormat;
   starting_life: number;
@@ -147,6 +156,11 @@ export interface FormatConfig {
    * fixed-deck formats client-side.
    */
   supplies_fixed_deck?: boolean;
+  /** Engine-authoritative default deck-construction copy ceiling, before
+   * per-card printed overrides and the basic-land exemption. This must be
+   * sent with every format configuration, mirroring `sideboard_policy`'s own
+   * required-field convention above. */
+  default_deck_copy_limit: DeckCopyLimit;
   /** Configured archenemy seat for default Archenemy. Absent outside Archenemy. */
   archenemy_player?: PlayerId | null;
   /**

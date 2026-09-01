@@ -14807,10 +14807,10 @@ fn unless_discard_cost_phrase_without_random_tail_stays_chosen() {
 /// branch for the disjunction combinator — the count axis must not swallow it.
 #[test]
 fn unless_they_discard_plural_keeps_chained_or_branch() {
-    let cost = parse_unless_they_alt_cost_chain("they discard two cards or pay 5 life")
+    let parsed = parse_unless_they_alt_cost_chain("they discard two cards or pay 5 life")
         .expect("disjunctive chain should lower");
-    let AbilityCost::OneOf { costs } = &cost else {
-        panic!("expected OneOf, got {cost:?}");
+    let AbilityCost::OneOf { costs } = &parsed.cost else {
+        panic!("expected OneOf, got {:?}", parsed.cost);
     };
     assert_eq!(costs.len(), 2, "both branches should survive: {costs:?}");
     assert!(
@@ -31171,4 +31171,169 @@ fn the_notary_hobbits_etb_copy_guards_on_token_and_strips_legendary() {
         },
         other => panic!("expected Mana effect, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 118.12a + CR 508.5: the unless-clause PAYER SUBJECT axis
+// ---------------------------------------------------------------------------
+
+/// CR 118.12a: The anaphoric pronoun subjects ("they" / "that player" / "that
+/// opponent") name no player of their own — they point back at a player the
+/// surrounding effect text established, so the chain must report `payer: None`
+/// and leave the referent to the caller's inference. This is the invariant that
+/// keeps the named-role arm below from silently capturing the pronoun class.
+#[test]
+fn unless_pronoun_subjects_carry_no_payer_of_their_own() {
+    for subject in ["they ", "that player ", "that opponent "] {
+        let clause = format!("{subject}sacrifices a creature of their choice");
+        let parsed = parse_unless_they_alt_cost_chain(&clause)
+            .unwrap_or_else(|| panic!("pronoun subject {subject:?} must still parse"));
+        assert!(
+            parsed.payer.is_none(),
+            "anaphoric subject {subject:?} must defer its payer to the caller"
+        );
+        assert!(
+            matches!(parsed.cost, AbilityCost::Sacrifice(_)),
+            "subject {subject:?} must still reach the sacrifice verb"
+        );
+    }
+}
+
+/// CR 508.5 + CR 118.12a: "defending player" is a NAMED role, not an anaphor —
+/// CR 508.5 fixes it as the player the attacking creature is attacking, so the
+/// clause names its payer outright and the chain must surface
+/// `TargetFilter::DefendingPlayer` instead of leaving it to pronoun inference
+/// (which would fall back to the triggering player).
+///
+/// Exercised across the whole verb axis, and with the optional definite
+/// article, because the subject and verb are independent dimensions of the
+/// grammar — the payer must not depend on which cost follows it.
+#[test]
+fn unless_defending_player_subject_names_its_own_payer() {
+    for (clause, expect_cost) in [
+        (
+            "defending player sacrifices a creature of their choice",
+            "sacrifice",
+        ),
+        ("the defending player sacrifices a creature", "sacrifice"),
+        ("defending player discards a card", "discard"),
+        ("defending player pays 3 life", "life"),
+    ] {
+        let parsed = parse_unless_they_alt_cost_chain(clause)
+            .unwrap_or_else(|| panic!("{clause:?} must parse"));
+        assert_eq!(
+            parsed.payer,
+            Some(TargetFilter::DefendingPlayer),
+            "{clause:?} must name the defending player as payer (CR 508.5)"
+        );
+        let matched = matches!(
+            (&parsed.cost, expect_cost),
+            (AbilityCost::Sacrifice(_), "sacrifice")
+                | (AbilityCost::Discard { .. }, "discard")
+                | (AbilityCost::PayLife { .. }, "life")
+        );
+        assert!(
+            matched,
+            "{clause:?} must yield a {expect_cost} cost, got {:?}",
+            parsed.cost
+        );
+    }
+}
+
+/// CR 118.12a: The subject axis and the `or`-disjunction axis compose — a named
+/// role still owns the payer when the clause offers several alternative costs,
+/// and the elided continuation subject does not reset it.
+#[test]
+fn unless_defending_player_subject_survives_or_disjunction() {
+    let parsed = parse_unless_they_alt_cost_chain(
+        "defending player sacrifices a creature of their choice or discards a card",
+    )
+    .expect("disjunctive defending-player clause must parse");
+    assert_eq!(parsed.payer, Some(TargetFilter::DefendingPlayer));
+    match &parsed.cost {
+        AbilityCost::OneOf { costs } => assert_eq!(
+            costs.len(),
+            2,
+            "both alternative costs must survive, got {costs:?}"
+        ),
+        other => panic!("disjunctive unless-cost must be OneOf, got {other:?}"),
+    }
+}
+
+/// CR 508.5 + CR 118.12a + CR 701.21a: Ogre Marauder end-to-end through the
+/// trigger parser — "Whenever this creature attacks, it gains 'this creature
+/// can't be blocked' until end of turn unless defending player sacrifices a
+/// creature of their choice."
+///
+/// Before the subject axis learned "defending player", the whole clause fell
+/// through to the `Unsupported unless clause` gap: the trigger went on the
+/// stack and resolved to nothing, so the grant never applied AND the defending
+/// player was never taxed — the creature stayed blockable for free.
+///
+/// The trigger must carry BOTH halves: the unless-cost (a sacrifice paid by the
+/// defending player) and the body grant (`CantBeBlocked` on the source, until
+/// end of turn).
+#[test]
+fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
+    use crate::types::statics::StaticMode;
+
+    let parsed = parse_oracle_text(
+        "Whenever this creature attacks, it gains \"this creature can't be blocked\" \
+         until end of turn unless defending player sacrifices a creature of their choice.",
+        "Ogre Marauder",
+        &[],
+        &["Creature".into()],
+        &["Ogre".into(), "Warrior".into()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| matches!(t.mode, TriggerMode::Attacks))
+        .expect("the attack trigger must parse");
+
+    // (1) The unless-cost: CR 701.21a sacrifice, paid by the defending player.
+    let unless = trigger
+        .unless_pay
+        .as_ref()
+        .expect("the attack trigger must carry an unless-cost, not a parser gap");
+    assert_eq!(
+        unless.payer,
+        TargetFilter::DefendingPlayer,
+        "CR 508.5: the defending player pays, not the triggering player"
+    );
+    assert!(
+        matches!(unless.cost, AbilityCost::Sacrifice(_)),
+        "the unless-cost must be a sacrifice, got {:?}",
+        unless.cost
+    );
+
+    // (2) The body: the source gains "can't be blocked" until end of turn.
+    let execute = trigger.execute.as_ref().expect("execute must be Some");
+    let statics = match &*execute.effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities,
+        other => panic!("body must lower to a GenericEffect grant, got {other:?}"),
+    };
+    assert!(
+        statics
+            .iter()
+            .any(|s| s.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlocked
+                }
+            ))),
+        "the grant must add StaticMode::CantBeBlocked, got {statics:?}"
+    );
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the grant lasts until end of turn"
+    );
+    assert!(
+        !format!("{:?}", execute.effect).contains("Unimplemented"),
+        "the body must not fall through to a parser gap"
+    );
 }

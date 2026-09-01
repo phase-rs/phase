@@ -65,6 +65,7 @@ fn pipeline_chandra_plus_one_exile_cast_typed_single_use() {
                         card_filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
                         single_use: true,
                         cast_cost_raise: None,
+                        alt_ability_cost: None,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         ..
                     },
@@ -107,6 +108,7 @@ fn pipeline_plural_exile_cast_stays_unrestricted() {
                     card_filter: None,
                     single_use: false,
                     cast_cost_raise: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     ..
                 },

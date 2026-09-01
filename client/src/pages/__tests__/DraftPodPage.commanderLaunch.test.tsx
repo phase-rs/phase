@@ -68,7 +68,13 @@ vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => nul
 vi.mock("../../components/menu/MenuShell", () => ({
   MenuShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: () => null }));
+vi.mock("../../components/draft/HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 
 // ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -80,6 +86,7 @@ function seat(index: number, isBot: boolean): SeatPublicView {
     connected: true,
     has_submitted_deck: true,
     pick_status: "NotDrafting",
+    active_pack_count: 0,
     face_up_draft_cards: [],
   };
 }

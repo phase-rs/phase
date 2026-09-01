@@ -939,7 +939,7 @@ describe("card pool board primitives", () => {
     ).columns).toHaveLength(20);
   });
 
-  it("adds_the_twentieth_column_and_then_disables_the_add_control", () => {
+  it("keeps_the_desktop_control_at_twenty_columns", () => {
     const pool = [card("first")];
     const poolGroups = groups(["first"]);
     const workspace = placedState(["first"]);

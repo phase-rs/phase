@@ -835,19 +835,25 @@ pub fn deck_copy_limit(name: &str) -> JsValue {
     })
 }
 
-/// CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
-/// legally contain across main deck, sideboard, and command zone combined
-/// (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
-/// already applies the basic-land exemption, the card's printed override, and
-/// the format default, so the caller compares a count against it directly.
+/// CR 100.2a / CR 903.5b: How many copies of the named card a deck built under
+/// `format_config` may legally contain across main deck, sideboard, and command
+/// zone combined (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved*
+/// ceiling — it already applies the basic-land exemption, the card's printed
+/// override, and the format default, so the caller compares a count against it
+/// directly.
+///
+/// `format_config` is a full `FormatConfig` JSON object (as published by
+/// `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+/// the config carries the resolved `default_deck_copy_limit` a custom format
+/// declares.
 ///
 /// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
 /// `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
 /// when the card database isn't loaded, so a not-yet-hydrated frontend never
 /// blocks a legal add.
 #[wasm_bindgen(js_name = maxDeckCopies)]
-pub fn max_deck_copies_for_format(name: &str, format: JsValue) -> JsValue {
-    let Ok(format) = serde_wasm_bindgen::from_value::<GameFormat>(format) else {
+pub fn max_deck_copies_for_format(name: &str, format_config: JsValue) -> JsValue {
+    let Ok(format_config) = serde_wasm_bindgen::from_value::<FormatConfig>(format_config) else {
         return to_js(&DeckCopyLimit::Unlimited);
     };
     CARD_DB.with(|cell| {
@@ -855,7 +861,7 @@ pub fn max_deck_copies_for_format(name: &str, format: JsValue) -> JsValue {
         let Some(db) = db.as_ref() else {
             return to_js(&DeckCopyLimit::Unlimited);
         };
-        to_js(&max_deck_copies(db, name, format))
+        to_js(&max_deck_copies(db, name, &format_config))
     })
 }
 
@@ -1058,9 +1064,13 @@ fn archetype_name(a: DeckArchetype) -> &'static str {
     }
 }
 
-/// CR 100.4a: Returns the sideboard policy for a given game format as a
+/// CR 100.4a: Returns the sideboard policy stored on a `FormatConfig` as a
 /// tagged union: `{"type": "Forbidden"}`, `{"type": "Limited", "data": 15}`,
 /// or `{"type": "Unlimited"}`.
+///
+/// `format_config` is a full `FormatConfig` JSON object (as published by
+/// `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+/// the config carries the resolved policy a custom format declares.
 ///
 /// The frontend must exhaustive-switch on `.type` — unit variants (`Forbidden`,
 /// `Unlimited`) emit no `data` field under `#[serde(tag, content)]`.
@@ -1068,10 +1078,10 @@ fn archetype_name(a: DeckArchetype) -> &'static str {
 /// The engine is the single authority for format sideboard rules; the frontend
 /// never hardcodes 15 or any other cap.
 #[wasm_bindgen(js_name = sideboardPolicyForFormat)]
-pub fn sideboard_policy_for_format(format: JsValue) -> Result<JsValue, JsValue> {
-    let format: GameFormat = serde_wasm_bindgen::from_value(format)
-        .map_err(|e| JsValue::from_str(&format!("Invalid GameFormat: {e}")))?;
-    Ok(to_js(&format.sideboard_policy()))
+pub fn sideboard_policy_for_format(format_config: JsValue) -> Result<JsValue, JsValue> {
+    let format_config: FormatConfig = serde_wasm_bindgen::from_value(format_config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid FormatConfig: {e}")))?;
+    Ok(to_js(&format_config.sideboard_policy))
 }
 
 /// Return the authoritative list of user-selectable formats as a typed array.
@@ -1306,7 +1316,7 @@ pub fn initialize_multiplayer_host_game(
 fn validate_deck_list_seats(
     db: &CardDatabase,
     deck_list: &DeckList,
-    game_format: GameFormat,
+    format_config: &FormatConfig,
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
@@ -1315,7 +1325,7 @@ fn validate_deck_list_seats(
     // client-side to validate. `load_and_hydrate_decks` fills each seat's
     // library with the engine-owned fixed deck. Gate on the engine predicate,
     // never a format literal.
-    if !game_format.supplies_fixed_deck() {
+    if !format_config.format.supplies_fixed_deck() {
         for (seat, deck) in [
             ("Player".to_string(), &deck_list.player),
             ("AI opponent".to_string(), &deck_list.opponent),
@@ -1330,7 +1340,7 @@ fn validate_deck_list_seats(
                 &deck.scheme_deck,
                 &deck.signature_spell,
                 &deck_list.draft_set_codes,
-                game_format,
+                format_config,
                 match_type,
                 player_count,
             ) {
@@ -1354,7 +1364,7 @@ fn validate_deck_list_seats(
                 &deck.scheme_deck,
                 &deck.signature_spell,
                 &deck_list.draft_set_codes,
-                game_format,
+                format_config,
                 match_type,
                 player_count,
             ) {
@@ -1396,7 +1406,6 @@ fn initialize_game_impl(
         FormatConfig::standard()
     };
     let count = player_count.unwrap_or(2);
-    let game_format = format_config.format;
     if let Err(reason) = validate_external_format_config(&format_config, count) {
         return to_js(&serde_json::json!({
             "error": true,
@@ -1468,7 +1477,7 @@ fn initialize_game_impl(
             if let Some(reasons) = validate_deck_list_seats(
                 db,
                 &deck_list,
-                game_format,
+                &format_config,
                 Some(state.match_config.match_type),
                 count as usize,
             ) {
@@ -6150,7 +6159,7 @@ mod deck_list_seat_validation_tests {
         let refused = validate_deck_list_seats(
             &db,
             &three_seat_list(&[]),
-            GameFormat::CommanderDraft,
+            &FormatConfig::commander_draft(),
             None,
             4,
         )
@@ -6171,7 +6180,7 @@ mod deck_list_seat_validation_tests {
             validate_deck_list_seats(
                 &db,
                 &three_seat_list(&["CMM"]),
-                GameFormat::CommanderDraft,
+                &FormatConfig::commander_draft(),
                 None,
                 4,
             ),
@@ -6190,7 +6199,7 @@ mod deck_list_seat_validation_tests {
     fn a_fixed_deck_format_skips_seat_validation_entirely() {
         let db = test_db();
         assert_eq!(
-            validate_deck_list_seats(&db, &three_seat_list(&[]), GameFormat::Momir, None, 4),
+            validate_deck_list_seats(&db, &three_seat_list(&[]), &FormatConfig::momir(), None, 4),
             None,
         );
     }

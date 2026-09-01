@@ -183,14 +183,14 @@ const DATABASE = "phase-visual-packs-scryfall-v1";
  *  is written with this operation's id while the operation is still
  *  `downloading`, which is the state a resume actually continues from. */
 async function interrupt(operation: string): Promise<void> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const record = await database.get("operations", operation);
   await database.put("operations", { ...record, state: "downloading", completedRevision: null });
   database.close();
 }
 
 async function operationRecords(): Promise<unknown[]> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const records = await database.getAll("operations");
   database.close();
   return records;

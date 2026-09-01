@@ -176,6 +176,9 @@ vi.mock("../../stores/gameStore", async () => ({
   hasRemoteHumans: (
     await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
   ).hasRemoteHumans,
+  canExportAuthoritativeState: (
+    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+  ).canExportAuthoritativeState,
   loadActiveGame: vi.fn(() => null),
   saveActiveGame: vi.fn(),
   clearActiveGame: vi.fn(),

@@ -10,7 +10,12 @@ import {
   buildStackEntry,
 } from "../../test/factories/gameStateFactory";
 import type { GameMode } from "../gameStore";
-import { hasRemoteHumans, isAuthorityRemote, useGameStore } from "../gameStore";
+import {
+  canExportAuthoritativeState,
+  hasRemoteHumans,
+  isAuthorityRemote,
+  useGameStore,
+} from "../gameStore";
 
 describe("game mode classification", () => {
   // The two questions the old `isMultiplayerMode` answered with one bit:
@@ -53,6 +58,20 @@ describe("game mode classification", () => {
     expect(hasRemoteHumans("local")).toBe(false);
     expect(isAuthorityRemote("local")).toBe(false);
   });
+
+  it.each(["ai", "local", "native-ai"] as GameMode[])(
+    "allows authoritative bug reports in private %s games",
+    (mode) => {
+      expect(canExportAuthoritativeState(mode)).toBe(true);
+    },
+  );
+
+  it.each(["online", "p2p-host", "p2p-join", "draft-match", "spectate"] as GameMode[])(
+    "blocks authoritative bug reports in shared %s games",
+    (mode) => {
+      expect(canExportAuthoritativeState(mode)).toBe(false);
+    },
+  );
 
   it("answers false to both for the pre-game null mode", () => {
     expect(isAuthorityRemote(null)).toBe(false);

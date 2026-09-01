@@ -16,7 +16,13 @@ vi.mock("../../menu/MenuShell", () => ({ MenuShell: ({ children }: { children: R
 vi.mock("../DraftIntro", () => ({ DraftIntro: ({ onContinue }: { onContinue(): void }) => <button type="button" onClick={onContinue}>Continue</button> }));
 vi.mock("../DraftPodLobby", () => ({ DraftPodLobby: () => null }));
 vi.mock("../DraftProgress", () => ({ DraftProgress: () => null }));
-vi.mock("../HostControls", () => ({ HostControls: () => null }));
+vi.mock("../HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 vi.mock("../HoverCardPreview", () => ({ HoverCardPreview: () => null }));
 vi.mock("../PickTimer", () => ({ PickTimer: () => null }));
 vi.mock("../PoolPanel", () => ({ PoolPanel: () => null }));
@@ -118,8 +124,15 @@ describe("PackDisplay pod controller", () => {
 
     rerender(<PackDisplay controller={podController({ selectedCard: "card-1", confirmPick })} presentation={presentation} onCardHover={vi.fn()} />);
     const selected = screen.getByRole("button", { name: "Lightning Bolt" }).closest('[data-instance-id="card-1"]')!;
-    expect(selected).toHaveClass("ring-2", "ring-[rgb(3,139,6)]", "shadow-[0_0_4px_2px_rgb(3,139,6)]");
-    expect(selected).not.toHaveClass("scale-105");
+    expect(selected).toHaveClass(
+      "transition-transform",
+      "duration-150",
+      "ring-2",
+      "ring-[rgb(3,139,6)]",
+      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
+    );
+    expect(selected).not.toHaveClass("!duration-0", "transition-all", "scale-105");
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Auto-pick" })).not.toBeInTheDocument();
     expect(confirmPick).not.toHaveBeenCalled();

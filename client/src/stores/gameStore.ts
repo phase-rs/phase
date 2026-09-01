@@ -164,6 +164,16 @@ export function hasRemoteHumans(mode: GameMode | null): boolean {
 }
 
 /**
+ * Whether this client may download the engine's unredacted persistence envelope.
+ * A shared remote table must never turn the authority's private view into a
+ * player-facing file; solo games have no remote player whose hidden information
+ * could be disclosed.
+ */
+export function canExportAuthoritativeState(mode: GameMode | null): boolean {
+  return mode !== null && !hasRemoteHumans(mode);
+}
+
+/**
  * The seat axis of the census: where this client's own seat number comes from.
  *
  * Read this instead of testing `gameMode` against a list at the call site. The

@@ -6940,6 +6940,20 @@ fn prepare_spell_cast_with_variant_override_inner(
                 {
                     Some(crate::types::mana::ManaCost::zero())
                 }
+                // CR 118.9 + CR 119.4 + CR 305.1: Inside Information class — a
+                // `PlayFromExile` grant that ALSO authorizes land plays carries
+                // its alt cost directly on `alt_ability_cost` rather than as a
+                // standalone `ExileWithAltAbilityCost` permission (that would
+                // wrongly imply a SEPARATE cast route from the land-play grant).
+                // Zero the mana cost exactly like the sibling arm above; the
+                // `AbilityCost` body is paid by `check_additional_cost_or_pay`'s
+                // mirrored `PlayFromExile` arm. Land plays never reach this
+                // spell-casting cost pipeline, so they are unaffected.
+                crate::types::ability::CastingPermission::PlayFromExile {
+                    alt_ability_cost: Some(_),
+                    granted_to,
+                    ..
+                } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
                 _ => None,
             })
             .or_else(|| {

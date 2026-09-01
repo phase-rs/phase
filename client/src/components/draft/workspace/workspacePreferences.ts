@@ -143,7 +143,7 @@ function clampPhoneDeckVisualColumnCap(value: unknown, fallback: number): number
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     return fallback;
   }
-  return Math.min(5, Math.max(1, value));
+  return Math.min(10, Math.max(1, value));
 }
 
 function repairTabletDeckVisualColumnCaps(value: unknown): DraftTabletDeckVisualColumnCaps {
@@ -158,7 +158,7 @@ function clampTabletDeckVisualColumnCap(value: unknown, fallback: number): numbe
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     return fallback;
   }
-  return Math.min(15, Math.max(1, value));
+  return Math.min(10, Math.max(1, value));
 }
 
 function repairSchemaV1Preferences(value: Record<string, unknown>): DraftWorkspacePreferences {

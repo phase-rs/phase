@@ -16,14 +16,18 @@ import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { useDraftShellChrome, type DraftShellPhoneAction } from "../components/chrome/ShellContext";
+import {
+  useDraftShellChrome,
+  type DraftShellPhoneAction,
+  type DraftShellTopAction,
+} from "../components/chrome/ShellContext";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { EliminationBracket } from "../components/draft/EliminationBracket";
-import { HostControls } from "../components/draft/HostControls";
+import { HostControls, useHostDraftTopActions } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
@@ -962,7 +966,7 @@ function DraftingPhaseContent({
         <div className={responsiveLayout === "desktop"
           ? "w-full min-w-0"
           : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
-          {!phoneLayout && <SeatStatusRing />}
+          {responsiveLayout === "desktop" && <SeatStatusRing />}
           {responsiveLayout === "desktop" && <DraftProgress view={view} />}
           <PickTimer />
           <PackDisplay
@@ -995,7 +999,6 @@ function DraftingPhaseContent({
               mobileOverlay
               mobileWorkspaceOpen={mobileWorkspaceOpen}
               onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
-              mobileSummaryAccessory={<HostControls presentation="integrated" />}
             />
           </div>
         )}
@@ -1204,6 +1207,8 @@ export function DraftPodPage() {
   }));
   const [podStatusOpen, setPodStatusOpen] = useState(false);
   const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false);
+  const endingDraftLatch = useRef(false);
+  const [endingDraft, setEndingDraft] = useState(false);
 
   const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
     responsiveViewport.width,
@@ -1211,8 +1216,39 @@ export function DraftPodPage() {
   );
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
+  const compactHostControlsLayout = phoneLayout || tabletLayout;
   const phoneDrafting = phase === "drafting" && phoneLayout;
+  const responsiveDrafting = phase === "drafting" && (phoneLayout || tabletLayout);
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
+  const handleEndDraft = useCallback(() => {
+    if (endingDraftLatch.current) return;
+    if (!window.confirm(t("hostControls.endDraftConfirm"))) return;
+
+    endingDraftLatch.current = true;
+    setEndingDraft(true);
+    void (async () => {
+      try {
+        await leave(false);
+        resetPod();
+        navigate("/");
+      } catch (err) {
+        console.error("[DraftPodPage] failed to end draft:", err);
+        endingDraftLatch.current = false;
+        setEndingDraft(false);
+      }
+    })();
+  }, [leave, navigate, resetPod, t]);
+  const endDraftAction = useMemo<DraftShellTopAction>(() => ({
+    id: "end-draft",
+    label: t("hostControls.endDraft"),
+    tone: "danger",
+    disabled: endingDraft,
+    onClick: handleEndDraft,
+  }), [endingDraft, handleEndDraft, t]);
+  const hostDraftTopActions = useHostDraftTopActions({
+    enabled: phase === "drafting",
+    endDraftAction,
+  });
   const betweenGamesEditorActive = screen === "betweenGames"
     && sideboardPrompt !== null
     && view !== null
@@ -1235,8 +1271,13 @@ export function DraftPodPage() {
   }, []);
 
   useEffect(() => {
-    if (!phoneLayout) {
+    if (!responsiveDrafting) {
       setPodStatusOpen(false);
+    }
+  }, [responsiveDrafting]);
+
+  useEffect(() => {
+    if (!phoneLayout) {
       setMobileWorkspaceOpen(false);
     }
   }, [phoneLayout]);
@@ -1246,13 +1287,13 @@ export function DraftPodPage() {
   }, []);
 
   const phoneAction: DraftShellPhoneAction | undefined = useMemo(() => {
-    if (!phoneDrafting) return undefined;
+    if (!responsiveDrafting) return undefined;
     return {
       icon: <PodIcon className="h-6 w-6 opacity-70" />,
       label: t("landing.podInProgress"),
       onClick: handleOpenPodStatus,
     };
-  }, [phoneDrafting, handleOpenPodStatus, t]);
+  }, [handleOpenPodStatus, responsiveDrafting, t]);
 
   useDraftShellChrome(
     phoneDrafting
@@ -1267,6 +1308,7 @@ export function DraftPodPage() {
     phoneAction,
     "pod",
     !(phase === "drafting" && responsiveLayout === "phone-portrait"),
+    hostDraftTopActions,
   );
 
   useEffect(() => {
@@ -1403,7 +1445,12 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!phoneDrafting && <HostControls />}
+      {!(phase === "drafting" && compactHostControlsLayout) && (
+        <HostControls
+          draftTopActions={hostDraftTopActions}
+          endDraftAction={endDraftAction}
+        />
+      )}
     </div>
   );
 }

@@ -3361,12 +3361,12 @@ fn extract_unless_pay_modifier(
         return (cleaned, Some(UnlessPayModifier { cost, payer }));
     }
 
-    // CR 118.12a: "[trigger] ... unless they/that player/that opponent
-    // {sacrifice|discard|pay life} [or ...]" — same disjunctive non-mana
+    // CR 118.12a: "[trigger] ... unless they/that player/that opponent/defending
+    // player {sacrifice|discard|pay life} [or ...]" — same disjunctive non-mana
     // unless-cost shape the resolution-time path handles. Delegate to the
     // single authority (`parse_unless_they_alt_cost_chain`) so trigger-side
     // and resolution-side parse identically. The chain requires an explicit
-    // pronoun ("they"/"that player"/"that opponent"), so "you"/mana forms
+    // subject (`parse_unless_payer_subject`), so "you"/mana forms
     // fall through to the existing blocks unchanged.
     //
     // GUARD: the chain's per-branch `unless_branch_boundary` stops at the
@@ -3377,11 +3377,22 @@ fn extract_unless_pay_modifier(
     // terminal unless-cost; defer to the gap path (mirrors the `unless`
     // dispatch guard below at the `Unsupported unless clause` site).
     if !has_later_sentence_if(&lower) {
-        if let Some(cost) = parse_unless_they_alt_cost_chain(after_unless) {
-            let payer = infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
-                .unwrap_or(TargetFilter::TriggeringPlayer);
+        if let Some(alt_cost) = parse_unless_they_alt_cost_chain(after_unless) {
+            // CR 508.5: a subject that NAMES its payer ("defending player")
+            // outranks the anaphoric inference below, which exists only to
+            // find the referent of a pronoun.
+            let payer = alt_cost.payer.unwrap_or_else(|| {
+                infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
+                    .unwrap_or(TargetFilter::TriggeringPlayer)
+            });
             let cleaned = text[..unless_pos].trim().to_string();
-            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: alt_cost.cost,
+                    payer,
+                }),
+            );
         }
     }
 
@@ -4231,12 +4242,12 @@ fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)>
     Some((count, filter))
 }
 
-/// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
-/// payment verbs joined by " or " into either a single `AbilityCost` (one
-/// branch) or `AbilityCost::OneOf { costs }` (two or more branches). Used by
-/// the resolution-time "[Effect] unless they X or Y" pattern (Tergrid's
-/// Lantern: "Target player loses 3 life unless they sacrifice a nonland
-/// permanent of their choice or discard a card.").
+/// CR 118.12 + CR 118.12a: Parse an unless-clause subject followed by a chain
+/// of alternative payment verbs joined by " or ", into either a single
+/// `AbilityCost` (one branch) or `AbilityCost::OneOf { costs }` (two or more).
+/// Used by the resolution-time "[Effect] unless <subject> X or Y" pattern
+/// (Tergrid's Lantern: "Target player loses 3 life unless they sacrifice a
+/// nonland permanent of their choice or discard a card.").
 ///
 /// The "of their choice" qualifier on `parse_unless_they_sacrifice_filter`
 /// is structurally redundant — the runtime sacrifice-cost prompt
@@ -4245,20 +4256,30 @@ fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)>
 /// must be absorbed to avoid leaving unparsed tail text on the cost.
 ///
 /// `after_unless` is the lowercase tail immediately after the literal
-/// `"unless "` prefix has been consumed; the sole caller
-/// (`extract_resolution_unless_pay_modifier`) strips the entire unless
-/// clause from the surrounding effect text using its own pre-computed
-/// `before_unless` offset, so this combinator only needs to return the
-/// parsed cost. Returns `None` if no "they X" branch is recognized.
-pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<AbilityCost> {
-    let (first_cost, after_first) = parse_unless_they_single_alt_cost(after_unless)?;
+/// `"unless "` prefix has been consumed. Every caller strips the entire
+/// unless clause from the surrounding effect text using its own pre-computed
+/// offset, so this combinator returns only what the clause itself carries:
+/// the cost, plus the payer its SUBJECT names (see `parse_unless_payer_subject`
+/// — `Some` for a named role like CR 508.5's "defending player", `None` for
+/// the anaphoric pronouns, whose referent only the caller's surrounding
+/// context can supply). Returns `None` if no subject+verb branch is
+/// recognized.
+///
+/// Three production callers consume this: the trigger-side
+/// `extract_unless_pay_modifier`, the resolution-side
+/// `extract_resolution_unless_pay_modifier`, and the counter path's
+/// `parse_unless_payment` (which discards the payer — it pins the payer to the
+/// targeted spell's controller at its own call site).
+pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<UnlessAltCost> {
+    let (first, after_first) = parse_unless_they_single_alt_cost(after_unless)?;
+    let payer = first.payer;
 
     // CR 118.12a: Greedily consume " or {alt_cost}" continuations to build
     // a disjunctive `OneOf`. English elides the second-clause subject
     // pronoun ("unless they sacrifice X or discard Y" — the "they" before
     // "discard" is implicit). `parse_unless_they_continuation` accepts
     // either form, dispatching by verb.
-    let mut costs = vec![first_cost];
+    let mut costs = vec![first.cost];
     let mut remainder = after_first;
     while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remainder) {
         let Some((next_cost, after_next)) = parse_unless_they_continuation(after_or) else {
@@ -4268,33 +4289,85 @@ pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<Abi
         remainder = after_next;
     }
 
-    if costs.len() == 1 {
-        costs.pop()
+    let cost = if costs.len() == 1 {
+        costs.pop()?
     } else {
-        Some(AbilityCost::OneOf { costs })
-    }
+        AbilityCost::OneOf { costs }
+    };
+    Some(UnlessAltCost { cost, payer })
 }
 
-/// CR 118.12: Parse a single "they {verb} ..." alternative payment branch.
-/// Mirrors the verb set of `parse_unless_alt_cost` but with the "they"
-/// pronoun (the target player) instead of "you" (the resolving ability's
-/// controller). Returns the cost and the unconsumed tail.
-fn parse_unless_they_single_alt_cost(input: &str) -> Option<(AbilityCost, &str)> {
-    // CR 118.12a: The first branch requires an explicit payer pronoun — it
-    // anchors the unless-clause to the paying player. The pronoun axis is
-    // parameterized: "they " (Tergrid's Lantern — a player target) and "that
-    // player " / "that opponent " (Nicol Bolas, Torment of Hailfire — the
-    // per-opponent scoped player). All forms resolve to the same payer, so
-    // only the verb dispatch downstream needs the remainder. Continuation
-    // branches omit the pronoun (English elision).
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("they "),
-        tag("that player "),
-        tag("that opponent "),
+/// CR 118.12a: An "unless [subject] [verb] …" alternative cost together with
+/// the payer its *subject* names outright.
+///
+/// The subject axis has two kinds of member (see
+/// [`parse_unless_payer_subject`]): anaphoric pronouns, which name no player of
+/// their own and leave `payer` as `None` for the caller to resolve from the
+/// surrounding effect text, and named combat/game roles, which resolve to a
+/// concrete [`TargetFilter`] here. Carrying the two in one value keeps the
+/// subject grammar in a single authority instead of forcing every caller to
+/// re-scan the clause to learn who the subject was.
+#[derive(Debug)]
+pub(crate) struct UnlessAltCost {
+    pub(crate) cost: AbilityCost,
+    /// `Some` when the clause's subject names its payer directly; `None` for
+    /// the anaphoric pronouns, whose referent only the caller's surrounding
+    /// context can supply.
+    pub(crate) payer: Option<TargetFilter>,
+}
+
+/// CR 118.12a: The subject of an "unless [subject] [verb] …" clause, as the
+/// payer it names (or `None` when it names none).
+///
+/// Two kinds of subject share this position in the grammar:
+///
+/// - **Anaphoric pronouns** — "they " (Tergrid's Lantern — a player target),
+///   "that player " / "that opponent " (Nicol Bolas, Torment of Hailfire — the
+///   per-opponent scoped player). These point back at a player the surrounding
+///   effect text established, so they carry no payer of their own; the caller
+///   infers it (`infer_pronoun_unless_payer` trigger-side, the
+///   `before_unless` scan resolution-side).
+/// - **Named roles** — CR 508.5: "defending player" is the player the
+///   attacking creature is attacking, determined per attacker and resolved
+///   from combat state, so the clause names its payer outright and no
+///   surrounding context is needed (Ogre Marauder). CR 508.5a makes this one
+///   specific player in multiplayer, which is exactly what
+///   `TargetFilter::DefendingPlayer` resolves to.
+fn parse_unless_payer_subject(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    alt((
+        // CR 508.5: named role — the subject IS the payer.
+        value(
+            Some(TargetFilter::DefendingPlayer),
+            alt((
+                tag("the defending player "),
+                tag::<_, _, OracleError<'_>>("defending player "),
+            )),
+        ),
+        // CR 118.12a: anaphoric pronouns — payer resolved by the caller.
+        value(
+            None,
+            alt((
+                tag::<_, _, OracleError<'_>>("they "),
+                tag("that player "),
+                tag("that opponent "),
+            )),
+        ),
     ))
     .parse(input)
-    .ok()?;
-    parse_unless_they_branch_by_verb(rest)
+}
+
+/// CR 118.12: Parse a single "[subject] {verb} ..." alternative payment
+/// branch. Mirrors the verb set of `parse_unless_alt_cost` but with a payer
+/// subject (the paying player) instead of "you" (the resolving ability's
+/// controller). Returns the cost, the payer its subject names (if any), and
+/// the unconsumed tail.
+fn parse_unless_they_single_alt_cost(input: &str) -> Option<(UnlessAltCost, &str)> {
+    // CR 118.12a: The first branch requires an explicit payer subject — it
+    // anchors the unless-clause to the paying player. Continuation branches
+    // omit it (English elision).
+    let (rest, payer) = parse_unless_payer_subject(input).ok()?;
+    let (cost, after) = parse_unless_they_branch_by_verb(rest)?;
+    Some((UnlessAltCost { cost, payer }, after))
 }
 
 /// CR 118.12a: Parse the second-or-later branch of a "unless they X or Y"

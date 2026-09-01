@@ -13346,6 +13346,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13487,6 +13488,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             single_use_group: None,
             single_use,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13596,6 +13598,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13843,6 +13846,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation,
         },
@@ -13923,6 +13927,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -14099,6 +14104,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -21444,6 +21450,39 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
 /// succeeds at the originating typed clause. It stops at the first clause that is
 /// conditional or is neither typed nor a `ParentTarget` carrier, so it never
 /// reaches across an unrelated referent.
+///
+/// CR 603.12 + CR 608.2c carve-out: a `WhenYouDo` clause does NOT bail the walk,
+/// even though it carries a `condition` — it is still inspected as a possible
+/// typed introducer before the walk gives up. Grishnákh, Brash Instigator:
+/// "When ~ enters, amass Orcs 2. **When you do**, until end of turn, gain
+/// control of target nonlegendary creature an opponent controls with power
+/// less than or equal to the amassed Army's power. Untap that creature. It
+/// gains haste until end of turn." The `WhenYouDo`-conditioned `GainControl`
+/// clause IS the typed introducer for the trailing "It gains haste" anaphor two
+/// clauses later; the old unconditional bail never got far enough back to see
+/// it, leaving "It" to fall back to `SelfRef` (the source, Grishnákh itself)
+/// instead of the stolen creature (issue #8145).
+///
+/// This carve-out is intentionally narrower than the identical-looking one on
+/// the sibling walk `chain_prior_referent_is_created_token` below, which also
+/// admits `EffectOutcome::OptionalEffectPerformed` ("if you do" tied to a
+/// separately-declinable optional action) behind an additional
+/// `gated_publisher_reaches` prediction — that extra machinery exists there
+/// because a declined inline "if you do" gate can leave `resolve_ability_chain`
+/// still descending into an independent `SequentialSibling` instruction with no
+/// referent ever having been produced (a stale-bind hazard for the
+/// game-lifetime `last_created_token_ids` ledger the sibling reads).
+/// `WhenYouDo` has no such hazard: `game::effects::consume_reflexive_creation_gate`
+/// treats `WhenYouDo` as a whole-body membership marker for a CR 603.12
+/// reflexive triggered ability and materializes it as a genuinely separate
+/// stack object (`build_reflexive_pending_trigger`) only when the antecedent
+/// action actually occurred; that object chooses its own targets at the time
+/// it is put on the stack (CR 603.3d, which applies CR 601.2c's target-choice
+/// process to triggered abilities), so if this walk ever reaches a
+/// `WhenYouDo` clause, that reflexive ability necessarily fired with real
+/// targets recorded — there is no "gate false, chain still descends" case to
+/// guard against. Extending this carve-out to `OptionalEffectPerformed` needs
+/// its own hostile-fixture proof and is deliberately left out of this fix.
 fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: bool) -> bool {
     // CR 608.2c: An `Otherwise` else-branch anaphor ("... and it's a 3/3 Robot ...")
     // binds to the referent that was in scope BEFORE the paired conditional it is the
@@ -21455,12 +21494,22 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     // reaches the originating `Choose target artifact card`. A SECOND conditional
     // still bails (never walk across an unrelated conditional). Default `false`
     // preserves the byte-for-byte behavior of the non-else callers.
+    //
+    // The `WhenYouDo` carve-out above shares this same one-shot allowance
+    // bookkeeping rather than bypassing it: the FIRST conditional encountered —
+    // `WhenYouDo` or not — always consumes `skipped_conditional`, so a `WhenYouDo`
+    // clause standing in the `Otherwise` pairing slot doesn't leave the allowance
+    // unspent for some unrelated SECOND conditional further back to steal (which
+    // would let an `Otherwise` anaphor bind across a conditional it was never
+    // paired with). Only once the allowance is already spent does a `WhenYouDo`
+    // clause additionally never bail on its own account, matching every other
+    // caller's unconditional carve-out.
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+        if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
-            } else {
+            } else if *cond != AbilityCondition::WhenYouDo {
                 return false;
             }
         }
@@ -36651,7 +36700,11 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     // spell's controller by `counter_unless_pay_modifier` at the call site, so
     // rewriting the recognized subject does not affect resolution.
     let normalized = normalize_counter_unless_subject(after_unless)?;
+    // The payer the subject names is discarded here on purpose: the counter
+    // path pins the payer to the targeted spell's controller at the call site
+    // (`counter_unless_pay_modifier`), per the normalization note above.
     crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(&normalized)
+        .map(|alt_cost| alt_cost.cost)
 }
 
 /// CR 117.3 + CR 107.14: Parse the mana / energy / dynamic-{X} forms of an
@@ -36981,7 +37034,7 @@ fn extract_resolution_unless_pay_modifier(
                 }),
             );
         }
-        if let Some(cost) =
+        if let Some(alt_cost) =
             crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
         {
             // Strip the entire " unless ..." tail from the cleaned effect
@@ -36995,21 +37048,32 @@ fn extract_resolution_unless_pay_modifier(
             // preceding word. The mask preserves byte length, so `.len()` indexes
             // the original text exactly.
             let cleaned = text[..before_unless.len()].trim().to_string();
-            // CR 118.12a + CR 608.2f: select the payer for "they X". A
-            // permanent's controller in the pre-"unless" text (Fade Away)
-            // takes precedence. Otherwise, when this chunk carries a
-            // `player_scope` ("each opponent/each player ... unless they X"),
-            // the payer is the per-iteration scoped player (`ScopedPlayer`,
-            // bound by the fan-out) rather than a chosen player target.
-            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
-            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
-                TargetFilter::ParentTargetController
-            } else if player_scope.is_some() {
-                TargetFilter::ScopedPlayer
-            } else {
-                TargetFilter::Player
-            };
-            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+            // CR 508.5 + CR 118.12a + CR 608.2f: select the payer. A subject
+            // that NAMES its payer ("defending player" — Ogre Marauder) is
+            // authoritative; the fallbacks below only exist to find the
+            // referent of an anaphoric pronoun. A permanent's controller in
+            // the pre-"unless" text (Fade Away) takes precedence there.
+            // Otherwise, when this chunk carries a `player_scope` ("each
+            // opponent/each player ... unless they X"), the payer is the
+            // per-iteration scoped player (`ScopedPlayer`, bound by the
+            // fan-out) rather than a chosen player target. Non-scoped
+            // punishers (Tergrid's Lantern) keep `Player`.
+            let payer = alt_cost.payer.unwrap_or_else(|| {
+                if nom_primitives::scan_contains(before_unless, "controller") {
+                    TargetFilter::ParentTargetController
+                } else if player_scope.is_some() {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Player
+                }
+            });
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: alt_cost.cost,
+                    payer,
+                }),
+            );
         }
     }
 

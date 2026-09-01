@@ -4,6 +4,8 @@
 //! move those counters to itself; it increases the number put on that Army.
 
 use engine::game::effects::counters::add_counter_with_replacement;
+use engine::game::keywords::has_keyword;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     ControllerRef, Effect, ObjectScope, QuantityExpr, QuantityModification, QuantityRef,
@@ -14,6 +16,7 @@ use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::{TokenCharacteristics, TokenSpec};
@@ -29,10 +32,13 @@ const SWARMING_OF_MORIA: &str = "Create a Treasure token.\nAmass Orcs 2.";
 const FORAY_OF_ORCS: &str = "Amass Orcs 2. When you do, Foray of Orcs deals X damage \
 to target creature an opponent controls, where X is the amassed Army's power.";
 
-const GRISHNAKH: &str = "When Grishnákh, Brash Instigator enters the battlefield, \
-amass Orcs 2. When you do, until end of turn, gain control of target nonlegendary \
-creature an opponent controls with power less than or equal to the amassed Army's \
-power. Untap that creature. It gains haste until end of turn.";
+// Verbatim Scryfall Oracle text (verified against the live API). "Grishnákh"
+// alone (not the full printed name "Grishnákh, Brash Instigator") is the
+// card's own self-reference here, exactly as printed.
+const GRISHNAKH_VERBATIM: &str = "When Grishnákh enters, amass Orcs 2. When you do, until \
+end of turn, gain control of target nonlegendary creature an opponent controls with power \
+less than or equal to the amassed Army's power. Untap that creature. It gains haste until \
+end of turn.";
 
 const SURROUNDED_BY_ORCS: &str =
     "Amass Orcs 3, then target player mills X cards, where X is the amassed Army's power.";
@@ -254,7 +260,13 @@ fn grishnakh_target_eligibility_uses_the_amassed_armys_current_power() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let grishnakh = scenario
-        .add_creature_to_hand_from_oracle(P0, "Grishnákh, Brash Instigator", 1, 1, GRISHNAKH)
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Grishnákh, Brash Instigator",
+            1,
+            1,
+            GRISHNAKH_VERBATIM,
+        )
         .with_mana_cost(ManaCost::zero())
         .id();
     let legal_target = scenario.add_creature(P1, "Legal Target", 2, 2).id();
@@ -286,6 +298,85 @@ fn grishnakh_target_eligibility_uses_the_amassed_armys_current_power() {
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "Grishnákh should resolve its reflexive trigger and return priority"
+    );
+}
+
+/// True iff `id` has `keyword` after a fresh layer evaluation (CR 613).
+fn has_kw(runner: &mut GameRunner, id: ObjectId, keyword: &Keyword) -> bool {
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    has_keyword(&runner.state().objects[&id], keyword)
+}
+
+/// Regression for issue #8145: Grishnákh's reflexive ability reads "Untap that
+/// creature. It gains haste until end of turn." — CR 608.2c: both "that
+/// creature" and "It" are anaphors for the SAME referent, the just-stolen
+/// creature named by "gain control of target nonlegendary creature ...", not
+/// Grishnákh itself. Before the fix, the "It gains haste" clause fell back to
+/// `SelfRef` (the ability's own source) instead of `ParentTarget` (the chosen
+/// creature), so the stolen creature never gained haste and Grishnákh wrongly
+/// did.
+///
+/// Drives the real cast → ETB trigger → reflexive-ability pipeline
+/// (`runner.cast(..).resolve()`), not a parsed-AST shape assertion, and reads
+/// back the EFFECTIVE post-layer-evaluation keyword set on both creatures.
+#[test]
+fn grishnakh_reflexive_haste_binds_to_the_stolen_creature_not_self() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grishnakh = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Grishnákh, Brash Instigator",
+            1,
+            1,
+            GRISHNAKH_VERBATIM,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let stolen = scenario.add_creature(P1, "Stolen Creature", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // Baseline before the ability resolves: neither creature has haste yet.
+    assert!(
+        !has_kw(&mut runner, stolen, &Keyword::Haste),
+        "baseline: the target has no haste before Grishnákh resolves"
+    );
+    assert!(
+        !has_kw(&mut runner, grishnakh, &Keyword::Haste),
+        "baseline: Grishnákh has no haste before its own ETB resolves"
+    );
+
+    let outcome = runner.cast(grishnakh).target_object(stolen).resolve();
+
+    // Positive reach-guard: prove the ETB trigger and reflexive ability
+    // actually ran the full chain (amass -> gain control -> untap) before
+    // asserting on the haste grant, so the negative assertion below isn't
+    // vacuously true from an early parse/resolution short-circuit.
+    assert_eq!(
+        runner.state().objects[&stolen].controller,
+        P0,
+        "Grishnákh's reflexive ability must gain control of the targeted creature"
+    );
+    assert!(
+        !runner.state().objects[&stolen].tapped,
+        "'Untap that creature' must untap the stolen creature"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Grishnákh's ETB and reflexive ability should fully resolve back to priority"
+    );
+
+    // The regression: "It gains haste" must bind to the stolen creature.
+    assert!(
+        has_kw(&mut runner, stolen, &Keyword::Haste),
+        "the stolen creature must gain haste from Grishnákh's reflexive ability"
+    );
+    // The regression's inverse: Grishnákh must NOT be the one that gains
+    // haste from this trigger.
+    assert!(
+        !has_kw(&mut runner, grishnakh, &Keyword::Haste),
+        "Grishnákh itself must NOT gain haste from this trigger"
     );
 }
 
