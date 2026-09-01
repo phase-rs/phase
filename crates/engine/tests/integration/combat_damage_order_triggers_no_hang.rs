@@ -79,6 +79,8 @@ const CALIX_GUIDED_BY_FATE: &str = "Constellation — Whenever Calix or another 
      creature you control deals combat damage to a player, you may create a token that's a copy of \
      a nonlegendary enchantment you control. Do this only once each turn.";
 
+const TEST_AURA: &str = "Enchant creature";
+
 #[test]
 fn once_per_turn_combat_damage_trigger_admits_one_of_two_qualifying_attackers() {
     let mut scenario = GameScenario::new();
@@ -121,8 +123,7 @@ fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
         .add_creature(P0, "Aura-enchanted attacker", 2, 2)
         .id();
     let aura = scenario
-        .add_creature(P0, "Test Aura", 0, 0)
-        .as_enchantment()
+        .add_enchantment_from_oracle(P0, "Test Aura", TEST_AURA)
         .with_subtypes(vec!["Aura"])
         .id();
 
@@ -140,6 +141,11 @@ fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
         "the enchanted attacker retains the reciprocal attachment"
     );
 
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(enchanted_attacker)),
+        "the legal Aura remains attached immediately before combat damage"
+    );
     run_combat(&mut runner, vec![calix, enchanted_attacker], vec![]);
 
     assert!(matches!(
