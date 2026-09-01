@@ -240,6 +240,100 @@ consistency re-check (not just the `custom_rules.id` match Phase 1a already
 does), since that's the same piece of work as building the resolver, not a
 separate one.
 
+Corrections surfaced during this phase's own plan review, recorded the same
+way Phase 1a's were:
+
+- **`StructuralRules` was missing `default_deck_copy_limit` entirely.** Phase
+  1b added `FormatConfig.default_deck_copy_limit` as the fourth stored
+  derived field, but the mirror on `StructuralRules` was never added, so an
+  Axis-A save would have captured every other structural field and silently
+  dropped the copy ceiling — and the resolver would have had nothing to
+  rebuild it from but `GameFormat::Custom(_).default_deck_copy_limit()`'s
+  fail-closed `UpTo(1)`. That is the identical silent-data-loss bug
+  `sideboard_policy` was added to prevent in Phase 1a, one field later. Fixed
+  by adding `StructuralRules.default_deck_copy_limit: DeckCopyLimit` as a
+  direct-copy mirror.
+- **`StructuralRules.deck_size` retyped `u16` -> `DeckSizeRule`.**
+  `StructuralRules`' own doc comment claims every field mirrors an existing
+  `FormatConfig` field 1:1, but `FormatConfig.deck_size` is a `DeckSizeRule`
+  and this one was a bare `u16` — which cannot round-trip WHICH rule a saved
+  format uses. CR 903.5a's exact-100 and CR 903.13f(1)'s 60-minimum are
+  different rules, and the resolver would have had to guess. This is the same
+  correction `FormatConfig` itself already took: lobby protocol **v42**
+  (`crates/lobby-broker/src/protocol.rs`) records that exact `u16 ->
+  DeckSizeRule` retype as an unconditional two-way PARSE break needing a
+  version bump. **This phase needs no protocol bump for its own retype**: the
+  changed shape is inside `CustomFormatRules`, reachable on the wire only via
+  `FormatConfig.custom_rules`, and no live Custom `FormatConfig` has ever
+  been accepted at the deserialization boundary (Phase 1a rejected every one
+  categorically) nor producible by any shipped UI — so no peer has ever
+  serialized or parsed this shape. The v42 precedent is why the retype is
+  correct, not a reason to bump; the field it broke was one every format
+  populated on every message, which is exactly the property this one lacks.
+- **Archenemy and Momir are rejected as lobby-save sources, for two separate
+  reasons with two separate citations.** Archenemy: CR 408.1 + CR 408.3 +
+  CR 904.3 — the command zone holds specialized objects each casual variant
+  defines for itself, and Archenemy's is a supplementary scheme deck of at
+  least twenty scheme cards, not a commander. `CommandZoneMode::Enabled`
+  can only name a commander-eligibility rule, and a saved definition carries
+  no scheme deck, so the save would claim a command zone it cannot populate.
+  Momir: CR 109.4c + CR 114.1 — its command zone holds a game-start *emblem*
+  (a marker object with abilities and no other characteristics), controlled
+  by the player who put it there. Corroborated in code: `deck_loading.rs`
+  (the Momir branch around lines 946-974) grants that emblem keyed off
+  `GameFormat::Momir` itself, not off any `StructuralRules` field, so a saved
+  copy would resolve to a command zone with no emblem and no way to grant
+  one. Collapsing these into one citation would misattribute a scheme-deck
+  rule to an emblem format.
+- **`from_lobby_config` returns `Result`, not a bare `CustomFormatDef`.**
+  `PLAN.md`'s signature sketch is infallible, but `PLAN.md:713-719` also
+  requires it to "reject explicitly rather than silently drop data," and this
+  phase found four such states: an empty/whitespace-only name, a
+  `GameFormat::Custom` source (re-saving a save would drop the source's own
+  `legality`), and the two command-zone formats above. The signature is
+  `Result<Self, FormatConfigError>`, matching the fallible-public-factory
+  posture `for_format`/`uses_commander`/`from_source_format` already took in
+  Phase 1a.
+- **`sideboard_policy` comes from the resolved field, not the bare method.**
+  `PLAN.md` specifies `structural.sideboard_policy:
+  config.format.sideboard_policy()`, valid only under its stated
+  built-in-source precondition. Corrected to read `config.sideboard_policy`
+  (and likewise `config.default_deck_copy_limit`) — the whole point of Phase
+  1a/1b's stored derived fields is that a lobby host may have tuned a value
+  away from its format default, and re-deriving from `GameFormat` would save
+  something the host never configured. The built-in-source precondition is
+  now enforced rather than assumed (see the `Result` correction above), so
+  the method call is not merely worse, it is unnecessary.
+- **`passes_legacy_axis_gate` narrowed to `&LegacyRuleSet`.** It only ever
+  read `def.rules.legality.legacy`, and this phase gives it a second caller
+  that holds no `CustomFormatDef` at all: `FormatConfig`'s `Deserialize`
+  impl, which sees a `CustomFormatRules` (display metadata never travels on
+  an active config). Both ingresses must apply the identical gate — a
+  deserialized custom format declaring an unimplemented axis would otherwise
+  receive behavior no engine code enforces, bypassing the registry gate
+  entirely since a deserialized config never passes through
+  `custom_format_registry()`. **The asymmetry with
+  `legal_sets`/`banned`/`restricted` (not gated) is deliberate:** those are
+  declarative card-pool data the evaluator applies in full or not at all, so
+  there is no partial-implementation risk; a `LegacyRuleSet` axis instead
+  promises *runtime behavior* (mana burn, legend-rule scope, Wish reach) that
+  may not be built yet, so declaring one misrepresents how the game will
+  actually play.
+- **The sentinel-collision guard is a real `assert!`, active in every build
+  profile.** `LOBBY_SAVE_CUSTOM_FORMAT_ID` (`CustomFormatId(0)`) is reserved
+  for Axis-A saves; no bundled preset may claim it, or a client-persisted
+  ad-hoc save becomes indistinguishable from a registry-stable preset
+  (`GameFormat::label()` would report the preset's name, and Phase 1d's
+  evaluator would hand it the preset's banned/restricted lists). Verified
+  against the workspace `Cargo.toml`: neither `[profile.release]` nor
+  `[profile.server-release]` sets `debug-assertions = true`, so a
+  `debug_assert!` would be compiled out of exactly the shipped builds that
+  need it, and a documentation-only convention would not fail at all. The
+  assert lives in an extracted
+  `assert_no_lobby_save_sentinel_collision(&[CustomFormatDef])` helper that
+  `custom_format_registry()` calls before filtering, so it is testable while
+  the preset list is still empty.
+
 ## Phase 1d — Deck-validation dispatch + first registry preset
 
 Real `evaluate_custom_format`/`quick_custom_format_check` bodies, mirroring
