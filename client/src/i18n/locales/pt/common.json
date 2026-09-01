@@ -5,6 +5,10 @@
     "close": "Fechar",
     "closeNamed": "Fechar {{name}}"
   },
+  "debug": {
+    "exportAuthoritative": "Exportar estado de jogo autoritativo",
+    "exportAuthoritativeTitle": "Baixa o estado controlado pelo mecanismo usado para diagnosticar e restaurar este jogo"
+  },
   "quantityRef": {
     "highestNumber": "o número mais alto",
     "lowestNumber": "o número mais baixo",
