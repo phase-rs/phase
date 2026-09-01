@@ -12,7 +12,7 @@ const SPONSOR_URL = "https://github.com/sponsors/matthewevans";
 export function social(url: string) {
   return (e: MouseEvent) => {
     e.preventDefault();
-    openExternal(url);
+    openExternal(url, e.nativeEvent);
   };
 }
 

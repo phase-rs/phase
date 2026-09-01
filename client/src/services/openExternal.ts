@@ -10,9 +10,15 @@ export function isOpenableExternalUrl(url: string): boolean {
   }
 }
 
-/** Open a validated HTTP(S) URL in the user's default browser. */
-export function openExternal(url: string): void {
-  if (!isOpenableExternalUrl(url)) return;
+/**
+ * Open a validated HTTP(S) URL in the user's default browser.
+ *
+ * External windows are an explicit-click affordance. Requiring the trusted
+ * browser event keeps hover, render, and asynchronous state updates from ever
+ * creating a tab or history entry.
+ */
+export function openExternal(url: string, event: Event): void {
+  if (!event.isTrusted || !isOpenableExternalUrl(url)) return;
 
   if (isTauri()) {
     void import("@tauri-apps/plugin-opener")
