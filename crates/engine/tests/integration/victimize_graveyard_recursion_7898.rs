@@ -23,8 +23,16 @@
 //! Once the graveyard cards are dropped from the sacrifice's targeted set, the
 //! sacrifice reaches the untargeted battlefield pool and actually happens.
 //!
-//! The `If you do` consequence (CR 608.2c) then has to fire on BOTH sacrifice
-//! completion paths, which reach it through different seams:
+//! CR 118.12: in `[Do something]. If you do, [effect].` the `[do something]`
+//! action is a COST paid on resolution, and the `If you do` clause checks
+//! whether the controller started to pay it. (Its own worked example —
+//! Standstill's "sacrifice this enchantment. If you do, each of that player's
+//! opponents draws three cards" — is structurally identical to Victimize.) So
+//! the rider fires exactly when the sacrifice cost was paid, and CR 608.2c
+//! supplies only the ORDER: the return happens after the sacrifice, not before.
+//!
+//! That `If you do` consequence then has to fire on BOTH sacrifice completion
+//! paths, which reach it through different seams:
 //!   * the mandatory auto path (`sacrifice.rs`, `!up_to && eligible.len() <=
 //!     count`) sacrifices inline, so the event-slice seed in `effects/mod.rs`
 //!     sets the performed-flag. V1/V3-V9 drive this path.
@@ -46,14 +54,14 @@
 //! | V3 | `returned_cards_are_controlled_by_caster` | 1 | auto | returned cards are controlled by the caster |
 //! | V4 | `resolution_completes_without_dangling_prompt` | 1 | auto | terminal `WaitingFor::Priority` |
 //! | V5 | `sacrifice_pool_is_battlefield_not_graveyard` | 1 | auto | CR 701.21a pool origin (the headline defect) |
-//! | V6 | `rider_suppressed_when_no_creature_to_sacrifice` | 0 | none | CR 609.3 rider suppression — the ONLY honest suppression fixture |
+//! | V6 | `rider_suppressed_when_no_creature_to_sacrifice` | 0 | none | CR 118.12 + CR 609.3 rider suppression (unpayable cost) — the ONLY honest suppression fixture |
 //! | V6-pair | `rider_fires_when_sacrifice_happens` | 1 | auto | positive twin making V6 non-vacuous |
 //! | V7 | `returns_exactly_the_two_chosen_cards_by_identity` | 1 | auto | bidirectional ObjectId identity |
-//! | V8 | `returned_cards_enter_tapped` | 1 | auto | CR 608.2c tapped rider |
+//! | V8 | `returned_cards_enter_tapped` | 1 | auto | CR 118.12 tapped rider |
 //! | V9 | `stale_chosen_card_is_dropped_without_substitution` | 1 | auto | CR 400.7 stale target, no substitution |
 //! | V10 | `interactive_path_sacrifices_fodder_and_returns_both_chosen_cards_tapped` | 2 | interactive | headline repeated on the interactive seam |
 //! | V11 | `interactive_path_returns_exactly_the_two_chosen_cards_by_identity` | 2 | interactive | identity discrimination on the interactive seam |
-//! | V12 | `interactive_path_rejects_empty_mandatory_sacrifice_selection` | 2 | interactive | submits an EMPTY `SelectCards` DIRECTLY via `act()`; asserts the reducer REJECTS it (CR 701.21a + CR 609.3), the prompt survives intact, then answers legally and drives to `Priority` with the rider fired |
+//! | V12 | `interactive_path_rejects_empty_mandatory_sacrifice_selection` | 2 | interactive | submits an EMPTY `SelectCards` DIRECTLY via `act()`; asserts the reducer REJECTS it (CR 608.2d + CR 701.21a), the prompt survives intact, then answers legally and drives to `Priority` with the rider fired |
 //! | V13 | `interactive_path_real_selection_fires_rider` | 2 | interactive | positive counterweight to V6's suppression negative |
 //!
 //! V12 deliberately does NOT use the `.effect_zone(&[])` builder: the shared
@@ -167,12 +175,14 @@ fn victimize_sacrifices_fodder_and_returns_both_chosen_cards_tapped() {
     // owner's graveyard.
     outcome.assert_zone(&[fodder], Zone::Graveyard);
 
-    // CR 608.2c: "If you do" fired, so both chosen cards returned...
+    // CR 118.12: the sacrifice cost was paid, so the "If you do" clause is
+    // satisfied and both chosen cards returned. CR 608.2c: the return follows
+    // the sacrifice in the order written.
     outcome.assert_zone(&[graveyard[0], graveyard[1]], Zone::Battlefield);
     // ...tapped.
     assert!(
         outcome.is_tapped(graveyard[0]) && outcome.is_tapped(graveyard[1]),
-        "CR 608.2c: both returned creatures must enter tapped; got {:?}/{:?}",
+        "CR 118.12: both returned creatures must enter tapped; got {:?}/{:?}",
         outcome.is_tapped(graveyard[0]),
         outcome.is_tapped(graveyard[1])
     );
@@ -285,7 +295,14 @@ fn victimize_sacrifice_pool_is_battlefield_not_graveyard() {
 
 /// V6 — NEGATIVE: with no creature on the battlefield to sacrifice, the
 /// `If you do` rider is suppressed and the chosen cards STAY in the graveyard.
-/// CR 609.3: the effect does only as much as possible.
+///
+/// CR 118.12: the sacrifice is a COST paid on resolution, and the `If you do`
+/// clause checks whether the controller started to pay it. With no creature to
+/// sacrifice the cost cannot be paid, so the clause is false and the rider does
+/// nothing — precisely the rule's own Standstill example ("you're unable to pay
+/// the 'sacrifice Standstill' cost. No player will draw cards.").
+/// CR 609.3: the sacrifice instruction itself attempts something impossible, so
+/// it does only as much as possible — here, nothing.
 ///
 /// PAIRED POSITIVE REACH-GUARD: `victimize_rider_fires_when_sacrifice_happens`
 /// below runs the IDENTICAL fixture shape plus one fodder creature and asserts
@@ -317,7 +334,8 @@ fn victimize_rider_suppressed_when_no_creature_to_sacrifice() {
         "reach-guard: Victimize must have been cast and resolved"
     );
 
-    // CR 608.2c: no sacrifice occurred, so the dependent clause does nothing.
+    // CR 118.12: the sacrifice cost was never paid, so the `If you do` clause
+    // is false and the dependent effect does nothing.
     outcome.assert_zone(&[graveyard[0], graveyard[1]], Zone::Graveyard);
 }
 
@@ -427,7 +445,7 @@ fn victimize_returned_cards_enter_tapped() {
         assert_eq!(outcome.zone_of(id), Zone::Battlefield);
         assert!(
             outcome.is_tapped(id),
-            "CR 608.2c: `return the chosen cards to the battlefield tapped` — \
+            "CR 118.12: `return the chosen cards to the battlefield tapped` — \
              {id:?} entered untapped"
         );
     }
@@ -522,7 +540,7 @@ fn victimize_stale_chosen_card_is_dropped_without_substitution() {
 //   * AUTO path (`sacrifice.rs`, `!up_to && eligible.len() <= count`): when the
 //     controller has exactly as many eligible creatures as the sacrifice needs,
 //     the resolver sacrifices them inline. `PermanentSacrificed` lands in the
-//     local event slice, so the CR 608.2c seed in `effects/mod.rs` sees it and
+//     local event slice, so the CR 118.12 seed in `effects/mod.rs` sees it and
 //     sets `optional_effect_performed` on the parent context.
 //   * INTERACTIVE path (`WaitingFor::EffectZoneChoice`): with 2+ eligible
 //     creatures the player must pick. The resolver returns before any sacrifice
@@ -572,13 +590,14 @@ fn victimize_interactive_path_sacrifices_fodder_and_returns_both_chosen_cards_ta
     outcome.assert_zone(&[fodder], Zone::Graveyard);
     outcome.assert_zone(&[spare], Zone::Battlefield);
 
-    // CR 608.2c: the rider fires on this path too — both chosen cards return...
+    // CR 118.12: the cost was paid on this path too, so the rider fires and
+    // both chosen cards return...
     outcome.assert_zone(&chosen, Zone::Battlefield);
     // ...and enter tapped.
     for &id in &chosen {
         assert!(
             outcome.is_tapped(id),
-            "CR 608.2c: chosen card {id:?} must return tapped on the interactive path"
+            "CR 118.12: chosen card {id:?} must return tapped on the interactive path"
         );
     }
 }
@@ -653,8 +672,11 @@ fn victimize_interactive_path_returns_exactly_the_two_chosen_cards_by_identity()
 /// `SelectCards` action at all — it parks on the prompt and returns a stalled,
 /// half-resolved state. Only `runner.act(..)` reaches the reducer.
 ///
-/// CR 701.21a + CR 609.3: `Sacrifice a creature` with a non-empty eligible pool
-/// is a MANDATORY choice of exactly one — a player may not decline it. The
+/// CR 608.2d: the player announces the sacrifice choice while applying the
+/// effect and "can't choose an option that's illegal or impossible" — with a
+/// non-empty eligible pool, choosing to sacrifice NOTHING is exactly such an
+/// illegal option. CR 701.21a supplies WHAT may be chosen: a permanent the
+/// player controls, moved from the battlefield to its owner's graveyard. The
 /// engine enforces that in `engine_resolution_choices.rs` via the `!up_to`
 /// branch `chosen.len() != count`, which rejects a 0-card submission against
 /// `count == 1` with `InvalidAction("Must select exactly 1 card(s), got 0")`.
@@ -662,7 +684,7 @@ fn victimize_interactive_path_returns_exactly_the_two_chosen_cards_by_identity()
 /// REVERT-FAILING ASSERTIONS: the post-rejection half. After the legal
 /// selection is submitted, `assert_zone(&chosen, Zone::Battlefield)` fails
 /// without the completion-seam seed (the fodder IS sacrificed, but the CR
-/// 608.2c rider never fires, leaving both chosen cards in the graveyard).
+/// 118.12 rider never fires, leaving both chosen cards in the graveyard).
 #[test]
 fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
     let Fixture {
@@ -713,19 +735,19 @@ fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
     }
 
     // THE POINT OF THIS TEST: an empty submission goes straight to the reducer
-    // and is REFUSED. CR 609.3 — a mandatory sacrifice with an eligible pool
-    // must sacrifice; declining is not a legal option.
+    // and is REFUSED. CR 608.2d — the player can't choose an option that's
+    // illegal; with an eligible pool, declining the mandatory sacrifice is one.
     let rejection = runner.act(GameAction::SelectCards { cards: vec![] });
     match rejection {
         Err(EngineError::InvalidAction(message)) => {
             assert!(
                 message.contains("exactly 1"),
-                "CR 609.3: the mandatory sacrifice must reject a 0-card selection \
+                "CR 608.2d: the mandatory sacrifice must reject a 0-card selection \
                  with a count-mismatch diagnostic, got {message:?}"
             );
         }
         other => panic!(
-            "CR 701.21a + CR 609.3: an empty mandatory sacrifice selection must be \
+            "CR 608.2d + CR 701.21a: an empty mandatory sacrifice selection must be \
              REJECTED while eligible creatures exist, got {other:?}"
         ),
     }
@@ -751,7 +773,7 @@ fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
         assert_eq!(
             runner.state().objects[&id].zone,
             Zone::Graveyard,
-            "rejected selection must not fire the CR 608.2c rider ({id:?})"
+            "rejected selection must not fire the CR 118.12 rider ({id:?})"
         );
     }
 
@@ -768,17 +790,18 @@ fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
 
-    // CR 608.2c: the rider fires on the interactive path — both chosen cards
-    // return to the battlefield tapped. THIS is the revert-failing assertion.
+    // CR 118.12: the cost was paid, so the rider fires on the interactive path —
+    // both chosen cards return to the battlefield tapped. THIS is the
+    // revert-failing assertion.
     for &id in &chosen {
         assert_eq!(
             runner.state().objects[&id].zone,
             Zone::Battlefield,
-            "CR 608.2c: chosen card {id:?} must return after the interactive sacrifice"
+            "CR 118.12: chosen card {id:?} must return after the interactive sacrifice"
         );
         assert!(
             runner.state().objects[&id].tapped,
-            "CR 608.2c: chosen card {id:?} must return tapped"
+            "CR 118.12: chosen card {id:?} must return tapped"
         );
     }
 
@@ -795,11 +818,14 @@ fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
 ///
 /// V6 (`victimize_rider_suppressed_when_no_creature_to_sacrifice`) is the
 /// engine's ONLY honest rider-suppression case: with an EMPTY battlefield there
-/// is no eligible fodder, the sacrifice does as much as possible (CR 609.3, i.e.
-/// nothing), and the CR 608.2c rider stays silent. Suppression cannot be staged
-/// on a fixture that HAS eligible creatures — a mandatory sacrifice with a
-/// non-empty pool must sacrifice (CR 701.21a), which is exactly what V12 proves
-/// the reducer enforces.
+/// is no eligible fodder, so the sacrifice COST cannot be paid at all and the
+/// `If you do` clause is false (CR 118.12) — the rider stays silent. (CR 609.3
+/// covers the sacrifice instruction itself doing only as much as possible, which
+/// on an empty pool is nothing; it is the cost check, not partial execution,
+/// that gates the rider.) Suppression cannot be staged on a fixture that HAS
+/// eligible creatures — with a non-empty pool, declining is an illegal choice
+/// (CR 608.2d) and a sacrifice must happen (CR 701.21a), which is exactly what
+/// V12 proves the reducer enforces.
 ///
 /// This test is the positive counterweight on the INTERACTIVE path: two
 /// eligible creatures, a real selection, and therefore a rider that DOES fire.
@@ -830,6 +856,7 @@ fn victimize_interactive_path_real_selection_fires_rider() {
 
     // The one difference from V12: a sacrifice actually happened...
     outcome.assert_zone(&[battlefield[0]], Zone::Graveyard);
-    // ...so the CR 608.2c rider fires and the chosen cards return.
+    // ...so the sacrifice cost was paid, the CR 118.12 rider fires, and the
+    // chosen cards return.
     outcome.assert_zone(&chosen, Zone::Battlefield);
 }
