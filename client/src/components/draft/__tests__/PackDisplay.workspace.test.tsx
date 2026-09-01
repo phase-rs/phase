@@ -216,11 +216,14 @@ function firePointerActivation(
 
 function RealDragPackHarness({
   onDrop,
+  confirmPick,
   responsiveLayout = "desktop",
 }: {
   onDrop(request: DraftDropRequest): DraftDropDispatch;
+  confirmPick?: ConfirmPick;
   responsiveLayout?: "desktop" | "tablet-portrait";
 }) {
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [interaction, setInteraction] = useState<DraftPickInteractionSnapshot>({
     interactionGeneration: 4,
     pickInteractionLocked: false,
@@ -258,6 +261,9 @@ function RealDragPackHarness({
           dragController: drag,
           pendingIntent: interaction.pendingPickIntent,
           interactionLocked: interaction.pickInteractionLocked,
+          selectedCard,
+          selectCard: setSelectedCard,
+          ...(confirmPick === undefined ? {} : { confirmPick }),
         })}
         presentation={{ packScale: 1, setPackScale: vi.fn() }}
         onCardHover={vi.fn()}
@@ -622,6 +628,31 @@ describe("PackDisplay local workspace controller", () => {
     expect(cardElement).not.toHaveClass("!duration-0");
 
     fireEvent.doubleClick(cardElement);
+    await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
+  it.each(["mouse", "pen"] as const)("selects_a_desktop_%s_pack_card_after_a_no_target_drag_release", async (pointerType) => {
+    const onDrop = vi.fn();
+    const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<RealDragPackHarness onDrop={onDrop as never} confirmPick={confirmPick} />);
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const target = screen.getByTestId("real-drag-target");
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => ({ left: 100, top: 0, right: 300, bottom: 200, width: 200, height: 200, x: 100, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    fireEvent.pointerDown(cardElement, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 96, pointerType });
+    fireEvent.pointerMove(cardElement, { clientX: 30, clientY: 30, pointerId: 96, pointerType });
+    fireEvent.pointerUp(cardElement, { clientX: 30, clientY: 30, pointerId: 96, pointerType });
+    expect(onDrop).not.toHaveBeenCalled();
+
+    firePointerActivation(within(cardElement).getByRole("button", { name: "Same" }), "click", {
+      detail: 1, pointerId: 96, pointerType,
+    });
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(cardElement).toHaveClass("ring-2", "ring-arcane", "shadow-[0_0_7px_3px_#38bdf8]");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
   });
 
