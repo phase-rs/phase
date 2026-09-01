@@ -148,6 +148,10 @@ fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
     );
     run_combat(&mut runner, vec![calix, enchanted_attacker], vec![]);
 
+    // Combat leaves the admitted trigger on the stack with a priority window.
+    // Resolve that window before checking the optional effect it produces.
+    runner.advance_until_stack_empty();
+
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { player: P0, .. }
