@@ -18,6 +18,18 @@ REPO_ROOT="$(pwd)"
 # image; export it explicitly so a non-login build shell still finds them.
 export PATH="${CARGO_HOME:-/usr/local/cargo}/bin:$PATH"
 
+# --- System packages the base image lacks. The standalone feed-scraper crate
+# links OpenSSL via native-tls, so a full `cargo clippy --all-targets`
+# (the pre-push hook and `tilt up -- lint`) needs the OpenSSL dev headers and
+# pkg-config. Only install when missing so re-runs are a no-op.
+if ! pkg-config --exists openssl 2>/dev/null; then
+  echo "Installing system packages (pkg-config, libssl-dev)..."
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq pkg-config libssl-dev
+else
+  echo "pkg-config + OpenSSL dev headers already present."
+fi
+
 # --- wasm-bindgen-cli: must exactly match the wasm-bindgen crate in Cargo.lock.
 # A mismatch fails build-wasm.sh with a "schema version" error, so we pin to the
 # locked version rather than a hardcoded one that drifts on dependency bumps.
