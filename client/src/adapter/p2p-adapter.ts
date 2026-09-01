@@ -2113,17 +2113,6 @@ export class P2PHostAdapter implements EngineAdapter {
     return this.wasm.previewManaPayment(action, actor);
   }
 
-  async exportPersistenceState(): Promise<string> {
-    this.assertNotDisposed();
-    if (!this.ownsAuthority()) {
-      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
-    }
-    if (this.nativeBridge) {
-      throw new AdapterError("P2P_ERROR", "Native P2P persistence is managed by phase-server", false);
-    }
-    return this.wasm.exportPersistenceState();
-  }
-
   /** Releases a complete native-server revision only after every local seat
    * socket has supplied its own filtered view. The native server is the
    * authority for this revision; PeerJS carries it through to terminal
