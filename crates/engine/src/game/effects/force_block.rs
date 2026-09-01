@@ -76,15 +76,15 @@ pub fn resolve(
         }
 
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&obj_id]);
-        let effect_id = state.add_transient_continuous_effect(
+        state.add_transient_continuous_effect_for_recipient(
             ability.source_id,
             ability.controller,
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::AddStaticMode { mode: mode.clone() }],
             None,
+            recipient,
         );
-        state.set_transient_affected_recipient(effect_id, recipient);
     }
 
     events.push(GameEvent::EffectResolved {

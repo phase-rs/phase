@@ -8,7 +8,7 @@ use crate::types::ability::{
 use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
@@ -173,13 +173,14 @@ pub(crate) fn apply_precomputed_copy_values(
     }];
     modifications.extend(layered_mods);
 
-    let tce_id = state.add_transient_continuous_effect(
+    let tce_id = state.add_transient_continuous_effect_for_recipient(
         source_id,
         controller,
         duration,
         TargetFilter::SpecificObject { id: recipient_id },
         modifications,
         None,
+        ObjectIncarnationRef::from_object(&state.objects[&recipient_id]),
     );
     state.set_transient_duration_subject(tce_id, duration_subject_id);
 

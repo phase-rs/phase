@@ -23794,6 +23794,32 @@ impl GameState {
             modifications,
             condition,
             None,
+            None,
+        )
+    }
+
+    /// Register a transient continuous effect whose one-shot recipient is
+    /// fixed to the supplied incarnation from the moment it is journaled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_transient_continuous_effect_for_recipient(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        recipient: ObjectIncarnationRef,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            None,
+            Some(recipient),
         )
     }
 
@@ -23825,6 +23851,7 @@ impl GameState {
             modifications,
             condition,
             Some(end_permission),
+            None,
         )
     }
 
@@ -23838,6 +23865,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
+        affected_recipient: Option<ObjectIncarnationRef>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -23865,7 +23893,7 @@ impl GameState {
                 timestamp,
                 duration,
                 affected,
-                affected_recipient: None,
+                affected_recipient,
                 modifications,
                 condition,
                 duration_subject: None,
@@ -23956,19 +23984,6 @@ impl GameState {
         self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
         self.layers_dirty.mark_full();
         Ok(())
-    }
-
-    /// Bind a transient effect to the exact recipient resolved by a one-shot
-    /// instruction. Dynamic effects intentionally leave this unset.
-    pub fn set_transient_affected_recipient(&mut self, id: u64, recipient: ObjectIncarnationRef) {
-        if let Some(tce) = self
-            .transient_continuous_effects
-            .iter_mut()
-            .find(|tce| tce.id == id)
-        {
-            tce.affected_recipient = Some(recipient);
-            self.layers_dirty.mark_full();
-        }
     }
 
     /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
