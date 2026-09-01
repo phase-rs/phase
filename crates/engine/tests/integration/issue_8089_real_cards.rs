@@ -48,7 +48,7 @@ fn resolve_facetaker_combat_trigger(runner: &mut GameRunner, target: ObjectId) {
 }
 
 #[test]
-fn cephalid_facetaker_copy_expires_at_cleanup_and_never_follows_it_to_hand() {
+fn cephalid_facetaker_copy_expires_at_cleanup() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let target = scenario.add_creature(P0, "Facetaker Target", 5, 5).id();
@@ -67,12 +67,32 @@ fn cephalid_facetaker_copy_expires_at_cleanup_and_never_follows_it_to_hand() {
         "Cephalid Facetaker",
         "the printed end-of-turn copy duration must expire during cleanup"
     );
+}
+
+#[test]
+fn cephalid_facetaker_live_copy_does_not_follow_it_to_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P0, "Facetaker Target", 5, 5).id();
+    let facetaker = scenario
+        .add_creature_from_oracle(P0, "Cephalid Facetaker", 1, 4, FACETAKER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    resolve_facetaker_combat_trigger(&mut runner, target);
+    assert_eq!(
+        runner.state().objects[&facetaker].name,
+        "Facetaker Target",
+        "precondition: the until-end-of-turn copy must be live before it changes zones"
+    );
 
     move_to_zone(runner.state_mut(), facetaker, Zone::Hand, &mut Vec::new());
     flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&facetaker].zone, Zone::Hand);
     assert_eq!(
         runner.state().objects[&facetaker].name,
-        "Cephalid Facetaker"
+        "Cephalid Facetaker",
+        "a new hand incarnation must retain its own identity, not the live battlefield copy"
     );
 }
 
