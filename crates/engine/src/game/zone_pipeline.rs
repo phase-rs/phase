@@ -3764,9 +3764,11 @@ pub(crate) fn deliver_replaced_zone_change(
                 let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
                     source_id: copy.source_id,
                     controller: copy.controller,
-                    duration_subject: ObjectIncarnationRef::from_object(
-                        &state.objects[&copy.source_id],
-                    ),
+                    // CR 400.7 + CR 611.2b: this effect applies to the
+                    // entering permanent, not to the copied object (which can
+                    // be absent by the time this replacement is delivered,
+                    // e.g. Mystic Reflection's resolved source).
+                    duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
                     duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
                     values: *copy.values,
                     display_source: copy.display_source,
