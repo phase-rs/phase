@@ -980,15 +980,16 @@ fn custom_format_unlimited_sideboard_survives_deck_loading() {
 #[test]
 fn from_lobby_config_rejects_archenemy_source() {
     // CR 408.1 + CR 408.3 + CR 904.3: Archenemy's command zone holds a
-    // supplementary scheme deck, not a commander, so CommandZoneMode::Enabled
-    // has no eligibility_rule to name and a saved definition carries no
-    // scheme deck. Saving it would produce a format claiming a command zone
-    // it cannot populate.
+    // supplementary scheme deck, not a commander — one member of the general
+    // "deck_loading.rs grants an auxiliary deck/component keyed on this
+    // literal GameFormat" class (see
+    // GameFormat::has_unrepresentable_auxiliary_deck_component), which also
+    // covers Planechase and Momir below.
     let error = CustomFormatDef::from_lobby_config("Archy".to_string(), &FormatConfig::archenemy())
         .expect_err("Archenemy must not be saveable as a custom format");
     assert!(
-        error.to_string().contains("command zone"),
-        "expected the command-zone rejection, got: {error}"
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
     );
 }
 
@@ -996,14 +997,33 @@ fn from_lobby_config_rejects_archenemy_source() {
 fn from_lobby_config_rejects_momir_source() {
     // CR 109.4c + CR 114.1: Momir's command zone holds a game-start emblem,
     // granted by deck_loading.rs keyed off GameFormat::Momir itself rather
-    // than off any StructuralRules field — a saved copy would resolve to a
-    // command zone with no emblem and no way to grant one. A different rule
-    // for a different reason than Archenemy's.
+    // than off any StructuralRules field. Same defect class as Archenemy and
+    // Planechase, for a different underlying reason.
     let error = CustomFormatDef::from_lobby_config("Momo".to_string(), &FormatConfig::momir())
         .expect_err("Momir must not be saveable as a custom format");
     assert!(
-        error.to_string().contains("command zone"),
-        "expected the command-zone rejection, got: {error}"
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+}
+
+#[test]
+fn from_lobby_config_rejects_planechase_source() {
+    // CR 901.15a: Planechase's shared communal planar deck is granted by
+    // deck_loading.rs's `load_shared_planar_deck`, keyed on
+    // GameFormat::Planechase itself. Unlike Archenemy/Momir, Planechase's
+    // `command_zone` is false — FormatConfig::planechase() sets
+    // command_zone: false — so this format would otherwise fall straight
+    // through the command-zone/eligibility check below to
+    // CommandZoneMode::Disabled and save "successfully," silently dropping
+    // the planar deck. has_unrepresentable_auxiliary_deck_component is the
+    // only guard that reaches it.
+    let error =
+        CustomFormatDef::from_lobby_config("Planar".to_string(), &FormatConfig::planechase())
+            .expect_err("Planechase must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
     );
 }
 

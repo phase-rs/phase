@@ -888,6 +888,32 @@ impl GameFormat {
         }
     }
 
+    /// True for a built-in format whose `game::deck_loading` behavior grants
+    /// an auxiliary deck or component keyed on this literal `GameFormat`
+    /// variant, with no `StructuralRules` field able to represent it: a
+    /// shared communal planar deck (Planechase, CR 901.15a,
+    /// `load_shared_planar_deck`), a supplementary scheme deck (Archenemy,
+    /// CR 904.3, `load_shared_scheme_deck`), or a game-start emblem (Momir,
+    /// CR 109.4c / CR 114.1, `grant_emblem`). A custom-format definition
+    /// modeled after one of these would resolve to a config that looks
+    /// structurally sound but never receives the grant, since
+    /// `deck_loading.rs` checks `state.format_config.format ==
+    /// GameFormat::X` directly rather than reading any `StructuralRules`
+    /// field.
+    ///
+    /// Used by `custom_format::CustomFormatDef::from_lobby_config` to reject
+    /// all three as lobby-config sources. Archenemy and Momir both also set
+    /// `command_zone: true` with no `CommanderEligibilityRule`, so they are
+    /// independently unrepresentable for that reason too; Planechase's
+    /// `command_zone` is `false`, so this predicate is the only guard that
+    /// reaches it.
+    pub fn has_unrepresentable_auxiliary_deck_component(self) -> bool {
+        matches!(
+            self,
+            GameFormat::Planechase | GameFormat::Archenemy | GameFormat::Momir
+        )
+    }
+
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
     ///
     /// Built-in variants return a static string. `Custom(id)` looks the id up

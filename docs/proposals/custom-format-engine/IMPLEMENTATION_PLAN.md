@@ -333,6 +333,26 @@ way Phase 1a's were:
   `assert_no_lobby_save_sentinel_collision(&[CustomFormatDef])` helper that
   `custom_format_registry()` calls before filtering, so it is testable while
   the preset list is still empty.
+- **Planechase was missed as a third unrepresentable lobby-save source,
+  found in `/review-impl`.** The command-zone/eligibility check above
+  correctly excludes Archenemy and Momir, but that check is gated on
+  `config.command_zone`, and `FormatConfig::planechase()` sets
+  `command_zone: false` — `deck_loading.rs:937` grants Planechase's shared
+  communal planar deck (CR 901.15a) keyed on the literal
+  `GameFormat::Planechase` comparison, exactly the same defect class as
+  Archenemy's scheme deck and Momir's emblem, just reached by a mechanism the
+  command-zone guard cannot see. A saved Planechase lobby would have passed
+  `from_lobby_config` "successfully" and silently lost the planar deck.
+  Fixed by naming the general class explicitly:
+  `GameFormat::has_unrepresentable_auxiliary_deck_component` (matching
+  `Planechase | Archenemy | Momir`), checked in `from_lobby_config` ahead of
+  the command-zone match. Archenemy/Momir's rejection message changed from
+  citing "command zone" to the shared "auxiliary deck or component" wording
+  now that one predicate covers all three; the `(true, None)` match arm is
+  kept as a defensive fallback rather than removed, since it still protects
+  against a future command-zone format added to
+  `CommanderEligibilityRule::from_source_format`'s `Ok(None)` bucket without
+  also being added to the new predicate.
 
 ## Phase 1d — Deck-validation dispatch + first registry preset
 

@@ -447,35 +447,49 @@ impl CustomFormatDef {
             ));
         }
 
+        // Closes the general defect class documented on
+        // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase
+        // (CR 901.15a, shared planar deck), Archenemy (CR 904.3, scheme deck),
+        // and Momir (CR 109.4c / CR 114.1, game-start emblem) each get an
+        // auxiliary deck/component from `deck_loading.rs` keyed on this exact
+        // `GameFormat` literal, with no `StructuralRules` field able to carry
+        // it forward. Checked ahead of the command-zone/eligibility match
+        // below because Planechase's `command_zone` is `false` — it would
+        // otherwise fall straight through to `CommandZoneMode::Disabled` and
+        // save "successfully," silently losing the planar deck. Archenemy and
+        // Momir are also caught here now (previously only by the `(true,
+        // None)` arm below, which this predicate makes unreachable for them —
+        // left in place as a defensive fallback for any future built-in that
+        // sets `command_zone: true` without a commander concept).
+        if config.format.has_unrepresentable_auxiliary_deck_component() {
+            return Err(FormatConfigError(format!(
+                "from_lobby_config cannot save {} as a custom format — its deck_loading.rs \
+                 behavior grants an auxiliary deck or component (a shared planar deck, a scheme \
+                 deck, or a game-start emblem) keyed on this literal format, and StructuralRules \
+                 has no representation for it",
+                config.format
+            )));
+        }
+
         let eligibility_rule = CommanderEligibilityRule::from_source_format(config.format)?;
         let command_zone_mode = match (config.command_zone, eligibility_rule) {
             (true, Some(eligibility_rule)) => CommandZoneMode::Enabled {
                 commander_damage_threshold: config.commander_damage_threshold,
                 eligibility_rule,
             },
-            // CR 408.1 + CR 408.3: the command zone holds specialized objects
-            // whose rules each casual variant defines for itself, and CR
-            // 904.3 makes Archenemy's the supplementary scheme deck — not a
-            // commander. `StructuralRules` can represent a command zone only
-            // through `CommandZoneMode::Enabled`, whose `eligibility_rule`
-            // names WHICH commander test applies; there is no such test for a
-            // scheme deck, and nothing in a saved definition carries the
-            // scheme deck itself, so saving Archenemy would produce a format
-            // that claims a command zone it cannot populate.
-            //
-            // CR 109.4c + CR 114.1: Momir's command zone holds a game-start
-            // EMBLEM (a marker object with abilities but no other
-            // characteristics), controlled by the player who put it there.
-            // `deck_loading.rs`'s Momir branch keys that grant off
-            // `GameFormat::Momir` itself, not off any `StructuralRules`
-            // field, so a saved copy would resolve to a command zone with no
-            // emblem and no way to grant one. A separate rule for a separate
-            // reason from Archenemy's, hence the separate citation.
+            // Defensive fallback: among today's built-ins, only Archenemy and
+            // Momir reach this arm (both `command_zone: true` with no
+            // eligibility rule), and both are already rejected above by
+            // `has_unrepresentable_auxiliary_deck_component`. Kept so a future
+            // command-zone format added to `CommanderEligibilityRule::from_source_format`'s
+            // `Ok(None)` bucket without also being added to that predicate
+            // still fails closed here instead of silently resolving to
+            // `CommandZoneMode::Disabled`.
             (true, None) => {
                 return Err(FormatConfigError(format!(
                     "from_lobby_config cannot save {} as a custom format — its command zone holds \
-                     format-specific objects (a scheme deck / a game-start emblem) rather than a \
-                     commander, and StructuralRules has no representation for them",
+                     format-specific objects rather than a commander, and StructuralRules has no \
+                     representation for them",
                     config.format
                 )))
             }
