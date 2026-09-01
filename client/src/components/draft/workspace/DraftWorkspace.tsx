@@ -130,7 +130,6 @@ export interface DraftWorkspaceProps {
   mobileOverlay?: boolean;
   mobileWorkspaceOpen?: boolean;
   onMobileWorkspaceOpenChange?(open: boolean): void;
-  mobileSummaryAccessory?: ReactNode;
   responsiveContext?: "draft" | "builder";
 }
 
@@ -150,7 +149,6 @@ export function DraftWorkspace({
   mobileOverlay = false,
   mobileWorkspaceOpen = false,
   onMobileWorkspaceOpenChange,
-  mobileSummaryAccessory,
   responsiveContext = "draft",
 }: DraftWorkspaceProps) {
   const { t } = useTranslation(["draft", "common"]);
@@ -234,7 +232,7 @@ export function DraftWorkspace({
     ? undefined
     : {
       value: visualColumnCap,
-      maximum: responsiveContext === "builder" && tabletLayout ? 15 : 5,
+      maximum: 10,
       orientation: responsiveLayout === "phone-portrait" || responsiveLayout === "tablet-portrait"
         ? "portrait"
         : "landscape",
@@ -653,16 +651,6 @@ export function DraftWorkspace({
     </section>
     {mobileOverlayActive && (
       <>
-      {mobileSummaryAccessory && (
-        <div
-          data-mobile-summary-accessory
-          className={responsiveLayout === "phone-landscape"
-            ? "fixed bottom-[58px] right-[9px] z-[42] w-[50vw]"
-            : "fixed bottom-[calc(112px_+_env(safe-area-inset-bottom))] right-[9px] z-[42] w-[50vw]"}
-        >
-          {mobileSummaryAccessory}
-        </div>
-      )}
       <div
         data-mobile-workspace-summary
         className={responsiveLayout === "phone-landscape"

@@ -88,7 +88,11 @@
     "passingRight": "← Passando para a Direita ←",
     "connected": "Connected",
     "disconnected": "Disconnected",
-    "faceUpDraftCards": "Virada para cima: {{cards}}"
+    "faceUpDraftCards": "Virada para cima: {{cards}}",
+    "activePackCount_one": "{{count}} pacote com {{player}}",
+    "activePackCount_few": "{{count}} pacotes com {{player}}",
+    "activePackCount_many": "{{count}} pacotes com {{player}}",
+    "activePackCount_other": "{{count}} pacotes com {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Dificuldade dos Bots",

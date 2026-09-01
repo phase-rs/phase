@@ -40,8 +40,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 23", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(23);
+    it("is version 24", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(24);
     });
   });
 
@@ -574,19 +574,50 @@ describe("draftProtocol", () => {
       },
     );
 
-    it("normalizes missing face-up draft arrays in received player views", () => {
+    it("normalizes missing face-up draft arrays while preserving active-pack presence", () => {
       const msg = validateDraftMessage({
         type: "draft_state_update",
         view: {
-          seats: [{ seat_index: 1, display_name: "Alex" }],
+          seats: [{ seat_index: 1, display_name: "Alex", active_pack_count: 1 }],
         },
       });
 
       expect(msg.type).toBe("draft_state_update");
       if (msg.type === "draft_state_update") {
         expect(msg.view.draft_effects).toEqual([]);
+        expect(msg.view.seats[0].active_pack_count).toBe(1);
         expect(msg.view.seats[0].face_up_draft_cards).toEqual([]);
       }
+    });
+
+    it.each([undefined, null, "1", 0.5, -1, 2])(
+      "rejects invalid active-pack presence %j",
+      (activePackCount) => {
+        expect(() => validateDraftMessage({
+          type: "draft_state_update",
+          view: {
+            seats: [{ active_pack_count: activePackCount }],
+          },
+        })).toThrow("active_pack_count must be an integer 0 or 1");
+      },
+    );
+
+    it.each([0, 1])("accepts active-pack presence %i", (activePackCount) => {
+      const msg = validateDraftMessage({
+        type: "draft_lobby_update",
+        seats: [{ active_pack_count: activePackCount }],
+      });
+
+      expect(msg).toMatchObject({
+        seats: [{ active_pack_count: activePackCount }],
+      });
+    });
+
+    it("requires active-pack presence in lobby seats", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_lobby_update",
+        seats: [{}],
+      })).toThrow("active_pack_count must be an integer 0 or 1");
     });
 
     it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
@@ -608,7 +639,7 @@ describe("draftProtocol", () => {
         type: "draft_state_update",
         view: {
           draft_effects: [],
-          seats: [{ face_up_draft_cards: faceUpCards }],
+          seats: [{ active_pack_count: 0, face_up_draft_cards: faceUpCards }],
         },
       })).toThrow("face_up_draft_cards must be an array");
     });

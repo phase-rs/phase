@@ -12200,8 +12200,12 @@ mod handshake_tests {
     }
 
     #[test]
-    fn rejects_previous_protocol_for_breaking_planechase_release() {
-        let previous = PROTOCOL_VERSION.saturating_sub(1);
+    fn rejects_v49_before_it_can_omit_default_deck_copy_limit() {
+        // v49 added `active_pack_count`, but it predates the per-format
+        // `default_deck_copy_limit` required by v50. Full games must reject it
+        // at hello rather than let a client use the fail-closed singleton
+        // fallback instead of the format's declared copy limit.
+        let previous = 49;
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {

@@ -43,7 +43,7 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
-/// 49 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
+/// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
 ///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
 ///      `max_deck_copies` and the deck-compatibility admission path now both
 ///      read, replacing per-function hardcoded literals and bare-`GameFormat`
@@ -57,11 +57,16 @@ pub enum ServerErrorCode {
 ///      it shouldn't. The direction is symmetric: whichever peer lacks the
 ///      field degrades the same way, fail-closed, never fail-open. Lobby
 ///      carriers move too; see `LOBBY_PROTOCOL_VERSION` 3.
+/// 49 — Full-server `DraftPlayerView` payloads require public-seat
+///      `active_pack_count`. An older v48 server can complete the handshake
+///      yet omit that serde-additive field while the TypeScript client accepts
+///      the JSON, leaving it unable to render a seat's active-pack presence.
+///      Full handshakes must refuse the capability mismatch. Lobby messages
+///      are unchanged.
 /// 48 — Full-server `DraftPlayerView` payloads require the engine-owned
-///      `pick_selection_mode`. An older server can omit the field while the
-///      TypeScript client accepts the JSON and then silently treats an ordered
-///      Commander Draft pick as direct selection, so Full handshakes must
-///      refuse the capability mismatch. Lobby messages are unchanged.
+///      `pick_selection_mode`. An older server can omit it while the
+///      TypeScript client accepts the JSON, then silently treats an ordered
+///      Commander Draft pick as direct selection. Lobby messages are unchanged.
 /// 47 — Resolution-time optional fixed sacrifice payments add a typed
 ///      replacement-resumable continuation to `GameState`.
 /// 46 — `QuantityRef::Aggregate` and `QuantityRef::TrackedSetAggregate` were
@@ -216,7 +221,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 49;
+pub const PROTOCOL_VERSION: u32 = 50;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -244,7 +249,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
 /// 3 — `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
-///     49 for the full entry). Same three carriers as 2:
+///     50 for the full entry). Same three carriers as 2:
 ///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
 ///     `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker →
 ///     client). Unlike 2, this is a CAPABILITY bump, not a parse bump — the
@@ -254,7 +259,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     non-default deck-copy-limit override, silently getting the fail-closed
 ///     `UpTo(1)` fallback instead of the format's real default. That is a
 ///     capability loss, not a broken session — the same shape as
-///     `PROTOCOL_VERSION`'s own capability-bump entries (24, 49), not this
+///     `PROTOCOL_VERSION`'s own capability-bump entries (24, 50), not this
 ///     file's own entry 2.
 /// 2 — `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
 ///     tagged `DeckSizeRule` — a field TYPE change, one of the four triggers
@@ -679,12 +684,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 49);
+        assert_eq!(PROTOCOL_VERSION, 50);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 48);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 49);
     }
 
     #[test]

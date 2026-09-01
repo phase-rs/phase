@@ -202,7 +202,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 49 — FormatConfig gained default_deck_copy_limit, the resolved per-format
+ * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *      and the deck-compatibility admission path now both read, replacing
  *      per-function hardcoded literals and bare-GameFormat-derived defaults
@@ -214,11 +214,15 @@ export class NativeEngineVersionMismatchError extends Error {
  *      admitting one it shouldn't. Symmetric in both directions. See
  *      PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs for the full
  *      entry; lobby carriers move too, see LOBBY_PROTOCOL_VERSION 3 below.
+ * 49 — Full-server DraftPlayerView payloads require public-seat
+ *      active_pack_count. An older v48 server can complete the handshake yet
+ *      omit that additive field while this client accepts the JSON, leaving it
+ *      unable to render a seat's active-pack presence. The Full handshake
+ *      refuses that capability mismatch. Lobby messages are unchanged.
  * 48 — Full-server DraftPlayerView payloads require the engine-owned
  *      pick_selection_mode. An older server can omit it while this client
- *      accepts the JSON and then silently treats an ordered Commander Draft
- *      pick as direct selection, so the Full handshake refuses that pairing.
- *      Lobby messages are unchanged.
+ *      accepts the JSON, then silently treats an ordered Commander Draft pick
+ *      as direct selection. Lobby messages are unchanged.
  * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
  * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -351,7 +355,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 49;
+export const PROTOCOL_VERSION = 50;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -381,7 +385,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
- * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 49
+ * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
  *     above for the full entry). Same three carriers as 2:
  *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Unlike 2, this is a
  *     CAPABILITY bump, not a parse bump — the field is serde-optional and

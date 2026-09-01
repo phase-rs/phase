@@ -95,10 +95,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects the previous protocol version for Full servers", async () => {
+  it("rejects v48 Full servers before they can omit active_pack_count", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION - 1 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 48 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
