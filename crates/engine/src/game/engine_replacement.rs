@@ -1708,6 +1708,14 @@ fn handle_persist_chosen_attribute_choice(
                     .to_string(),
             )
         })?;
+    let duration_subject = crate::types::identifiers::ObjectIncarnationRef::from_object(
+        state.objects.get(&host_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "PersistChosenAttribute copy choice resolved after its Aura host left the game"
+                    .to_string(),
+            )
+        })?,
+    );
 
     // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
     // continuous effect sourced from the Aura, applied to the host, ending
@@ -1717,9 +1725,7 @@ fn handle_persist_chosen_attribute_choice(
     let copy = super::effects::become_copy::PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject: crate::types::identifiers::ObjectIncarnationRef::from_object(
-            &state.objects[&host_id],
-        ),
+        duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
         display_source,

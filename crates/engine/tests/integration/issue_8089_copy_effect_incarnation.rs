@@ -2,7 +2,7 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::zones::move_to_zone;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::{
     Duration, Effect, ObjectScope, ResolvedAbility, StaticCondition, TargetFilter, TargetRef,
 };
@@ -114,8 +114,22 @@ fn self_copy_journals_its_recipient_and_cannot_copy_after_reentry() {
     assert_command_pins_match_live(&replay, &installs, &[expected_recipient]);
 
     let mut events = Vec::new();
-    move_to_zone(&mut replay, source, Zone::Graveyard, &mut events);
-    move_to_zone(&mut replay, source, Zone::Battlefield, &mut events);
+    assert!(
+        !move_object_for_test(
+            &mut replay,
+            ZoneMoveRequest::effect(source, Zone::Graveyard, donor),
+            &mut events,
+        ),
+        "the source's graveyard move must complete without a replacement choice"
+    );
+    assert!(
+        !move_object_for_test(
+            &mut replay,
+            ZoneMoveRequest::effect(source, Zone::Battlefield, donor),
+            &mut events,
+        ),
+        "the source's return must complete without a replacement choice"
+    );
     evaluate_layers(&mut replay);
     assert_eq!(
         replay.objects[&source].name, "Journal Copy Host",
@@ -277,8 +291,22 @@ fn zygon_duration_subject_replay_cannot_follow_a_reentered_tapped_target() {
     );
 
     let mut events = Vec::new();
-    move_to_zone(&mut replay, target, Zone::Graveyard, &mut events);
-    move_to_zone(&mut replay, target, Zone::Battlefield, &mut events);
+    assert!(
+        !move_object_for_test(
+            &mut replay,
+            ZoneMoveRequest::effect(target, Zone::Graveyard, zygon),
+            &mut events,
+        ),
+        "the target's graveyard move must complete without a replacement choice"
+    );
+    assert!(
+        !move_object_for_test(
+            &mut replay,
+            ZoneMoveRequest::effect(target, Zone::Battlefield, zygon),
+            &mut events,
+        ),
+        "the target's return must complete without a replacement choice"
+    );
     replay.objects.get_mut(&target).unwrap().tapped = true;
     evaluate_layers(&mut replay);
     assert_eq!(

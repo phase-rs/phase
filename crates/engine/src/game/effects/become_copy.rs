@@ -175,7 +175,12 @@ pub(crate) fn apply_precomputed_copy_values(
     }];
     modifications.extend(layered_mods);
 
-    let recipient = ObjectIncarnationRef::from_object(&state.objects[&recipient_id]);
+    let recipient = ObjectIncarnationRef::from_object(
+        state
+            .objects
+            .get(&recipient_id)
+            .ok_or(EffectError::ObjectNotFound(recipient_id))?,
+    );
     state.add_transient_continuous_effect_with_bindings(
         source_id,
         controller,

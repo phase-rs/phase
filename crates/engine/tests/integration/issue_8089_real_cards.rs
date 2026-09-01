@@ -3,7 +3,7 @@
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::turns::execute_cleanup;
-use engine::game::zones::move_to_zone;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -86,7 +86,14 @@ fn cephalid_facetaker_live_copy_does_not_follow_it_to_hand() {
         "precondition: the until-end-of-turn copy must be live before it changes zones"
     );
 
-    move_to_zone(runner.state_mut(), facetaker, Zone::Hand, &mut Vec::new());
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(facetaker, Zone::Hand, target),
+            &mut Vec::new(),
+        ),
+        "Facetaker's return to hand must complete without a replacement choice"
+    );
     flush_layers(runner.state_mut());
     assert_eq!(runner.state().objects[&facetaker].zone, Zone::Hand);
     assert_eq!(
@@ -136,7 +143,14 @@ fn glasspool_mimic_copy_target_choice_does_not_survive_a_return_to_hand() {
     assert_eq!(runner.state().objects[&mimic].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&mimic].name, "Glasspool Target");
 
-    move_to_zone(runner.state_mut(), mimic, Zone::Hand, &mut Vec::new());
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(mimic, Zone::Hand, target),
+            &mut Vec::new(),
+        ),
+        "Glasspool Mimic's return to hand must complete without a replacement choice"
+    );
     flush_layers(runner.state_mut());
     assert_eq!(
         runner.state().objects[&mimic].name,
