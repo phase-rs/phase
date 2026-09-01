@@ -8,6 +8,7 @@ import {
 import {
   LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
   LOBBY_PROTOCOL_VERSION,
+  MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
 
@@ -183,7 +184,7 @@ describe("openPhaseSocket", () => {
     ws.deliverMessage(
       helloFrame({
         mode: "LobbyOnly",
-        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+        lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );
 
@@ -254,7 +255,7 @@ describe("openPhaseSocket", () => {
       helloFrame({
         protocol_version: PROTOCOL_VERSION,
         mode: "Full",
-        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+        lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );
 
