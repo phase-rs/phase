@@ -162,6 +162,9 @@ jobs:
           # binds loopback-only regardless, so the Service/pod-IP path is dead
           # even if NetworkPolicy is off or the CNI doesn't enforce it.
           grep -q 'listen 127.0.0.1:' /tmp/logging-default.yaml
+          # No freshness policy otherwise, so a cached file or autoindex
+          # response could persist across port-forward targets.
+          grep -q 'add_header Cache-Control no-store always;' /tmp/logging-default.yaml
 
           helm template phase-server deploy/helm/phase-server \
             --namespace phase -f /tmp/scaleout.yaml --set logging.enabled=true \
@@ -176,6 +179,7 @@ jobs:
           # Entry + headless + one per ordinal, at scaleOut.replicaMax 3 above.
           test "$(grep -c 'targetPort: logs' /tmp/logging-scaleout.yaml)" -eq 5
           grep -q 'listen 127.0.0.1:' /tmp/logging-scaleout.yaml
+          grep -q 'add_header Cache-Control no-store always;' /tmp/logging-scaleout.yaml
 
       # Pins the chosen invariant for the reported unsafe combination: with
       # NetworkPolicy off, nothing in the chart restricts ingress by policy,

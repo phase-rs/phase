@@ -37,6 +37,11 @@ data:
         autoindex on;
         location / {
           root {{ .Values.logging.dir }};
+          # NGINX sets no Cache-Control/Expires by default, so a
+          # port-forward that lands on a different pod after this one
+          # could otherwise reuse the previous pod's cached file and
+          # autoindex responses.
+          add_header Cache-Control no-store always;
         }
       }
     }
