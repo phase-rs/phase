@@ -1,0 +1,17 @@
+{
+  "name": "phase.rs",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "tilt",
+      "command": "PATH=/usr/local/cargo/bin:$PATH tilt up --stream",
+      "description": "Canonical dev loop. Continuously builds the WASM engine bundles (wasm), regenerates card-data.json (card-data), serves the Vite frontend at http://localhost:5173 (frontend), and runs the deck-import lobby worker at http://localhost:8787 (lobby-worker). Read results with `tilt logs <resource> --tail 50` or `./scripts/tilt-wait.sh <resource>`; do not run cargo/pnpm builds directly. Start optional groups with `tilt up -- server test lint`."
+    }
+  ],
+  "ports": [
+    { "name": "vite frontend", "port": 5173 },
+    { "name": "lobby worker", "port": 8787 },
+    { "name": "tilt ui", "port": 10350 }
+  ]
+}
