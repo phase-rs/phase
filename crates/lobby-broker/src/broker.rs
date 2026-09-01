@@ -21,6 +21,10 @@ use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
     NOT_OWNED_RESERVATION,
 };
+use crate::tournament::{
+    BracketShape, CreateTournamentRequest, MatchArity, PairingId, PodOutcome, ScoringPolicy,
+    TournamentExpiryEvent, TournamentManager,
+};
 
 /// Capacity cap for the broker path. `LobbyManager` is otherwise unbounded —
 /// without this gate an abusive client could pin arbitrary entries in memory
@@ -55,6 +59,24 @@ pub struct ConnState {
     /// `(game_code, token)` reservations this connection holds, released on
     /// disconnect or explicit release/consume.
     pub reservations: Vec<(String, String)>,
+    /// Tournament codes this connection created, appended on every successful
+    /// `CreateTournament`.
+    ///
+    /// **Not an authority.** Organizer permission is the `organizer_token`
+    /// compared against `TournamentMeta::organizer_token`, never this list —
+    /// which is why nothing in the broker reads it. It exists as local
+    /// reconnect convenience for a future "your events" client flow, and is
+    /// deliberately NOT cleared by [`Broker::on_disconnect`]: closing a socket
+    /// must not cost an organizer their event, unlike `host_game`/
+    /// `reservations`, which are socket-bound by design.
+    #[serde(default)]
+    pub organized_tournaments: Vec<String>,
+    /// `(code, player_token)` for every tournament this connection joined.
+    /// Same non-authority framing as [`Self::organized_tournaments`]; grows
+    /// monotonically (dropping from an event does not remove the record that
+    /// this connection was in it).
+    #[serde(default)]
+    pub joined_tournaments: Vec<(String, String)>,
 }
 
 /// A side effect the shell must perform after a broker call. **Order within a
@@ -108,12 +130,23 @@ pub fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitC
 #[derive(Serialize, Deserialize)]
 pub struct Broker {
     lobby: LobbyManager,
+    /// The tournament registry, alongside — not inside — [`Self::lobby`]: a
+    /// tournament outlives any single lobby entry and has its own lifecycle
+    /// and expiry rules ([`TournamentManager::check_expired`]).
+    ///
+    /// `#[serde(default)]` so a Durable Object snapshot taken before this
+    /// field existed still restores its lobby entries instead of failing the
+    /// whole parse and falling back to an empty broker (see
+    /// [`WasmBroker::from_snapshot`]'s reset behavior in `broker-wasm`).
+    #[serde(default)]
+    tournaments: TournamentManager,
 }
 
 impl Broker {
     pub fn new() -> Self {
         Self {
             lobby: LobbyManager::new(),
+            tournaments: TournamentManager::new(),
         }
     }
 
@@ -129,6 +162,54 @@ impl Broker {
     /// lobby operations (see [`Broker::lobby`]).
     pub fn lobby_mut(&mut self) -> &mut LobbyManager {
         &mut self.lobby
+    }
+
+    /// Borrow the tournament registry, mirroring [`Broker::lobby`]. For shell
+    /// operations the broker does not own (a Full-mode listing endpoint, a
+    /// `/stats` gauge); dispatch itself never goes through this.
+    pub fn tournaments(&self) -> &TournamentManager {
+        &self.tournaments
+    }
+
+    /// Mutable access to the tournament registry, mirroring
+    /// [`Broker::lobby_mut`] (see [`Broker::tournaments`]).
+    pub fn tournaments_mut(&mut self) -> &mut TournamentManager {
+        &mut self.tournaments
+    }
+
+    /// Every tournament as a wire summary, ordered by code.
+    ///
+    /// [`TournamentManager::iter`] promises no order (it wraps
+    /// `HashMap::values`), so the sort is this caller's job — and it must
+    /// happen, because a `TournamentListUpdate` whose row order shuffled on
+    /// every broadcast would make clients re-render the whole list for no
+    /// state change. Sorting by `code` rather than `created_at` keeps the
+    /// order total: codes are unique, creation timestamps are second-grained
+    /// and collide freely.
+    fn tournament_summaries(&self) -> Vec<crate::protocol::TournamentSummary> {
+        let mut summaries: Vec<crate::protocol::TournamentSummary> = self
+            .tournaments
+            .iter()
+            .map(crate::protocol::TournamentSummary::from)
+            .collect();
+        summaries.sort_by(|a, b| a.code.cmp(&b.code));
+        summaries
+    }
+
+    /// The `TournamentListUpdate` broadcast that follows any list-affecting
+    /// change. Assembled in one place so no call site can broadcast a list
+    /// built a different way.
+    fn tournament_list_update(&self) -> Outbound {
+        Outbound::ToSubscribers(LobbyServerMessage::TournamentListUpdate {
+            tournaments: self.tournament_summaries(),
+        })
+    }
+
+    /// The detail view for `code`, or `None` if the tournament is gone.
+    fn tournament_view(&self, code: &str) -> Option<crate::protocol::TournamentView> {
+        self.tournaments
+            .get(code)
+            .map(crate::protocol::TournamentView::from)
     }
 
     /// Single entry for client frames. Returns the ordered side effects the
@@ -166,9 +247,19 @@ impl Broker {
                 conn.subscribed = true;
                 let games = self.lobby.public_games();
                 debug!(games = games.len(), "sending lobby state");
+                // The tournament list rides the same initial push as the game
+                // list, so a freshly-subscribed client has both without a
+                // second round-trip. Emitted unconditionally — an empty list
+                // is a meaningful answer ("no events"), and omitting it would
+                // leave a client unable to distinguish that from "not sent
+                // yet". Order is significant and asserted by
+                // `subscribe_emits_add_then_update_then_tournaments_then_count`.
+                let tournaments = self.tournament_summaries();
+                debug!(tournaments = tournaments.len(), "sending tournament state");
                 vec![
                     Outbound::AddSubscriber,
                     Outbound::ToSelf(LobbyServerMessage::LobbyUpdate { games }),
+                    Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { tournaments }),
                     Outbound::SendPlayerCountToSelf,
                 ]
             }
@@ -254,6 +345,51 @@ impl Broker {
             LobbyClientMessage::UnregisterLobby { game_code } => {
                 self.handle_unregister(conn, game_code)
             }
+
+            LobbyClientMessage::CreateTournament {
+                name,
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+            } => self.handle_create_tournament(
+                conn,
+                name,
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                env,
+            ),
+
+            LobbyClientMessage::JoinTournament {
+                code,
+                player_key,
+                display_name,
+            } => self.handle_join_tournament(conn, code, player_key, display_name, env),
+
+            LobbyClientMessage::GetTournament { code } => self.handle_get_tournament(code),
+
+            LobbyClientMessage::StartTournamentRound {
+                code,
+                organizer_token,
+            } => self.handle_start_tournament_round(code, organizer_token, env),
+
+            LobbyClientMessage::ReportMatchResult {
+                code,
+                pairing_id,
+                player_token,
+                outcome,
+            } => self.handle_report_match_result(code, pairing_id, player_token, outcome, env),
+
+            LobbyClientMessage::DropFromTournament { code, player_token } => {
+                self.handle_drop_from_tournament(code, player_token, env)
+            }
+
+            LobbyClientMessage::EndTournament {
+                code,
+                organizer_token,
+            } => self.handle_end_tournament(code, organizer_token, env),
         }
     }
 
@@ -299,18 +435,76 @@ impl Broker {
         out
     }
 
-    /// Reaper for a tokio interval (native) or DO alarm (WASM). Returns a
-    /// `LobbyGameRemoved` per reaped game. The Full-mode session/db deletion
-    /// stays in the shell — it pulls the expired codes from
-    /// [`Broker::lobby_mut`]`.check_expired` directly.
+    /// Reaper for a tokio interval (native) or DO alarm (WASM). Sweeps BOTH
+    /// registries in one call and returns their outbounds in one vector: a
+    /// `LobbyGameRemoved` per reaped game, then the tournament lifecycle
+    /// events, then at most one trailing `TournamentListUpdate`.
+    ///
+    /// The Full-mode session/db deletion stays in the shell — it pulls the
+    /// expired codes from [`Broker::lobby_mut`]`.check_expired` directly, and
+    /// tournaments have no equivalent server-run session to clean up.
+    ///
+    /// `timeout_secs` applies to lobby entries only. Tournament expiry runs on
+    /// the three fixed lifecycle clocks
+    /// ([`crate::tournament::REGISTRATION_TIMEOUT_SECS`] and siblings) that
+    /// [`TournamentManager::check_expired`] owns, which is why it takes no
+    /// timeout argument: a registration window, a 7-day abandonment and a
+    /// 30-day retention are not the same duration as a lobby listing's, and
+    /// threading one number through both would imply they are.
     pub fn reap_expired(&mut self, timeout_secs: u64, env: &impl BrokerEnv) -> Vec<Outbound> {
-        self.lobby
+        let mut out: Vec<Outbound> = self
+            .lobby
             .check_expired(timeout_secs, env)
             .into_iter()
             .map(|game_code| {
                 Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code })
             })
-            .collect()
+            .collect();
+
+        let events = self.tournaments.check_expired(env);
+        let list_changed = !events.is_empty();
+        for event in events {
+            match event {
+                // The record is gone, so there is no view left to send — the
+                // code alone is the whole message.
+                TournamentExpiryEvent::Deleted(code) => {
+                    info!(tournament = %code, "tournament expired — record removed");
+                    out.push(Outbound::ToSubscribers(
+                        LobbyServerMessage::TournamentRemoved { code },
+                    ));
+                }
+                // The record IS preserved (that is the point of `Abandoned`),
+                // so subscribers get its updated view rather than a removal.
+                TournamentExpiryEvent::Abandoned(code) => {
+                    info!(tournament = %code, "tournament inactive — marked abandoned");
+                    match self.tournament_view(&code) {
+                        Some(view) => out.push(Outbound::ToSubscribers(
+                            LobbyServerMessage::TournamentUpdate { code, view },
+                        )),
+                        // `check_expired` retains everything it abandons, so
+                        // this is unreachable. Degrade to a removal rather
+                        // than panic in a reaper: a broadcast a client
+                        // over-prunes is recoverable, a shell that aborts its
+                        // sweep loop is not.
+                        None => {
+                            warn!(tournament = %code, "abandoned tournament vanished mid-sweep");
+                            out.push(Outbound::ToSubscribers(
+                                LobbyServerMessage::TournamentRemoved { code },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Exactly ONE trailing list update per sweep, not one per expired
+        // tournament: N simultaneous expiries change the list once, and N
+        // identical broadcasts would just make every client re-render N times.
+        if list_changed {
+            out.push(self.tournament_list_update());
+        }
+
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -720,6 +914,301 @@ impl Broker {
             vec![]
         }
     }
+
+    // -- Tournament organizer ----------------------------------------------
+    //
+    // Every gated helper below follows one shape: resolve the tournament,
+    // check the presented token against the STORED one, call the single
+    // `TournamentManager` method that does the real work, assemble outbounds.
+    // The manager owns every rules decision (status gating, duplicate joins,
+    // result legality, round ceilings); these helpers add authority and wire
+    // assembly and nothing else, and they propagate the manager's own `Err`
+    // string verbatim so a client sees why it was refused rather than a
+    // generic broker message.
+
+    /// Is `presented` the organizer token for `code`?
+    ///
+    /// `Err` carries the message to reply with, distinguishing "no such
+    /// tournament" from "wrong token" for the caller while keeping both a
+    /// single early return at the call site.
+    fn authorize_organizer(&self, code: &str, presented: &str) -> Result<(), String> {
+        let meta = self
+            .tournaments
+            .get(code)
+            .ok_or_else(|| format!("Tournament not found: {code}"))?;
+        // An empty presented token must never authorize anything. Stored
+        // tokens come from `BrokerEnv::new_token` and are never empty, so this
+        // is belt-and-braces against a future env rather than a live hole —
+        // but an authority check is the wrong place to rely on that.
+        if presented.is_empty() || meta.organizer_token != presented {
+            return Err(format!("Invalid organizer token for tournament {code}"));
+        }
+        Ok(())
+    }
+
+    /// The `player_key` owning `presented` in `code`, if any.
+    ///
+    /// Resolves the token to a player rather than merely testing it, because
+    /// every player-gated action needs to know *which* entrant is acting —
+    /// "some valid token exists" is exactly the check that would let player A
+    /// drop player B.
+    fn authorize_player(&self, code: &str, presented: &str) -> Result<String, String> {
+        let meta = self
+            .tournaments
+            .get(code)
+            .ok_or_else(|| format!("Tournament not found: {code}"))?;
+        if presented.is_empty() {
+            return Err(format!("Invalid player token for tournament {code}"));
+        }
+        meta.players
+            .iter()
+            .find(|p| p.player_token == presented)
+            .map(|p| p.player_key.clone())
+            .ok_or_else(|| format!("Invalid player token for tournament {code}"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_create_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        name: String,
+        arity: MatchArity,
+        scoring: ScoringPolicy,
+        bracket: BracketShape,
+        total_rounds: Option<u32>,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        // Broker-minted, exactly like a lobby game code:
+        // `TournamentManager::create_tournament` takes a caller-supplied code
+        // for the same reason `LobbyManager::register_game` does.
+        let code = env.new_game_code();
+        let organizer_token = match self.tournaments.create_tournament(
+            &code,
+            CreateTournamentRequest {
+                name: name.clone(),
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+            },
+            env,
+        ) {
+            Ok(token) => token,
+            Err(reason) => return vec![error(&reason)],
+        };
+
+        let Some(view) = self.tournament_view(&code) else {
+            // Unreachable: `create_tournament` just returned `Ok`, so the
+            // record exists.
+            return vec![error("Tournament was created but could not be read back")];
+        };
+
+        conn.organized_tournaments.push(code.clone());
+        info!(tournament = %code, name = %name, "tournament created");
+
+        // No `TournamentUpdate` broadcast: nobody else holds this code yet, so
+        // there is no detail view anyone could be watching. The list row is
+        // the only thing that changed for subscribers.
+        vec![
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                view,
+            }),
+            self.tournament_list_update(),
+        ]
+    }
+
+    fn handle_join_tournament(
+        &mut self,
+        conn: &mut ConnState,
+        code: String,
+        player_key: String,
+        display_name: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        let player_token =
+            match self
+                .tournaments
+                .join_tournament(&code, &player_key, &display_name, env)
+            {
+                Ok(token) => token,
+                Err(reason) => return vec![error(&reason)],
+            };
+
+        let Some(view) = self.tournament_view(&code) else {
+            return vec![error("Tournament was joined but could not be read back")];
+        };
+
+        conn.joined_tournaments
+            .push((code.clone(), player_token.clone()));
+        info!(tournament = %code, player = %player_key, "tournament joined");
+
+        // A join changes both the detail view (a new entrant) and the list
+        // row (`player_count`), so both broadcasts are warranted.
+        vec![
+            Outbound::ToSelf(LobbyServerMessage::TournamentJoined {
+                code: code.clone(),
+                player_token,
+                view: view.clone(),
+            }),
+            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
+            self.tournament_list_update(),
+        ]
+    }
+
+    /// Read-only. Ungated: a tournament is public once its code is known,
+    /// exactly like a lobby listing, and the view carries no token.
+    fn handle_get_tournament(&mut self, code: String) -> Vec<Outbound> {
+        match self.tournament_view(&code) {
+            Some(view) => vec![Outbound::ToSelf(LobbyServerMessage::TournamentUpdate {
+                code,
+                view,
+            })],
+            None => vec![error(&format!("Tournament not found: {code}"))],
+        }
+    }
+
+    fn handle_start_tournament_round(
+        &mut self,
+        code: String,
+        organizer_token: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        if let Err(reason) = self.authorize_organizer(&code, &organizer_token) {
+            warn!(tournament = %code, "StartTournamentRound rejected — bad organizer token");
+            return vec![error(&reason)];
+        }
+        if let Err(reason) = self.tournaments.generate_pairings(&code, env) {
+            return vec![error(&reason)];
+        }
+        let Some(view) = self.tournament_view(&code) else {
+            return vec![error(&format!("Tournament not found: {code}"))];
+        };
+        info!(tournament = %code, "tournament round paired");
+
+        // Status may flip to `InProgress` and `current_round` advances — both
+        // are list-row fields, so the list update is warranted here.
+        vec![
+            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
+            self.tournament_list_update(),
+        ]
+    }
+
+    fn handle_report_match_result(
+        &mut self,
+        code: String,
+        pairing_id: PairingId,
+        player_token: String,
+        outcome: PodOutcome,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        let reporter = match self.authorize_player(&code, &player_token) {
+            Ok(key) => key,
+            Err(reason) => {
+                warn!(tournament = %code, "ReportMatchResult rejected — bad player token");
+                return vec![error(&reason)];
+            }
+        };
+
+        // Being *an* entrant is not enough: the reporter must be seated in
+        // THIS pairing. Without this, any valid token in the event could
+        // report any other pairing's result — two real tokens exist in that
+        // fixture and only one is valid for this specific action.
+        let seated = self
+            .tournaments
+            .get(&code)
+            .and_then(|meta| meta.pairing(pairing_id))
+            .map(|pairing| pairing.players.contains(&reporter));
+        match seated {
+            Some(true) => {}
+            Some(false) => {
+                warn!(tournament = %code, pairing = pairing_id, "ReportMatchResult rejected — reporter not seated in this pairing");
+                return vec![error(&format!(
+                    "Player {reporter} is not seated in pairing {pairing_id}"
+                ))];
+            }
+            None => return vec![error(&format!("Pairing {pairing_id} not found in {code}"))],
+        }
+
+        if let Err(reason) = self
+            .tournaments
+            .report_result(&code, pairing_id, outcome, env)
+        {
+            return vec![error(&reason)];
+        }
+        let Some(view) = self.tournament_view(&code) else {
+            return vec![error(&format!("Tournament not found: {code}"))];
+        };
+        info!(tournament = %code, pairing = pairing_id, "match result reported");
+
+        // The one helper that does NOT pair its update with a list update:
+        // a mid-event result changes standings and a pairing outcome, both of
+        // which live only in the detail view. Status, round, and active-player
+        // count — every field a `TournamentSummary` carries — are untouched,
+        // so broadcasting the whole list here would be a no-op re-render for
+        // every subscriber.
+        vec![Outbound::ToSubscribers(
+            LobbyServerMessage::TournamentUpdate { code, view },
+        )]
+    }
+
+    fn handle_drop_from_tournament(
+        &mut self,
+        code: String,
+        player_token: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        // Resolving the token to its owner is what confines a drop to the
+        // player who presented it: the key is never taken from the payload,
+        // so there is no field a client could point at someone else.
+        let player_key = match self.authorize_player(&code, &player_token) {
+            Ok(key) => key,
+            Err(reason) => {
+                warn!(tournament = %code, "DropFromTournament rejected — bad player token");
+                return vec![error(&reason)];
+            }
+        };
+        if let Err(reason) = self.tournaments.drop_player(&code, &player_key, env) {
+            return vec![error(&reason)];
+        }
+        let Some(view) = self.tournament_view(&code) else {
+            return vec![error(&format!("Tournament not found: {code}"))];
+        };
+        info!(tournament = %code, player = %player_key, "player dropped from tournament");
+
+        // A drop lowers `active_player_count`, which IS a summary field, so
+        // the list row genuinely changed here (unlike a result report).
+        vec![
+            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
+            self.tournament_list_update(),
+        ]
+    }
+
+    fn handle_end_tournament(
+        &mut self,
+        code: String,
+        organizer_token: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        if let Err(reason) = self.authorize_organizer(&code, &organizer_token) {
+            warn!(tournament = %code, "EndTournament rejected — bad organizer token");
+            return vec![error(&reason)];
+        }
+        if let Err(reason) = self.tournaments.complete_tournament(&code, env) {
+            return vec![error(&reason)];
+        }
+        let Some(view) = self.tournament_view(&code) else {
+            return vec![error(&format!("Tournament not found: {code}"))];
+        };
+        info!(tournament = %code, "tournament completed");
+
+        // Status → `Completed`, a summary field.
+        vec![
+            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
+            self.tournament_list_update(),
+        ]
+    }
 }
 
 impl Default for Broker {
@@ -772,6 +1261,11 @@ mod tests {
                 token: Cell::new(0),
                 code: Cell::new(0),
             }
+        }
+        /// Move the clock forward. Used by the expiry sweeps, which are the
+        /// only broker behavior that depends on elapsed time.
+        fn advance_secs(&self, secs: u64) {
+            self.now.set(self.now.get() + secs * 1000);
         }
     }
     impl BrokerEnv for FakeEnv {
@@ -948,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_emits_add_then_update_then_count() {
+    fn subscribe_emits_add_then_update_then_tournaments_then_count() {
         let env = FakeEnv::new();
         let mut broker = Broker::new();
         let mut conn = ConnState::default();
@@ -959,8 +1453,17 @@ mod tests {
             out[1],
             Outbound::ToSelf(LobbyServerMessage::LobbyUpdate { .. })
         ));
-        assert_eq!(out[2], Outbound::SendPlayerCountToSelf);
-        assert_eq!(out.len(), 3);
+        // Emitted even though no tournament exists: an empty list is the
+        // answer "no events", which a client cannot otherwise distinguish
+        // from "not sent yet".
+        match &out[2] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { tournaments }) => {
+                assert!(tournaments.is_empty());
+            }
+            other => panic!("expected an empty TournamentListUpdate, got {other:?}"),
+        }
+        assert_eq!(out[3], Outbound::SendPlayerCountToSelf);
+        assert_eq!(out.len(), 4);
         assert!(conn.subscribed);
     }
 
@@ -1608,5 +2111,974 @@ mod tests {
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 7 })]
         );
+    }
+
+    // ======================================================================
+    // Tournament organizer
+    //
+    // Every test below drives a real `Broker::handle` on a real `ConnState`,
+    // not a bare `TournamentManager` call — the seam under test is the
+    // dispatch layer's authority and outbound assembly, which a manager-level
+    // test cannot reach.
+    // ======================================================================
+
+    use crate::protocol::{TournamentSummary, TournamentView};
+    use crate::tournament::{
+        BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentStatus,
+        IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
+    };
+
+    /// Creates a tournament through the real dispatch path and returns
+    /// `(code, organizer_token)`.
+    fn make_tournament(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        bracket: BracketShape,
+    ) -> (String, String) {
+        let out = broker.handle(
+            conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket,
+                total_rounds: None,
+            },
+            env,
+        );
+        match out.first() {
+            Some(Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                ..
+            })) => (code.clone(), organizer_token.clone()),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        }
+    }
+
+    /// Joins through the real dispatch path and returns the minted
+    /// `player_token`.
+    fn join_tournament(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        code: &str,
+        player_key: &str,
+        display_name: &str,
+    ) -> String {
+        let out = broker.handle(
+            conn,
+            LobbyClientMessage::JoinTournament {
+                code: code.to_string(),
+                player_key: player_key.to_string(),
+                display_name: display_name.to_string(),
+            },
+            env,
+        );
+        match out.first() {
+            Some(Outbound::ToSelf(LobbyServerMessage::TournamentJoined {
+                player_token, ..
+            })) => player_token.clone(),
+            other => panic!("expected TournamentJoined, got {other:?}"),
+        }
+    }
+
+    fn error_reason(out: &[Outbound]) -> &str {
+        match out {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, .. })] => message.as_str(),
+            other => panic!("expected a single Error outbound, got {other:?}"),
+        }
+    }
+
+    fn is_error(out: &[Outbound]) -> bool {
+        matches!(out, [Outbound::ToSelf(LobbyServerMessage::Error { .. })])
+    }
+
+    /// Serialize every outbound and scan the bytes for a secret. Catches a
+    /// leak wherever it is nested, rather than trusting a field-by-field walk
+    /// to have visited every carrier.
+    fn outbounds_contain(out: &[Outbound], needle: &str) -> bool {
+        out.iter().any(|ob| {
+            let msg = match ob {
+                Outbound::ToSelf(msg) | Outbound::ToSubscribers(msg) => msg,
+                _ => return false,
+            };
+            serde_json::to_string(msg)
+                .expect("outbound serializes")
+                .contains(needle)
+        })
+    }
+
+    fn subscriber_msgs(out: &[Outbound]) -> Vec<&LobbyServerMessage> {
+        out.iter()
+            .filter_map(|ob| match ob {
+                Outbound::ToSubscribers(msg) => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn list_update(out: &[Outbound]) -> Vec<TournamentSummary> {
+        out.iter()
+            .find_map(|ob| match ob {
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentListUpdate {
+                    tournaments,
+                }) => Some(tournaments.clone()),
+                _ => None,
+            })
+            .expect("a TournamentListUpdate is present")
+    }
+
+    fn view_of(out: &[Outbound]) -> TournamentView {
+        out.iter()
+            .find_map(|ob| match ob {
+                Outbound::ToSelf(LobbyServerMessage::TournamentUpdate { view, .. })
+                | Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { view, .. }) => {
+                    Some(view.clone())
+                }
+                _ => None,
+            })
+            .expect("a TournamentUpdate is present")
+    }
+
+    /// Runs a full head-to-head event up to "round 1 paired, one pairing
+    /// pending", returning `(code, organizer_token, token_a, token_b)`.
+    fn started_event(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+    ) -> (String, String, String, String) {
+        let (code, organizer_token) = make_tournament(conn, broker, env, BracketShape::Swiss);
+        let token_a = join_tournament(conn, broker, env, &code, "key-a", "Alice");
+        let token_b = join_tournament(conn, broker, env, &code, "key-b", "Bob");
+        let out = broker.handle(
+            conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+            },
+            env,
+        );
+        assert!(!is_error(&out), "round 1 must pair: {out:?}");
+        (code, organizer_token, token_a, token_b)
+    }
+
+    // -- Row 1: organizer token reaches only its creator --------------------
+
+    #[test]
+    fn create_tournament_returns_organizer_token_only_to_creator() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+
+        let (code, organizer_token) = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                view,
+            }) => {
+                // The point reply's own view must not restate the token.
+                let view_json = serde_json::to_string(view).expect("view serializes");
+                assert!(!view_json.contains(organizer_token.as_str()));
+                (code.clone(), organizer_token.clone())
+            }
+            other => panic!("expected TournamentCreated first, got {other:?}"),
+        };
+        assert!(!organizer_token.is_empty());
+
+        // Structural: the token appears in NO broadcast, at any nesting depth.
+        let broadcasts: Vec<Outbound> = out
+            .iter()
+            .filter(|ob| matches!(ob, Outbound::ToSubscribers(_)))
+            .cloned()
+            .collect();
+        assert!(
+            !outbounds_contain(&broadcasts, &organizer_token),
+            "organizer_token leaked to subscribers"
+        );
+
+        // ...and the broadcast that DID go out is the list row, non-vacuously
+        // carrying this tournament.
+        let list = list_update(&out);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].code, code);
+        assert_eq!(list[0].status, TournamentStatus::Registration);
+        assert_eq!(list[0].player_count, 0);
+
+        assert_eq!(conn.organized_tournaments, vec![code]);
+    }
+
+    /// The second connection's view of the same creation: a concurrently
+    /// subscribed client receives no token field anywhere.
+    #[test]
+    fn a_second_connection_never_sees_another_organizers_token() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut watcher = ConnState::default();
+
+        let (code, organizer_token) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+
+        // The watcher subscribes afterwards and asks for the event directly —
+        // both of the paths by which a non-owner learns about a tournament.
+        let sub = broker.handle(&mut watcher, LobbyClientMessage::SubscribeLobby, &env);
+        assert!(!outbounds_contain(&sub, &organizer_token));
+
+        let got = broker.handle(
+            &mut watcher,
+            LobbyClientMessage::GetTournament { code: code.clone() },
+            &env,
+        );
+        assert!(!outbounds_contain(&got, &organizer_token));
+        // Non-vacuity: the watcher really did receive this tournament.
+        assert_eq!(view_of(&got).summary.code, code);
+    }
+
+    // -- Row 2: duplicate player_key ---------------------------------------
+
+    #[test]
+    fn join_tournament_rejects_duplicate_player_key() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let (code, _) = make_tournament(&mut host, &mut broker, &env, BracketShape::Swiss);
+
+        let mut alice = ConnState::default();
+        let first = join_tournament(&mut alice, &mut broker, &env, &code, "key-a", "Alice");
+        assert!(!first.is_empty());
+
+        // A DIFFERENT connection claiming the same key is still refused — the
+        // duplicate check keys on `player_key`, not on the socket.
+        let mut impostor = ConnState::default();
+        let out = broker.handle(
+            &mut impostor,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-a".into(),
+                display_name: "Not Alice".into(),
+            },
+            &env,
+        );
+        assert!(error_reason(&out).contains("already joined"));
+        // No second token was minted for the same key.
+        assert!(impostor.joined_tournaments.is_empty());
+        assert_eq!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .players
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn join_after_registration_closes_surfaces_the_manager_error() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, ..) = started_event(&mut conn, &mut broker, &env);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-late".into(),
+                display_name: "Latecomer".into(),
+            },
+            &env,
+        );
+        // The manager's own message, verbatim — not a generic broker string.
+        assert!(
+            error_reason(&out).contains("no longer accepting entries"),
+            "unexpected reason: {}",
+            error_reason(&out)
+        );
+    }
+
+    // -- Row 3: organizer-gated actions ------------------------------------
+
+    #[test]
+    fn organizer_gated_actions_reject_wrong_token() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let player_token = join_tournament(&mut conn, &mut broker, &env, &code, "key-a", "Alice");
+        join_tournament(&mut conn, &mut broker, &env, &code, "key-b", "Bob");
+
+        // The multi-authority fixture: a REAL, live token for this very
+        // tournament, just for the wrong authority tier.
+        assert_ne!(player_token, organizer_token);
+        for wrong in [player_token.as_str(), "not-a-token", ""] {
+            for msg in [
+                LobbyClientMessage::StartTournamentRound {
+                    code: code.clone(),
+                    organizer_token: wrong.to_string(),
+                },
+                LobbyClientMessage::EndTournament {
+                    code: code.clone(),
+                    organizer_token: wrong.to_string(),
+                },
+            ] {
+                let out = broker.handle(&mut conn, msg, &env);
+                assert!(
+                    error_reason(&out).contains("Invalid organizer token"),
+                    "token {wrong:?} was accepted"
+                );
+            }
+        }
+        // Nothing advanced.
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            TournamentStatus::Registration
+        );
+
+        // Positive control: the correct token calls through to the manager.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+            },
+            &env,
+        );
+        assert!(!is_error(&out));
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            TournamentStatus::InProgress
+        );
+    }
+
+    /// The organizer token of a DIFFERENT tournament is not accepted here —
+    /// proving the comparison is per-tournament, not "any known organizer".
+    #[test]
+    fn another_tournaments_organizer_token_is_rejected() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code_one, _) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let (_, token_two) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::EndTournament {
+                code: code_one,
+                organizer_token: token_two,
+            },
+            &env,
+        );
+        assert!(error_reason(&out).contains("Invalid organizer token"));
+    }
+
+    // -- Row 4: player-gated actions ---------------------------------------
+
+    #[test]
+    fn player_gated_actions_reject_wrong_token() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token, token_a, _token_b) =
+            started_event(&mut conn, &mut broker, &env);
+
+        for wrong in [organizer_token.as_str(), "not-a-token", ""] {
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::DropFromTournament {
+                    code: code.clone(),
+                    player_token: wrong.to_string(),
+                },
+                &env,
+            );
+            assert!(
+                error_reason(&out).contains("Invalid player token"),
+                "token {wrong:?} was accepted for a drop"
+            );
+        }
+
+        // Positive control: Alice's own token drops Alice, and nobody else.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token_a,
+            },
+            &env,
+        );
+        assert!(!is_error(&out));
+        let meta = broker.tournaments().get(&code).expect("event");
+        assert!(meta.player("key-a").expect("alice").dropped);
+        assert!(!meta.player("key-b").expect("bob").dropped);
+    }
+
+    /// The sharp multi-authority case for reporting: two real, live player
+    /// tokens exist, and a valid entrant who is NOT seated in the pairing must
+    /// not be able to report it.
+    #[test]
+    fn a_player_cannot_report_a_pairing_they_are_not_seated_in() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        // Four entrants pair into TWO head-to-head pairings, so a real token
+        // exists for a player genuinely absent from the pairing under test.
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let mut tokens = Vec::new();
+        for i in 0..4 {
+            tokens.push(join_tournament(
+                &mut conn,
+                &mut broker,
+                &env,
+                &code,
+                &format!("key-{i}"),
+                &format!("Player {i}"),
+            ));
+        }
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token,
+            },
+            &env,
+        );
+        assert!(!is_error(&out));
+
+        let meta = broker.tournaments().get(&code).expect("event");
+        assert_eq!(meta.pairings.len(), 2, "fixture needs two pairings");
+        let first = &meta.pairings[0];
+        let pairing_id = first.id;
+        let seated: Vec<String> = first.players.clone();
+        let outsider_index = (0..4)
+            .find(|i| !seated.contains(&format!("key-{i}")))
+            .expect("some entrant is not in the first pairing");
+        let outsider_token = tokens[outsider_index].clone();
+        let seated_token = tokens[seated[0]
+            .strip_prefix("key-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .expect("key index")]
+        .clone();
+
+        // A valid token, for a real player, in this very tournament — and
+        // still refused for THIS pairing.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: outsider_token,
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        assert!(
+            error_reason(&out).contains("not seated in pairing"),
+            "unexpected reason: {}",
+            error_reason(&out)
+        );
+        assert!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .pairing(pairing_id)
+                .expect("pairing")
+                .outcome
+                .is_none(),
+            "the pairing must still be pending"
+        );
+
+        // Positive control: a seated player's own token IS accepted, so the
+        // rejection above is about the seat, not about reporting at all.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: seated_token,
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        assert!(!is_error(&out), "{out:?}");
+        assert_eq!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .pairing(pairing_id)
+                .expect("pairing")
+                .outcome,
+            Some(PairingOutcome::Reported(PodOutcome::Draw))
+        );
+    }
+
+    // -- Row 5: the broker never short-circuits past the manager -------------
+
+    #[test]
+    fn token_gate_and_manager_gate_agree() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token, token_a, _) = started_event(&mut conn, &mut broker, &env);
+
+        let pairing_id = broker.tournaments().get(&code).expect("event").pairings[0].id;
+        broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a.clone(),
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+            },
+            &env,
+        );
+        assert!(!is_error(&out));
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            TournamentStatus::Completed
+        );
+
+        // A CORRECT token on a terminal tournament is still refused — by the
+        // manager, whose message is surfaced verbatim. This is what proves the
+        // broker's own token gate is defense in depth rather than the only
+        // gate: passing it does not imply the call goes through.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        assert!(
+            error_reason(&out).contains("no longer running"),
+            "expected the manager's terminal-status message, got: {}",
+            error_reason(&out)
+        );
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code,
+                organizer_token,
+            },
+            &env,
+        );
+        assert!(error_reason(&out).contains("no longer running"));
+    }
+
+    // -- Authority does not route through ConnState -------------------------
+
+    /// The reconnect case, and the whole reason the model is token-based: a
+    /// FRESH `ConnState` — empty `organized_tournaments`, no `ClientHello`,
+    /// nothing — still exercises organizer authority with the right token.
+    #[test]
+    fn a_fresh_connection_with_the_right_token_still_has_authority() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut original = ConnState::default();
+        let (code, organizer_token, ..) = started_event(&mut original, &mut broker, &env);
+
+        // Simulate the socket closing entirely.
+        let teardown = broker.on_disconnect(&mut original);
+        assert!(
+            !teardown.iter().any(|ob| matches!(
+                ob,
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentRemoved { .. })
+            )),
+            "a disconnect must not remove a tournament"
+        );
+        assert!(
+            broker.tournaments().get(&code).is_some(),
+            "the event survives its organizer's socket"
+        );
+
+        let mut reconnected = ConnState::default();
+        assert!(reconnected.organized_tournaments.is_empty());
+        let pairing_id = broker.tournaments().get(&code).expect("event").pairings[0].id;
+        broker.handle(
+            &mut reconnected,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: broker.tournaments().get(&code).expect("event").players[0]
+                    .player_token
+                    .clone(),
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        let out = broker.handle(
+            &mut reconnected,
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token,
+            },
+            &env,
+        );
+        assert!(
+            !is_error(&out),
+            "authority must not route through ConnState"
+        );
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            TournamentStatus::Completed
+        );
+    }
+
+    // -- Rows 6 & 7: the widened reaper -------------------------------------
+
+    #[test]
+    fn reap_expired_recovers_lobby_and_tournament_events_together() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let game_code = game_code_of(&created);
+
+        let mut organizer = ConnState::default();
+        let (tour_code, _) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+
+        // One sweep, past both the lobby timeout and the registration window.
+        env.advance_secs(REGISTRATION_TIMEOUT_SECS + 1);
+        let out = broker.reap_expired(300, &env);
+
+        let msgs = subscriber_msgs(&out);
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                LobbyServerMessage::LobbyGameRemoved { game_code: g } if *g == game_code
+            )),
+            "the pre-existing lobby path must still reap: {out:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                LobbyServerMessage::TournamentRemoved { code } if *code == tour_code
+            )),
+            "the tournament must reap in the SAME call: {out:?}"
+        );
+        // The list update reflects the now-empty registry, not a stale row.
+        assert!(list_update(&out).is_empty());
+        assert!(broker.tournaments().is_empty());
+    }
+
+    /// Negative control for the widening: a broker holding only a stale lobby
+    /// game still reaps exactly as it did before, with no tournament noise.
+    #[test]
+    fn reap_with_no_tournaments_is_unchanged() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let game_code = game_code_of(&created);
+
+        env.advance_secs(301);
+        let out = broker.reap_expired(300, &env);
+        assert_eq!(
+            out.as_slice(),
+            [Outbound::ToSubscribers(
+                LobbyServerMessage::LobbyGameRemoved { game_code }
+            )],
+            "no TournamentListUpdate may be emitted when nothing tournament-side changed"
+        );
+    }
+
+    /// Verification Matrix row 7: each `TournamentExpiryEvent` variant maps to
+    /// its specified delivery, and N simultaneous expiries produce exactly ONE
+    /// trailing list update, not N.
+    #[test]
+    fn expiry_delivery_contract_matches_the_design() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        // A `Registration` event that will be deleted outright...
+        let (stale_code, _) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        // ...and an `InProgress` one that will be abandoned, in the same sweep.
+        let (running_code, ..) = started_event(&mut conn, &mut broker, &env);
+
+        env.advance_secs(IN_PROGRESS_ABANDON_SECS + 1);
+        let out = broker.reap_expired(300, &env);
+        let msgs = subscriber_msgs(&out);
+
+        // Deleted -> TournamentRemoved.
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                LobbyServerMessage::TournamentRemoved { code } if *code == stale_code
+            )),
+            "a stale Registration must be removed: {out:?}"
+        );
+        assert!(broker.tournaments().get(&stale_code).is_none());
+
+        // Abandoned -> TournamentUpdate carrying the preserved record.
+        let abandoned_view = msgs
+            .iter()
+            .find_map(|m| match m {
+                LobbyServerMessage::TournamentUpdate { code, view } if *code == running_code => {
+                    Some(view.clone())
+                }
+                _ => None,
+            })
+            .expect("an abandoned tournament is UPDATED, not removed");
+        assert_eq!(abandoned_view.summary.status, TournamentStatus::Abandoned);
+        assert_eq!(
+            abandoned_view.players.len(),
+            2,
+            "the record and its history are preserved"
+        );
+        assert_eq!(abandoned_view.pairings.len(), 1);
+        assert!(
+            broker.tournaments().get(&running_code).is_some(),
+            "an abandoned record is retained"
+        );
+
+        // Exactly ONE list update for two simultaneous events.
+        let list_updates = msgs
+            .iter()
+            .filter(|m| matches!(m, LobbyServerMessage::TournamentListUpdate { .. }))
+            .count();
+        assert_eq!(
+            list_updates, 1,
+            "one sweep emits one trailing list update, not one per expiry"
+        );
+        // ...and it reflects the post-sweep state: the deleted one is gone,
+        // the abandoned one remains.
+        let list = list_update(&out);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].code, running_code);
+        assert_eq!(list[0].status, TournamentStatus::Abandoned);
+    }
+
+    // -- Row 8: SubscribeLobby carries the current list ---------------------
+
+    #[test]
+    fn subscribe_includes_existing_tournaments_in_a_stable_order() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let (first, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let (second, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+
+        let mut watcher = ConnState::default();
+        let out = broker.handle(&mut watcher, LobbyClientMessage::SubscribeLobby, &env);
+        let tournaments = match &out[2] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { tournaments }) => {
+                tournaments.clone()
+            }
+            other => panic!("expected TournamentListUpdate third, got {other:?}"),
+        };
+
+        let mut expected = [first, second];
+        expected.sort();
+        let codes: Vec<String> = tournaments.iter().map(|t| t.code.clone()).collect();
+        assert_eq!(codes, expected.to_vec(), "list order must be stable");
+
+        // Repeating the subscription yields the identical order — the sort is
+        // real, not an accident of one `HashMap` iteration.
+        let again = broker.handle(&mut watcher, LobbyClientMessage::SubscribeLobby, &env);
+        let codes_again: Vec<String> = match &again[2] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentListUpdate { tournaments }) => {
+                tournaments.iter().map(|t| t.code.clone()).collect()
+            }
+            other => panic!("expected TournamentListUpdate, got {other:?}"),
+        };
+        assert_eq!(codes, codes_again);
+    }
+
+    // -- ConnState bookkeeping ---------------------------------------------
+
+    #[test]
+    fn conn_state_records_tournaments_without_granting_authority() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        assert!(conn.organized_tournaments.is_empty());
+        assert!(conn.joined_tournaments.is_empty());
+
+        let (code, _) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let token = join_tournament(&mut conn, &mut broker, &env, &code, "key-a", "Alice");
+
+        assert_eq!(conn.organized_tournaments, vec![code.clone()]);
+        assert_eq!(conn.joined_tournaments, vec![(code.clone(), token.clone())]);
+
+        // Dropping does NOT remove the record that this connection was in the
+        // event — the list grows monotonically, as documented.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token.clone(),
+            },
+            &env,
+        );
+        assert!(!is_error(&out));
+        assert_eq!(conn.joined_tournaments, vec![(code, token)]);
+    }
+
+    // -- Outbound shape per helper -----------------------------------------
+
+    /// A mid-event result report is the ONE mutating tournament action that
+    /// deliberately does not broadcast a list update, because no summary field
+    /// changed. Pinning it stops a later edit from "fixing" the asymmetry.
+    #[test]
+    fn reporting_a_result_updates_the_detail_view_but_not_the_list() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, _, token_a, _) = started_event(&mut conn, &mut broker, &env);
+        let pairing_id = broker.tournaments().get(&code).expect("event").pairings[0].id;
+
+        let before = broker.tournaments().get(&code).expect("event").status;
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Decisive {
+                    winner: "key-a".into(),
+                    game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 1u8)]
+                        .into_iter()
+                        .collect(),
+                },
+            },
+            &env,
+        );
+
+        let msgs = subscriber_msgs(&out);
+        assert_eq!(msgs.len(), 1, "exactly one broadcast: {out:?}");
+        assert!(matches!(
+            msgs[0],
+            LobbyServerMessage::TournamentUpdate { .. }
+        ));
+        // Non-vacuity: the standings really did move.
+        let view = view_of(&out);
+        assert_eq!(
+            view.pairings[0].outcome,
+            Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                winner: "key-a".into(),
+                game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 1u8)]
+                    .into_iter()
+                    .collect(),
+            }))
+        );
+        assert!(view.standings.iter().any(|s| s.match_points > 0));
+        // ...and the summary genuinely did not.
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            before
+        );
+    }
+
+    /// A drop DOES change a summary field (`player_count` counts active
+    /// entrants), so it pairs its detail update with a list update — the
+    /// contrast that makes the test above meaningful.
+    #[test]
+    fn dropping_a_player_updates_both_the_view_and_the_list() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, _, token_a, _) = started_event(&mut conn, &mut broker, &env);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token_a,
+            },
+            &env,
+        );
+        assert_eq!(subscriber_msgs(&out).len(), 2);
+        let list = list_update(&out);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].player_count, 1, "one of two entrants is left");
+        assert_eq!(
+            view_of(&out).players.len(),
+            2,
+            "the detail view keeps the dropped entrant"
+        );
+    }
+
+    #[test]
+    fn get_tournament_is_read_only_and_reports_a_missing_code() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, _) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::GetTournament { code: code.clone() },
+            &env,
+        );
+        assert!(
+            subscriber_msgs(&out).is_empty(),
+            "a read must not broadcast"
+        );
+        assert_eq!(view_of(&out).summary.code, code);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::GetTournament {
+                code: "NOPE00".into(),
+            },
+            &env,
+        );
+        assert!(error_reason(&out).contains("Tournament not found"));
+    }
+
+    /// A `Broker` snapshot taken before the `tournaments` field existed must
+    /// still restore its lobby entries rather than resetting the whole broker
+    /// — the reason the field carries `#[serde(default)]`.
+    #[test]
+    fn a_pre_tournament_snapshot_still_deserializes() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        create(&mut host, &mut broker, &env);
+
+        let full = serde_json::to_value(&broker).expect("snapshot");
+        let mut legacy = full.as_object().expect("object").clone();
+        legacy.remove("tournaments");
+        assert!(legacy.contains_key("lobby"));
+
+        let restored: Broker =
+            serde_json::from_value(serde_json::Value::Object(legacy)).expect("legacy snapshot");
+        assert_eq!(restored.lobby().len(), 1, "lobby entries survive");
+        assert!(restored.tournaments().is_empty());
     }
 }

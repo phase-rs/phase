@@ -102,8 +102,22 @@ fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::JoinGameWithPassword { .. }
         | LobbyClientMessage::LookupJoinTarget { .. }
         | LobbyClientMessage::UpdateLobbyMetadata { .. }
-        | LobbyClientMessage::UnregisterLobby { .. } => true,
-        LobbyClientMessage::ClientHello { .. }
+        | LobbyClientMessage::UnregisterLobby { .. }
+        // Every tournament write lands in the `TournamentManager` the broker
+        // snapshot carries, so each must mark the DO dirty. Classifying one of
+        // these `false` would lose the write on the next hibernation —
+        // silently, and only for tournaments, since lobby traffic would keep
+        // re-snapshotting around it.
+        | LobbyClientMessage::CreateTournament { .. }
+        | LobbyClientMessage::JoinTournament { .. }
+        | LobbyClientMessage::StartTournamentRound { .. }
+        | LobbyClientMessage::ReportMatchResult { .. }
+        | LobbyClientMessage::DropFromTournament { .. }
+        | LobbyClientMessage::EndTournament { .. } => true,
+        // `GetTournament` is a pure read, like `SubscribeLobby`: classifying
+        // it `true` would write storage on every poll of a public listing.
+        LobbyClientMessage::GetTournament { .. }
+        | LobbyClientMessage::ClientHello { .. }
         | LobbyClientMessage::SubscribeLobby
         | LobbyClientMessage::UnsubscribeLobby
         | LobbyClientMessage::Ping { .. } => false,
@@ -271,4 +285,82 @@ pub fn min_supported_lobby_protocol() -> u32 {
 
 fn result_json(r: CallResult) -> String {
     serde_json::to_string(&r).expect("call result always serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lobby_broker::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+
+    /// The classification is the whole contract, and getting it wrong is
+    /// SILENT: a mutating frame classified `false` leaves the shell skipping
+    /// its snapshot, so the write survives until the DO next hibernates and
+    /// then vanishes. Every variant is enumerated explicitly rather than
+    /// sampled, because there is no runtime symptom to catch a missed one.
+    #[test]
+    fn tournament_variants_are_classified_by_whether_they_write() {
+        let mutating = [
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            LobbyClientMessage::JoinTournament {
+                code: "TOUR01".into(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+            LobbyClientMessage::ReportMatchResult {
+                code: "TOUR01".into(),
+                pairing_id: 0,
+                player_token: "tok".into(),
+                outcome: PodOutcome::Draw,
+            },
+            LobbyClientMessage::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+            },
+            LobbyClientMessage::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+        ];
+        for msg in &mutating {
+            assert!(
+                mutates_lobby(msg),
+                "{msg:?} writes tournament state and MUST mark the DO dirty"
+            );
+        }
+
+        assert!(
+            !mutates_lobby(&LobbyClientMessage::GetTournament {
+                code: "TOUR01".into()
+            }),
+            "GetTournament is a pure read; a `true` here writes storage on every poll"
+        );
+    }
+
+    /// Regression guard: the pre-existing classifications are untouched by
+    /// this extension.
+    #[test]
+    fn pre_existing_variant_classifications_are_unchanged() {
+        assert!(mutates_lobby(&LobbyClientMessage::UnregisterLobby {
+            game_code: "GAME01".into()
+        }));
+        assert!(mutates_lobby(&LobbyClientMessage::UpdateLobbyMetadata {
+            game_code: "GAME01".into(),
+            current_players: 1,
+            max_players: 2,
+            consumed_reservation_tokens: Vec::new(),
+        }));
+        assert!(!mutates_lobby(&LobbyClientMessage::SubscribeLobby));
+        assert!(!mutates_lobby(&LobbyClientMessage::UnsubscribeLobby));
+        assert!(!mutates_lobby(&LobbyClientMessage::Ping { timestamp: 1 }));
+    }
 }

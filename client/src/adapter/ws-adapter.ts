@@ -369,6 +369,11 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 3 — The tournament-organizer message set: seven LobbyClientMessage variants
+ *     and five LobbyServerMessage variants. Purely ADDITIVE, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
+ *     existing variant changed shape, so nothing this client already parses
+ *     can break against a version-2 broker.
  * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
  *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
  *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
@@ -376,7 +381,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 2;
+export const LOBBY_PROTOCOL_VERSION = 3;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
