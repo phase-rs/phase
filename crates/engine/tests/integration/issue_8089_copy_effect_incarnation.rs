@@ -3,7 +3,9 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{
+    Duration, Effect, ObjectScope, ResolvedAbility, StaticCondition, TargetFilter, TargetRef,
+};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::resolved_commands::{ResolvedContinuousEffectCommand, ResolvedRulesCommand};
@@ -222,5 +224,65 @@ fn force_block_journals_its_exact_recipient_pin() {
     assert_eq!(
         replay.transient_continuous_effects,
         state.transient_continuous_effects
+    );
+}
+
+#[test]
+fn zygon_duration_subject_replay_cannot_follow_a_reentered_tapped_target() {
+    let mut scenario = GameScenario::new();
+    let target = scenario.add_creature(P0, "Tapped Target", 5, 5).id();
+    let zygon = scenario.add_creature(P0, "Zygon Infiltrator", 2, 3).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+    state.objects.get_mut(&target).unwrap().tapped = true;
+    let pre_state = state.clone();
+    let journal_start = state.resolved_rules_journal.entries().len();
+    let target_ref = ObjectIncarnationRef::from_object(&state.objects[&target]);
+
+    let ability = ResolvedAbility::new(
+        Effect::BecomeCopy {
+            recipient: TargetFilter::SelfRef,
+            target: TargetFilter::Any,
+            duration: Some(Duration::ForAsLongAs {
+                condition: StaticCondition::IsTapped {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            mana_value_limit: None,
+            additional_modifications: Vec::new(),
+        },
+        vec![TargetRef::Object(target)],
+        zygon,
+        P0,
+    );
+
+    engine::game::effects::become_copy::resolve(&mut state, &ability, &mut Vec::new())
+        .expect("Zygon's copied target must install its duration-bound copy effect");
+    let installs = recorded_installs_since(&state, journal_start);
+    assert_eq!(installs.len(), 1);
+    assert_eq!(installs[0].effect.duration_subject, Some(target_ref));
+
+    let mut replay = pre_state;
+    replay
+        .apply_resolved_continuous_effect(&installs[0])
+        .expect("the recorded Zygon copy install must replay against its predecessor");
+    evaluate_layers(&mut replay);
+    assert_eq!(replay.objects[&zygon].name, "Tapped Target");
+
+    replay.objects.get_mut(&target).unwrap().tapped = false;
+    evaluate_layers(&mut replay);
+    assert_eq!(
+        replay.objects[&zygon].name, "Zygon Infiltrator",
+        "untapping the captured target must end the copy"
+    );
+
+    let mut events = Vec::new();
+    move_to_zone(&mut replay, target, Zone::Graveyard, &mut events);
+    move_to_zone(&mut replay, target, Zone::Battlefield, &mut events);
+    replay.objects.get_mut(&target).unwrap().tapped = true;
+    evaluate_layers(&mut replay);
+    assert_eq!(
+        replay.objects[&zygon].name, "Zygon Infiltrator",
+        "a reentered tapped object cannot revive a duration bound to its old incarnation"
     );
 }

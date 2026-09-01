@@ -1712,12 +1712,14 @@ fn handle_persist_chosen_attribute_choice(
     // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
     // continuous effect sourced from the Aura, applied to the host, ending
     // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
-    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // `tce.source_id` leaving — the Aura). `duration_subject` tracks the
     // host for any recipient-relative duration reads (harmless here).
     let copy = super::effects::become_copy::PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject_id: host_id,
+        duration_subject: crate::types::identifiers::ObjectIncarnationRef::from_object(
+            &state.objects[&host_id],
+        ),
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
         display_source,

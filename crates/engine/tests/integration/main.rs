@@ -787,6 +787,7 @@ mod issue_788_unexpectedly_absent;
 mod issue_7945_free_grant_face_down;
 mod issue_8024_terminal_rest_captures;
 mod issue_8089_copy_effect_incarnation;
+mod issue_8089_real_cards;
 mod issue_8101_candelabra_target_selection;
 mod issue_8163_was_cast_event_subject;
 mod issue_8183_static_gate_fail_open;

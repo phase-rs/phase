@@ -19344,6 +19344,18 @@ pub struct EndEffectPermission {
     pub cost: ManaCost,
 }
 
+/// Exact object bindings captured when a transient continuous effect begins.
+///
+/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
+/// effect may affect or whose state may sustain its duration.  They travel in
+/// the same journaled install command as the rest of the effect, rather than
+/// being attached after installation, so replay cannot observe a partial TCE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransientContinuousEffectBindings {
+    pub affected_recipient: Option<ObjectIncarnationRef>,
+    pub duration_subject: Option<ObjectIncarnationRef>,
+}
+
 /// A runtime-generated continuous effect stored at state level.
 ///
 /// Unlike `StaticDefinition` (which represents intrinsic/printed card text),
@@ -19372,12 +19384,13 @@ pub struct TransientContinuousEffect {
     /// subject diverge — Zygon Infiltrator: the copy modification applies to
     /// the source, but the duration tracks the copy *target*'s tap state.
     /// `None` for the common case where the duration tracks `affected` or the
-    /// source. Set only via [`GameState::set_transient_duration_subject`] on the
-    /// TCE that `add_transient_continuous_effect` just created, so all TCE
-    /// construction stays in one authority. Backward-compatible across the
-    /// WASM/multiplayer serialization boundary.
+    /// source. Captured in the journaled installation command together with
+    /// `affected_recipient`, so replay cannot reconstruct a partial effect.
+    /// Backward-compatible across the WASM/multiplayer serialization boundary:
+    /// the `ObjectIncarnationRef` serde migration converts legacy raw ids to a
+    /// non-current sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_subject: Option<ObjectId>,
+    pub duration_subject: Option<ObjectIncarnationRef>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
     /// authority (`add_transient_continuous_effect_with_end_permission`), so it
@@ -23794,14 +23807,14 @@ impl GameState {
             modifications,
             condition,
             None,
-            None,
+            TransientContinuousEffectBindings::default(),
         )
     }
 
-    /// Register a transient continuous effect whose one-shot recipient is
-    /// fixed to the supplied incarnation from the moment it is journaled.
+    /// Register a transient continuous effect with exact object identities
+    /// captured as part of the same journaled installation command.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_transient_continuous_effect_for_recipient(
+    pub fn add_transient_continuous_effect_with_bindings(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -23809,7 +23822,7 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
-        recipient: ObjectIncarnationRef,
+        bindings: TransientContinuousEffectBindings,
     ) -> u64 {
         self.add_transient_continuous_effect_inner(
             source_id,
@@ -23819,13 +23832,13 @@ impl GameState {
             modifications,
             condition,
             None,
-            Some(recipient),
+            bindings,
         )
     }
 
     /// CR 116.2c: install a continuous effect that carries a pay-to-end
     /// permission. The permission is threaded into the construction authority
-    /// (rather than post-stamped like `duration_subject`) so it rides INSIDE
+    /// together with the exact object bindings, so it rides INSIDE
     /// the journaled `ResolvedContinuousEffectCommand` and survives replay.
     ///
     /// One argument wider than the plain constructor by construction — it is the
@@ -23851,7 +23864,7 @@ impl GameState {
             modifications,
             condition,
             Some(end_permission),
-            None,
+            TransientContinuousEffectBindings::default(),
         )
     }
 
@@ -23865,7 +23878,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
-        affected_recipient: Option<ObjectIncarnationRef>,
+        bindings: TransientContinuousEffectBindings,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -23893,10 +23906,10 @@ impl GameState {
                 timestamp,
                 duration,
                 affected,
-                affected_recipient,
+                affected_recipient: bindings.affected_recipient,
                 modifications,
                 condition,
-                duration_subject: None,
+                duration_subject: bindings.duration_subject,
                 end_permission,
                 source_name,
             },
@@ -23984,26 +23997,6 @@ impl GameState {
         self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
         self.layers_dirty.mark_full();
         Ok(())
-    }
-
-    /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
-    /// concrete object resolved at effect-resolution time, on the TCE that
-    /// [`Self::add_transient_continuous_effect`] just created (addressed by its
-    /// returned `id`). Used when the duration's tracked subject diverges from the
-    /// effect's `affected` recipient — Zygon Infiltrator: the copy modification
-    /// applies to the source, but the duration tracks the copy *target*'s tap
-    /// state. Keeps construction in one authority (no second constructor); the
-    /// only divergent caller is `effects/become_copy.rs`. Marks layers dirty so
-    /// the duration re-evaluation picks up the binding.
-    pub fn set_transient_duration_subject(&mut self, id: u64, subject: ObjectId) {
-        if let Some(tce) = self
-            .transient_continuous_effects
-            .iter_mut()
-            .find(|tce| tce.id == id)
-        {
-            tce.duration_subject = Some(subject);
-            self.layers_dirty.mark_full();
-        }
     }
 
     /// Migrate the pre-2026-05-09 audit M4 split-slot
@@ -26878,6 +26871,7 @@ mod tests {
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        LEGACY_INCARNATION,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
@@ -26924,6 +26918,34 @@ mod tests {
             persisted["unrelated"],
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn legacy_duration_subject_id_deserializes_as_a_non_current_incarnation() {
+        let effect = TransientContinuousEffect {
+            id: 1,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            timestamp: 1,
+            duration: Duration::Permanent,
+            affected: TargetFilter::SelfRef,
+            affected_recipient: None,
+            modifications: Vec::new(),
+            condition: None,
+            duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            end_permission: None,
+            source_name: String::new(),
+        };
+        let mut legacy = serde_json::to_value(effect).expect("effect serializes");
+        legacy["duration_subject"] = serde_json::json!(9);
+
+        let migrated: TransientContinuousEffect =
+            serde_json::from_value(legacy).expect("legacy raw duration id migrates");
+        assert_eq!(
+            migrated.duration_subject,
+            Some(ObjectIncarnationRef::of(ObjectId(9), LEGACY_INCARNATION)),
+            "a saved raw id cannot prove its old incarnation and must never bind a live object"
         );
     }
 

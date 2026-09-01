@@ -6452,7 +6452,15 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
             // Infiltrator) when it diverges from `affected`; otherwise the
             // affected object (Shield Broker's recipient-relative control
             // duration, where the recipient IS the tracked object).
-            let recipient = tce.duration_subject.unwrap_or(*id);
+            let recipient = match tce.duration_subject {
+                // CR 400.7 + CR 611.2b: an explicit duration subject is an
+                // exact object binding, not a rediscoverable storage id. A
+                // zone change makes the old target a new object, so its
+                // duration cannot be sustained by a later incarnation.
+                Some(subject) if subject.is_current(state) => subject.object_id,
+                Some(_) => return false,
+                None => *id,
+            };
             evaluate_condition_with_recipient(
                 state,
                 condition,
