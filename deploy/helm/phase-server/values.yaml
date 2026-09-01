@@ -52,6 +52,30 @@ persistence:
   storageClass: ""     # "" = cluster default
   existingClaim: ""
 
+# PHASE_LOG_DIR: main log (phase-server.log) + one file pair per game
+# (games/<code>.*) for diagnosis. Off by default — nothing writes here until
+# enabled. `dir` must be a subdirectory of PHASE_DATA_DIR (/var/lib/phase-server):
+# logs land on the same per-ordinal `data` PVC already mounted, so no second or
+# shared (RWX) volume is needed.
+logging:
+  enabled: false
+  dir: /var/lib/phase-server/logs
+  # Sidecar that serves `dir` read-only for diagnosis (autoindex on). Never
+  # routed through the public Ingress or allowed by NetworkPolicy — reach it
+  # the same way as /admin: `kubectl port-forward svc/<release>[-<ordinal>]
+  # <server.port>` (see README).
+  server:
+    image:
+      repository: nginxinc/nginx-unprivileged
+      tag: 1.27-alpine
+    # The image's own non-root uid/gid; change together if you swap the image.
+    runAsUser: 101
+    runAsGroup: 101
+    port: 8080
+    resources:
+      requests: { cpu: 5m, memory: 8Mi }
+      limits: { memory: 32Mi }
+
 resources:
   requests:
     cpu: 250m
