@@ -2118,6 +2118,8 @@ fn legacy_duration(x: &Duration) -> bool {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        | Duration::WhileControllingHost
+        | Duration::WhileHostOnBattlefield
         | Duration::UntilSourceExilesAnotherCard
         | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent
@@ -4337,6 +4339,13 @@ fn rw_duration(x: &Duration) -> RwProfile {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        // CR 611.2b: the control question is asked against the carrier's own
+        // controller field, not against a `PlayerScope` payload on the
+        // duration — the same reason `StaticCondition::SourceControllerEquals`
+        // is `RwProfile::empty()` in `rw_static_condition`.
+        | Duration::WhileControllingHost
+        // CR 611.2b + CR 702.26f: presence-bound sibling, likewise payload-free.
+        | Duration::WhileHostOnBattlefield
         | Duration::UntilSourceExilesAnotherCard
         | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent => RwProfile::empty(),

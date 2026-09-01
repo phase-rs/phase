@@ -6565,6 +6565,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(2),
                     cast_transformed: false,

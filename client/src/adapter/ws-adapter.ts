@@ -202,6 +202,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ *      gained duration and source_id, ExileWithAltCost gained source_id beside
+ *      the duration it already had (additive, serde
+ *      defaults), and Duration gained the WhileControllingHost and
+ *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
+ *      one-way parse break — a v50 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
+ *      degrading.
  * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *      and the deck-compatibility admission path now both read, replacing
@@ -355,7 +363,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 50;
+export const PROTOCOL_VERSION = 51;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

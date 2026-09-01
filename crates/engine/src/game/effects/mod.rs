@@ -23500,6 +23500,7 @@ mod tests {
             .sub_ability(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        source_id: None,
                         cost_provenance:
                             crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cost: ManaCost::generic(2),
@@ -23602,6 +23603,7 @@ mod tests {
             .sub_ability(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        source_id: None,
                         cost_provenance:
                             crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cost: ManaCost::generic(2),
@@ -23678,6 +23680,7 @@ mod tests {
         .sub_ability(ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(2),
                     cast_transformed: false,

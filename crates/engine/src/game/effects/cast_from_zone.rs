@@ -1635,6 +1635,8 @@ fn record_lingering_permissions(
     // object (The Tomb of Aclazotz).
     let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
 
+    // CR 611.2b: set when a host-bound lifetime was attached below.
+    let mut needs_lifetime_check = false;
     for &obj_id in target_ids {
         // CR 601.2a: Targeted graveyard grants (Emry, Lurker in the Loch) and
         // resolution-time hand picks (Electrodominance) keep the card in its
@@ -1661,11 +1663,71 @@ fn record_lingering_permissions(
             // attack trigger's cast permission must be scoped to Jeleva's
             // controller, not to each card's owner.
             let granted_to = Some(ability.controller);
+            // CR 611.2a: the stated lifetime of the grant. Computed ONCE here
+            // so both alternative-cost forms below receive the same value: the
+            // non-mana cost (CR 118.9) changes how the spell is paid for, never
+            // how long the permission lasts, and a lifetime that survives only
+            // one of the two branches is the defect this shares with the
+            // land-play companion further down.
+            //
+            // CR 611.2a: An *in-place* grant on a card left in the hand or
+            // graveyard (Emry, Sunforger searching to hand, Electrodominance)
+            // is a continuous effect from this ability's resolution; it must
+            // expire at cleanup if the cast is declined, since the card never
+            // leaves a zone that would trigger permission cleanup. Exile-origin
+            // grants keep `None` — they are pruned on leaving exile instead
+            // (`zones::apply_zone_exit_cleanup`).
+            // The same question `grant_permission::resolve` asks, asked the same
+            // way: "does this grant sit on a card in EXILE?" — the only zone
+            // `zones::apply_zone_exit_cleanup` clears permissions from. Written
+            // out rather than derived as `!in_place` so the two sites cannot
+            // drift apart the moment a fourth origin zone appears.
+            let exile_resident = matches!(current_zone, Some(Zone::Exile));
+            let in_place = matches!(current_zone, Some(Zone::Graveyard | Zone::Hand));
+            let enforceable = |d: &Duration| {
+                crate::game::layers::casting_permission_duration_is_enforceable(d, exile_resident)
+            };
+            let granted_duration = match duration.clone() {
+                // The stated lifetime, when some pass can end it for THIS grant.
+                Some(d) if enforceable(&d) => Some(d),
+                // CR 611.2a: an in-place stated lifetime nothing can enforce
+                // falls back to the cleanup-step default rather than being kept
+                // unbounded. Resourceful Collector states "for as long as it's
+                // in your graveyard"; no pass evaluates that condition and the
+                // card never leaves exile, so keeping it would turn a
+                // permission that expired at end of turn into one that never
+                // expires — the exact defect this repair exists to remove. The
+                // printed condition stays unmodeled either way; this only
+                // refuses to make it worse.
+                Some(_) if in_place => Some(Duration::UntilEndOfTurn),
+                // Exile-resident with a lifetime nothing can end: refuse the
+                // grant rather than attaching it unbounded. Same guard as
+                // `grant_permission::resolve`; both sites ask the one authority
+                // so a shape cannot be enforceable at one and not the other.
+                Some(d) => {
+                    debug_assert!(
+                        false,
+                        "cast-from-zone grant carries an unenforceable duration: {d:?}"
+                    );
+                    continue;
+                }
+                // CR 611.2a: the durationless in-place default, stated once
+                // above this match.
+                None => in_place.then_some(Duration::UntilEndOfTurn),
+            };
             let permission = if let Some(cost) = alt_ability_cost.clone() {
                 CastingPermission::ExileWithAltAbilityCost {
                     cost,
                     constraint: constraint.clone(),
                     granted_to,
+                    duration: granted_duration.clone(),
+                    // CR 611.2a + CR 400.7: same host identity as the
+                    // `ExileWithAltCost` sibling — without it a
+                    // `WhileControllingHost` / `UntilHostLeavesPlay` lifetime
+                    // has nothing to compare the departed object against and is
+                    // unenforceable (Nashi, Moon Sage's Scion — the card that
+                    // reaches this variant today).
+                    source_id: Some(ability.source_id),
                 }
             } else {
                 let cost = if without_paying {
@@ -1706,10 +1768,13 @@ fn record_lingering_permissions(
                     // Default both in-place origins to UntilEndOfTurn when the
                     // parser carried no explicit duration. (Exile-origin grants
                     // keep `None` — they are pruned on leaving exile instead.)
-                    duration: duration.clone().or_else(|| {
-                        matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
-                            .then_some(Duration::UntilEndOfTurn)
-                    }),
+                    duration: granted_duration.clone(),
+                    // CR 611.2a + CR 400.7: record WHICH permanent's presence
+                    // bounds the duration above. The land-play companion built
+                    // below already carries `source_id`; without the same
+                    // identity here the cast half of one `CastFromZone` would
+                    // outlive its host while the land half expired.
+                    source_id: Some(ability.source_id),
                     graveyard_replacement: graveyard_replacement.clone(),
                     enters_with_counter: enters_with_counter.clone(),
                     enters_with_modifications: enters_with_modifications.clone(),
@@ -1721,8 +1786,25 @@ fn record_lingering_permissions(
                     mana_spend_permission,
                 }
             };
+            // CR 611.2b: a host-bound lifetime must be evaluated once now —
+            // its duration may ALREADY be over (the host left, or changed
+            // controller, before this ability resolved), in which case
+            // CR 611.2b says the effect does nothing. Attaching a permission to
+            // a card in exile changes no characteristic and so would not dirty
+            // the layers on its own, and `prune_lapsed_host_bound_casting_permissions`
+            // runs inside `evaluate_layers`, which a flush reaches only when the
+            // layers are dirty. Marking here is what connects the two, and it
+            // keeps the pass off the hot path for every flush that grants
+            // nothing.
+            let host_bound = permission
+                .lifetime()
+                .duration
+                .is_some_and(Duration::ends_when_host_leaves_play);
             if !obj.casting_permissions.contains(&permission) {
                 obj.casting_permissions.push(permission);
+                if host_bound {
+                    needs_lifetime_check = true;
+                }
             }
 
             // CR 305.1: A `CastFromZone` in `mode: Play` must also authorize
@@ -1734,11 +1816,14 @@ fn record_lingering_permissions(
             {
                 // CR 305.1: lands are played (not cast) but still require
                 // face-down exile look/play authority.
-                let play_duration = duration.clone().unwrap_or_else(|| {
-                    matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
-                        .then_some(Duration::UntilEndOfTurn)
-                        .unwrap_or(Duration::Permanent)
-                });
+                // The SAME value the cast half received, not the raw parsed
+                // duration: the land companion must not be the one branch that
+                // keeps a lifetime nothing can enforce. `PlayFromExile.duration`
+                // is not optional, so the exile-origin `None` becomes
+                // `Permanent` here — pruned on leaving exile
+                // (`zones::apply_zone_exit_cleanup`), which is what it meant
+                // before this field was plumbed through.
+                let play_duration = granted_duration.clone().unwrap_or(Duration::Permanent);
 
                 let play_permission = CastingPermission::PlayFromExile {
                     provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
@@ -1763,6 +1848,9 @@ fn record_lingering_permissions(
                 }
             }
         }
+    }
+    if needs_lifetime_check {
+        state.layers_dirty.mark_full();
     }
     Ok(())
 }
@@ -3206,6 +3294,89 @@ mod tests {
             "hand-origin in-place grant must default to UntilEndOfTurn so a \
              declined offer expires at cleanup; got {:?}",
             state.objects[&cheap].casting_permissions
+        );
+    }
+
+    /// CR 611.2a + CR 305.1: both halves of one in-place grant consume the same
+    /// enforceable-duration decision — the cast permission and the land-play
+    /// companion.
+    ///
+    /// The companion is the half that computed the decision a second time, and
+    /// the two answers differ on exactly one input: a stated duration that no
+    /// pass can end for THIS grant. `ForAsLongAs` off an exile resident is that
+    /// input — `zones::apply_zone_exit_cleanup` is its only authority and never
+    /// fires for a card that stays in the graveyard, which is why
+    /// `casting_permission_duration_is_enforceable` refuses it here. The cast
+    /// half falls back to the cleanup-step default; the companion used to keep
+    /// the raw `ForAsLongAs` and never expire.
+    ///
+    /// Resourceful Collector prints this shape ("for as long as it's in your
+    /// graveyard"). Whether its grant runs is not established — the node sits
+    /// under an `Effect::Unimplemented` head — so the regression drives the
+    /// production entry point (`grant_lingering_permissions`) with the shape the
+    /// parser produces rather than through that card.
+    #[test]
+    fn the_land_companion_takes_the_same_enforceable_duration_as_the_cast_half() {
+        let mut state = make_test_state();
+        let card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(515));
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(Duration::ForAsLongAs {
+                    condition: crate::types::ability::StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::Any,
+                    },
+                }),
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[card], &mut events).unwrap();
+
+        let permissions = state.objects[&card].casting_permissions.clone();
+        // Reach guard: the CR 305.1 companion branch really ran, so the
+        // assertion below is about its value and not about its absence.
+        assert!(
+            permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+                    ..
+                }
+            )),
+            "a mode: Play grant must build the land companion; got {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            )),
+            "the land companion must take the enforceable fallback, not the raw \
+             ForAsLongAs nothing can end; got {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            )),
+            "the cast half must carry the same value as the companion; got {permissions:?}"
         );
     }
 

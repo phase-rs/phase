@@ -4250,7 +4250,10 @@ fn detect_condition_as_long_as(
     if evidence.any_duration(|d| {
         matches!(
             d,
-            Duration::ForAsLongAs { .. } | Duration::UntilHostLeavesPlay
+            Duration::ForAsLongAs { .. }
+                | Duration::UntilHostLeavesPlay
+                | Duration::WhileControllingHost
+                | Duration::WhileHostOnBattlefield
         )
     }) {
         return;

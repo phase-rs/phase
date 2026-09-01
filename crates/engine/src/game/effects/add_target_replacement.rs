@@ -19,18 +19,28 @@ use crate::types::replacements::ReplacementEvent;
 pub(crate) enum ReplacementDurationExpiry {
     Unstated,
     Explicit(RestrictionExpiry),
-    /// The duration is enforced by a separate applicability gate rather than an
-    /// expiry prune (`UntilHostLeavesPlay` on the untap-prevention rider).
+    /// CR 611.2a: the CONTROLLER's own next turn. The only class whose stamp
+    /// needs the resolving ability's controller, so it is left unresolved here
+    /// and named by each install seam. Keeping it out of `Explicit` is what
+    /// makes the classification controller-free, which in turn lets the
+    /// parse-time honesty net consult this same authority
+    /// (`parser::oracle::demote_unenforceable_replacement_lifetimes`) with no
+    /// second duration list.
+    ExplicitControllerNextTurn,
+    /// The duration is enforced by a separate applicability gate rather than
+    /// an expiry prune — the CONTROL gate on the bare untap-prevention rider
+    /// (`stamp_for_as_long_as_controlled_gate`). That gate is
+    /// `ReplacementCondition::ControllerControlsSource`, so this class carries
+    /// exactly one duration: `Duration::WhileControllingHost`. An install whose
+    /// replacement cannot carry the gate fails closed in
+    /// `replacement_with_ability_expiry`.
     GateControlled,
     Unsupported,
 }
 
 /// CR 611.2a: map a parser-side `Duration` onto the engine's replacement-side
 /// lifecycle without conflating an absent duration with an unrepresentable one.
-pub(crate) fn expiry_from_duration(
-    duration: Option<&Duration>,
-    controller: crate::types::player::PlayerId,
-) -> ReplacementDurationExpiry {
+pub(crate) fn expiry_from_duration(duration: Option<&Duration>) -> ReplacementDurationExpiry {
     match duration {
         None => ReplacementDurationExpiry::Unstated,
         Some(Duration::UntilEndOfTurn) => {
@@ -41,24 +51,52 @@ pub(crate) fn expiry_from_duration(
         }
         Some(Duration::UntilNextTurnOf {
             player: crate::types::ability::PlayerScope::Controller,
-        }) => ReplacementDurationExpiry::Explicit(RestrictionExpiry::UntilPlayerNextTurn {
-            player: controller,
-        }),
+        }) => ReplacementDurationExpiry::ExplicitControllerNextTurn,
         // `UntilEndOfNextTurnOf` needs replacement-side arming, while non-controller
         // turn/step scopes need a resolution-time player binding. Neither is present
         // at this seam, so applying an `EndOfTurn` default would be rules-incorrect.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
         | Some(Duration::UntilNextStepOf { .. }) => ReplacementDurationExpiry::Unsupported,
-        // NOT identity-safe despite the shared name. `Duration::UntilHostLeavesPlay`
-        // means "when the SOURCE object leaves the battlefield";
-        // `RestrictionExpiry::UntilHostLeavesPlay` is pruned when the object
-        // HOSTING the definition leaves (`layers.rs`, the host-left prune, which
-        // keys on the departed id). For a shield installed on a TARGET those are
-        // different objects — Old Fat Spider Can't See Me chapter II binds to the
-        // Saga while hosting its shield on the targeted creature, so the identity
-        // mapping would strand an immortal shield when the Saga leaves first.
-        Some(Duration::UntilHostLeavesPlay) => ReplacementDurationExpiry::GateControlled,
+        // CR 611.2b: the CONTROL reading, and only it. The gate this class
+        // promises is `ReplacementCondition::ControllerControlsSource`, which
+        // re-reads the source each layer pass, so it observes a control change
+        // and a battlefield exit alike — and both genuinely end "for as long as
+        // you control ~", the second because a permanent that has left the
+        // battlefield is no longer controlled. CR 611.2b's own example is this
+        // duration class (Master Thief, "gain control of target artifact for as
+        // long as you control this creature"); it illustrates the duration
+        // failing to START, not the two ways it ends, so the ends above are read
+        // off the wording, not quoted from the rule.
+        Some(Duration::WhileControllingHost) => ReplacementDurationExpiry::GateControlled,
+        // CR 611.2a: the two NON-control host readings have no enforceable
+        // lifetime at this seam, so they fail closed.
+        //
+        // They must not take the control gate: both survive a control change
+        // while their source stays on the battlefield, and
+        // `ControllerControlsSource` would end them there — a window SHORTER
+        // than the printed one, which CR 611.2a forbids just as much as a
+        // longer one.
+        //
+        // Nor is `RestrictionExpiry::UntilHostLeavesPlay` the answer for the
+        // event deadline, despite the shared name: the `Duration` means "when
+        // the SOURCE object leaves the battlefield", while the
+        // `RestrictionExpiry` is pruned when the object HOSTING the definition
+        // leaves (`layers.rs`, the host-left prune, which keys on the departed
+        // id). For a rider installed on a TARGET those are different objects —
+        // Old Fat Spider Can't See Me chapter II binds to the Saga while
+        // hosting its shield on the targeted creature, so the identity mapping
+        // would strand an immortal shield when the Saga leaves first. And
+        // `WhileHostOnBattlefield` additionally ends on a phase-out
+        // (CR 702.26f), which no `RestrictionExpiry` stamp expresses at all.
+        //
+        // Failing closed here is not a silent drop: the parse-time honesty net
+        // demotes the whole line to `Effect::Unimplemented` before it can be
+        // reported as supported, and the install seam returns a hard error if
+        // one ever reaches it anyway.
+        Some(Duration::UntilHostLeavesPlay) | Some(Duration::WhileHostOnBattlefield) => {
+            ReplacementDurationExpiry::Unsupported
+        }
         // CR 611.2b conditional windows are gated by
         // `stamp_for_as_long_as_controlled_gate` / `ReplacementCondition`, not by
         // an expiry stamp.
@@ -69,22 +107,97 @@ pub(crate) fn expiry_from_duration(
     }
 }
 
+/// CR 611.2a: does the install seam REFUSE this replacement under this stated
+/// duration? The single authority for that question, and deliberately shared by
+/// its two consumers:
+///
+/// * `replacement_with_ability_expiry`, at resolution, which turns a refusal
+///   into a hard `EffectError` rather than a successful no-op; and
+/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
+///   post-lowering honesty net, which demotes a refused line to
+///   `Effect::Unimplemented` so no card ever REPORTS the shape as supported.
+///
+/// Both axes are read from their own single owner — the duration axis from
+/// `expiry_from_duration`, the form axis from `host_gate_enforceable` — so
+/// neither list exists twice and a newly routed duration reaches both consumers
+/// in the same breath.
+///
+/// The `expiry.is_some()` short-circuit mirrors the install seam exactly: a
+/// replacement that already carries a parser-stamped expiry does not take its
+/// lifetime from the ability's duration at all, so the duration cannot refuse it.
+pub(crate) fn replacement_install_is_refused(
+    replacement: &ReplacementDefinition,
+    duration: Option<&Duration>,
+) -> bool {
+    if replacement.expiry.is_some() {
+        return false;
+    }
+    match expiry_from_duration(duration) {
+        ReplacementDurationExpiry::Unsupported => true,
+        ReplacementDurationExpiry::GateControlled => !host_gate_enforceable(replacement),
+        ReplacementDurationExpiry::Unstated
+        | ReplacementDurationExpiry::Explicit(_)
+        | ReplacementDurationExpiry::ExplicitControllerNextTurn => false,
+    }
+}
+
 fn replacement_with_ability_expiry(
     replacement: &ReplacementDefinition,
     ability: &ResolvedAbility,
-) -> Option<ReplacementDefinition> {
+) -> Result<ReplacementDefinition, EffectError> {
     let mut replacement = replacement.clone();
+    // CR 611.2a: the refusal itself, read from the SAME authority the parse-time
+    // honesty net reads. Asking it here rather than re-deriving both axes is what
+    // makes "neither list exists twice" true of the code and not just of the
+    // comment: a duration or a form the net demotes and a duration or form this
+    // seam installs can never drift apart, because there is only one answer.
+    if replacement_install_is_refused(&replacement, ability.duration.as_ref()) {
+        return Err(unenforceable_lifetime(ability));
+    }
     if replacement.expiry.is_none() {
-        match expiry_from_duration(ability.duration.as_ref(), ability.controller) {
+        match expiry_from_duration(ability.duration.as_ref()) {
             ReplacementDurationExpiry::Unstated => {
                 replacement = replacement.with_resolution_shield_expiry();
             }
             ReplacementDurationExpiry::Explicit(expiry) => replacement.expiry = Some(expiry),
+            // CR 611.2a: the one class whose stamp needs the resolving
+            // ability's controller, named here rather than inside the shared
+            // classification.
+            ReplacementDurationExpiry::ExplicitControllerNextTurn => {
+                replacement.expiry = Some(RestrictionExpiry::UntilPlayerNextTurn {
+                    player: ability.controller,
+                });
+            }
+            // CR 611.2a: `GateControlled` promises that a runtime applicability
+            // gate enforces the host-bound duration — and that gate exists only
+            // for the bare untap-prevention rider
+            // (`stamp_for_as_long_as_controlled_gate`). Any other replacement
+            // shape would install with no lifetime the engine can end
+            // CORRECTLY: a floating or player-bound install sits in
+            // `pending_damage_replacements`, whose prunes key on `expiry` only,
+            // and outlives its printed window; an object install lands
+            // live-only (`install_to_base` is false for this shape) and is
+            // wiped at the next CR 613.1 layer reseed, far too early. Either
+            // way the printed duration is dropped. Fail closed exactly like
+            // `Unsupported` until a typed host lifetime exists for those
+            // shapes. `host_gate_enforceable` answers the form axis for both
+            // this guard and the stamp; the stamp consumes
+            // `expiry_from_duration` for the duration axis, so neither list
+            // exists twice.
+            // Not refused above, so the form CAN carry the gate. There is no
+            // stamp to write: the lifetime IS the gate, installed by
+            // `stamp_for_as_long_as_controlled_gate` further down.
             ReplacementDurationExpiry::GateControlled => {}
             // CR 611.2a: do not install a replacement whose stated duration the
             // engine cannot enforce. In particular, never replace it with the
             // end-of-turn fallback, which would shorten the printed window.
-            ReplacementDurationExpiry::Unsupported => return None,
+            // Unreachable: `replacement_install_is_refused` returns true for
+            // this class unconditionally. Kept as its own arm rather than folded
+            // into the one above so the match stays wildcard-free and a duration
+            // newly routed here cannot silently inherit the gate's meaning.
+            ReplacementDurationExpiry::Unsupported => {
+                return Err(unenforceable_lifetime(ability));
+            }
         }
     }
     // CR 514.2 + CR 615.3: a SHIELD installed by a resolving spell or ability with
@@ -119,7 +232,31 @@ fn replacement_with_ability_expiry(
     stamp_for_as_long_as_controlled_gate(&mut replacement, ability);
     freeze_damage_modification_x(&mut replacement, ability);
     freeze_parent_copy_target(&mut replacement, ability);
-    Some(replacement)
+    Ok(replacement)
+}
+
+/// CR 611.2a: the refusal, as a hard resolution error rather than a successful
+/// no-op.
+///
+/// Reaching this is a PARSER defect, not a game state: the post-lowering
+/// honesty net demotes every refused shape to `Effect::Unimplemented` before a
+/// card can claim support for it.
+///
+/// What the error buys, precisely: in the test harness a refused install now
+/// FAILS instead of passing, which is what the `expect_err` pins hold
+/// (`tap_untap::tests::host_duration_on_non_untap_replacement_fails_closed`,
+/// `tests::stated_unrepresentable_duration_does_not_install_a_shield`). In
+/// production it aborts the remainder of the resolution chain — `stack.rs`
+/// discards the `Result` (`let _ = effects::resolve_ability_chain(..)`) and no
+/// consumer logs an `EffectError`, so nothing becomes visible to a player. It is
+/// therefore a REGRESSION PIN plus a fail-closed stop, not a diagnostic; the
+/// visibility half is the parser net's job.
+fn unenforceable_lifetime(ability: &ResolvedAbility) -> EffectError {
+    EffectError::InvalidParam(format!(
+        "AddTargetReplacement: no enforceable lifetime for duration {:?} on this replacement form \
+         (CR 611.2a); the parser must lower this line to Effect::Unimplemented instead",
+        ability.duration
+    ))
 }
 
 /// CR 603.2 + CR 603.3b + CR 117.3b: Concretize
@@ -237,59 +374,74 @@ fn concretize_parent_copy_target(
 /// can't become untapped for as long as you control ~.").
 ///
 /// The clause shell peels "for as long as you control ~" onto the ability frame
-/// as `Duration::UntilHostLeavesPlay` (the parser's canonical mapping for
-/// host-control lifetimes). For a replacement installed on a DIFFERENT object
-/// (the chosen creature) that mapping is insufficient on its own — nothing
-/// prunes an `UntilHostLeavesPlay` object-installed replacement, and it must end
-/// on a control SWAP of the originating source, not just when it leaves play.
-/// Stamping the gate with the originating source (`ability.source_id`, e.g.
-/// Spider-Woman) and its controller (`ability.controller`) re-checks "you still
-/// control [the source]" on every untap, matching the Master Thief example.
+/// as `Duration::WhileControllingHost`. For a replacement installed on a
+/// DIFFERENT object (the chosen creature) that mapping is insufficient on its
+/// own — an object-installed replacement whose only lifetime statement sits on
+/// the ability frame has no pruner of its own, and the control reading must
+/// end on a control SWAP of the originating source, not just when it leaves
+/// play. Stamping the gate with the originating source (`ability.source_id`,
+/// e.g. Spider-Woman) and its controller (`ability.controller`) re-checks
+/// "you still control [the source]" on every untap, matching the Master Thief
+/// example.
 ///
 /// Tightly scoped: only a bare untap-prevention rider (event `Untap`, no
-/// `execute`, no pre-existing condition) carrying this exact duration is
+/// `execute`, no pre-existing condition) under a `GateControlled` duration is
 /// translated, so unrelated `AddTargetReplacement` installs are untouched.
 ///
-/// ACKNOWLEDGED CR 611.2b GAP — presence sub-class is over-gated (NOT fixed
-/// here): `parse_for_as_long_as_condition` (parser/oracle_nom/duration.rs)
-/// collapses BOTH "for as long as you control [subject]" (control-bound: ends
-/// on leave-play OR a control swap of the source — Spider-Woman) AND "[subject]
-/// remains on the battlefield" (presence-bound: per CR 611.2b ends ONLY on
-/// leave-play, NOT on a source control change) into the same
-/// `Duration::UntilHostLeavesPlay`. `ResolvedAbility` carries only `duration`,
-/// so the original phrasing is lost by the time this stamp runs — the two
-/// sub-classes are indistinguishable here. A hypothetical "[creature] can't
-/// become untapped for as long as ~ remains on the battlefield" would therefore
-/// currently receive the `ControllerControlsSource` gate, whose
-/// `controller == installer` re-check would make it lapse EARLY on a source
-/// control swap — rules-wrong for the presence sub-class.
+/// The three host wordings are NOT interchangeable here, and this stamp now
+/// matches only one of them. `ReplacementCondition::ControllerControlsSource`
+/// ends on a control change; that is the printed end of
+/// `Duration::WhileControllingHost` and of nothing else. The presence reading
+/// (`Duration::WhileHostOnBattlefield`) and the event deadline
+/// (`Duration::UntilHostLeavesPlay`) both survive a control change while their
+/// source stays on the battlefield, so gating them here would END THEM EARLY —
+/// a window shorter than printed, which CR 611.2a forbids exactly as much as a
+/// longer one.
 ///
-/// This is left as a documented strict-failure gap rather than silently
-/// distinguished: making the two phrasings carry distinct durations (so the
-/// stamp could tell them apart) was rejected because "remains on the
-/// battlefield" → `UntilHostLeavesPlay` is relied on by several shipped card
-/// classes (Saga goaded tokens, Stern Mentor-style "loses all abilities",
-/// gain-control + lose-abilities, +1/+1 grants) that depend on the
-/// leave-play prune path (layers.rs); re-routing the presence arm to a
-/// presence-bound `ForAsLongAs { IsPresent }` would change the prune semantics
-/// for all of them. No real card currently combines the presence phrasing with
-/// a bare untap-prevention rider, so this gate stays keyed on
-/// `UntilHostLeavesPlay` (correct for Spider-Woman / Secret Agent) and the
-/// presence sub-class waits here until either a distinguishing signal is
-/// threaded through `ResolvedAbility` or a card forces the distinction.
+/// Those two therefore classify as `Unsupported` in `expiry_from_duration` and
+/// never reach this stamp. That is a refusal, not a silent drop: the parser's
+/// post-lowering honesty net demotes such a line to `Effect::Unimplemented`
+/// (`parser::oracle::demote_unenforceable_replacement_lifetimes`), and the
+/// install seam raises a hard `EffectError` if one arrives anyway. Reachability
+/// is measured, not assumed: all three wordings DO lower to this replacement
+/// path from ordinary Oracle text (`can't become untapped for as long as ~
+/// remains on the battlefield` / `until ~ leaves the battlefield`), so the
+/// corpus being free of them today is an accident of printing, not a guard.
+///
+/// The duration axis is consumed from `expiry_from_duration` — the same
+/// authority the install seam's `GateControlled` arm answers to — and the form
+/// axis from `host_gate_enforceable`, shared with that arm's fail-closed
+/// check. Neither the duration set nor the form predicate exists twice, so a
+/// future duration routed to `GateControlled` reaches this stamp and the
+/// fail-closed guard in the same breath.
 fn stamp_for_as_long_as_controlled_gate(
     replacement: &mut ReplacementDefinition,
     ability: &ResolvedAbility,
 ) {
-    let is_bare_untap_prevention = replacement.event == ReplacementEvent::Untap
-        && replacement.execute.is_none()
-        && replacement.condition.is_none();
-    if is_bare_untap_prevention && matches!(ability.duration, Some(Duration::UntilHostLeavesPlay)) {
+    if host_gate_enforceable(replacement)
+        && matches!(
+            expiry_from_duration(ability.duration.as_ref()),
+            ReplacementDurationExpiry::GateControlled
+        )
+    {
         replacement.condition = Some(ReplacementCondition::ControllerControlsSource {
             source: ability.source_id,
             controller: ability.controller,
         });
     }
+}
+
+/// Whether `stamp_for_as_long_as_controlled_gate` can enforce a host-bound
+/// duration on this replacement's FORM: the bare untap-prevention rider (event
+/// `Untap`, no `execute`, no pre-existing condition). Shared by the stamp and
+/// by `replacement_with_ability_expiry`'s `GateControlled` fail-closed arm, so
+/// a shape the stamp skips can never be installed as if it were gated. The
+/// duration axis is deliberately NOT part of this predicate — it lives in
+/// `expiry_from_duration`, which both consumers also share.
+fn host_gate_enforceable(replacement: &ReplacementDefinition) -> bool {
+    replacement.event == ReplacementEvent::Untap
+        && replacement.execute.is_none()
+        && replacement.condition.is_none()
 }
 
 /// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
@@ -398,9 +550,7 @@ pub fn resolve(
     // Slaughter's "If a source you control would deal damage this turn,
     // it deals that much damage plus 1 instead.").
     if matches!(target, TargetFilter::None) {
-        let Some(mut replacement) = replacement_with_ability_expiry(replacement, ability) else {
-            return Ok(());
-        };
+        let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
         state.pending_damage_replacements.push(replacement);
         attached += 1;
@@ -408,11 +558,7 @@ pub fn resolve(
         for resolved_target in replacement_targets(state, ability, target) {
             match resolved_target {
                 TargetRef::Object(obj_id) => {
-                    let Some(mut replacement) =
-                        replacement_with_ability_expiry(replacement, ability)
-                    else {
-                        continue;
-                    };
+                    let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
                     replacement.fix_legacy_parse_time_consumed_flag();
                     // CR 611.2b: A "for as long as you control [source]" gated
                     // replacement is a continuous effect that must survive every
@@ -471,11 +617,7 @@ pub fn resolve(
                     }
                 }
                 TargetRef::Player(player) => {
-                    let Some(mut replacement) =
-                        replacement_with_ability_expiry(replacement, ability)
-                    else {
-                        continue;
-                    };
+                    let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
                     if matches!(
                         replacement.event,
                         crate::types::replacements::ReplacementEvent::DamageDone
@@ -805,6 +947,15 @@ mod tests {
             .any(|replacement| replacement.event == ReplacementEvent::Moved));
     }
 
+    /// CR 611.2a: a stated duration this seam cannot represent must not be
+    /// shortened to the end-of-turn fallback — and the refusal must be LOUD.
+    ///
+    /// The `expect_err` is the second half of the pin: an `unwrap()` here would
+    /// pass again the moment the seam goes back to a successful no-op, which is
+    /// exactly how the previous revision reported an unenforceable lifetime as
+    /// applied. Sibling of
+    /// `game::effects::tap_untap::tests::host_duration_on_non_untap_replacement_fails_closed`,
+    /// which covers the host-bound wordings on all three call sites.
     #[test]
     fn stated_unrepresentable_duration_does_not_install_a_shield() {
         use crate::types::ability::{Effect, PreventionAmount};
@@ -840,7 +991,10 @@ mod tests {
             player: crate::types::ability::PlayerScope::Controller,
         });
 
-        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        resolve(&mut state, &ability, &mut Vec::new()).expect_err(
+            "CR 611.2a: an unrepresentable stated duration must FAIL the resolution, \
+             not succeed with no effect",
+        );
 
         assert!(
             state.objects[&target].replacement_definitions.is_empty(),

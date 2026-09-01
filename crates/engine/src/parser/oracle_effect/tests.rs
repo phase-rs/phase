@@ -7604,7 +7604,7 @@ fn opportunistic_dragon_loses_all_abilities_sibling_preserved() {
                 for modification in &static_def.modifications {
                     match modification {
                         ContinuousModification::RemoveAllAbilities
-                            if ability.duration == Some(Duration::UntilHostLeavesPlay) =>
+                            if ability.duration == Some(Duration::WhileHostOnBattlefield) =>
                         {
                             remove_all_abilities_with_host_duration = true;
                         }
@@ -7628,7 +7628,7 @@ fn opportunistic_dragon_loses_all_abilities_sibling_preserved() {
     assert!(has_gain_control, "expected GainControl in chain: {def:#?}");
     assert!(
             remove_all_abilities_with_host_duration,
-            "expected RemoveAllAbilities GenericEffect with UntilHostLeavesPlay (middle sibling dropped?): {def:#?}"
+            "expected RemoveAllAbilities GenericEffect with WhileHostOnBattlefield (middle sibling dropped?): {def:#?}"
         );
     assert!(
         has_cant_attack && has_cant_block,
@@ -28901,19 +28901,24 @@ fn for_as_long_as_remains_tapped() {
     );
 }
 
+/// CR 611.2b: the clause stripper keeps the host-lifetime wordings apart,
+/// because they end at different moments — continued control ends on a control
+/// change (CR 611.2b's own Master Thief example), continued presence does not,
+/// and both end on a phase-out (CR 702.26f) while the "until ~ leaves the
+/// battlefield" event deadline does not (CR 702.26d).
 #[test]
-fn for_as_long_as_you_control_maps_to_until_host_leaves() {
+fn for_as_long_as_you_control_is_the_control_bound_duration() {
     let (rest, dur) =
         strip_trailing_duration("target creature gets +2/+2 for as long as you control ~");
     assert_eq!(rest, "target creature gets +2/+2");
-    assert_eq!(dur, Some(Duration::UntilHostLeavesPlay));
+    assert_eq!(dur, Some(Duration::WhileControllingHost));
 }
 
 #[test]
-fn for_as_long_as_remains_on_battlefield_maps_to_until_host_leaves() {
+fn for_as_long_as_remains_on_battlefield_is_the_presence_bound_duration() {
     let (_, dur) =
         strip_trailing_duration("target gets +1/+1 for as long as ~ remains on the battlefield");
-    assert_eq!(dur, Some(Duration::UntilHostLeavesPlay));
+    assert_eq!(dur, Some(Duration::WhileHostOnBattlefield));
 }
 
 #[test]

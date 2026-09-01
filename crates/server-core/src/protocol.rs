@@ -2630,8 +2630,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_50_for_format_copy_limit_and_active_pack_count() {
-        assert_eq!(PROTOCOL_VERSION, 50);
+    fn protocol_version_is_51_for_typed_casting_permission_lifetimes() {
+        assert_eq!(PROTOCOL_VERSION, 51);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no

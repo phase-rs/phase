@@ -419,6 +419,8 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
+            // CR 611.2a: no duration, so no host to bind to.
+            source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
@@ -1268,6 +1270,7 @@ mod tests {
             source
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,

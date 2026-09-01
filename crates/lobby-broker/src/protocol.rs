@@ -43,6 +43,18 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 51 — Casting permissions gained a typed lifetime. Two parts:
+///      (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration` and
+///      `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+///      `duration` it already carried. `source_id` is the granting permanent
+///      that bounds a host-lifetime duration — additive behind serde defaults.
+///      (b) `Duration` gained the `WhileControllingHost` ("for as long as you
+///      control ~") and `WhileHostOnBattlefield` ("for as long as ~ remains on
+///      the battlefield") variants (CR 611.2b). Each new tag is a ONE-WAY
+///      parse break like entry 46: a v50 peer cannot deserialize a `GameState`
+///      containing it, and no serde default can rescue an unknown variant, so
+///      the full-game handshake must refuse the pairing. Lobby messages are
+///      unchanged.
 /// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
 ///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
 ///      `max_deck_copies` and the deck-compatibility admission path now both
@@ -221,7 +233,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 50;
+pub const PROTOCOL_VERSION: u32 = 51;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -684,12 +696,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 50);
+        assert_eq!(PROTOCOL_VERSION, 51);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 49);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 50);
     }
 
     #[test]

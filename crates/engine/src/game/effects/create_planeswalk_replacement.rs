@@ -57,11 +57,18 @@ pub fn resolve(
     // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
     match crate::game::effects::add_target_replacement::expiry_from_duration(
         ability.duration.as_ref(),
-        ability.controller,
     ) {
         crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Explicit(
             expiry,
         ) => shield.expiry = Some(expiry),
+        // CR 611.2a: the controller-scoped class, named here rather than
+        // re-derived — this resolver's own comment above ("Duration::
+        // UntilNextTurnOf { Controller }") is exactly this arm.
+        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::ExplicitControllerNextTurn => {
+            shield.expiry = Some(crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
+                player: ability.controller,
+            });
+        }
         crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unstated => {}
         crate::game::effects::add_target_replacement::ReplacementDurationExpiry::GateControlled
         | crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unsupported => {

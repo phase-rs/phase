@@ -39,6 +39,7 @@ fn graveyard_split_card_cast_offers_face_choice_for_affordable_half() {
         let obj = runner.state_mut().objects.get_mut(&life).unwrap();
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: obj.mana_cost.clone(),
                 cast_transformed: false,
@@ -94,6 +95,7 @@ fn exiled_split_card_free_cast_permission_stays_free_after_face_choice() {
         let obj = runner.state_mut().objects.get_mut(&life).unwrap();
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,

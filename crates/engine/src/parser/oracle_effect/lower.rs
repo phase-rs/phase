@@ -2109,6 +2109,91 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2c + CR 701.9a + CR 701.21a: Rebind the parser's generic bare-pronoun
+/// default (`TargetFilter::ParentTarget` — no chosen target and no clearer
+/// antecedent reached the clause parser, per `resolve_pronoun_target`'s
+/// fallthrough arm) to the moved object (`TargetFilter::LastZoneChanged`) in a
+/// sub-ability gated by a discard/sacrifice-this-way reflexive condition
+/// (`AbilityCondition::ZoneChangedThisWay { destination: None, .. }`) whose
+/// PARENT effect is the `Discard`/`Sacrifice` that created the reflexive gate.
+///
+/// Neither `Effect::Discard.target` (the ACTING PLAYER) nor
+/// `Effect::Sacrifice.target` (the ELIGIBILITY filter for what may be
+/// sacrificed) names the specific card/permanent that actually moved — that
+/// object is known only once the move resolves
+/// (`state.last_zone_changed_ids`). This is why the sibling battlefield-entry
+/// "this way" class (`fold_enters_this_way_counter_rider`,
+/// `destination: Some(Zone::Battlefield)`) stays on `TargetFilter::ParentTarget`
+/// for its own gated riders: "you put an artifact onto the battlefield this
+/// way" IS itself the parent effect's declared target (Oviya, Automech
+/// Artisan's "put an artifact card from your hand onto the battlefield"
+/// already names that artifact), so a bare pronoun in ITS gated body correctly
+/// resolves to `ParentTarget` — there is no equivalent declared target for a
+/// discard/sacrifice parent, so the SAME parser default is wrong here and must
+/// be corrected.
+///
+/// MUST run before `oracle_trigger::lower_trigger_ir`'s later
+/// `lift_parent_target_to_triggering_source_in_ability` pass, which — for
+/// event-source-bearing trigger modes including `TriggerMode::ChangesZone`
+/// (self-ETB triggers) — blindly rewrites any remaining top-level
+/// `ParentTarget` on a `ChangeZone`/`Sacrifice`/`CopyTokenOf` effect to
+/// `TriggeringSource` (correct for a *direct* "whenever you discard a card,
+/// exile it" trigger, where `ParentTarget` names the discarded card, but wrong
+/// here: it would rebind to the ETB SOURCE — Silvan Reveler itself, already on
+/// the battlefield — not the discarded card several sub-abilities deep). This
+/// pass runs during `assemble_effect_chain` (`oracle_effect::lower_effect_chain_ir`
+/// → `oracle_effect::assembly::assemble_effect_chain`), which
+/// `lower_trigger_effect_chain` calls to build `execute` BEFORE
+/// `lower_trigger_ir` applies that later lift — so once this pass has already
+/// rebound the target to `LastZoneChanged`, the later pass's own
+/// `matches!(target, TargetFilter::ParentTarget)` guard no longer matches and
+/// leaves it alone.
+///
+/// Runs as a POST-HOC rewrite over the fully assembled ability tree —
+/// mirroring the sibling `rebind_triggering_source_to_parent_target`
+/// (`oracle_effect/mod.rs`, gated on a self-referential disjunctive delayed
+/// trigger) — rather than as parse-time `ParseContext::object_pronoun_ref`
+/// threading, since the clause dispatcher's many candidate-recognizer paths
+/// do not reliably carry a per-chunk context pin this deep (each candidate
+/// may re-derive its own target parse via the context-free `parse_target`
+/// wrapper). Walking parent/child adjacency on the assembled tree is exact
+/// regardless of which internal recognizer produced the child's effect.
+///
+/// Silvan Reveler (issue #8122): "When this creature enters, draw a card,
+/// then discard a card. If you discard a land card this way, put it from
+/// your graveyard onto the battlefield tapped." Without this rewrite, "it"
+/// resolves to `TriggeringSource` (Silvan Reveler itself, already on the
+/// battlefield), so the land never leaves the graveyard.
+pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut AbilityDefinition) {
+    let parent_is_discard_or_sacrifice = matches!(
+        *def.effect,
+        Effect::Discard { .. } | Effect::Sacrifice { .. }
+    );
+    if parent_is_discard_or_sacrifice {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if matches!(
+                sub.condition,
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    destination: None,
+                    ..
+                })
+            ) {
+                if let Effect::ChangeZone { target, .. } = sub.effect.as_mut() {
+                    if *target == TargetFilter::ParentTarget {
+                        *target = TargetFilter::LastZoneChanged;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_zone_changed_this_way_pronoun_to_moved_object(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        rebind_zone_changed_this_way_pronoun_to_moved_object(els);
+    }
+}
+
 /// CR 603.7a + CR 608.2c + CR 702.170c: fold the "If you do, ..." continuation
 /// of an "exile [the resolving spell] instead of putting it into [a/your]
 /// graveyard as it resolves" clause into the carrier effect's typed `on_exile`
