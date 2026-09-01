@@ -131,12 +131,20 @@ jobs:
       # the default and scale-out shapes.
       - name: helm template (logging enabled)
         run: |
+          # The security-relevant mount is the *combination* of subPath and
+          # read-only, not either alone: a generic `readOnly` grep can match
+          # an unrelated mount (the ConfigMap's is read-only too) and would
+          # stay green even if `readOnly: true` were dropped from this one,
+          # granting the sidecar write access to the logs subtree. Match the
+          # exact contiguous block instead of two independent greps.
+          data_mount_ro='- name: data\n\s+mountPath: /var/lib/phase-server/logs\n\s+subPath: logs\n\s+readOnly: true'
+
           helm template phase-server deploy/helm/phase-server \
             --namespace phase --set logging.enabled=true > /tmp/logging-default.yaml
           grep -q 'kind: ConfigMap' /tmp/logging-default.yaml
           grep -q 'name: PHASE_LOG_DIR' /tmp/logging-default.yaml
           grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-default.yaml
-          grep -q 'subPath: logs$' /tmp/logging-default.yaml
+          grep -Pzoq -- "$data_mount_ro" /tmp/logging-default.yaml
           # Only the entry Service in the default (non-scale-out) shape.
           test "$(grep -c 'targetPort: logs' /tmp/logging-default.yaml)" -eq 1
 
@@ -149,7 +157,7 @@ jobs:
           grep -q 'kind: ConfigMap' /tmp/logging-scaleout.yaml
           grep -q 'name: PHASE_LOG_DIR' /tmp/logging-scaleout.yaml
           grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-scaleout.yaml
-          grep -q 'subPath: logs$' /tmp/logging-scaleout.yaml
+          grep -Pzoq -- "$data_mount_ro" /tmp/logging-scaleout.yaml
           # Entry + headless + one per ordinal, at scaleOut.replicaMax 3 above.
           test "$(grep -c 'targetPort: logs' /tmp/logging-scaleout.yaml)" -eq 5
 
@@ -177,6 +185,18 @@ jobs:
             echo "expected the render to fail for a logging.dir containing '..'"; exit 1
           fi
           grep -q 'traversal-free descendant' /tmp/logging-traversal.err
+
+          # A trailing `.` string-prefix-matches PHASE_DATA_DIR just like the
+          # empty-subPath case above, and kubelet's subPath join treats a
+          # bare `.` segment as the volume root too -- reproducing the same
+          # exposure under a different disguise.
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/. \
+               > /tmp/logging-dot.yaml 2>/tmp/logging-dot.err; then
+            echo "expected the render to fail for logging.dir=/var/lib/phase-server/."; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-dot.err
 
       # `scaleOut.scheme` names the URL each ordinal advertises, and the client
       # turns that string into the "CODE@host" share link a friend dials. Every

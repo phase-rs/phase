@@ -125,17 +125,20 @@ traefik.ingress.kubernetes.io/router.tls.options: {{ include "phase-server.crdRe
      Must be a STRICT, traversal-free descendant, not the PVC root itself:
      `logging.dir: /var/lib/phase-server/` string-prefix-matches but trims to
      an empty subPath, which mounts the *entire* volume — games.db and its
-     WAL included — into the read-only autoindexed sidecar. A `..` segment
-     is rejected for the same reason (the check below is a string prefix,
-     not a filesystem walk, so `/var/lib/phase-server/../etc` would
-     otherwise also match). */}}
+     WAL included — into the read-only autoindexed sidecar. A `.` or `..`
+     path segment is rejected for the same reason: the check below is a
+     string prefix, not a filesystem walk, so `/var/lib/phase-server/../etc`
+     would otherwise also match, and kubelet's subPath join treats a bare
+     `.` segment as the volume root too (`logging.dir:
+     /var/lib/phase-server/.` trims to subPath `"."`, exactly as exposed as
+     the empty-subPath case this guard exists for). */}}
 {{- define "phase-server.logSubPath" -}}
 {{- $prefix := "/var/lib/phase-server/" -}}
 {{- if not (hasPrefix $prefix .Values.logging.dir) -}}
 {{- fail (printf "logging.dir %q must be a subdirectory of %s (the data PVC mount point) so the logs sidecar can mount it from the same volume." .Values.logging.dir $prefix) -}}
 {{- end -}}
 {{- $sub := trimPrefix $prefix .Values.logging.dir -}}
-{{- if or (eq $sub "") (regexMatch "(^|/)\\.\\.($|/)" $sub) -}}
+{{- if or (eq $sub "") (regexMatch "(^|/)\\.{1,2}($|/)" $sub) -}}
 {{- fail (printf "logging.dir %q must be a strict, traversal-free descendant of %s -- the PVC root itself (or a path containing '..') would mount the whole data volume, games.db included, into the read-only autoindexed logs sidecar, not just logs." .Values.logging.dir $prefix) -}}
 {{- end -}}
 {{- $sub -}}
