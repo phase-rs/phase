@@ -628,7 +628,24 @@ impl TriggerCollectionSession {
         );
     }
 
-    fn record_match(&mut self, state: &mut GameState, matched: &MatchedTrigger, event: &GameEvent) {
+    /// Atomically admits one already-matched trigger candidate to collection.
+    ///
+    /// Candidate discovery deliberately performs its normal fire-time checks
+    /// before fanout. A single event can then expand into multiple candidates,
+    /// so ledger-backed limits must be checked again against the current
+    /// staged/live state immediately before their recording operation. This is
+    /// the boundary that prevents a rejected sibling from leaving either a
+    /// ledger edit or a transactional journal operation behind.
+    fn record_match(
+        &mut self,
+        state: &mut GameState,
+        matched: &MatchedTrigger,
+        event: &GameEvent,
+    ) -> bool {
+        if !matched_trigger_constraint_allows_admission(state, matched, event) {
+            return false;
+        }
+
         let _ = self.apply(
             state,
             TriggerCollectionOperation::RecordTriggerFired {
@@ -640,10 +657,10 @@ impl TriggerCollectionSession {
         );
 
         if !matched.batched || !batched_zone_change_batch(&matched.trigger_events) {
-            return;
+            return true;
         }
         let Some(definition_ref) = matched.definition_ref.clone() else {
-            return;
+            return true;
         };
         let turn_zone_change_keys = matched
             .trigger_events
@@ -662,6 +679,7 @@ impl TriggerCollectionSession {
                 turn_zone_change_keys,
             },
         );
+        true
     }
 
     fn mark_speed_trigger_used(&mut self, state: &mut GameState, player: PlayerId) {
@@ -4181,11 +4199,13 @@ fn collect_pending_triggers_with_collection(
             };
 
             for matched in matched_triggers {
+                if !session.record_match(state, &matched, event) {
+                    continue;
+                }
                 #[cfg(debug_assertions)]
                 if audit_trigger_index {
                     production_matched.insert((obj_id, matched.trig_idx));
                 }
-                session.record_match(state, &matched, event);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -4676,7 +4696,9 @@ fn collect_pending_triggers_with_collection(
                 };
             if !matched_triggers.is_empty() {
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
@@ -4721,7 +4743,9 @@ fn collect_pending_triggers_with_collection(
                     )
                 };
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((*exploiter, matched.trig_idx));
                     }
@@ -4847,7 +4871,9 @@ fn collect_pending_triggers_with_collection(
                     }
                 }
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -4904,7 +4930,9 @@ fn collect_pending_triggers_with_collection(
                 };
 
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
@@ -12931,6 +12959,64 @@ fn check_trigger_constraint_with_ref(
                 .unwrap_or(0)
                 < *max
         }),
+    }
+}
+
+/// Re-checks the constraints whose fire-time truth is changed by recording an
+/// earlier candidate from the same collection pass.
+///
+/// All other constraints remain exclusively in the normal pre-fanout check.
+/// This intentionally consumes the constraint and source identity already
+/// retained by `MatchedTrigger`, rather than rediscovering a live definition
+/// after a zone change.
+fn matched_trigger_constraint_allows_admission(
+    state: &GameState,
+    matched: &MatchedTrigger,
+    event: &GameEvent,
+) -> bool {
+    use crate::types::ability::TriggerConstraint;
+
+    match matched.constraint.as_ref() {
+        Some(TriggerConstraint::OncePerTurn) => matched
+            .definition_ref
+            .as_ref()
+            .is_none_or(|key| !state.triggers_fired_this_turn.contains(key)),
+        Some(TriggerConstraint::OncePerGame) => matched
+            .definition_ref
+            .as_ref()
+            .is_none_or(|key| !state.triggers_fired_this_game.contains(key)),
+        Some(TriggerConstraint::OncePerOpponentPerTurn) => {
+            let GameEvent::LifeChanged { player_id, .. } = event else {
+                return false;
+            };
+            *player_id != matched.pending.controller
+                && state.active_player == *player_id
+                && matched.definition_ref.as_ref().is_none_or(|key| {
+                    !state
+                        .triggers_fired_this_turn_per_opponent
+                        .contains(&(key.clone(), *player_id))
+                })
+        }
+        Some(TriggerConstraint::MaxTimesPerTurn { max }) => {
+            matched.definition_ref.as_ref().is_none_or(|key| {
+                state
+                    .trigger_fire_counts_this_turn
+                    .get(key)
+                    .copied()
+                    .unwrap_or(0)
+                    < *max
+            })
+        }
+        Some(
+            TriggerConstraint::OnlyDuringYourTurn
+            | TriggerConstraint::OnlyDuringOpponentsTurn
+            | TriggerConstraint::OnlyDuringYourMainPhase
+            | TriggerConstraint::NthSpellThisTurn { .. }
+            | TriggerConstraint::NthDrawThisTurn { .. }
+            | TriggerConstraint::EventSourceControlledBy { .. }
+            | TriggerConstraint::AtClassLevel { .. },
+        )
+        | None => true,
     }
 }
 
@@ -24612,6 +24698,491 @@ pub mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::CombatDamageDealtToPlayer { .. })),
             "the aggregate must be consumed so a re-scan cannot fire the trigger twice"
+        );
+    }
+
+    fn install_ledger_limited_combat_damage_trigger(
+        state: &mut GameState,
+        constraint: TriggerConstraint,
+    ) -> (ObjectId, GameEvent) {
+        let controller = PlayerId(0);
+        let defender = PlayerId(1);
+        let source = make_creature(state, controller, "Ledger watcher", 1, 1);
+        let attacker_a = make_creature(state, controller, "Ledger attacker A", 2, 2);
+        let attacker_b = make_creature(state, controller, "Ledger attacker B", 2, 2);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.constraint = Some(constraint);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+
+        (
+            source,
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: defender,
+                source_amounts: vec![(attacker_a, 2), (attacker_b, 2)],
+                total_damage: 4,
+            },
+        )
+    }
+
+    fn collect_transactional_trigger_candidates(
+        state: &mut GameState,
+        events: &[GameEvent],
+    ) -> (Vec<PendingTriggerContext>, Vec<TriggerCollectionOperation>) {
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let pending = collect_pending_triggers_with_collection(
+            state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        );
+        (pending, session.into_operation_journal())
+    }
+
+    fn assert_single_transactional_ledger_record(
+        journal: &[TriggerCollectionOperation],
+        pending: &[PendingTriggerContext],
+    ) {
+        assert_eq!(
+            pending.len(),
+            1,
+            "two qualifying candidates must admit exactly one pending trigger"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate must not append a second ledger journal record"
+        );
+        assert!(
+            !journal.iter().any(|operation| {
+                matches!(
+                    operation,
+                    TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                )
+            }),
+            "the rejected candidate must not append a batched-zone journal record"
+        );
+    }
+
+    #[test]
+    fn transactional_admission_rejection_leaves_no_local_or_batched_side_effect() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = make_creature(&mut state, controller, "Batched ledger watcher", 1, 1);
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        {
+            let source_object = state.objects.get_mut(&source).expect("source exists");
+            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+            source_object.materialize_base_trigger_definitions();
+        }
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let definition_ref = state.objects[&source].trigger_definition_ref(
+            state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("materialized trigger exists"),
+        );
+        let event = GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(state.objects[&source].snapshot_for_zone_change(
+                source,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            controller,
+        );
+        ability.set_trigger_source_recursive(source_context);
+        let matched = MatchedTrigger {
+            trig_idx: 0,
+            definition_ref: Some(definition_ref),
+            pending: PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability: Box::new(ability),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(event.clone()),
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            trigger_events: vec![event.clone()],
+            batched: true,
+            constraint: Some(TriggerConstraint::OncePerTurn),
+        };
+        let before = state.clone();
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let mut batched_this_pass = std::collections::HashSet::new();
+        let mut pending = Vec::new();
+
+        for _ in 0..2 {
+            if !session.record_match(&mut state, &matched, &event) {
+                continue;
+            }
+            batched_this_pass.insert((source, matched.trig_idx));
+            pending.push(PendingTriggerContext::batched(
+                matched.pending.clone(),
+                matched.trigger_events.clone(),
+            ));
+        }
+        let journal = session.into_operation_journal();
+
+        assert_eq!(
+            pending.len(),
+            1,
+            "the rejected candidate never becomes pending"
+        );
+        assert_eq!(
+            batched_this_pass.len(),
+            1,
+            "the rejected candidate never reaches local batch dedup bookkeeping"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no trigger-fired journal operation"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no batched-zone journal operation"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn, state.triggers_fired_this_turn,
+            "the retained journal replays the one admitted batched ledger edit cleanly"
+        );
+        assert_eq!(
+            replay.batched_zone_change_trigger_fired, state.batched_zone_change_trigger_fired,
+            "the retained journal replays the one admitted batched-zone edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_per_opponent_admission_rechecks_already_matched_candidates() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+        let source = make_creature(&mut state, controller, "Opponent ledger watcher", 1, 1);
+        let mut trigger = TriggerDefinition::new(TriggerMode::LifeLost);
+        trigger.constraint = Some(TriggerConstraint::OncePerOpponentPerTurn);
+        {
+            let source_object = state.objects.get_mut(&source).expect("source exists");
+            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+            source_object.materialize_base_trigger_definitions();
+        }
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let definition_ref = state.objects[&source].trigger_definition_ref(
+            state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("materialized trigger exists"),
+        );
+        let event = GameEvent::LifeChanged {
+            player_id: opponent,
+            amount: -1,
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            controller,
+        );
+        ability.set_trigger_source_recursive(source_context);
+        let matched = MatchedTrigger {
+            trig_idx: 0,
+            definition_ref: Some(definition_ref),
+            pending: PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability: Box::new(ability),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(event.clone()),
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            trigger_events: vec![event.clone()],
+            batched: false,
+            constraint: Some(TriggerConstraint::OncePerOpponentPerTurn),
+        };
+        let before = state.clone();
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let mut pending = Vec::new();
+        let mut local_admissions = 0;
+        let mut batched_this_pass = std::collections::HashSet::new();
+
+        for candidate_event in [event.clone(), event] {
+            if !session.record_match(&mut state, &matched, &candidate_event) {
+                continue;
+            }
+            local_admissions += 1;
+            if matched.batched {
+                batched_this_pass.insert((source, matched.trig_idx));
+            }
+            pending.push(PendingTriggerContext::batched(
+                matched.pending.clone(),
+                matched.trigger_events.clone(),
+            ));
+        }
+        let journal = session.into_operation_journal();
+
+        assert_eq!(
+            local_admissions, 1,
+            "only the first matched candidate is admitted"
+        );
+        assert_eq!(
+            pending.len(),
+            1,
+            "the rejected candidate never becomes pending"
+        );
+        assert!(
+            batched_this_pass.is_empty(),
+            "the rejected non-batched candidate never mutates batch bookkeeping"
+        );
+        assert_eq!(
+            state.triggers_fired_this_turn_per_opponent.len(),
+            1,
+            "the second already-matched candidate cannot mutate the per-opponent ledger"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no trigger-fired journal operation"
+        );
+        assert!(
+            !journal.iter().any(|operation| {
+                matches!(
+                    operation,
+                    TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                )
+            }),
+            "the rejected candidate appends no batched-zone journal operation"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn_per_opponent,
+            state.triggers_fired_this_turn_per_opponent,
+            "the retained journal replays the one admitted per-opponent edit cleanly"
+        );
+    }
+
+    /// The admission boundary runs after a single aggregate combat-damage event
+    /// has expanded into two candidate `DamageDealt` contexts. Its first
+    /// successful record updates the staged ledger, so the second must be
+    /// rejected without becoming pending or entering the retained journal.
+    #[test]
+    fn transactional_once_per_turn_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (_, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::OncePerTurn,
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert!(matches!(
+            pending[0].trigger_events.as_slice(),
+            [GameEvent::DamageDealt { .. }]
+        ));
+        assert_eq!(
+            state.triggers_fired_this_turn.len(),
+            1,
+            "the second expanded candidate must not mutate the once-per-turn ledger"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn, state.triggers_fired_this_turn,
+            "the retained transactional journal replays the admitted ledger edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_once_per_game_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (_, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::OncePerGame,
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert_eq!(
+            state.triggers_fired_this_game.len(),
+            1,
+            "the second expanded candidate must not mutate the once-per-game ledger"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_game, state.triggers_fired_this_game,
+            "the retained transactional journal replays the admitted ledger edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_max_times_per_turn_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (source, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::MaxTimesPerTurn { max: 1 },
+        );
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let trigger = &state.objects[&source]
+            .trigger_definitions
+            .iter_all()
+            .next()
+            .expect("materialized trigger exists")
+            .definition;
+        let expanded = crate::game::trigger_matchers::matching_damage_done_events(
+            &event,
+            trigger,
+            &source_context,
+            &state,
+        );
+        assert_eq!(
+            expanded.len(),
+            2,
+            "one aggregate combat-damage event must fan out into two synthetic DamageDealt contexts before admission"
+        );
+        assert!(
+            expanded
+                .iter()
+                .all(|event| matches!(event, GameEvent::DamageDealt { .. })),
+            "the aggregate fanout must produce only synthetic DamageDealt contexts"
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert!(matches!(
+            pending[0].trigger_events.as_slice(),
+            [GameEvent::DamageDealt { .. }]
+        ));
+        assert_eq!(
+            state
+                .trigger_fire_counts_this_turn
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1],
+            "one aggregate combat-damage event expands to two candidates but records only one max-times firing"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.trigger_fire_counts_this_turn, state.trigger_fire_counts_this_turn,
+            "the retained transactional journal replays the admitted max-times edit cleanly"
         );
     }
 
