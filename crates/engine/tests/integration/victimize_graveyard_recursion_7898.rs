@@ -35,7 +35,33 @@
 //!
 //! V2 also happens to drive the interactive path, but asserts ONLY the sacrifice
 //! half (fodder to the graveyard, spare untouched) — it does not cover the rider.
-//! See the V10-V13 block comment below for the measured path-coverage table.
+//!
+//! MEASURED PATH-COVERAGE TABLE (battlefield creature count decides the path:
+//! 0 = no eligible pool, 1 = mandatory AUTO, 2+ = interactive EffectZoneChoice):
+//!
+//! | # | test | bf | path | what it pins |
+//! |---|------|----|------|--------------|
+//! | V1 | `sacrifices_fodder_and_returns_both_chosen_cards_tapped` | 1 | auto | headline: fodder sacrificed, both chosen return tapped |
+//! | V2 | `sacrifices_exactly_one_creature` | 2 | interactive | sacrifice half only (count discipline); NOT the rider |
+//! | V3 | `returned_cards_are_controlled_by_caster` | 1 | auto | returned cards are controlled by the caster |
+//! | V4 | `resolution_completes_without_dangling_prompt` | 1 | auto | terminal `WaitingFor::Priority` |
+//! | V5 | `sacrifice_pool_is_battlefield_not_graveyard` | 1 | auto | CR 701.21a pool origin (the headline defect) |
+//! | V6 | `rider_suppressed_when_no_creature_to_sacrifice` | 0 | none | CR 609.3 rider suppression — the ONLY honest suppression fixture |
+//! | V6-pair | `rider_fires_when_sacrifice_happens` | 1 | auto | positive twin making V6 non-vacuous |
+//! | V7 | `returns_exactly_the_two_chosen_cards_by_identity` | 1 | auto | bidirectional ObjectId identity |
+//! | V8 | `returned_cards_enter_tapped` | 1 | auto | CR 608.2c tapped rider |
+//! | V9 | `stale_chosen_card_is_dropped_without_substitution` | 1 | auto | CR 400.7 stale target, no substitution |
+//! | V10 | `interactive_path_sacrifices_fodder_and_returns_both_chosen_cards_tapped` | 2 | interactive | headline repeated on the interactive seam |
+//! | V11 | `interactive_path_returns_exactly_the_two_chosen_cards_by_identity` | 2 | interactive | identity discrimination on the interactive seam |
+//! | V12 | `interactive_path_rejects_empty_mandatory_sacrifice_selection` | 2 | interactive | submits an EMPTY `SelectCards` DIRECTLY via `act()`; asserts the reducer REJECTS it (CR 701.21a + CR 609.3), the prompt survives intact, then answers legally and drives to `Priority` with the rider fired |
+//! | V13 | `interactive_path_real_selection_fires_rider` | 2 | interactive | positive counterweight to V6's suppression negative |
+//!
+//! V12 deliberately does NOT use the `.effect_zone(&[])` builder: the shared
+//! driver short-circuits its `EffectZoneChoice` arm on
+//! `if effect_zone_cards.is_empty() { break; }`, so an empty declared policy
+//! never emits a `SelectCards` action and merely parks on a stalled,
+//! half-resolved state. Only `runner.act(..)` reaches the reducer, which is what
+//! makes the rejection assertion real rather than vacuous.
 //!
 //! CR 400.7 (V9): an object that changes zones becomes a NEW object with no
 //! relation to its previous existence, so a chosen card that leaves the
@@ -43,6 +69,9 @@
 //! in its place.
 
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::EngineError;
+use engine::types::ability::EffectKind;
+use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -501,11 +530,18 @@ fn victimize_stale_chosen_card_is_dropped_without_substitution() {
 //     evaluates; the flag must instead be seeded at the sacrifice-completion
 //     seam once the choice is answered.
 //
-// Every V1-V9 test above stages exactly ONE battlefield creature and therefore
-// only ever exercised the AUTO path. V2 is the sole exception (it stages two)
-// and asserts ONLY the sacrifice half, never the rider — so the rider on the
-// interactive path was entirely uncovered. These tests close that gap; each one
-// stages 2+ battlefield creatures to force `EffectZoneChoice`.
+// Every V1-V9 test above stages exactly ONE battlefield creature (V6 stages
+// none) and therefore only ever exercised the AUTO path. V2 is the sole
+// exception (it stages two) and asserts ONLY the sacrifice half, never the
+// rider — so the rider on the interactive path was entirely uncovered. These
+// tests close that gap; each one stages 2+ battlefield creatures to force
+// `EffectZoneChoice`.
+//
+// V10/V11/V13 answer that prompt through the `.effect_zone(&[..])` builder.
+// V12 instead drives the prompt RAW (`commit()` + `advance_until_stack_empty()`
+// + `runner.act(..)`) because the builder cannot express an empty submission:
+// the driver breaks out of its `EffectZoneChoice` arm before acting when the
+// declared pick list is empty. See the module-level path-coverage table.
 
 /// V10 — INTERACTIVE-PATH HEADLINE. Assertion-identical to V1, but stages TWO
 /// battlefield creatures so the sacrifice routes through `EffectZoneChoice`
@@ -605,48 +641,171 @@ fn victimize_interactive_path_returns_exactly_the_two_chosen_cards_by_identity()
     }
 }
 
-/// V12 — INTERACTIVE-PATH NEGATIVE. An interactive sacrifice that selects
-/// NOTHING (empty `EffectZoneChoice` submission) leaves an empty completion
-/// ledger, so the CR 608.2c rider must NOT fire.
+/// V12 — INTERACTIVE-PATH MANDATORY-SELECTION REJECTION. Drives the real
+/// `EffectZoneChoice` prompt, submits an EMPTY `GameAction::SelectCards`
+/// DIRECTLY through `apply()`, and proves the engine REJECTS it — then answers
+/// the same prompt legally and drives the spell to a clean priority window.
 ///
-/// Paired with V13, which runs the IDENTICAL fixture and differs only in that a
-/// creature is actually selected — that pairing is what makes this negative
-/// non-vacuous.
+/// WHY THE DIRECT SUBMISSION IS LOAD-BEARING: the `.effect_zone(&[])` builder
+/// CANNOT express this. `drive_resolution` short-circuits its
+/// `WaitingFor::EffectZoneChoice` arm on `if effect_zone_cards.is_empty()
+/// { break; }` (`game/scenario.rs`), so an empty declared policy never emits a
+/// `SelectCards` action at all — it parks on the prompt and returns a stalled,
+/// half-resolved state. Only `runner.act(..)` reaches the reducer.
+///
+/// CR 701.21a + CR 609.3: `Sacrifice a creature` with a non-empty eligible pool
+/// is a MANDATORY choice of exactly one — a player may not decline it. The
+/// engine enforces that in `engine_resolution_choices.rs` via the `!up_to`
+/// branch `chosen.len() != count`, which rejects a 0-card submission against
+/// `count == 1` with `InvalidAction("Must select exactly 1 card(s), got 0")`.
+///
+/// REVERT-FAILING ASSERTIONS: the post-rejection half. After the legal
+/// selection is submitted, `assert_zone(&chosen, Zone::Battlefield)` fails
+/// without the completion-seam seed (the fodder IS sacrificed, but the CR
+/// 608.2c rider never fires, leaving both chosen cards in the graveyard).
 #[test]
-fn victimize_interactive_path_empty_selection_does_not_fire_rider() {
+fn victimize_interactive_path_rejects_empty_mandatory_sacrifice_selection() {
     let Fixture {
         mut runner,
         victimize,
         graveyard,
         battlefield,
     } = setup(&["Grave One", "Grave Two"], &["Fodder", "Spare"]);
+    let (fodder, spare) = (battlefield[0], battlefield[1]);
     let chosen = [graveyard[0], graveyard[1]];
 
-    let outcome = runner
-        .cast(victimize)
-        .target_objects(&chosen)
-        .effect_zone(&[])
-        .resolve();
+    // Commit the cast, then let the stack resolve until it parks on the
+    // sacrifice prompt. `advance_until_stack_empty` deliberately breaks at any
+    // non-`PutAtLibraryPosition` `EffectZoneChoice`, leaving it live for us.
+    runner.cast(victimize).target_objects(&chosen).commit();
+    runner.advance_until_stack_empty();
 
-    // POSITIVE REACH-GUARD: the spell was cast and resolved, so the negative
-    // below reflects the rider's gate and not an upstream fizzle.
-    assert_ne!(
-        outcome.zone_of(victimize),
-        Zone::Hand,
-        "reach-guard: Victimize must have been cast and resolved"
+    // REACH-GUARD (structural, not "it left the hand"): the interactive prompt
+    // genuinely exists, is owned by the caster, offers exactly the two
+    // battlefield creatures, and is a MANDATORY choice of one.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::EffectZoneChoice {
+            player,
+            ref cards,
+            count,
+            up_to,
+            effect_kind,
+            ..
+        } => {
+            assert_eq!(player, P0, "the caster chooses the sacrifice");
+            assert_eq!(
+                effect_kind,
+                EffectKind::Sacrifice,
+                "the parked prompt must be the sacrifice, not some other zone move"
+            );
+            assert!(!up_to, "CR 701.21a: `Sacrifice a creature` is not optional");
+            assert_eq!(count, 1, "exactly one creature must be sacrificed");
+            let mut offered = cards.clone();
+            offered.sort();
+            let mut expected = vec![fodder, spare];
+            expected.sort();
+            assert_eq!(
+                offered, expected,
+                "both battlefield creatures are eligible fodder"
+            );
+        }
+        other => panic!("expected the interactive sacrifice EffectZoneChoice, got {other:?}"),
+    }
+
+    // THE POINT OF THIS TEST: an empty submission goes straight to the reducer
+    // and is REFUSED. CR 609.3 — a mandatory sacrifice with an eligible pool
+    // must sacrifice; declining is not a legal option.
+    let rejection = runner.act(GameAction::SelectCards { cards: vec![] });
+    match rejection {
+        Err(EngineError::InvalidAction(message)) => {
+            assert!(
+                message.contains("exactly 1"),
+                "CR 609.3: the mandatory sacrifice must reject a 0-card selection \
+                 with a count-mismatch diagnostic, got {message:?}"
+            );
+        }
+        other => panic!(
+            "CR 701.21a + CR 609.3: an empty mandatory sacrifice selection must be \
+             REJECTED while eligible creatures exist, got {other:?}"
+        ),
+    }
+
+    // The refusal is inert: nothing was sacrificed, nothing was returned, and
+    // the SAME prompt is still live and re-answerable (no wedge, no state drift).
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { count: 1, .. }
+        ),
+        "the rejected action must leave the prompt intact, found {:?}",
+        runner.state().waiting_for
     );
+    for &id in &[fodder, spare] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Battlefield,
+            "rejected selection must not sacrifice anything ({id:?})"
+        );
+    }
+    for &id in &chosen {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Graveyard,
+            "rejected selection must not fire the CR 608.2c rider ({id:?})"
+        );
+    }
 
-    // CR 701.21a: nothing was sacrificed, so both battlefield creatures survive.
-    outcome.assert_zone(&battlefield, Zone::Battlefield);
+    // Now answer the SAME live prompt legally and let resolution finish. This
+    // is the real-resolution half the old test never reached.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("a one-creature selection satisfies the mandatory sacrifice");
+    runner.advance_until_stack_empty();
 
-    // CR 608.2c: with an empty sacrifice ledger the dependent clause does
-    // nothing — the chosen cards stay in the graveyard.
-    outcome.assert_zone(&chosen, Zone::Graveyard);
+    // CR 701.21a: the chosen fodder was sacrificed; the spare survives.
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
+
+    // CR 608.2c: the rider fires on the interactive path — both chosen cards
+    // return to the battlefield tapped. THIS is the revert-failing assertion.
+    for &id in &chosen {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Battlefield,
+            "CR 608.2c: chosen card {id:?} must return after the interactive sacrifice"
+        );
+        assert!(
+            runner.state().objects[&id].tapped,
+            "CR 608.2c: chosen card {id:?} must return tapped"
+        );
+    }
+
+    // CR 117.3b: the completed spell leaves a clean priority window behind — no
+    // dangling prompt (mirrors V4 on the interactive path).
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Victimize must resolve to a clean priority window, halted at {:?}",
+        runner.state().waiting_for
+    );
 }
 
-/// V13 — V12's POSITIVE TWIN. Identical fixture (two graveyard creatures, two
-/// battlefield creatures, interactive path); the ONLY difference is that a real
-/// creature is selected for the sacrifice. The rider therefore DOES fire.
+/// V13 — INTERACTIVE-PATH POSITIVE TWIN OF THE V6 SUPPRESSION NEGATIVE.
+///
+/// V6 (`victimize_rider_suppressed_when_no_creature_to_sacrifice`) is the
+/// engine's ONLY honest rider-suppression case: with an EMPTY battlefield there
+/// is no eligible fodder, the sacrifice does as much as possible (CR 609.3, i.e.
+/// nothing), and the CR 608.2c rider stays silent. Suppression cannot be staged
+/// on a fixture that HAS eligible creatures — a mandatory sacrifice with a
+/// non-empty pool must sacrifice (CR 701.21a), which is exactly what V12 proves
+/// the reducer enforces.
+///
+/// This test is the positive counterweight on the INTERACTIVE path: two
+/// eligible creatures, a real selection, and therefore a rider that DOES fire.
+/// Together with V6 it brackets the suppression boundary from both sides
+/// (no pool → silent; pool + real selection → fires) without ever asserting the
+/// illegal middle state of "eligible pool, nothing sacrificed".
 #[test]
 fn victimize_interactive_path_real_selection_fires_rider() {
     let Fixture {
