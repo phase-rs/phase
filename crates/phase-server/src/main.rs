@@ -1707,7 +1707,7 @@ fn main() {
 async fn serve() {
     let cli = Cli::parse();
 
-    let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
+    let (_log_guard, game_log) = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
     let mode: Mode = if cli.lobby_only {
         ServerMode::LobbyOnly
     } else {
@@ -1801,11 +1801,16 @@ async fn serve() {
     // ten years is effectively unbounded without risking overflow in `now + grace`.
     // It also stamps `HostingMode::SingleUser` on every session this manager
     // owns, which is what grants the desktop sidecar its debug capability.
-    let state: SharedState = Arc::new(Mutex::new(if cli.single_user {
+    let mut session_manager = if cli.single_user {
         SessionManager::single_user(Duration::from_secs(10 * 365 * 24 * 60 * 60))
     } else {
         SessionManager::new()
-    }));
+    };
+    // Every session this manager creates or restores gets this cache
+    // (`SessionManager`/`GameSession` re-stamp it, same lifecycle as
+    // `hosting`) — see `server_core::game_log`.
+    session_manager.game_log = Arc::clone(&game_log);
+    let state: SharedState = Arc::new(Mutex::new(session_manager));
     let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
     let draft_pools_path = data_path.join("draft-pools.json");
     let draft_pools: SharedDraftPools = match draft_pools::DraftPools::from_path(&draft_pools_path)

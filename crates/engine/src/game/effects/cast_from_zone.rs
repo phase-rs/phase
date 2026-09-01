@@ -343,6 +343,7 @@ fn open_private_zone_cast_selection(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
@@ -1681,6 +1682,7 @@ fn record_lingering_permissions(
                     single_use_group: None,
                     single_use: false,
                     cast_cost_raise: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: EtbTapState::Unspecified,
                 };
 

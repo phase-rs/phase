@@ -838,6 +838,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // itself. Viewer projections are display-only clones; the authoritative
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
+    // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
+    // identities and origins for later private choices. The public current
+    // `EffectZoneChoice` is projected below; its execution-only successor
+    // carrier must never be shipped to any viewer, including a future owner.
+    filtered.pending_mass_library_order_choice = None;
     // CR 510.2 + CR 616.1: the parked combat-damage batch is server authority.
     // Its `batch_events` can carry rider-created `ZoneChanged` records and other
     // effect events that `filter_events_for_viewer` would redact in the live
@@ -1835,15 +1840,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref enter_with_counters,
         ref conditional_enter_with_counters,
         count_param,
-        library_position: None,
+        ref library_position,
+        mass_library_order: _,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
     } = state.waiting_for
     {
-        // `open_private_zone_cast_selection` is the sole Library producer and
-        // always writes `library_position: None`, so this pattern redacts every
-        // private library cast-choice payload for non-prompt viewers.
+        // A private-zone choice reveals exactly which cards can be selected,
+        // including a mass library-order prompt whose members still occupy the
+        // battlefield. The placement parameters are public, but the offered
+        // ids and their identity/origin provenance are not.
         if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
@@ -1867,7 +1874,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 enter_with_counters: enter_with_counters.clone(),
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
-                library_position: None,
+                library_position: library_position.clone(),
+                mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 // The bounded-move duration is a public effect parameter, not
