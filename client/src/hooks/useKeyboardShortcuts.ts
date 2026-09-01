@@ -191,7 +191,7 @@ export function useKeyboardShortcuts(): void {
         case "D":
           if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
             e.preventDefault();
-            if (adapter && canExportAuthoritativeState(gameMode)) {
+            if (adapter?.exportPersistenceState && canExportAuthoritativeState(gameMode)) {
               exportAuthoritativeGameStateZip(adapter)
                 .then((filename) => console.log(`[Debug] Game state exported to ${filename}`))
                 .catch((err) => console.error("[Debug] Failed to export:", err));

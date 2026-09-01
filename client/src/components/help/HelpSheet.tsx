@@ -240,7 +240,7 @@ export function HelpSheet() {
   };
 
   const handleExportState = () => {
-    if (!canExportAuthoritative || !adapter) return;
+    if (!canExportAuthoritative || !adapter?.exportPersistenceState) return;
     exportAuthoritativeGameStateZip(adapter)
       .then((filename) => setStatus(t("help.status.exported", { filename })))
       .catch((err: unknown) => {
