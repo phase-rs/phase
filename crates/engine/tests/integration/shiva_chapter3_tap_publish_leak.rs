@@ -118,7 +118,7 @@ fn stage_shiva(runner: &mut GameRunner) -> ObjectId {
     obj.card_types.core_types.push(CoreType::Enchantment);
     obj.card_types.subtypes.push("Saga".to_string());
     obj.base_card_types = obj.card_types.clone();
-    // CR 712.4a: the lore-counter trigger has TRANSFORMED the saga to its back
+    // CR 712.9 + CR 712.18: the lore-counter trigger has TRANSFORMED the saga to its back
     // face — the chapter resolves while Shiva is showing, exactly as in the
     // live dump. Without this flag the zone-exit front-face revert never fires
     // and the fixture diverges from the live game (whose exiled object 23 was
@@ -158,7 +158,7 @@ fn shiva_chapter_iii_tap_leg_must_not_pollute_return_candidates() {
     );
     assert_eq!(
         state.objects[&shiva_id].name, "Jill, Shiva's Dominant",
-        "the returned permanent must show its front face (CR 712.14a)"
+        "the returned permanent must show its front face (CR 712.14)"
     );
     assert_eq!(
         state.objects[&untapped_land].zone,

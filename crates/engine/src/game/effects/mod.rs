@@ -5888,6 +5888,13 @@ fn population_does_not_move(effect: &Effect) -> bool {
 ///
 /// `repeat_for: TrackedSetSize` consumers are not publisher positions (they
 /// publish nothing), so Seasoned Pyromancer (#740) is unaffected.
+///
+/// The [`ResolvedAbility::detached_remainder`] leg-3 term is deliberately
+/// UNNARROWED: the splitter's stamp carries no moving/in-place detail, so a
+/// player-scope template whose remainder is a same-class in-place producer
+/// would be vetoed where its non-scoped twin publishes. No corpus row
+/// exercises that shape today; if one appears, refine the stamp, not this
+/// gate.
 fn transitive_publish_superseded(producer: &ResolvedAbility) -> bool {
     population_does_not_move(&producer.effect)
         && (later_node_is_moving_publisher_position(producer)
