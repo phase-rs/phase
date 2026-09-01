@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -276,6 +279,16 @@ describe("PackDisplay local workspace controller", () => {
     imageState.sources = {};
     imageState.faceSources = {};
     alternateFaceState.values = {};
+  });
+
+  it("uses_arcane_cyan_for_the_selected_pack_keyframe_without_the_old_green", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+    const keyframe = css.match(/@keyframes draft-pack-selected-glow \{[\s\S]*?\n\}/)?.[0];
+
+    expect(css).toContain("--color-arcane: #38bdf8");
+    expect(keyframe).toContain("var(--color-arcane)");
+    expect(keyframe).toContain("rgb(56 189 248 / 0.55)");
+    expect(keyframe).not.toMatch(/(?:rgb|rgba)\(3,\s*139,\s*6/);
   });
 
   it("renders_authoritative_sequence_once_and_preserves_duplicate_names_and_unknown_rarity", () => {
@@ -601,8 +614,8 @@ describe("PackDisplay local workspace controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
       "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
     expect(cardElement).not.toHaveClass("transition-all");
@@ -610,6 +623,25 @@ describe("PackDisplay local workspace controller", () => {
 
     fireEvent.doubleClick(cardElement);
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
+  it.each([
+    ["desktop", true],
+    ["phone-portrait", false],
+    ["tablet-landscape", false],
+  ] as const)("uses_the_reduced_hover_scale_only_for_%s", (responsiveLayout, hasDesktopHover) => {
+    const rendered = render(
+      <PackDisplay
+        controller={controller()}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout={responsiveLayout}
+      />,
+    );
+    const packCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(hasDesktopHover);
+    expect(packCard.classList.contains("hover:scale-[1.08]")).toBe(false);
   });
 
   it("keeps_commander_pick_two_selection_in_click_order_and_submits_that_order_manually", () => {
@@ -890,7 +922,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const firstCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const cardButton = within(firstCard).getByRole("button", { name: "Same" });
-    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.08]", "hover:ring-white/20");
+    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.05]", "hover:ring-white/20");
 
     fireEvent.click(cardButton, { detail: 1, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
@@ -902,8 +934,8 @@ describe("PackDisplay local workspace controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
       "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
     expect(firstCard).not.toHaveClass("transition-all");
