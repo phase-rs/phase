@@ -36,6 +36,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "phase-server.logsImage" -}}
+{{- $img := .Values.logging.server.image -}}
+{{- if $img.digest -}}
+{{- printf "%s:%s@%s" $img.repository $img.tag $img.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $img.repository $img.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/* PUBLIC_URL is what the server advertises to clients, so it is never
      guessed. Deriving it from ingress.host is only sound when that host is
      actually serving: with the ingress off it yields the values.yaml
@@ -364,7 +373,7 @@ containers:
         mountPath: /var/lib/phase-server
   {{- if .Values.logging.enabled }}
   - name: logs
-    image: {{ .Values.logging.server.image.repository }}:{{ .Values.logging.server.image.tag }}
+    image: {{ include "phase-server.logsImage" . }}
     imagePullPolicy: {{ .Values.image.pullPolicy }}
     # Read-only static file server for `logging.dir`, diagnosis only — never
     # write access, and only the logs subtree of `data` (not games.db).

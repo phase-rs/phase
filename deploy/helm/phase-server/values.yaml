@@ -68,6 +68,10 @@ logging:
     image:
       repository: nginxinc/nginx-unprivileged
       tag: 1.27-alpine
+      # Multi-arch index digest for the tag above, pinned so a registry-side
+      # retag can't change what's pulled without a reviewed values.yaml change.
+      # Re-resolve with: docker buildx imagetools inspect nginxinc/nginx-unprivileged:<tag>
+      digest: sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
     # The image's own non-root uid/gid; change together if you swap the image.
     runAsUser: 101
     runAsGroup: 101
