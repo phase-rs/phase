@@ -7,7 +7,7 @@ const EXPECTED_PROTOCOL_VERSION = 50;
 // The LOBBY message-set version. Deliberately separate from the full-game
 // number above and deliberately NOT derived from it: a GameState-only bump must
 // not move the lobby's compatibility window. See the assertions at the bottom.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 3;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 4;
 // The P2P wire version. A THIRD independent surface: host/guest first-contact
 // frames carry it, and the same GameState shape change that moves
 // EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated

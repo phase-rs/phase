@@ -220,7 +220,16 @@
     "back": "Back",
     "opening": "Opening…",
     "hostP2PGame": "Host P2P Game",
-    "hostGame": "Host Game"
+    "hostGame": "Host Game",
+    "savedFormats": "Saved Custom Formats",
+    "saveAsCustomFormat": "Save format",
+    "customFormatNamePlaceholder": "Name this format",
+    "useCustomFormat": "Use",
+    "customFormatInUse": "In use",
+    "deleteCustomFormat": "Delete",
+    "loadingCustomFormat": "Loading format…",
+    "noSavedCustomFormats": "No saved custom formats yet.",
+    "customFormatResolveFailed": "Could not load that saved format."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",

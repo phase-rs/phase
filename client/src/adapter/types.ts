@@ -65,7 +65,13 @@ export interface DungeonRoomView {
 
 // ── Game Format ─────────────────────────────────────────────────────────
 
-export type GameFormat =
+/**
+ * The engine's built-in formats — every `GameFormat` variant that carries no
+ * payload and appears in `getFormatRegistry`. Split out from `GameFormat` so
+ * registry-shaped lookups (`FORMAT_DEFAULTS`, per-format metadata) can say they
+ * only cover built-ins.
+ */
+export type BuiltInGameFormat =
   | "Standard"
   | "Commander"
   | "Pioneer"
@@ -89,6 +95,145 @@ export type GameFormat =
   | "Limited"
   | "Momir"
   | "CommanderDraft";
+
+/**
+ * Wire form of `GameFormat::Custom(CustomFormatId)`.
+ *
+ * The engine's `GameFormat` has a HAND-WRITTEN `Serialize`/`Deserialize` (not a
+ * derive) that round-trips through `Display`/`FromStr` as a plain string, so
+ * `GameFormat::Custom(CustomFormatId(5))` is the literal string `"Custom:5"` on
+ * the wire — not a tagged object. See `crates/engine/src/types/format.rs`.
+ */
+export type CustomGameFormat = `Custom:${number}`;
+
+/**
+ * True when `format` is an engine custom format rather than a built-in.
+ *
+ * Takes `unknown` on purpose: both real callers narrow a value that came off an
+ * untrusted `JSON.parse` boundary (persisted storage, a broker frame), where
+ * the static type is `string` at best. It narrows an already-typed `GameFormat`
+ * to `CustomGameFormat` just the same.
+ */
+export function isCustomGameFormat(format: unknown): format is CustomGameFormat {
+  return typeof format === "string" && format.startsWith("Custom:");
+}
+
+export type GameFormat = BuiltInGameFormat | CustomGameFormat;
+
+// ── Custom formats ──────────────────────────────────────────────────────
+//
+// Read-only mirrors of `crates/engine/src/types/custom_format.rs`, for display
+// and for round-tripping a saved definition back to the engine. The client
+// NEVER evaluates these rules: `FormatConfig::for_custom_rules` (exposed as
+// `formatConfigForCustomRules`) is the single authority that turns them into an
+// active config, and the engine's own `FormatConfig` deserializer re-derives
+// with that same function and demands equality at every ingress — so a
+// hand-assembled config would be rejected at the next boundary it crossed.
+//
+// These reference `DeckSizeRule` / `SideboardPolicy` / `DeckCopyLimit` /
+// `RangeOfInfluenceConfig`, declared just below with the rest of the format
+// vocabulary they are shared with.
+
+/** Serde-transparent newtype over `u16`. */
+export type CustomFormatId = number;
+
+/** An MTGJSON-style set code, e.g. "MH3". Serde-transparent over `String`. */
+export type SetCode = string;
+
+/** No mana burn (post-M10) vs. the pre-M10 rule. Schema only — unenforced. */
+export type ManaBurnPolicy = "Modern" | "Obsolete";
+
+/** CR 510: modern unified damage step vs. the pre-6th-edition on-stack
+ *  procedure. Schema only — unenforced. */
+export type CombatDamageTiming = "Modern" | "OnStack";
+
+/** CR 400.11 / CR 400.11a: what a "Wish" effect can reach outside the game.
+ *  Schema only — unenforced. */
+export type WishOutsideGameScope = "PostM10SideboardOnly" | "PreM10ReachesExile";
+
+/** CR 704.5j: per-controller-with-choice (post-M14) vs. the historical
+ *  all-controllers form. Schema only — unenforced. */
+export type LegendRuleScope = "Modern" | "PreM14AnyController";
+
+export interface LegacyRuleSet {
+  mana_burn: ManaBurnPolicy;
+  damage_timing: CombatDamageTiming;
+  wish_scope: WishOutsideGameScope;
+  legend_rule_scope: LegendRuleScope;
+}
+
+/** CR 903.3 and the Tiny Leaders / Oathbreaker / Brawl deck-construction
+ *  rules: which commander-eligibility test a custom format applies. */
+export type CommanderEligibilityRule =
+  | "Standard"
+  | "TinyLeaders"
+  | "OathbreakerSignatureSpell"
+  | "BrawlColorIdentity";
+
+/**
+ * Whether a custom format uses the command zone (CR 903) and, if so, its
+ * commander-damage threshold and eligibility predicate. Externally tagged like
+ * the engine enum: a unit variant is the bare string, a struct variant is
+ * `{ Enabled: { ... } }`. Always narrow before reading the payload.
+ */
+export type CommandZoneMode =
+  | "Disabled"
+  | {
+      Enabled: {
+        commander_damage_threshold: number | null;
+        eligibility_rule: CommanderEligibilityRule;
+      };
+    };
+
+/** Structural game parameters captured by an Axis-A lobby save. Every field
+ *  mirrors a `FormatConfig` field 1:1. */
+export interface StructuralRules {
+  starting_life: number;
+  min_players: number;
+  max_players: number;
+  deck_size: DeckSizeRule;
+  singleton: boolean;
+  command_zone_mode: CommandZoneMode;
+  range_of_influence?: RangeOfInfluenceConfig | null;
+  team_based: boolean;
+  sideboard_policy: SideboardPolicy;
+  default_deck_copy_limit: DeckCopyLimit;
+}
+
+/** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
+export interface LegalityRules {
+  legal_sets: SetCode[] | null;
+  banned: string[];
+  restricted: string[];
+  legacy: LegacyRuleSet;
+}
+
+export interface CustomFormatRules {
+  id: CustomFormatId;
+  structural: StructuralRules;
+  legality: LegalityRules;
+}
+
+export type ReprintPolicy =
+  | "OriginalPrintingsOnly"
+  | "AllowSpecialReprintSets"
+  | "AllowAnyPrinting";
+
+export type PrintingFidelity = "NotApplicable" | "SetCodeApproximation";
+
+/**
+ * A saved custom-format definition, as produced by
+ * `customFormatFromLobbyConfig`. Client-persisted in this phase; there is no
+ * server-side registry write path.
+ */
+export interface CustomFormatDef {
+  rules: CustomFormatRules;
+  label: string;
+  short_label: string;
+  description: string;
+  reprint_policy: ReprintPolicy | null;
+  printing_fidelity: PrintingFidelity;
+}
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
@@ -170,6 +315,19 @@ export interface FormatConfig {
    * of a session.
    */
   allow_debug_actions: boolean;
+  /**
+   * Present exactly when `format` is a `Custom:<id>` string, and then
+   * `custom_rules.id` must equal that id — the engine's
+   * `validate_custom_rules_consistency` enforces the biconditional in both
+   * directions and rejects a built-in format that carries rules. Absent (the
+   * engine skips serializing `None`) for every built-in format.
+   *
+   * Display and round-trip only. Never derive a runtime field from it
+   * client-side: the engine re-derives the WHOLE config from these rules via
+   * `FormatConfig::for_custom_rules` on deserialization and refuses anything
+   * that differs.
+   */
+  custom_rules?: CustomFormatRules | null;
 }
 
 /**

@@ -220,7 +220,16 @@
     "back": "Indietro",
     "opening": "Apertura…",
     "hostP2PGame": "Ospita partita P2P",
-    "hostGame": "Ospita partita"
+    "hostGame": "Ospita partita",
+    "savedFormats": "Formati personalizzati salvati",
+    "saveAsCustomFormat": "Salva formato",
+    "customFormatNamePlaceholder": "Dai un nome a questo formato",
+    "useCustomFormat": "Usa",
+    "customFormatInUse": "In uso",
+    "deleteCustomFormat": "Elimina",
+    "loadingCustomFormat": "Caricamento del formato…",
+    "noSavedCustomFormats": "Nessun formato personalizzato salvato.",
+    "customFormatResolveFailed": "Impossibile caricare il formato salvato."
   },
   "page": {
     "deckRejected": "Il mazzo è stato rifiutato dall'host.",

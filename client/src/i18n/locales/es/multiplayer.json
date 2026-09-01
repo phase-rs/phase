@@ -220,7 +220,16 @@
     "back": "Atrás",
     "opening": "Abriendo…",
     "hostP2PGame": "Hospedar partida P2P",
-    "hostGame": "Hospedar partida"
+    "hostGame": "Hospedar partida",
+    "savedFormats": "Formatos personalizados guardados",
+    "saveAsCustomFormat": "Guardar formato",
+    "customFormatNamePlaceholder": "Nombra este formato",
+    "useCustomFormat": "Usar",
+    "customFormatInUse": "En uso",
+    "deleteCustomFormat": "Eliminar",
+    "loadingCustomFormat": "Cargando formato…",
+    "noSavedCustomFormats": "Todavía no hay formatos personalizados guardados.",
+    "customFormatResolveFailed": "No se pudo cargar ese formato guardado."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",

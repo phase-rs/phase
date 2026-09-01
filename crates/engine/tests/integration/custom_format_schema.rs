@@ -434,8 +434,19 @@ fn custom_format_label_falls_back_when_id_is_not_registered() {
     );
 }
 
+// `evaluate_deck_compatibility` is the UI-HINT entry point (it feeds the
+// lobby's live deck-legality chip via `classifyCompatResult`, where `None`
+// already means "idle"/no opinion). The engine cannot evaluate Custom-format
+// legality yet — no per-card `CustomFormatRules` resolver exists — so a hard
+// "illegal" verdict would assert a rules claim nothing computed. Both
+// dispatches (summary and full) therefore answer "no opinion". The ENFORCING
+// paths are covered separately and still fail closed:
+// `validate_name_deck_for_format_full` below, plus
+// `validate_deck_for_format` / `evaluate_deck_format_gate` in
+// `deck_validation.rs`'s own test module.
+
 #[test]
-fn custom_format_deck_compatibility_summary_reports_not_yet_supported() {
+fn custom_format_deck_compatibility_summary_reports_no_opinion() {
     use engine::database::CardDatabase;
     use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
 
@@ -446,15 +457,12 @@ fn custom_format_deck_compatibility_summary_reports_not_yet_supported() {
         ..Default::default()
     };
     let result = evaluate_deck_compatibility(&db, &request);
-    assert_eq!(result.selected_format_compatible, Some(false));
-    assert!(result
-        .selected_format_reasons
-        .iter()
-        .any(|r| r.contains("not yet supported")));
+    assert_eq!(result.selected_format_compatible, None);
+    assert!(result.selected_format_reasons.is_empty());
 }
 
 #[test]
-fn custom_format_deck_compatibility_reports_not_yet_supported() {
+fn custom_format_deck_compatibility_reports_no_opinion() {
     use engine::database::CardDatabase;
     use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
 
@@ -465,11 +473,8 @@ fn custom_format_deck_compatibility_reports_not_yet_supported() {
         ..Default::default()
     };
     let result = evaluate_deck_compatibility(&db, &request);
-    assert_eq!(result.selected_format_compatible, Some(false));
-    assert!(result
-        .selected_format_reasons
-        .iter()
-        .any(|r| r.contains("not yet supported")));
+    assert_eq!(result.selected_format_compatible, None);
+    assert!(result.selected_format_reasons.is_empty());
 }
 
 #[test]

@@ -220,7 +220,16 @@
     "back": "Retour",
     "opening": "Ouverture…",
     "hostP2PGame": "Héberger une partie P2P",
-    "hostGame": "Héberger une partie"
+    "hostGame": "Héberger une partie",
+    "savedFormats": "Formats personnalisés enregistrés",
+    "saveAsCustomFormat": "Enregistrer le format",
+    "customFormatNamePlaceholder": "Nommez ce format",
+    "useCustomFormat": "Utiliser",
+    "customFormatInUse": "Utilisé",
+    "deleteCustomFormat": "Supprimer",
+    "loadingCustomFormat": "Chargement du format…",
+    "noSavedCustomFormats": "Aucun format personnalisé enregistré.",
+    "customFormatResolveFailed": "Impossible de charger ce format enregistré."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",

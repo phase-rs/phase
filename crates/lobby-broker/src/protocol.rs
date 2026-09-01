@@ -248,6 +248,29 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 4 — `FormatConfig.custom_rules` became LIVE on the wire. The field itself
+///     has existed in the schema since the custom-format work began, but no
+///     frame could ever carry content in it: no shipped UI could populate it,
+///     and `FormatConfig`'s `Deserialize` rejected every externally-supplied
+///     `Custom` payload outright for want of a resolver. Phase 1c lands the
+///     resolver (`FormatConfig::for_custom_rules`) and the lobby UI that
+///     produces one, so a real `CustomFormatRules` now travels the same three
+///     carriers as 2 and 3: `CreateGameWithSettings` on [`LobbyClientMessage`]
+///     (client → broker), `JoinTargetInfo` and `PeerInfo` on
+///     [`LobbyServerMessage`] (broker → client).
+///
+///     A CAPABILITY bump, like 3 and unlike 2, so
+///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does NOT move: the field is
+///     `#[serde(default, skip_serializing_if = "Option::is_none")]`, so every
+///     frame a v3 peer can send today still deserializes byte-for-byte
+///     unchanged, and a frame that omits it is exactly what a v3 peer already
+///     produces. What a v3 peer cannot do is host or join a CUSTOM-format room
+///     — and it fails loudly rather than silently: on the client → broker half
+///     a v3 broker's `FormatConfig` deserializer refuses a `Custom` config it
+///     has no resolver for, and on the broker → client half a v3 client has no
+///     saved-format UI to select one with. That is a capability loss confined
+///     to a format that peer never had, not a broken session for the built-in
+///     formats it does have.
 /// 3 — `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
 ///     50 for the full entry). Same three carriers as 2:
 ///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
@@ -287,7 +310,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 3;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 4;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -664,7 +687,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 3);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 4);
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
             LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,

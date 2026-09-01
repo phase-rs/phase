@@ -33,6 +33,9 @@ const mockWorkerClient = {
   evaluateDeckCompatibility: vi
     .fn()
     .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
+  evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
+  customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
+  formatConfigForCustomRules: vi.fn().mockResolvedValue({ format: "Custom:0" }),
   getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
@@ -499,6 +502,43 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
       expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
+    });
+  });
+
+  // Symmetric with the block above, and load-bearing for exactly one reason: a
+  // copy-paste slip inside `evaluateDeckFormatGate`'s real implementation —
+  // calling `evaluateDeckCompatibility` instead of `evaluateDeckFormatGate` —
+  // would silently restore the UI-hint path's "no opinion" answer on the
+  // security gate, and every fully-mocked `p2p-adapter` test would still pass.
+  // This is the only layer that can catch it.
+  describe("evaluateDeckFormatGate", () => {
+    it("ensures the DB is loaded then delegates to the gate worker method", async () => {
+      const request = { main_deck: ["Forest"], sideboard: [], selected_format: "Custom:0" };
+      const result = await adapter.evaluateDeckFormatGate(request);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.evaluateDeckFormatGate).toHaveBeenCalledWith(request);
+      // The UI-hint method must NOT be what a gate call reaches.
+      expect(mockWorkerClient.evaluateDeckCompatibility).not.toHaveBeenCalled();
+      expect(result).toEqual({ compatible: true, reasons: [] });
+    });
+  });
+
+  describe("custom format save/select", () => {
+    it("delegates a lobby-config save to the engine", async () => {
+      const config = { format: "Commander" };
+      const result = await adapter.customFormatFromLobbyConfig("My Format", config);
+      expect(mockWorkerClient.customFormatFromLobbyConfig).toHaveBeenCalledWith(
+        "My Format",
+        config,
+      );
+      expect(result).toEqual({ label: "My Format" });
+    });
+
+    it("delegates custom-rule resolution to the engine's own resolver", async () => {
+      const rules = { id: 0 };
+      const result = await adapter.formatConfigForCustomRules(rules);
+      expect(mockWorkerClient.formatConfigForCustomRules).toHaveBeenCalledWith(rules);
+      expect(result).toEqual({ format: "Custom:0" });
     });
   });
 
