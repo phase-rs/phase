@@ -935,11 +935,21 @@ struct SocketIdentity {
     /// the core and is permanently empty in the native shell. Explicitly NOT
     /// an authority (the `organizer_token` is), and deliberately not cleared
     /// on disconnect.
+    ///
+    /// Growth is bounded by the core, not here: the broker is the only writer
+    /// (`absorb_conn_state` copies back whatever it produced), and it appends
+    /// through `push_conn_tournament`, which holds the list at
+    /// `lobby_broker::broker::MAX_CONN_TOURNAMENT_ENTRIES`. The shell must not
+    /// add a second, independently-drifting bound.
     lobby_organized_tournaments: Vec<String>,
-    /// `(code, player_token)` per tournament this socket joined, mirroring
+    /// Tournament codes this socket joined, mirroring
     /// `ConnState::joined_tournaments`. Same threading rationale as
     /// [`SocketIdentity::lobby_organized_tournaments`].
-    lobby_joined_tournaments: Vec<(String, String)>,
+    ///
+    /// Codes only. The core deliberately does not retain the `player_token`
+    /// here, precisely because this per-socket identity is where such a
+    /// secret would be held long past the operation that minted it.
+    lobby_joined_tournaments: Vec<String>,
     /// Set when this socket is participating in a draft session.
     draft_code: Option<String>,
     draft_seat: Option<usize>,
@@ -13208,23 +13218,103 @@ mod handshake_tests {
 
         let mut conn = identity.to_conn_state();
         conn.organized_tournaments.push("TOUR01".to_string());
-        conn.joined_tournaments
-            .push(("TOUR02".to_string(), "player-tok".to_string()));
+        conn.joined_tournaments.push("TOUR02".to_string());
         identity.absorb_conn_state(conn);
 
         // Absorbed into the shell...
         assert_eq!(identity.lobby_organized_tournaments, vec!["TOUR01"]);
-        assert_eq!(
-            identity.lobby_joined_tournaments,
-            vec![("TOUR02".to_string(), "player-tok".to_string())]
-        );
+        assert_eq!(identity.lobby_joined_tournaments, vec!["TOUR02"]);
         // ...and projected back out on the NEXT broker call, which is the half
         // that would be missing if `to_conn_state` defaulted these fields.
         let next = identity.to_conn_state();
         assert_eq!(next.organized_tournaments, vec!["TOUR01"]);
-        assert_eq!(
-            next.joined_tournaments,
-            vec![("TOUR02".to_string(), "player-tok".to_string())]
+        assert_eq!(next.joined_tournaments, vec!["TOUR02"]);
+    }
+
+    /// The shell-side mirror must never come to hold a tournament
+    /// `player_token`.
+    ///
+    /// This is the field the token would have outlived its operation in: the
+    /// list is never pruned, `SocketIdentity` is per-socket state that
+    /// survives every broker call, and the equivalent WASM shell copies the
+    /// same `ConnState` verbatim into a durable WebSocket attachment. So the
+    /// assertion is made against a REAL minted token from a REAL join, not a
+    /// placeholder — a shape-only check would pass just as happily against a
+    /// tuple that still carried the secret.
+    #[test]
+    fn socket_identity_never_retains_a_tournament_player_token() {
+        use lobby_broker::{LobbyClientMessage, LobbyServerMessage};
+        use server_core::protocol::{BracketShape, MatchArity, ScoringPolicy};
+
+        // `SysEnv` is the production token source, so the needle below is a
+        // genuine `generate_player_token()` value.
+        let env = SysEnv;
+        let mut broker = Broker::new();
+        let mut identity = empty_identity();
+        let mut conn = identity.to_conn_state();
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        let (code, organizer_token) = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                ..
+            }) => (code.clone(), organizer_token.clone()),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        };
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            &env,
+        );
+        let player_token = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentJoined { player_token, .. }) => {
+                player_token.clone()
+            }
+            other => panic!("expected TournamentJoined, got {other:?}"),
+        };
+        assert!(!player_token.is_empty() && !organizer_token.is_empty());
+
+        identity.absorb_conn_state(conn);
+
+        // Reach-guard: the create and the join really did reach the mirror, so
+        // the negatives below are statements about a populated field rather
+        // than about an empty one.
+        assert_eq!(identity.lobby_organized_tournaments, vec![code.clone()]);
+        assert_eq!(identity.lobby_joined_tournaments, vec![code.clone()]);
+
+        // Structural: scan the whole projected `ConnState` — the exact value
+        // the WASM shell serializes into its durable attachment — so a token
+        // reintroduced at ANY nesting depth fails this, not just one in the
+        // field it is expected in.
+        let projected = identity.to_conn_state();
+        let json = serde_json::to_string(&projected).expect("ConnState serializes");
+        assert!(
+            json.contains(code.as_str()),
+            "reach-guard: the tournament code must be present: {json}"
+        );
+        assert!(
+            !json.contains(player_token.as_str()),
+            "player_token retained in per-socket state: {json}"
+        );
+        assert!(
+            !json.contains(organizer_token.as_str()),
+            "organizer_token retained in per-socket state: {json}"
         );
     }
 }

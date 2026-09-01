@@ -32,6 +32,39 @@ use crate::tournament::{
 /// pre-extraction phase-server shell.
 pub const MAX_LOBBY_ENTRIES: usize = 200;
 
+/// Capacity cap for the tournament registry — the same gate
+/// [`MAX_LOBBY_ENTRIES`] applies to the lobby, for the other unbounded map the
+/// broker owns. Without it a client can mint tournament records without limit:
+/// a `Registration` record survives until the staleness reaper fires (300s),
+/// and an `InProgress`/`Completed` one persists for its own much longer
+/// retention window, while every successful creation also broadcasts a
+/// `TournamentListUpdate` carrying *every* stored tournament — so both
+/// resident memory and per-creation fan-out grow unbounded together.
+///
+/// A separate constant rather than a reuse of the lobby's, because the two
+/// registries have genuinely different per-entry profiles — a tournament
+/// carries its entrant list, pairing history and standings, and lives orders
+/// of magnitude longer than a lobby row — and must be able to move
+/// independently as either grows. The initial value matches the lobby's own
+/// choice: far above any plausible count of concurrent events on one broker,
+/// and still a hard bound.
+pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
+
+/// Cap on the per-connection tournament bookkeeping lists
+/// ([`ConnState::organized_tournaments`] and [`ConnState::joined_tournaments`]).
+///
+/// Those lists are appended to on every successful create/join and are
+/// deliberately never pruned — not on disconnect, drop, expiry or completion —
+/// because they are reconnect convenience that must outlive a socket. Never
+/// pruned plus never bounded is unbounded per-connection growth, which
+/// [`MAX_TOURNAMENT_ENTRIES`] does not cover: that bounds the registry, while
+/// a client can join and re-join across many events on one long-lived socket.
+///
+/// 50 is far past any real "your events" list for a single connection while
+/// keeping the worst case per socket trivial. See [`push_conn_tournament`] for
+/// why reaching the cap evicts rather than refuses.
+pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
+
 /// The client's self-reported identity from `ClientHello`. `build_commit` is
 /// the join-compatibility gate; `client_version` is the display-only string
 /// stamped into a registered entry's `host_version`.
@@ -69,14 +102,32 @@ pub struct ConnState {
     /// deliberately NOT cleared by [`Broker::on_disconnect`]: closing a socket
     /// must not cost an organizer their event, unlike `host_game`/
     /// `reservations`, which are socket-bound by design.
+    ///
+    /// Never pruned, but bounded: appends go through
+    /// [`push_conn_tournament`], which holds the list at
+    /// [`MAX_CONN_TOURNAMENT_ENTRIES`] most-recent codes.
     #[serde(default)]
     pub organized_tournaments: Vec<String>,
-    /// `(code, player_token)` for every tournament this connection joined.
-    /// Same non-authority framing as [`Self::organized_tournaments`]; grows
-    /// monotonically (dropping from an event does not remove the record that
-    /// this connection was in it).
+    /// Tournament codes this connection joined, appended on every successful
+    /// `JoinTournament`.
+    ///
+    /// **Codes only — deliberately never the `player_token`.** Player
+    /// permission is the token compared against the entrant record, never this
+    /// list, so retaining the token here bought nothing and cost a great deal:
+    /// the list is never pruned and is copied verbatim into the native shell's
+    /// per-socket identity and into durable Durable Object attachments, which
+    /// turned a non-authority convenience record into monotonic secret
+    /// retention in storage that outlives the socket. A code carries no such
+    /// risk — it is already broadcast to every subscriber in each
+    /// `TournamentListUpdate`.
+    ///
+    /// Same non-authority framing and retention as
+    /// [`Self::organized_tournaments`]: dropping from an event does not remove
+    /// the record that this connection was in it, and the list is bounded to
+    /// the [`MAX_CONN_TOURNAMENT_ENTRIES`] most-recent joins rather than
+    /// growing without limit.
     #[serde(default)]
-    pub joined_tournaments: Vec<(String, String)>,
+    pub joined_tournaments: Vec<String>,
 }
 
 /// A side effect the shell must perform after a broker call. **Order within a
@@ -952,6 +1003,27 @@ impl Broker {
     /// every player-gated action needs to know *which* entrant is acting —
     /// "some valid token exists" is exactly the check that would let player A
     /// drop player B.
+    ///
+    /// A dropped entrant is refused here, at the single authority, rather than
+    /// per action. A drop is permanent in this engine — nothing ever clears
+    /// [`crate::tournament::TournamentPlayer::dropped`], and
+    /// [`crate::tournament::TournamentManager::drop_player`] settles the
+    /// pairings it can on the way out — so a dropped player's token must stop
+    /// authorizing *anything*, not merely the one action each downstream gate
+    /// happened to think of. The narrower per-action checks are not
+    /// sufficient: [`crate::tournament::validate_match_result`] rejects a
+    /// dropped *winner*, but a dropped player reporting a still-active
+    /// opponent as the winner — or a draw — passes it, and in a pod
+    /// (`arity > 2`) with two or more active seats left the pairing is still
+    /// `Pending` after the drop precisely so the remaining players can play it
+    /// out, so there is a real, reachable window in which a dropped seat could
+    /// settle a match it is no longer in.
+    ///
+    /// Three distinct `Err` shapes — missing tournament, unusable token,
+    /// dropped entrant — because they are three different client-side
+    /// situations and the caller replies with the message verbatim. The
+    /// dropped case reveals nothing: it is told only to the holder of that
+    /// player's own token.
     fn authorize_player(&self, code: &str, presented: &str) -> Result<String, String> {
         let meta = self
             .tournaments
@@ -960,11 +1032,15 @@ impl Broker {
         if presented.is_empty() {
             return Err(format!("Invalid player token for tournament {code}"));
         }
-        meta.players
+        let player = meta
+            .players
             .iter()
             .find(|p| p.player_token == presented)
-            .map(|p| p.player_key.clone())
-            .ok_or_else(|| format!("Invalid player token for tournament {code}"))
+            .ok_or_else(|| format!("Invalid player token for tournament {code}"))?;
+        if player.dropped {
+            return Err(format!("Player has dropped from tournament {code}"));
+        }
+        Ok(player.player_key.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -978,6 +1054,21 @@ impl Broker {
         total_rounds: Option<u32>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Registry capacity, checked before a code or a token is minted and
+        // before the manager is asked to store anything — the same shape and
+        // the same point in the flow as `handle_create_game`'s
+        // `MAX_LOBBY_ENTRIES` gate.
+        if self.tournaments.len() >= MAX_TOURNAMENT_ENTRIES {
+            warn!(
+                entries = self.tournaments.len(),
+                limit = MAX_TOURNAMENT_ENTRIES,
+                "tournament registry full, rejecting CreateTournament"
+            );
+            return vec![error(
+                "Server tournament registry is full, please try again shortly",
+            )];
+        }
+
         // Broker-minted, exactly like a lobby game code:
         // `TournamentManager::create_tournament` takes a caller-supplied code
         // for the same reason `LobbyManager::register_game` does.
@@ -1003,7 +1094,7 @@ impl Broker {
             return vec![error("Tournament was created but could not be read back")];
         };
 
-        conn.organized_tournaments.push(code.clone());
+        push_conn_tournament(&mut conn.organized_tournaments, code.clone());
         info!(tournament = %code, name = %name, "tournament created");
 
         // No `TournamentUpdate` broadcast: nobody else holds this code yet, so
@@ -1040,8 +1131,9 @@ impl Broker {
             return vec![error("Tournament was joined but could not be read back")];
         };
 
-        conn.joined_tournaments
-            .push((code.clone(), player_token.clone()));
+        // The code alone: `player_token` is returned to this caller below and
+        // never retained here (see `ConnState::joined_tournaments`).
+        push_conn_tournament(&mut conn.joined_tournaments, code.clone());
         info!(tournament = %code, player = %player_key, "tournament joined");
 
         // A join changes both the detail view (a new entrant) and the list
@@ -1106,7 +1198,10 @@ impl Broker {
         let reporter = match self.authorize_player(&code, &player_token) {
             Ok(key) => key,
             Err(reason) => {
-                warn!(tournament = %code, "ReportMatchResult rejected — bad player token");
+                // `reason` distinguishes an unusable token from an entrant who
+                // has dropped, so it is logged rather than flattened into one
+                // "bad token" message that would misreport the second case.
+                warn!(tournament = %code, %reason, "ReportMatchResult rejected — player not authorized");
                 return vec![error(&reason)];
             }
         };
@@ -1162,10 +1257,20 @@ impl Broker {
         // Resolving the token to its owner is what confines a drop to the
         // player who presented it: the key is never taken from the payload,
         // so there is no field a client could point at someone else.
+        //
+        // A second drop on an already-dropped token is refused by that same
+        // gate, and deliberately so. It is not an idempotent no-op: `dropped`
+        // is already `true`, so re-running [`TournamentManager::drop_player`]
+        // changes no player state and can settle no further pairing (the
+        // dropped set is unchanged), while still bumping `last_activity_at` —
+        // i.e. its only observable effect is to push back the staleness reaper
+        // for an event this caller has left. Refusing is both the honest
+        // answer ("you are not a participant") and the one that does not hand
+        // a departed entrant a liveness lever.
         let player_key = match self.authorize_player(&code, &player_token) {
             Ok(key) => key,
             Err(reason) => {
-                warn!(tournament = %code, "DropFromTournament rejected — bad player token");
+                warn!(tournament = %code, %reason, "DropFromTournament rejected — player not authorized");
                 return vec![error(&reason)];
             }
         };
@@ -1239,6 +1344,28 @@ pub fn server_hello(
 
 fn error(message: &str) -> Outbound {
     Outbound::ToSelf(LobbyServerMessage::error(message))
+}
+
+/// Append to a per-connection tournament bookkeeping list, evicting oldest-first
+/// to stay within [`MAX_CONN_TOURNAMENT_ENTRIES`].
+///
+/// Evicts rather than refuses, and never fails the create/join it accompanies.
+/// These lists are explicitly *not* an authority — organizer permission is the
+/// `organizer_token`, player permission the `player_token`, and nothing in the
+/// broker reads either list — so failing a real operation because a
+/// convenience record has nowhere to go would trade a correct outcome for a
+/// bookkeeping one. Refusing only the *append* was the other option, but that
+/// freezes the list on its oldest entries forever, which is exactly backwards
+/// for a "your recent events" aid: recency is what makes it useful, so the
+/// oldest record is the right one to lose.
+///
+/// The loop (rather than a single `remove`) also repairs an over-cap list
+/// deserialized from a snapshot written before this bound existed.
+fn push_conn_tournament<T>(list: &mut Vec<T>, entry: T) {
+    while list.len() >= MAX_CONN_TOURNAMENT_ENTRIES {
+        list.remove(0);
+    }
+    list.push(entry);
 }
 
 #[cfg(test)]
@@ -2198,11 +2325,30 @@ mod tests {
     /// Serialize every outbound and scan the bytes for a secret. Catches a
     /// leak wherever it is nested, rather than trusting a field-by-field walk
     /// to have visited every carrier.
+    ///
+    /// The match is deliberately exhaustive with no wildcard arm. Every
+    /// [`Outbound`] variant must be classified explicitly as either "carries a
+    /// payload, scan it" or "structurally cannot carry a secret, skip" — a
+    /// `_ =>` arm would let a future variant that DOES carry a payload fall
+    /// straight through every leak test in this module while they all stayed
+    /// green. Adding a variant must instead break this compile and force the
+    /// decision to be made.
     fn outbounds_contain(out: &[Outbound], needle: &str) -> bool {
         out.iter().any(|ob| {
             let msg = match ob {
+                // Payload-carrying: these are the only variants that can hold
+                // a token, and both must be scanned — `ToSelf` because a leak
+                // test may be asserting the token is absent from a point reply
+                // that is not its rightful recipient, `ToSubscribers` because
+                // it is the broadcast path.
                 Outbound::ToSelf(msg) | Outbound::ToSubscribers(msg) => msg,
-                _ => return false,
+                // Payload-free signals: fieldless unit variants that instruct
+                // the shell to manipulate its own subscriber set or emit a
+                // count it owns. They carry no data from the core at all, so
+                // there is nothing here to leak.
+                Outbound::AddSubscriber
+                | Outbound::RemoveSubscriber
+                | Outbound::SendPlayerCountToSelf => return false,
             };
             serde_json::to_string(msg)
                 .expect("outbound serializes")
@@ -2630,6 +2776,237 @@ mod tests {
         );
     }
 
+    /// Creates an `arity`-seat tournament through the real dispatch path.
+    /// `make_tournament` is head-to-head only, and head-to-head cannot express
+    /// the fixture below: a drop there leaves exactly one survivor, so the
+    /// pairing auto-forfeits immediately and the hostile window never opens.
+    fn make_pod_tournament(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        arity: MatchArity,
+    ) -> (String, String) {
+        let out = broker.handle(
+            conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Commander Night".into(),
+                arity,
+                scoring: ScoringPolicy::default_for_arity(arity),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            env,
+        );
+        match out.first() {
+            Some(Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                ..
+            })) => (code.clone(), organizer_token.clone()),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        }
+    }
+
+    /// A dropped entrant's token must not report a result — the hostile case
+    /// no *downstream* gate catches.
+    ///
+    /// Four-seat pod, one drop, three active seats left: `drop_player` awards a
+    /// forfeit only when exactly one survivor remains, so the pairing is still
+    /// `Pending`, and `pairing.players` still seats the dropped player, so the
+    /// seated-in-this-pairing check passes. The reported outcome credits a
+    /// *different, still-active* player, so `validate_match_result`'s
+    /// dropped-winner rule does not fire either. `authorize_player` is the only
+    /// thing standing between a departed seat and a settled match.
+    #[test]
+    fn a_dropped_player_cannot_report_a_pod_that_is_still_pending() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let arity = MatchArity::COMMANDER_POD;
+        let (code, organizer_token) = make_pod_tournament(&mut conn, &mut broker, &env, arity);
+        let tokens: Vec<String> = (0..4)
+            .map(|i| {
+                join_tournament(
+                    &mut conn,
+                    &mut broker,
+                    &env,
+                    &code,
+                    &format!("key-{i}"),
+                    &format!("Player {i}"),
+                )
+            })
+            .collect();
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token,
+            },
+            &env,
+        );
+        assert!(!is_error(&out), "round 1 must pair: {out:?}");
+
+        let meta = broker.tournaments().get(&code).expect("event");
+        assert_eq!(meta.pairings.len(), 1, "fixture needs one four-seat pod");
+        assert_eq!(meta.pairings[0].players.len(), 4);
+        let pairing_id = meta.pairings[0].id;
+
+        // The drop itself is legitimate and must still work.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: tokens[0].clone(),
+            },
+            &env,
+        );
+        assert!(!is_error(&out), "the drop must succeed: {out:?}");
+        let meta = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            meta.active_player_count(),
+            3,
+            "three active seats keep the pod pending"
+        );
+        assert!(
+            meta.pairing(pairing_id).expect("pairing").outcome.is_none(),
+            "the fixture is only hostile while the pod is unresolved"
+        );
+
+        // Crediting a still-active player: rejected on the reporter, not the
+        // winner.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: tokens[0].clone(),
+                outcome: PodOutcome::Decisive {
+                    winner: "key-1".into(),
+                    game_wins: std::collections::HashMap::new(),
+                },
+            },
+            &env,
+        );
+        assert!(
+            error_reason(&out).contains("has dropped"),
+            "unexpected reason: {}",
+            error_reason(&out)
+        );
+        // A draw names nobody at all, so it evades every winner-shaped check.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: tokens[0].clone(),
+                outcome: PodOutcome::Draw,
+            },
+            &env,
+        );
+        assert!(
+            error_reason(&out).contains("has dropped"),
+            "unexpected reason: {}",
+            error_reason(&out)
+        );
+        assert!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .pairing(pairing_id)
+                .expect("pairing")
+                .outcome
+                .is_none(),
+            "neither refusal may have settled the pod"
+        );
+
+        // Positive control: a still-active seat in the same pod reports the
+        // same result and is accepted, so the refusals above are about the
+        // drop and not about pod reporting.
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: tokens[1].clone(),
+                outcome: PodOutcome::Decisive {
+                    winner: "key-1".into(),
+                    game_wins: std::collections::HashMap::new(),
+                },
+            },
+            &env,
+        );
+        assert!(!is_error(&out), "{out:?}");
+        assert_eq!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .pairing(pairing_id)
+                .expect("pairing")
+                .outcome,
+            Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                winner: "key-1".into(),
+                game_wins: std::collections::HashMap::new(),
+            }))
+        );
+    }
+
+    /// A second drop on an already-dropped token is refused rather than
+    /// treated as an idempotent no-op.
+    ///
+    /// The observable stake is `last_activity_at`: `drop_player` bumps it
+    /// unconditionally, so an accepted double drop would let a departed
+    /// entrant keep pushing the staleness reaper back indefinitely. The clock
+    /// is advanced between the two attempts so a bump would be visible.
+    #[test]
+    fn a_dropped_players_token_cannot_drop_again() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, _organizer_token, token_a, _token_b) =
+            started_event(&mut conn, &mut broker, &env);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token_a.clone(),
+            },
+            &env,
+        );
+        assert!(!is_error(&out), "the first drop must succeed: {out:?}");
+        let after_first = broker
+            .tournaments()
+            .get(&code)
+            .expect("event")
+            .last_activity_at;
+
+        env.advance_secs(60);
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token_a,
+            },
+            &env,
+        );
+        assert!(
+            error_reason(&out).contains("has dropped"),
+            "unexpected reason: {}",
+            error_reason(&out)
+        );
+        assert_eq!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .last_activity_at,
+            after_first,
+            "a refused drop must not renew the event's staleness clock"
+        );
+    }
+
     // -- Row 5: the broker never short-circuits past the manager -------------
 
     #[test]
@@ -2932,10 +3309,11 @@ mod tests {
         let token = join_tournament(&mut conn, &mut broker, &env, &code, "key-a", "Alice");
 
         assert_eq!(conn.organized_tournaments, vec![code.clone()]);
-        assert_eq!(conn.joined_tournaments, vec![(code.clone(), token.clone())]);
+        assert_eq!(conn.joined_tournaments, vec![code.clone()]);
 
         // Dropping does NOT remove the record that this connection was in the
-        // event — the list grows monotonically, as documented.
+        // event: the list is never pruned by a game action, only bounded at
+        // its head by `MAX_CONN_TOURNAMENT_ENTRIES`, as documented.
         let out = broker.handle(
             &mut conn,
             LobbyClientMessage::DropFromTournament {
@@ -2945,7 +3323,118 @@ mod tests {
             &env,
         );
         assert!(!is_error(&out));
-        assert_eq!(conn.joined_tournaments, vec![(code, token)]);
+        assert_eq!(conn.joined_tournaments, vec![code]);
+
+        // ...and the record it keeps is the non-secret code, never the
+        // `player_token` that authorized the join. The token was live enough
+        // to drive a real drop immediately above, so this is a statement about
+        // what is *retained*, not about an empty or inert value.
+        assert!(!token.is_empty());
+        let joined_json =
+            serde_json::to_string(&conn.joined_tournaments).expect("joined_tournaments serializes");
+        assert!(
+            !joined_json.contains(token.as_str()),
+            "player_token retained in ConnState::joined_tournaments: {joined_json}"
+        );
+    }
+
+    /// The per-connection bookkeeping lists are bounded, and being at the
+    /// bound never costs the client the create/join itself.
+    ///
+    /// Eviction is oldest-first, so the surviving window is the most recent
+    /// `MAX_CONN_TOURNAMENT_ENTRIES` — the opposite of refusing the append,
+    /// which would freeze the list on its oldest entries forever.
+    #[test]
+    fn per_connection_tournament_lists_are_bounded_without_failing_the_operation() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut player = ConnState::default();
+
+        let overshoot = 5;
+        let mut codes = Vec::new();
+        for _ in 0..MAX_CONN_TOURNAMENT_ENTRIES + overshoot {
+            // Both helpers panic on an error outbound, so reaching the end of
+            // the loop is itself the proof that the cap never failed a create
+            // or a join.
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            join_tournament(&mut player, &mut broker, &env, &code, "key-a", "Alice");
+            codes.push(code);
+        }
+
+        assert_eq!(
+            organizer.organized_tournaments.len(),
+            MAX_CONN_TOURNAMENT_ENTRIES
+        );
+        assert_eq!(player.joined_tournaments.len(), MAX_CONN_TOURNAMENT_ENTRIES);
+
+        let newest = &codes[overshoot..];
+        assert_eq!(
+            organizer.organized_tournaments.as_slice(),
+            newest,
+            "the newest codes are the ones kept, in order"
+        );
+        assert_eq!(player.joined_tournaments.as_slice(), newest);
+
+        // The registry itself is untouched by the per-connection bound: every
+        // event still exists, only this socket's convenience list is trimmed.
+        assert_eq!(
+            broker.tournaments().len(),
+            MAX_CONN_TOURNAMENT_ENTRIES + overshoot
+        );
+    }
+
+    // -- Registry capacity --------------------------------------------------
+
+    /// `CreateTournament` is refused at [`MAX_TOURNAMENT_ENTRIES`], the
+    /// tournament-registry analogue of the lobby's `MAX_LOBBY_ENTRIES` gate,
+    /// and capacity comes back when the reaper frees it.
+    #[test]
+    fn create_tournament_is_refused_at_capacity_and_recovers_after_a_reap() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        for _ in 0..MAX_TOURNAMENT_ENTRIES {
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        }
+        assert_eq!(broker.tournaments().len(), MAX_TOURNAMENT_ENTRIES);
+
+        let full = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "One Too Many".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        // `error_reason` also pins that the refusal is a *single* outbound:
+        // nothing was created, so no list update may go out either.
+        assert!(
+            error_reason(&full).contains("tournament registry is full"),
+            "unexpected reason: {}",
+            error_reason(&full)
+        );
+        assert_eq!(
+            broker.tournaments().len(),
+            MAX_TOURNAMENT_ENTRIES,
+            "a refused creation must not store anything"
+        );
+
+        // Capacity is recovered by the staleness reaper, the only path that
+        // removes a `Registration` record.
+        env.advance_secs(REGISTRATION_TIMEOUT_SECS + 1);
+        broker.reap_expired(300, &env);
+        assert!(broker.tournaments().is_empty());
+
+        let (code, _) = make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        assert!(
+            broker.tournaments().get(&code).is_some(),
+            "creation must work again once the registry is below capacity"
+        );
     }
 
     // -- Outbound shape per helper -----------------------------------------
