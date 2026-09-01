@@ -125,6 +125,17 @@ jobs:
           grep -q 'volumeClaimTemplates' /tmp/scaleout-render.yaml
           if grep -q 'kind: Deployment' /tmp/scaleout-render.yaml; then echo "unexpected 'kind: Deployment' in /tmp/scaleout-render.yaml"; exit 1; fi
 
+      # `logging.enabled` defaults to false (values.yaml), so the default
+      # render must carry none of the logging surface — a regression in any
+      # of the `if .Values.logging.enabled` gates would otherwise ship an
+      # opt-in component on by default with every check above staying green.
+      - name: assert logging is absent by default
+        run: |
+          if grep -q 'kind: ConfigMap' /tmp/default.yaml; then echo "unexpected 'kind: ConfigMap' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'PHASE_LOG_DIR' /tmp/default.yaml; then echo "unexpected 'PHASE_LOG_DIR' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'nginxinc/nginx-unprivileged' /tmp/default.yaml; then echo "unexpected 'nginxinc/nginx-unprivileged' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'targetPort: logs' /tmp/default.yaml; then echo "unexpected 'targetPort: logs' in /tmp/default.yaml"; exit 1; fi
+
       # The read-only logs sidecar (PHASE_LOG_DIR, its ConfigMap, and the
       # `logs` Service port) is entirely gated on `logging.enabled`, so none
       # of the renders above ever touch it — assert it explicitly, in both
