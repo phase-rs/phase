@@ -908,10 +908,35 @@ impl GameFormat {
     /// `command_zone` is `false`, so this predicate is the only guard that
     /// reaches it.
     pub fn has_unrepresentable_auxiliary_deck_component(self) -> bool {
-        matches!(
-            self,
-            GameFormat::Planechase | GameFormat::Archenemy | GameFormat::Momir
-        )
+        match self {
+            GameFormat::Planechase | GameFormat::Archenemy | GameFormat::Momir => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Commander
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::CommanderDraft => false,
+            // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
+            // style: a future built-in that grants its own deck_loading.rs
+            // auxiliary component must force a deliberate `true`/`false` choice
+            // here, not silently default to unrepresented. No custom-format use
+            // case for this exists today.
+            GameFormat::Custom(_) => false,
+        }
     }
 
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
