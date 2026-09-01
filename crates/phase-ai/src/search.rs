@@ -4776,6 +4776,223 @@ mod tests {
         state
     }
 
+    /// Regression: the equip announcement opens a real
+    /// `WaitingFor::TargetSelection` (driven here through `engine::apply` —
+    /// production wiring, not a hand-built prompt), and `choose_action` must
+    /// never pick the creature the Equipment is already attached to. Fails on
+    /// revert of the `SelectTarget` arm of `EquipmentPriorityPolicy`.
+    #[test]
+    fn choose_action_never_picks_current_host_at_equip_announcement() {
+        let mut state = make_state();
+        let equip = create_object(
+            &mut state,
+            CardId(9),
+            P0,
+            "Summoner's Grimoire".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let e = state.objects.get_mut(&equip).unwrap();
+            e.card_types.core_types.push(CoreType::Artifact);
+            e.card_types.subtypes.push("Book".to_string());
+            e.card_types.subtypes.push("Equipment".to_string());
+            e.base_card_types = e.card_types.clone();
+            Arc::make_mut(&mut e.abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Typed(
+                        engine::types::ability::TypedFilter::creature()
+                            .controller(ControllerRef::You),
+                    ),
+                },
+            ));
+        }
+        let host = add_creature(&mut state, P0, 1, 1);
+        // A second creature exists — the trivial "no other home" activation
+        // rejection does NOT apply here; the host pick is the only place the
+        // same-host play can be stopped.
+        let upgrade = add_creature(&mut state, P0, 3, 3);
+        state.objects.get_mut(&equip).unwrap().attached_to =
+            Some(engine::game::game_object::AttachTarget::Object(host));
+
+        let announced = engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: equip,
+                ability_index: 0,
+            },
+        )
+        .expect("free equip activation must announce");
+        let WaitingFor::TargetSelection { .. } = &announced.waiting_for else {
+            panic!(
+                "equip activation must open TargetSelection, got {:?}",
+                announced.waiting_for
+            );
+        };
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let action = choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(7))
+            .expect("AI must produce an action at the equip host prompt");
+        assert!(
+            !matches!(
+                action,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                } if id == host
+            ),
+            "AI must not pick the current equip host at announcement; got {action:?} \
+             (host {host:?}, upgrade {upgrade:?})"
+        );
+
+        // Reach guard — the negative assertion above is a seeded softmax pick;
+        // pin the ground truth so the test fails structurally if the
+        // same-host Reject regresses (e.g. to a soft penalty): the host-pick
+        // candidate at this exact prompt must be in the issued domain and its
+        // EquipmentPriority verdict a hard Reject.
+        let issued = engine::ai_support::legal_actions(&state);
+        assert!(
+            issued.iter().any(
+                |a| matches!(a, GameAction::ChooseTarget { target: Some(TargetRef::Object(id)) }
+                    if *id == host)
+            ),
+            "reach guard: the current host must be a legal equip target at the announcement prompt"
+        );
+        let host_pick = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Utility),
+        };
+        let policy_decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let policy_context = crate::context::AiContext::empty(&config.weights);
+        let verdicts =
+            crate::policies::registry::PolicyRegistry::shared().verdicts(&PolicyContext {
+                state: &state,
+                decision: &policy_decision,
+                candidate: &host_pick,
+                ai_player: P0,
+                config: &config,
+                context: &policy_context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            });
+        let equip_verdict = verdicts
+            .iter()
+            .find(|(id, _)| *id == crate::policies::registry::PolicyId::EquipmentPriority)
+            .map(|(_, v)| v);
+        assert!(
+            matches!(
+                equip_verdict,
+                Some(crate::policies::registry::PolicyVerdict::Reject { reason })
+                    if reason.kind == "equipment_reequip_same_host"
+            ),
+            "reach guard: picking the current host at the announcement prompt must be \
+             a hard Reject from EquipmentPriorityPolicy; got {equip_verdict:?}"
+        );
+    }
+
+    /// With the Equipment attached to its only creature, the AI must never
+    /// surface the equip activation at priority (pre-existing
+    /// `equipment_no_other_home` rejection — kept as a guard on the activation
+    /// stage).
+    #[test]
+    fn choose_action_never_activates_reequip_without_better_host() {
+        let mut state = make_state();
+        let equip = create_object(
+            &mut state,
+            CardId(9),
+            P0,
+            "Summoner's Grimoire".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let e = state.objects.get_mut(&equip).unwrap();
+            e.card_types.core_types.push(CoreType::Artifact);
+            e.card_types.subtypes.push("Book".to_string());
+            e.card_types.subtypes.push("Equipment".to_string());
+            e.base_card_types = e.card_types.clone();
+            Arc::make_mut(&mut e.abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Any,
+                },
+            ));
+        }
+        let host = add_creature(&mut state, P0, 1, 1);
+        state.objects.get_mut(&equip).unwrap().attached_to =
+            Some(engine::game::game_object::AttachTarget::Object(host));
+        // {3} available for the equip cost — the activation is affordable.
+        add_mana(&mut state, P0, ManaType::Colorless, 3);
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let action =
+            choose_action(&state, P0, &config, &mut rng).expect("AI must produce an action");
+        assert!(
+            !matches!(
+                action,
+                GameAction::ActivateAbility { source_id, .. } if source_id == equip
+            ),
+            "AI must not re-activate equip of an Equipment already attached to its \
+             only host; got {action:?}"
+        );
+
+        // Reach guard — the negative assertion above is vacuous unless the
+        // activation was actually available and hard-rejected by policy. Pin
+        // both so the test flips if the `equipment_no_other_home` guard
+        // regresses to a soft penalty.
+        let issued = engine::ai_support::legal_actions(&state);
+        assert!(
+            issued.iter().any(
+                |a| matches!(a, GameAction::ActivateAbility { source_id, ability_index }
+                    if *source_id == equip && *ability_index == 0)
+            ),
+            "reach guard: the equip activation must be a legal action at priority"
+        );
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: equip,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+        };
+        let policy_decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: P0 },
+            candidates: Vec::new(),
+        };
+        let policy_context = crate::context::AiContext::empty(&config.weights);
+        let verdicts =
+            crate::policies::registry::PolicyRegistry::shared().verdicts(&PolicyContext {
+                state: &state,
+                decision: &policy_decision,
+                candidate: &candidate,
+                ai_player: P0,
+                config: &config,
+                context: &policy_context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            });
+        let equip_verdict = verdicts
+            .iter()
+            .find(|(id, _)| *id == crate::policies::registry::PolicyId::EquipmentPriority)
+            .map(|(_, v)| v);
+        assert!(
+            matches!(
+                equip_verdict,
+                Some(crate::policies::registry::PolicyVerdict::Reject { reason })
+                    if reason.kind == "equipment_no_other_home"
+            ),
+            "reach guard: the no-other-home equip activation must be a hard Reject \
+             from EquipmentPriorityPolicy; got {equip_verdict:?}"
+        );
+    }
+
     /// T8 — the combat production wiring at `deterministic_choice`'s combat
     /// branch derives its lookahead from the config via `from_config`, rather
     /// than passing a literal variant.
