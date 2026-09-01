@@ -9451,6 +9451,40 @@ fn perform_player_scope_sacrifices(
             }
         }
     }
+    // CR 608.2c + CR 609.3: "Sacrifice a creature. If you do, [rider]." — seed
+    // the performed-flag for a sacrifice that completed through the INTERACTIVE
+    // `EffectZoneChoice` path (Victimize, #7898).
+    //
+    // The mandatory-rider seed in `resolve_ability_with_events` decides the flag
+    // by scanning the LOCAL event slice for `PermanentSacrificed`. That works for
+    // the auto path (`sacrifice.rs`: `!up_to && eligible.len() <= count`), which
+    // sacrifices inline. But when the controller has more eligible creatures than
+    // the sacrifice needs, the resolver instead parks on
+    // `WaitingFor::EffectZoneChoice` and returns BEFORE anything is sacrificed —
+    // so that slice holds no `PermanentSacrificed` when the seed evaluates, the
+    // flag stays false, and the rider is silently skipped. In a real game that is
+    // the ordinary case (any caster controlling 2+ creatures), which made
+    // Victimize return nothing at all.
+    //
+    // The sacrifice is only actually known to have happened HERE, at the
+    // completion seam the resumed choice runs through, so the flag must be
+    // stamped onto the stashed continuation frame the same way
+    // `resolve_optional_effect_decision` (accepted "you may") and
+    // `finalize_discard_choice_completion` (an answered discard choice) do.
+    //
+    // Guarded on the completion LEDGER, not on the fact that the seam ran: a
+    // declined / empty selection sacrifices nothing, and CR 608.2c makes the
+    // dependent clause do nothing unless the preceding action occurred. This is
+    // deliberately independent of `cost_payment_failed_flag`, which the rider's
+    // own gate still checks separately.
+    if completion.propagate_parent_context && !completion.sacrificed.is_empty() {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame
+                .pending
+                .chain
+                .set_optional_effect_performed_recursive(true);
+        }
+    }
     if completion.propagate_parent_context {
         if let Some(snapshot) =
             parent_referent_context_from_events(state, &events[events_before_sacrifice..]).or_else(

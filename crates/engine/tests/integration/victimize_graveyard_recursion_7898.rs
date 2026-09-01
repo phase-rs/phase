@@ -21,9 +21,21 @@
 //! CR 115.1: an effect's targets are only the ones its own filter declares.
 //!
 //! Once the graveyard cards are dropped from the sacrifice's targeted set, the
-//! sacrifice reaches the untargeted battlefield pool, actually happens, and the
-//! `If you do` consequence (CR 608.2c) fires on both the mandatory fast path
-//! and the interactive `EffectZoneChoice` path — V1/V2 cover one each.
+//! sacrifice reaches the untargeted battlefield pool and actually happens.
+//!
+//! The `If you do` consequence (CR 608.2c) then has to fire on BOTH sacrifice
+//! completion paths, which reach it through different seams:
+//!   * the mandatory auto path (`sacrifice.rs`, `!up_to && eligible.len() <=
+//!     count`) sacrifices inline, so the event-slice seed in `effects/mod.rs`
+//!     sets the performed-flag. V1/V3-V9 drive this path.
+//!   * the interactive `EffectZoneChoice` path (2+ eligible creatures) parks and
+//!     returns before sacrificing, so the flag is instead seeded at the
+//!     sacrifice-completion seam once the choice is answered. V10-V13 drive this
+//!     path and are the only tests that assert the rider on it.
+//!
+//! V2 also happens to drive the interactive path, but asserts ONLY the sacrifice
+//! half (fodder to the graveyard, spare untouched) — it does not cover the rider.
+//! See the V10-V13 block comment below for the measured path-coverage table.
 //!
 //! CR 400.7 (V9): an object that changes zones becomes a NEW object with no
 //! relation to its previous existence, so a chosen card that leaves the
@@ -470,4 +482,195 @@ fn victimize_stale_chosen_card_is_dropped_without_substitution() {
         outcome.is_tapped(survivor),
         "the still-legal chosen card must enter tapped"
     );
+}
+
+// ---------------------------------------------------------------------------
+// INTERACTIVE-PATH COVERAGE (V10-V13).
+//
+// `sacrifice.rs` has TWO completion paths, and they complete the "If you do"
+// rider through DIFFERENT seams:
+//
+//   * AUTO path (`sacrifice.rs`, `!up_to && eligible.len() <= count`): when the
+//     controller has exactly as many eligible creatures as the sacrifice needs,
+//     the resolver sacrifices them inline. `PermanentSacrificed` lands in the
+//     local event slice, so the CR 608.2c seed in `effects/mod.rs` sees it and
+//     sets `optional_effect_performed` on the parent context.
+//   * INTERACTIVE path (`WaitingFor::EffectZoneChoice`): with 2+ eligible
+//     creatures the player must pick. The resolver returns before any sacrifice
+//     happens, so the local slice holds NO `PermanentSacrificed` when that seed
+//     evaluates; the flag must instead be seeded at the sacrifice-completion
+//     seam once the choice is answered.
+//
+// Every V1-V9 test above stages exactly ONE battlefield creature and therefore
+// only ever exercised the AUTO path. V2 is the sole exception (it stages two)
+// and asserts ONLY the sacrifice half, never the rider — so the rider on the
+// interactive path was entirely uncovered. These tests close that gap; each one
+// stages 2+ battlefield creatures to force `EffectZoneChoice`.
+
+/// V10 — INTERACTIVE-PATH HEADLINE. Assertion-identical to V1, but stages TWO
+/// battlefield creatures so the sacrifice routes through `EffectZoneChoice`
+/// instead of the mandatory auto path.
+///
+/// REVERT-FAILING ASSERTION: `assert_zone(&chosen, Zone::Battlefield)` — without
+/// the completion-seam seed the fodder IS sacrificed but the rider never fires,
+/// so both chosen cards stay in the graveyard (`object N expected in
+/// Battlefield, found in Graveyard`).
+#[test]
+fn victimize_interactive_path_sacrifices_fodder_and_returns_both_chosen_cards_tapped() {
+    let Fixture {
+        mut runner,
+        victimize,
+        graveyard,
+        battlefield,
+    } = setup(&["Grave One", "Grave Two"], &["Fodder", "Spare"]);
+    let (fodder, spare) = (battlefield[0], battlefield[1]);
+    let chosen = [graveyard[0], graveyard[1]];
+
+    let outcome = runner
+        .cast(victimize)
+        .target_objects(&chosen)
+        .effect_zone(&[fodder])
+        .resolve();
+
+    // CR 701.21a: only the chosen fodder is sacrificed; the spare survives.
+    outcome.assert_zone(&[fodder], Zone::Graveyard);
+    outcome.assert_zone(&[spare], Zone::Battlefield);
+
+    // CR 608.2c: the rider fires on this path too — both chosen cards return...
+    outcome.assert_zone(&chosen, Zone::Battlefield);
+    // ...and enter tapped.
+    for &id in &chosen {
+        assert!(
+            outcome.is_tapped(id),
+            "CR 608.2c: chosen card {id:?} must return tapped on the interactive path"
+        );
+    }
+}
+
+/// V11 — INTERACTIVE-PATH IDENTITY DISCRIMINATION. The V7 identity assertion
+/// carried onto the interactive path: four distinct graveyard creatures, two
+/// battlefield creatures (forcing `EffectZoneChoice`), and a NON-ADJACENT,
+/// NON-LEADING chosen pair asserted BIDIRECTIONALLY by `ObjectId`.
+///
+/// This is the binding requirement — the fix must accept the targets the player
+/// actually chose and return exactly those — verified on the path that a real
+/// game takes whenever the caster controls more than one creature.
+#[test]
+fn victimize_interactive_path_returns_exactly_the_two_chosen_cards_by_identity() {
+    let Fixture {
+        mut runner,
+        victimize,
+        graveyard,
+        battlefield,
+    } = setup(
+        &["Grave One", "Grave Two", "Grave Three", "Grave Four"],
+        &["Fodder", "Spare"],
+    );
+    assert_eq!(graveyard.len(), 4, "fixture intent: four distinct choices");
+    assert_eq!(
+        battlefield.len(),
+        2,
+        "fixture intent: 2 eligible creatures force the EffectZoneChoice path"
+    );
+
+    let chosen = [graveyard[1], graveyard[3]];
+    let not_chosen = [graveyard[0], graveyard[2]];
+
+    let outcome = runner
+        .cast(victimize)
+        .target_objects(&chosen)
+        .effect_zone(&[battlefield[0]])
+        .resolve();
+
+    // Direction 1: each CHOSEN id is on the battlefield, tapped.
+    for &id in &chosen {
+        assert_eq!(
+            outcome.zone_of(id),
+            Zone::Battlefield,
+            "chosen card {id:?} must be returned on the interactive path"
+        );
+        assert!(
+            outcome.is_tapped(id),
+            "chosen card {id:?} must enter tapped on the interactive path"
+        );
+    }
+
+    // Direction 2: each NON-CHOSEN id is untouched in the graveyard.
+    for &id in &not_chosen {
+        assert_eq!(
+            outcome.zone_of(id),
+            Zone::Graveyard,
+            "unchosen card {id:?} must remain in the graveyard"
+        );
+    }
+}
+
+/// V12 — INTERACTIVE-PATH NEGATIVE. An interactive sacrifice that selects
+/// NOTHING (empty `EffectZoneChoice` submission) leaves an empty completion
+/// ledger, so the CR 608.2c rider must NOT fire.
+///
+/// Paired with V13, which runs the IDENTICAL fixture and differs only in that a
+/// creature is actually selected — that pairing is what makes this negative
+/// non-vacuous.
+#[test]
+fn victimize_interactive_path_empty_selection_does_not_fire_rider() {
+    let Fixture {
+        mut runner,
+        victimize,
+        graveyard,
+        battlefield,
+    } = setup(&["Grave One", "Grave Two"], &["Fodder", "Spare"]);
+    let chosen = [graveyard[0], graveyard[1]];
+
+    let outcome = runner
+        .cast(victimize)
+        .target_objects(&chosen)
+        .effect_zone(&[])
+        .resolve();
+
+    // POSITIVE REACH-GUARD: the spell was cast and resolved, so the negative
+    // below reflects the rider's gate and not an upstream fizzle.
+    assert_ne!(
+        outcome.zone_of(victimize),
+        Zone::Hand,
+        "reach-guard: Victimize must have been cast and resolved"
+    );
+
+    // CR 701.21a: nothing was sacrificed, so both battlefield creatures survive.
+    outcome.assert_zone(&battlefield, Zone::Battlefield);
+
+    // CR 608.2c: with an empty sacrifice ledger the dependent clause does
+    // nothing — the chosen cards stay in the graveyard.
+    outcome.assert_zone(&chosen, Zone::Graveyard);
+}
+
+/// V13 — V12's POSITIVE TWIN. Identical fixture (two graveyard creatures, two
+/// battlefield creatures, interactive path); the ONLY difference is that a real
+/// creature is selected for the sacrifice. The rider therefore DOES fire.
+#[test]
+fn victimize_interactive_path_real_selection_fires_rider() {
+    let Fixture {
+        mut runner,
+        victimize,
+        graveyard,
+        battlefield,
+    } = setup(&["Grave One", "Grave Two"], &["Fodder", "Spare"]);
+    let chosen = [graveyard[0], graveyard[1]];
+
+    let outcome = runner
+        .cast(victimize)
+        .target_objects(&chosen)
+        .effect_zone(&[battlefield[0]])
+        .resolve();
+
+    assert_ne!(
+        outcome.zone_of(victimize),
+        Zone::Hand,
+        "reach-guard: Victimize must have been cast and resolved"
+    );
+
+    // The one difference from V12: a sacrifice actually happened...
+    outcome.assert_zone(&[battlefield[0]], Zone::Graveyard);
+    // ...so the CR 608.2c rider fires and the chosen cards return.
+    outcome.assert_zone(&chosen, Zone::Battlefield);
 }

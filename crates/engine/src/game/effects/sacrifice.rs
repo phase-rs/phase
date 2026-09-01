@@ -294,6 +294,21 @@ pub fn resolve(
     // sacrificing. Routing an emptied anaphoric set into the untargeted pool
     // would instead make the ABILITY'S controller sacrifice an arbitrary
     // creature of their own, which CR 701.21a does not sanction.
+    //
+    // `CostPaidObject` is deliberately NOT in this exclusion set, even though it
+    // is also anaphoric (CR 608.2k back-reference to the object this ability's
+    // cost or trigger condition named). Unlike the two `ParentTarget*` shapes it
+    // has no bespoke downstream handling in this module, so it reaches the
+    // generic `_ =>` inheritance arm of `effect_object_targets` and does flow
+    // through this retain — but the retain is a provable no-op for it: per
+    // CR 118.8 / CR 701.21a a sacrifice cost is paid by moving a permanent the
+    // player CONTROLS off the battlefield, so any object bound as the cost-paid
+    // referent of a *sacrifice* effect was on the battlefield when it was bound.
+    // The retain therefore either keeps it (still on the battlefield) or drops
+    // an object that the targeted loop's own `zone != Battlefield` guard would
+    // have skipped regardless. Excluding it would not change behavior today and
+    // would only widen the anaphoric carve-out past the two shapes that actually
+    // need it, so it stays out.
     if !matches!(
         filter,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
