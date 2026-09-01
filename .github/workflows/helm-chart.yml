@@ -125,6 +125,59 @@ jobs:
           grep -q 'volumeClaimTemplates' /tmp/scaleout-render.yaml
           if grep -q 'kind: Deployment' /tmp/scaleout-render.yaml; then echo "unexpected 'kind: Deployment' in /tmp/scaleout-render.yaml"; exit 1; fi
 
+      # The read-only logs sidecar (PHASE_LOG_DIR, its ConfigMap, and the
+      # `logs` Service port) is entirely gated on `logging.enabled`, so none
+      # of the renders above ever touch it — assert it explicitly, in both
+      # the default and scale-out shapes.
+      - name: helm template (logging enabled)
+        run: |
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase --set logging.enabled=true > /tmp/logging-default.yaml
+          grep -q 'kind: ConfigMap' /tmp/logging-default.yaml
+          grep -q 'name: PHASE_LOG_DIR' /tmp/logging-default.yaml
+          grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-default.yaml
+          grep -q 'subPath: logs$' /tmp/logging-default.yaml
+          # Only the entry Service in the default (non-scale-out) shape.
+          test "$(grep -c 'targetPort: logs' /tmp/logging-default.yaml)" -eq 1
+
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml --set logging.enabled=true \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/logging-scaleout.yaml
+          grep -q 'kind: ConfigMap' /tmp/logging-scaleout.yaml
+          grep -q 'name: PHASE_LOG_DIR' /tmp/logging-scaleout.yaml
+          grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-scaleout.yaml
+          grep -q 'subPath: logs$' /tmp/logging-scaleout.yaml
+          # Entry + headless + one per ordinal, at scaleOut.replicaMax 3 above.
+          test "$(grep -c 'targetPort: logs' /tmp/logging-scaleout.yaml)" -eq 5
+
+      # Regression pin: a `logging.dir` that string-prefix-matches
+      # PHASE_DATA_DIR but trims to an empty (or `..`-containing) subPath
+      # would mount the *entire* data PVC — games.db and its WAL included —
+      # read-only into the autoindexed sidecar, not just the logs subtree.
+      # Both must-fail cases are paired with the must-succeed render above,
+      # so the guard is proven to track the value, not to refuse the
+      # feature outright.
+      - name: helm template (logging enabled, unsafe logging.dir) must fail
+        run: |
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/ \
+               > /tmp/logging-root.yaml 2>/tmp/logging-root.err; then
+            echo "expected the render to fail for logging.dir at the PVC root"; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-root.err
+
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/logs/../../etc \
+               > /tmp/logging-traversal.yaml 2>/tmp/logging-traversal.err; then
+            echo "expected the render to fail for a logging.dir containing '..'"; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-traversal.err
+
       # `scaleOut.scheme` names the URL each ordinal advertises, and the client
       # turns that string into the "CODE@host" share link a friend dials. Every
       # IngressRoute the chart renders terminates TLS, so `http` is refused
