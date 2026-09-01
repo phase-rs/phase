@@ -85,7 +85,7 @@ export function PreviewBadge() {
             return;
           }
           e.preventDefault();
-          openExternal(__PREVIEW_SITE_URL__);
+          openExternal(__PREVIEW_SITE_URL__, e.nativeEvent);
         }}
         aria-describedby={tooltipId}
         className="group relative flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200 shadow-[0_0_16px_-2px_rgba(245,158,11,0.45)] backdrop-blur-sm transition-all hover:border-amber-300/70 hover:bg-amber-500/20 hover:text-amber-100 hover:shadow-[0_0_22px_0_rgba(245,158,11,0.65)] sm:gap-1.5 sm:px-3.5 sm:py-1.5 sm:text-xs"
