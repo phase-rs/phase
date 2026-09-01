@@ -5060,6 +5060,7 @@ fn bind_search_found_definition(
                         single_use_group: None,
                         single_use: false,
                         cast_cost_raise: None,
+                        alt_ability_cost: None,
                         land_enter_tapped,
                         invalidation: None,
                         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,

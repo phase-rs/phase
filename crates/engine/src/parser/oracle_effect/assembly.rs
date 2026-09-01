@@ -36,7 +36,8 @@ use crate::types::zones::Zone;
 use super::conditions::ability_condition_to_static_condition;
 use super::lower::{
     append_remember_card_to_standalone_exiled_choice, apply_where_x_ability_expression,
-    apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
+    apply_where_x_to_latest_def, attach_alt_ability_cost_to_previous_play_from_exile,
+    attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
@@ -1756,7 +1757,21 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // def; emit no sibling. `modifier` selects which field/aspect.
                 match modifier {
                     PriorModifier::AltCost(cost) => {
-                        attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
+                        // CR 118.9 + CR 119.4: Xander's Pact / Nashi fold the
+                        // rider onto a preceding `CastFromZone` (their whole
+                        // grant is spell-only). Inside Information's preceding
+                        // grant is a plain "you may play those cards" —
+                        // `GrantCastingPermission { PlayFromExile }` — which
+                        // also authorizes land plays, so when no `CastFromZone`
+                        // is in scope, fall back to folding the cost onto that
+                        // grant's `alt_ability_cost` instead (land plays stay
+                        // unaffected — the field is spell-cast-only).
+                        if !attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone()) {
+                            attach_alt_ability_cost_to_previous_play_from_exile(
+                                &mut defs,
+                                cost.clone(),
+                            );
+                        }
                     }
                     PriorModifier::ManaRetention(expiry) => {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);

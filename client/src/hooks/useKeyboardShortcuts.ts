@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 
-import { isAuthorityRemote, useGameStore } from "../stores/gameStore";
+import {
+  canExportAuthoritativeState,
+  isAuthorityRemote,
+  useGameStore,
+} from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
 import { getPlayerId } from "./usePlayerId";
@@ -8,7 +12,7 @@ import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
 import {
   copyGameStateDebugSnapshot,
-  exportGameStateDebugZip,
+  exportAuthoritativeGameStateZip,
 } from "../services/gameStateExport";
 
 /**
@@ -79,6 +83,7 @@ export function useKeyboardShortcuts(): void {
         stateHistory,
         gameMode,
         manaPaymentShortcutActions,
+        adapter,
       } = useGameStore.getState();
       const uiState = useUiStore.getState();
 
@@ -186,8 +191,8 @@ export function useKeyboardShortcuts(): void {
         case "D":
           if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
             e.preventDefault();
-            if (gameState) {
-              exportGameStateDebugZip(gameState)
+            if (adapter?.exportPersistenceState && canExportAuthoritativeState(gameMode)) {
+              exportAuthoritativeGameStateZip(adapter)
                 .then((filename) => console.log(`[Debug] Game state exported to ${filename}`))
                 .catch((err) => console.error("[Debug] Failed to export:", err));
             }

@@ -363,7 +363,20 @@ export function useVisualPackManager(): VisualPackManagerState {
 
   const handleProgress = useCallback((event: ProgressEvent) => {
     if (!mountedRef.current) return;
-    const selected = operationRef.current;
+    let selected = operationRef.current;
+    if (
+      operationIsDurableMutation(event.operation)
+      && !startEventBufferRef.current.active
+      && (!selected || ((progressOutcomeRef.current.failed || !operationIsDurableMutation(selected)) && progressIdentity(event) !== `${selected.operationId}:${selected.catalogRoot}`))
+    ) {
+      const identity = progressIdentity(event);
+      operationRef.current = event.operation;
+      progressRef.current = null;
+      progressOutcomeRef.current = { identity, failed: false, cancelled: false, terminal: false };
+      setOperation(event.operation);
+      setProgress(null);
+      selected = event.operation;
+    }
     if (
       !selected
       || event.operation.operationId !== selected.operationId
@@ -410,9 +423,31 @@ export function useVisualPackManager(): VisualPackManagerState {
     // `completed` is excluded from the reopening because that ending is
     // unambiguous: `run()`'s catch leaves an already-completed record alone, so
     // it can emit `failed` carrying one, and a finished install must not flip.
-    if (outcome.failed || outcome.cancelled) return;
+    // A retryable failure leaves its record live. Its next authoritative
+    // `started` event is a new run of THAT record, so it may reopen the
+    // failure latch. Do this only after proving the event still names a live
+    // operation: a late start must never revive a witnessed cancellation or a
+    // completed/terminal record.
+    const restartingAfterRetryableFailure = event.phase === "started"
+      && outcome.failed
+      && !outcome.cancelled
+      && !outcome.terminal
+      && operationIsDurableMutation(event.operation);
+    const acceptingCancellationAfterRetryableFailure = event.phase === "cancelled"
+      && outcome.failed
+      && !outcome.terminal
+      && operationIsDurableMutation(selected);
+    if (outcome.cancelled) return;
+    // Reconciliation can authoritatively cancel a previously failed but still
+    // retryable operation when its membership is superseded. That terminal
+    // event must replace the Resume state; ordinary running updates may not.
+    if (outcome.failed && !restartingAfterRetryableFailure && !acceptingCancellationAfterRetryableFailure) return;
     if (outcome.terminal && (event.phase !== "failed" || event.operation.state === "completed")) return;
     if (operationRank(event.operation) < operationRank(selected)) return;
+    if (restartingAfterRetryableFailure) {
+      outcome.failed = false;
+      outcome.terminal = false;
+    }
     if (event.phase === "failed") outcome.failed = true;
     if (event.phase === "cancelled") outcome.cancelled = true;
     if (progressIsTerminal(event)) outcome.terminal = true;

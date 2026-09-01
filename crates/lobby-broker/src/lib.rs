@@ -13,6 +13,7 @@ pub mod inbound_guard;
 pub mod lobby;
 pub mod protocol;
 pub mod reservation_auth;
+pub mod tournament;
 pub mod validation;
 
 pub use broker::{
@@ -37,5 +38,14 @@ pub use protocol::{
 pub use reservation_auth::{
     conn_holds_reservation, consume_owned_reservation, release_owned_reservation,
     ReservationConsume, ReservationRelease, NOT_OWNED_RESERVATION,
+};
+pub use tournament::{
+    build_single_elimination_round, build_swiss_round, default_total_rounds, had_bye,
+    had_short_pod, partition_round, prior_opponents, validate_match_result, BracketShape,
+    CreateTournamentRequest, MatchArity, PairingId, PairingOutcome, PodOutcome, RawScoringPolicy,
+    RoundPartition, ScoringPolicy, TiebreakOrder, Tiebreaks, TournamentExpiryEvent,
+    TournamentManager, TournamentMeta, TournamentPairing, TournamentPlayer, TournamentStanding,
+    TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
+    SINGLE_ELIMINATION_MAX_PLAYERS, SINGLE_ELIMINATION_MIN_PLAYERS, TERMINAL_RETENTION_SECS,
 };
 pub use validation::validate_lobby_message;

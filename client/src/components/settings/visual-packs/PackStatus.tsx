@@ -167,6 +167,9 @@ export function PackStatus({
           </ul>
         </div>
       )}
+      {pendingActions.has("remove") && (
+        <p aria-live="polite" className="text-xs text-slate-300">{t("visualPacks.removal.inProgress")}</p>
+      )}
     </section>
   );
 }

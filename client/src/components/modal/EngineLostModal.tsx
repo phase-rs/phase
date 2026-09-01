@@ -200,7 +200,7 @@ export function EngineLostModal() {
               ? t("engineLost.exportFailed")
               : exported
                 ? t("engineLost.exported")
-                : t("engineLost.exportGameState")}
+                : t("engineLost.exportClientSnapshot")}
           </button>
           {isPanic && (
             <>

@@ -70,6 +70,24 @@ pub(crate) struct ParseContext {
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
     pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
+    /// nearest preceding `Effect::Dig` in this chain whose kept and rest
+    /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of
+    /// Wills's "... into your hand and the rest into your graveyard").
+    /// `None` when no such split precedes this chunk, INCLUDING when the
+    /// nearest tracked-set producer is a single-pile mover (`ChangeZoneAll`,
+    /// `Destroy`, `Mill`, ...) with no complementary kept partition to
+    /// disambiguate from (Pinnacle Starcage's "put each card exiled with this
+    /// artifact into its owner's graveyard, then create ... for each card put
+    /// into a graveyard this way" — every exiled card lands in the SAME
+    /// graveyard pile, so the bare `TrackedSetSize` default is already
+    /// correct there). Set per effect-chain chunk from a lookback over
+    /// `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
+    /// by the Token "for each" dispatch (`oracle_effect::mod::try_parse_for_each_effect`)
+    /// to bind a bare "card put into a/your/their graveyard this way" count to
+    /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
+    /// actually precedes it.
+    pub nearest_dig_rest_zone: Option<crate::types::zones::Zone>,
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,

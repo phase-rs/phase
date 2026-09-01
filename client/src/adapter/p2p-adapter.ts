@@ -702,6 +702,15 @@ function isZeroCountDebugCreate(action: GameAction): boolean {
 let sharedEngineHost: symbol | null = null;
 
 /**
+ * Cadence of the host's per-guest state redelivery sweep — deliberately the
+ * same 5s as the transport keepalive (`network/peer.ts`). The keepalive bounds
+ * detection of a DEAD channel (pong timeout, disconnect, `reconnect_ack`
+ * resync on rejoin); this sweep bounds recovery from failures the host can
+ * SEE on a live channel: a rejected viewer snapshot or a refused send.
+ */
+const STATE_REDELIVERY_TICK_MS = 5_000;
+
+/**
  * Fail-loud contract for a disposed host. With a private worker, `dispose()`
  * tore the engine down and every later call threw `assertInitialized`. A shared
  * worker survives disposal, so a use-after-dispose host would silently operate
@@ -789,6 +798,19 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Monotonic authority revision for WASM hosts; native hosts replace this
    * with the local phase-server's revision before fan-out. */
   private authoritativeRevision = 0;
+  /**
+   * Last revision each guest seat's channel ACCEPTED (`send` resolved true)
+   * from a state-bearing frame: `game_setup`, `state_update`, or
+   * `reconnect_ack`. A missing entry means the seat never took its setup
+   * frame; the redelivery sweep skips such seats, because a `state_update`
+   * cannot substitute for the setup handshake. Channel acceptance is the
+   * strongest per-frame signal the wire protocol offers (there is no
+   * state-update ack); a channel that dies after accepting is the
+   * keepalive's case, and its reconnect refreshes this ledger through
+   * `reconnect_ack`.
+   */
+  private guestDeliveredRevisions = new Map<PlayerId, number>();
+  private redeliveryTimer: ReturnType<typeof setInterval> | null = null;
   /** First committed terminal statement fences every subsequent action and
    * reconnect. Its id is immutable for this adapter incarnation. */
   private terminalResult: P2PTerminalResult | null = null;
@@ -1165,11 +1187,19 @@ export class P2PHostAdapter implements EngineAdapter {
     await saveResumableGameStrict(this.gameId, JSON.parse(json) as PersistedGameState);
   }
 
-  /** Abort an unpublished resumed engine so no reconnect can observe volatile state. */
+  /** Abort an unpublished resumed engine so no reconnect can observe volatile
+   * state. Also stops the redelivery sweep: it is armed in `initializeInner`
+   * before the resume barrier, and only `dispose()` cleared it, so reaching
+   * this path left a 5 s interval firing for the life of the page. A resume
+   * that fails before this path is reached still relies on `dispose()`. */
   private async abortUnpublishedResume(): Promise<void> {
     this.resumedAutomation = null;
     this.unsubscribeHostConnections();
     this.disposed = true;
+    if (this.redeliveryTimer !== null) {
+      clearInterval(this.redeliveryTimer);
+      this.redeliveryTimer = null;
+    }
     if (sharedEngineHost === this.engineClaim) sharedEngineHost = null;
     await this.wasm.releaseHostSession(true);
     releaseP2PHostLease(this.authority);
@@ -1466,14 +1496,9 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       staleRetries = 0;
       const result = outcome.result;
+      await this.publishHostSnapshot(result);
       await this.broadcastStateUpdate(result.events, result.log_entries);
       void this.persistAuthoritativeState();
-      this.emit({
-        type: "stateChanged",
-        snapshot: await this.wasm.getSnapshot(),
-        events: result.events,
-        logEntries: result.log_entries,
-      });
     }
   }
 
@@ -1566,6 +1591,7 @@ export class P2PHostAdapter implements EngineAdapter {
       // handshake above) were in flight. Bail before installing anything:
       // nothing has been claimed yet, so there is nothing to undo.
       if (this.disposed) await this.bailDisposed(false, "initialization");
+      this.startRedeliverySweep();
       // Resume path: load the persisted GameState with a fresh RNG seed
       // and atomic multiplayer-flag claim. `resumeMultiplayerHostState`
       // mirrors server-core's `from_persisted` pattern, and
@@ -2028,21 +2054,41 @@ export class P2PHostAdapter implements EngineAdapter {
       }
 
       const revision = ++this.authoritativeRevision;
+      let setupFailure: unknown = null;
       for (const [pid, session] of this.guestSessions) {
         const token = this.playerTokens.get(pid)!;
-        const snapshot = await this.wasm.getViewerSnapshot(pid);
-        void this.send(session, {
-          type: "game_setup",
-          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-          assignedPlayerId: pid,
-          playerToken: token,
-          revision,
-          state: snapshot.state,
-          events: result.events,
-          playerNames: allNames,
-          ...legalActionsToWire(snapshot),
-        });
+        try {
+          const snapshot = await this.wasm.getViewerSnapshot(pid);
+          void this.send(session, {
+            type: "game_setup",
+            wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+            assignedPlayerId: pid,
+            playerToken: token,
+            revision,
+            state: snapshot.state,
+            events: result.events,
+            playerNames: allNames,
+            ...legalActionsToWire(snapshot),
+          }).then((delivered) => {
+            if (delivered) this.recordGuestDelivery(pid, revision);
+          });
+        } catch (err) {
+          // Isolate per seat. Unisolated, one rejected read left every LATER
+          // seat without its setup frame — and those seats are then stuck for
+          // good: no `game_setup` means no ledger entry, so the sweep skips
+          // them by design, and a second start returns early because
+          // `gameStarted` is already true. The seat whose own read failed
+          // still belongs to the setup/reconnect path, not to the sweep.
+          console.error(`[P2PHost] game_setup for seat ${pid} failed:`, err);
+          setupFailure ??= err;
+        }
       }
+      // Isolation buys the LATER seats their frame; it must not also buy
+      // silence. Before it, the throw reached the host. A seat that never got
+      // `game_setup` waits on a promise that never settles (the guest's
+      // `initializeGame` resolves only on `game_setup`/`reconnect_ack`), so the
+      // host is the only party that can learn of it — keep the throw.
+      if (setupFailure !== null) throw setupFailure;
 
       await this.runAiLoop();
       return result;
@@ -2114,17 +2160,6 @@ export class P2PHostAdapter implements EngineAdapter {
     return this.wasm.previewManaPayment(action, actor);
   }
 
-  async exportPersistenceState(): Promise<string> {
-    this.assertNotDisposed();
-    if (!this.ownsAuthority()) {
-      throw new AdapterError("P2P_ERROR", "Host session superseded", true);
-    }
-    if (this.nativeBridge) {
-      throw new AdapterError("P2P_ERROR", "Native P2P persistence is managed by phase-server", false);
-    }
-    return this.wasm.exportPersistenceState();
-  }
-
   /** Releases a complete native-server revision only after every local seat
    * socket has supplied its own filtered view. The native server is the
    * authority for this revision; PeerJS carries it through to terminal
@@ -2139,7 +2174,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (revision < this.authoritativeRevision) return;
     this.authoritativeRevision = revision;
     const allNames = this.playerNamesForSeats();
-    const sends: Array<Promise<boolean>> = [];
+    const sends: Array<Promise<void>> = [];
     for (const [pid, session] of this.guestSessions) {
       const update = views.get(pid);
       if (!update || this.disconnectedSeats.has(pid)) continue;
@@ -2156,6 +2191,8 @@ export class P2PHostAdapter implements EngineAdapter {
           events: update.events,
           playerNames: allNames,
           ...legalActionsToWire(update.snapshot.legalResult),
+        }).then((delivered) => {
+          if (delivered) this.recordGuestDelivery(pid, revision);
         }));
       } else {
         sends.push(this.send(session, {
@@ -2165,6 +2202,8 @@ export class P2PHostAdapter implements EngineAdapter {
           events: update.events,
           logEntries: update.logEntries,
           ...legalActionsToWire(update.snapshot.legalResult),
+        }).then((delivered) => {
+          if (delivered) this.recordGuestDelivery(pid, revision);
         }));
       }
     }
@@ -2224,6 +2263,17 @@ export class P2PHostAdapter implements EngineAdapter {
    * Final state first, terminal statement second. The ordered transport plus
    * the state commitment lets a guest reject a plausible-looking terminal
    * result that belongs to another final position or host incarnation.
+   *
+   * Per recipient this reads a viewer snapshot of its own, so it carries the
+   * same rejection source as the state fan-out and is isolated the same way.
+   * Unisolated, one rejected read cost the seat its statement, with no way
+   * back — this function returns early once `this.terminalResult` is set; it
+   * cost that seat its sweep nomination too, whenever the state fan-out had
+   * already recorded it at this revision; and it cost the host its own
+   * `terminalResult` emit, which clears the prompt overlay, drops the
+   * resumable save and supplies the closing reason (the board itself already
+   * reads GameOver from the published snapshot). A failed seat is now pushed below the
+   * revision and the sweep heals it.
    */
   private async commitTerminalIfComplete(
     snapshot: EngineSnapshot,
@@ -2255,11 +2305,19 @@ export class P2PHostAdapter implements EngineAdapter {
     this.terminalResult = result;
     this.gameRunState = "terminal";
     await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
-      const viewerSnapshot = this.nativeBridge
-        ? this.nativeBridge.viewerSnapshot(playerId)
-        : await this.wasm.getViewerSnapshot(playerId);
-      const recipientResult = await createResult(playerId, viewerSnapshot.state);
-      await this.send(session, { type: "terminal_result", result: recipientResult });
+      try {
+        const viewerSnapshot = this.nativeBridge
+          ? this.nativeBridge.viewerSnapshot(playerId)
+          : await this.wasm.getViewerSnapshot(playerId);
+        const recipientResult = await createResult(playerId, viewerSnapshot.state);
+        if (await this.send(session, { type: "terminal_result", result: recipientResult })) return;
+      } catch (err) {
+        console.error(`[P2PHost] terminal delivery for seat ${playerId} failed; the sweep resyncs it:`, err);
+      }
+      // Same authority that heals a failed state fan-out: hand the seat to the
+      // ledger, and `redeliverGuestState` re-sends the final state plus a
+      // freshly committed, recipient-bound statement on the next sweep.
+      this.markGuestBehind(playerId, revision);
     }));
     this.emit({ type: "terminalResult", result });
     return true;
@@ -2298,6 +2356,11 @@ export class P2PHostAdapter implements EngineAdapter {
    * populated `legalActions` map; non-acting guests receive empty legal
    * actions from the engine-side viewer gate (`legal_actions_for_viewer`).
    * Skips disconnected seats (their state is delivered via `reconnect_ack`).
+   *
+   * Delivery contract (#7924): an accepted send advances that seat's entry in
+   * `guestDeliveredRevisions`; a seat whose viewer read or send fails keeps
+   * its old entry and is resynchronized by the redelivery sweep below. One
+   * seat's failure aborts neither the other seats nor the terminal close.
    */
   private async broadcastStateUpdate(
     events: GameEvent[],
@@ -2315,21 +2378,187 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     const revision = ++this.authoritativeRevision;
-    const sends: Array<Promise<boolean>> = [];
+    const sends: Array<Promise<void>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
-      const snapshot = await this.wasm.getViewerSnapshot(pid);
-      sends.push(this.send(session, {
-        type: "state_update",
-        revision,
-        state: snapshot.state,
-        events,
-        logEntries,
-        ...legalActionsToWire(snapshot),
-      }));
+      try {
+        const snapshot = await this.wasm.getViewerSnapshot(pid);
+        sends.push(this.send(session, {
+          type: "state_update",
+          revision,
+          state: snapshot.state,
+          events,
+          logEntries,
+          ...legalActionsToWire(snapshot),
+        }).then((delivered) => {
+          if (delivered) this.recordGuestDelivery(pid, revision);
+        }));
+      } catch (err) {
+        console.error(`[P2PHost] viewer snapshot for seat ${pid} failed; the redelivery sweep resyncs it:`, err);
+      }
     }
     await Promise.all(sends);
-    await this.commitTerminalIfComplete(await this.wasm.getSnapshot(), revision, terminalReason);
+    // This read decides whether the game closes AT ALL, and the guest-path
+    // `try` around this call would swallow a rejection: `terminalResult` would
+    // stay null with nothing to retry it, because a finished game produces no
+    // further action to drive another close. Surface it rather than leaving the
+    // match silently unclosed.
+    let closingSnapshot;
+    try {
+      closingSnapshot = await this.wasm.getSnapshot();
+    } catch (err) {
+      console.error("[P2PHost] terminal close could not read the final state:", err);
+      this.emit({
+        type: "terminalUnavailable",
+        message: "Failed to read the authoritative state; a game that just ended stays open until something drives another close",
+      });
+      return;
+    }
+    await this.commitTerminalIfComplete(closingSnapshot, revision, terminalReason);
+  }
+
+  /**
+   * Push a seat BELOW the authoritative revision so the sweep nominates it.
+   *
+   * `recordGuestDelivery` is deliberately monotonic; this is the one caller
+   * allowed to lower an entry, and only where the seat provably did not
+   * receive this revision.
+   *
+   * A seat with NO entry is left alone: a missing entry means the seat never
+   * took its `game_setup`, and that seat belongs to the setup/reconnect path
+   * (a `state_update` cannot substitute for the handshake). Creating an entry
+   * here would hand it a resync every tick that it discards unauthenticated.
+   * `Math.min` keeps the entry from claiming a revision the seat never had.
+   */
+  private markGuestBehind(pid: PlayerId, revision: number): void {
+    const prior = this.guestDeliveredRevisions.get(pid);
+    if (prior === undefined) return;
+    this.guestDeliveredRevisions.set(pid, Math.min(prior, revision - 1));
+  }
+
+  /** Monotonic: a stale resync result must never roll a seat's entry back. */
+  private recordGuestDelivery(pid: PlayerId, revision: number): void {
+    const prior = this.guestDeliveredRevisions.get(pid);
+    if (prior === undefined || revision > prior) {
+      this.guestDeliveredRevisions.set(pid, revision);
+    }
+  }
+
+  private startRedeliverySweep(): void {
+    if (this.redeliveryTimer !== null) return;
+    this.redeliveryTimer = setInterval(() => this.queueLaggingRedeliveries(), STATE_REDELIVERY_TICK_MS);
+  }
+
+  /** Sweep entry — runs outside the delivery queue, so it only nominates
+   * seats; the actual send happens inside `enqueueDelivery`, which re-checks
+   * the lag (a broadcast queued ahead may already have healed the seat, and
+   * a second nomination then settles as a no-op). */
+  private queueLaggingRedeliveries(): void {
+    if (this.disposed || !this.ownsAuthority()) return;
+    for (const pid of this.guestSessions.keys()) {
+      if (this.disconnectedSeats.has(pid)) continue;
+      const delivered = this.guestDeliveredRevisions.get(pid);
+      if (delivered === undefined || delivered >= this.authoritativeRevision) continue;
+      void this.enqueueDelivery(() => this.redeliverGuestState(pid));
+    }
+  }
+
+  /**
+   * Idempotent per-seat resync: reuses `reconnectHandoff` (revision and
+   * viewer snapshot captured together, native and WASM alike) and sends the
+   * CURRENT authoritative state as a plain `state_update`. The missed frame's
+   * events and log entries are not replayed — the full state is the recovery;
+   * animations and the seat's game log are not, and the log keeps that hole.
+   * If the game has already closed, the seat also gets a freshly committed
+   * `terminal_result` AFTER the healing state frame: the one-shot terminal
+   * fan-out ran against the seat's stale revision, and `acceptTerminalResult`
+   * refuses a revision mismatch, so without this the seat would hold the
+   * final board but never a committed result. Never rejects: a failure
+   * leaves the ledger entry stale and the next sweep retries, for as long
+   * as the seat stays connected.
+   */
+  private async redeliverGuestState(pid: PlayerId): Promise<void> {
+    if (this.disposed || !this.ownsAuthority()) return;
+    const session = this.guestSessions.get(pid);
+    if (!session || this.disconnectedSeats.has(pid)) return;
+    const delivered = this.guestDeliveredRevisions.get(pid);
+    if (delivered === undefined || delivered >= this.authoritativeRevision) return;
+    try {
+      const handoff = await this.reconnectHandoff(pid);
+      const accepted = await this.send(session, {
+        type: "state_update",
+        revision: handoff.revision,
+        state: handoff.snapshot.state,
+        events: [],
+        ...legalActionsToWire(handoff.snapshot.legalResult),
+      });
+      if (!accepted) return;
+      if (this.terminalResult !== null) {
+        // Recipient-bound, like the reconnect path: `terminalResultForRecipient`
+        // verifies the terminal revision against this handoff and throws
+        // otherwise — the catch below turns that into a retry. The ledger
+        // advances only once BOTH frames are accepted, so a refused or failed
+        // terminal send re-nominates the seat on the next sweep.
+        const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
+        if (!(await this.send(session, { type: "terminal_result", result }))) return;
+      }
+      this.recordGuestDelivery(pid, handoff.revision);
+    } catch (err) {
+      console.warn(`[P2PHost] state redelivery for seat ${pid} failed; retrying on the next sweep:`, err);
+    }
+  }
+
+  /**
+   * Emit the host's own `stateChanged` for an applied submission.
+   *
+   * Call this BEFORE `broadcastStateUpdate`, never after (#7924). On the
+   * guest-message paths the fan-out runs inside a `try`, and it can still
+   * reject at its close: the host snapshot read feeding
+   * `commitTerminalIfComplete`. The per-seat viewer reads on both sides of
+   * that close — the fan-out's and the terminal commit's own recipient-bound
+   * ones — are caught per seat and settle into the delivery ledger. Emitting
+   * afterwards therefore makes the host's own screen depend on work done on
+   * every guest's behalf — the host freezes on a board its own engine has
+   * already advanced.
+   *
+   * Precise about the failure that is NOT in that set: a dead guest channel
+   * is not one. `trySend` resolves `false` for a closed channel, an encode
+   * error, or a throwing `conn.send` (`network/peer.ts:69-106`), so a broken
+   * link degrades the fan-out silently rather than rejecting it. The ordering
+   * matters for the per-viewer snapshot and the terminal commit.
+   *
+   * **This never rejects.** Running before the fan-out would otherwise turn a
+   * failed local read into a stalled delivery: the fan-out is the only step
+   * that advances the authoritative revision, so skipping it leaves even the
+   * redelivery sweep with nothing to nominate — the guests hear nothing until
+   * the next action — and their watchdog cannot bridge that gap
+   * (`game/staleStateWatchdog.ts` — its check
+   * compares screen against the adapter cache, and an undelivered update
+   * leaves both equally stale). Symmetry is the whole point of the ordering:
+   * on THIS path neither side may starve the other, so a failure here is
+   * logged and the caller continues to the fan-out.
+   *
+   * The symmetry stops at the guest-message paths. The host's own
+   * `submitAction` / `submitInteraction` still await the fan-out without a
+   * `try`, so its one remaining rejection — the terminal close — surfaces to
+   * the host's caller after the per-seat sends have settled; a seat that
+   * missed its frame belongs to the ledger and sweep. Naming it rather than
+   * changing a public adapter contract in this PR.
+   *
+   * No-op under `nativeBridge`, which publishes its own revisions.
+   */
+  private async publishHostSnapshot(result: SubmitResult): Promise<void> {
+    if (this.nativeBridge) return;
+    try {
+      this.emit({
+        type: "stateChanged",
+        snapshot: await this.wasm.getSnapshot(),
+        events: result.events,
+        logEntries: result.log_entries,
+      });
+    } catch (err) {
+      console.error("[P2PHost] host snapshot publication failed:", err);
+    }
   }
 
   async getState(): Promise<GameState> {
@@ -2477,6 +2706,11 @@ export class P2PHostAdapter implements EngineAdapter {
     this.guestDecks.clear();
     this.aiDecks.clear();
     this.nativeDeliveredViews.clear();
+    this.guestDeliveredRevisions.clear();
+    if (this.redeliveryTimer !== null) {
+      clearInterval(this.redeliveryTimer);
+      this.redeliveryTimer = null;
+    }
     try {
       this.hostPeer.destroy();
     } catch {
@@ -2610,6 +2844,7 @@ export class P2PHostAdapter implements EngineAdapter {
           }
           return;
         }
+        let result: SubmitResult;
         try {
           // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
           // `msg.senderPlayerId`. The envelope check above already guarantees
@@ -2617,32 +2852,36 @@ export class P2PHostAdapter implements EngineAdapter {
           // tag with the authenticated session identity — the wire payload
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
-          const result = this.nativeBridge
+          result = this.nativeBridge
             ? await this.nativeBridge.submitAction(msg.action, pid)
             : await this.wasm.submitAction(msg.action, pid);
+        } catch (err) {
+          // The engine refused the action: nothing applied, so this — and only
+          // this — is an action failure the guest must hear about.
+          const session = this.guestSessions.get(pid);
+          if (session) void this.send(session, actionFailureFrame(err));
+          break;
+        }
+        // Past here the action HAS applied. Everything left is delivery and
+        // bookkeeping, so a throw must not reach the guest as an action
+        // failure — that reports an applied action as failed and the guest's
+        // screen then disagrees with the authoritative engine (#7924).
+        try {
           if (isZeroCountDebugCreate(msg.action)) {
             const session = this.guestSessions.get(pid);
             if (session) await this.send(session, { type: "action_noop" });
             break;
           }
+          // Host screen first, then the guests (see `publishHostSnapshot`).
+          await this.publishHostSnapshot(result);
           await this.broadcastStateUpdate(result.events, result.log_entries);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
           await this.runAiLoop();
           void this.persistAuthoritativeState();
-          // Emit local stateChanged so host UI updates for opponent actions.
-          if (!this.nativeBridge) {
-            this.emit({
-              type: "stateChanged",
-              snapshot: await this.wasm.getSnapshot(),
-              events: result.events,
-              logEntries: result.log_entries,
-            });
-          }
         } catch (err) {
-          const session = this.guestSessions.get(pid);
-          if (session) void this.send(session, actionFailureFrame(err));
+          console.error("[P2PHost] delivery after an applied guest action failed:", err);
         }
         break;
       }
@@ -2661,23 +2900,23 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           return;
         }
+        let result: SubmitResult;
         try {
-          const result = this.nativeBridge
+          result = this.nativeBridge
             ? await this.nativeBridge.submitInteraction(msg.submission, pid)
             : await this.wasm.submitInteraction(msg.submission, pid);
+        } catch (err) {
+          void this.send(session, actionFailureFrame(err));
+          break;
+        }
+        // Applied — same delivery contract as the "action" case above (#7924).
+        try {
+          await this.publishHostSnapshot(result);
           await this.broadcastStateUpdate(result.events, result.log_entries);
           await this.runAiLoop();
           void this.persistAuthoritativeState();
-          if (!this.nativeBridge) {
-            this.emit({
-              type: "stateChanged",
-              snapshot: await this.wasm.getSnapshot(),
-              events: result.events,
-              logEntries: result.log_entries,
-            });
-          }
         } catch (err) {
-          void this.send(session, actionFailureFrame(err));
+          console.error("[P2PHost] delivery after an applied guest interaction failed:", err);
         }
         break;
       }
@@ -2908,6 +3147,7 @@ export class P2PHostAdapter implements EngineAdapter {
         this.failPendingReconnect(pid, session, "Reconnect acknowledgement could not be delivered");
         return;
       }
+      this.recordGuestDelivery(pid, handoff.revision);
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
       if (this.deliveredNativeAiDriverFault !== null) {
@@ -3053,22 +3293,18 @@ export class P2PHostAdapter implements EngineAdapter {
       const result = this.nativeBridge
         ? await this.nativeBridge.submitAction(concedeAction, pid)
         : await this.wasm.submitAction(concedeAction, pid);
-      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
-      await this.runAiLoop();
-      void this.persistAuthoritativeState();
-      if (!this.nativeBridge) {
-        this.emit({
-          type: "stateChanged",
-          snapshot: await this.wasm.getSnapshot(),
-          events: result.events,
-          logEntries: result.log_entries,
-        });
-      }
+      // Both host emissions precede the fan-out: the concession has applied,
+      // and a guest link failure must not hide it from the host's own screen
+      // (#7924). Order between them is unchanged — state, then the notice.
+      await this.publishHostSnapshot(result);
       this.emit(
         origin === "kick"
           ? { type: "playerKicked", playerId: pid, reason }
           : { type: "playerConceded", playerId: pid, reason },
       );
+      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
     } catch (err) {
       console.error("[P2PHost] concedePlayer failed:", err);
     }

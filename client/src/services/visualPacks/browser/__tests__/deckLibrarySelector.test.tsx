@@ -2,8 +2,10 @@ import "fake-indexeddb/auto";
 
 import { IDBFactory } from "fake-indexeddb";
 import { openDB } from "idb";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { VisualPackManager } from "../../../../components/settings/visual-packs/VisualPackManager.tsx";
 import { VisualPackBackendError } from "../../backend.ts";
 import { assetKey, catalogRoot, estimatedImageBytes, minimumImageBytes, operationId, packId } from "../../types.ts";
 import type { DeckLibraryInstallSelector, InstallSelector, ProgressEvent } from "../../types.ts";
@@ -21,6 +23,12 @@ const CURATED = packId("curated");
 const EMPTY_DIGEST = catalogRoot("f".repeat(64));
 const BULK_INDEX_URL = "https://api.scryfall.com/bulk-data";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 class MemoryCache {
   readonly entries = new Map<string, Response>();
 
@@ -34,6 +42,7 @@ class MemoryCache {
   }
 
   async delete(path: string): Promise<boolean> {
+    if (path === holdCacheDeletePath) await new Promise<void>((resolve) => { releaseCacheDelete = resolve; });
     return this.entries.delete(path);
   }
 }
@@ -44,6 +53,8 @@ let holdSecondImage = false;
 let releaseSecondImage: (() => void) | null = null;
 let holdCachePath: string | null = null;
 let releaseCacheMatch: (() => void) | null = null;
+let holdCacheDeletePath: string | null = null;
+let releaseCacheDelete: (() => void) | null = null;
 let failImages = false;
 let failedImage: string | null = null;
 
@@ -53,6 +64,7 @@ const state = vi.hoisted(() => ({
   plan: vi.fn(),
   invalidate: vi.fn(),
 }));
+const platform = vi.hoisted(() => ({ load: vi.fn() }));
 
 vi.mock("../../../scryfall.ts", () => ({
   isCardDataResident: () => state.cardDataResident,
@@ -62,6 +74,8 @@ vi.mock("../../deckLibraryPack.ts", () => ({
   planDeckLibraryPack: state.plan,
   invalidateDeckLibraryPack: state.invalidate,
 }));
+vi.mock("../../../platform.ts", () => ({ loadVisualPackBackend: platform.load }));
+vi.mock("../../../../hooks/useSetSymbols.ts", () => ({ useSetCatalog: () => ({ catalog: null, isLoading: false }) }));
 
 class FifoWebLocks {
   private tail = Promise.resolve();
@@ -153,8 +167,11 @@ describe("deck-library selector and drift contract", () => {
     releaseSecondImage = null;
     holdCachePath = null;
     releaseCacheMatch = null;
+    holdCacheDeletePath = null;
+    releaseCacheDelete = null;
     failImages = false;
     failedImage = null;
+    platform.load.mockReset();
     vi.stubGlobal("caches", { open: async () => cache } as unknown as CacheStorage);
     fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
       const source = String(input);
@@ -180,6 +197,7 @@ describe("deck-library selector and drift contract", () => {
   });
 
   afterEach(() => {
+    cleanup();
     releaseSecondImage?.();
     releaseCacheMatch?.();
     vi.unstubAllGlobals();
@@ -619,6 +637,84 @@ describe("deck-library selector and drift contract", () => {
     expect(cache.entries.has(sharedPath)).toBe(true);
   });
 
+  it("publishes a committed removal before slow cache cleanup finishes", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await backend.refreshCatalog();
+    await seedPack(DECK_LIBRARY, PLANNED_DIGEST);
+    await seedObject(DECK_LIBRARY, PLANNED_DIGEST, FIRST);
+    const database = await openDB(DATABASE, 1);
+    const [stored] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    database.close();
+    if (!stored) throw new Error("seed object was not written");
+    cache.entries.set(stored.path, new Response("image", { headers: { "Content-Type": "image/jpeg" } }));
+    holdCacheDeletePath = stored.path;
+    const revisions: string[] = [];
+    await backend.subscribeRevision((event) => revisions.push(event.revision));
+
+    const removing = backend.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
+    await vi.waitFor(() => expect(releaseCacheDelete).not.toBeNull());
+
+    expect(revisions).toHaveLength(1);
+    expect((await backend.catalogSummary()).installedPacks).toEqual([]);
+
+    releaseCacheDelete?.();
+    await removing;
+  });
+
+  it("restores a paused deck-library download in the settings panel", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await backend.refreshCatalog();
+    holdSecondImage = true;
+    const started = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (started.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => {
+      expect((await backend.operationStatus(started.operationId)).objectsPromoted).toBe(1);
+    });
+    platform.load.mockResolvedValue(backend);
+    render(<VisualPackManager />);
+
+    expect(await screen.findByText("1/2")).toBeInTheDocument();
+
+    releaseSecondImage?.();
+    await vi.waitFor(async () => expect((await backend.operationStatus(started.operationId)).state).toBe("completed"));
+  });
+
+  it("does not replay a stale snapshot after live progress arrives during subscription", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await backend.refreshCatalog();
+    holdSecondImage = true;
+    const started = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (started.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    const privateBackend = backend as unknown as {
+      database: { getAll(store: string): Promise<unknown[]> };
+      emit(event: ProgressEvent): void;
+    };
+    const originalGetAll = privateBackend.database.getAll.bind(privateBackend.database);
+    const snapshot = deferred<unknown[]>();
+    let snapshotRead = false;
+    privateBackend.database.getAll = async () => {
+      snapshotRead = true;
+      return snapshot.promise;
+    };
+    const events: ProgressEvent[] = [];
+    const subscribed = backend.subscribeProgress((event) => events.push(event));
+    await vi.waitFor(() => expect(snapshotRead).toBe(true));
+    const live = await backend.operationStatus(started.operationId);
+    privateBackend.emit({ phase: "failed", operation: { ...live, objectsPromoted: 0 }, error: "network" });
+    snapshot.resolve(await originalGetAll("operations"));
+    const unlisten = await subscribed;
+
+    expect(events).toEqual([expect.objectContaining({ phase: "failed", error: "network" })]);
+    unlisten();
+    releaseSecondImage?.();
+    await backend.cancel(started.operationId);
+  });
+
   it("removes both an installed receipt and a cancelled delta root while retaining shared cache", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
     const initial = await backend.start({
@@ -645,6 +741,7 @@ describe("deck-library selector and drift contract", () => {
       expect((await rows.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).some((row) => row.root === EMPTY_DIGEST)).toBe(true);
       rows.close();
     });
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
     const cancelling = backend.cancel(delta.operationId);
     releaseSecondImage?.();
     await cancelling;
@@ -948,6 +1045,38 @@ describe("deck-library selector and drift contract", () => {
     await vi.waitFor(async () => expect((await recreated.operationStatus(operation.id)).state).toBe("completed"));
   });
 
+  it("restarts a failed background sync at the same membership digest", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    failImages = true;
+    installWebLocks();
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+    const failed = await openDB(DATABASE, 1);
+    const operation = (await failed.getAll("operations")).find((entry) => entry.background);
+    failed.close();
+    if (!operation) throw new Error("background operation was not persisted");
+
+    const events: ProgressEvent[] = [];
+    await backend.subscribeProgress((event) => events.push(event));
+    platform.load.mockResolvedValue(backend);
+    render(<VisualPackManager />);
+    expect(await screen.findByRole("button", { name: /resume operation/i })).toBeInTheDocument();
+    failImages = false;
+    await expect(backend.reconcileDeckLibrary()).resolves.toBeUndefined();
+
+    expect((await backend.operationStatus(operation.id)).state).toBe("completed");
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "started", operation: expect.objectContaining({ operationId: operation.id }) }),
+      expect.objectContaining({ phase: "completed", operation: expect.objectContaining({ operationId: operation.id }) }),
+    ]));
+  });
+
   it("collects a failed delta when membership returns to its installed root", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
     const initial = await backend.start({
@@ -977,6 +1106,11 @@ describe("deck-library selector and drift contract", () => {
     });
     failed.close();
 
+    const events: ProgressEvent[] = [];
+    await backend.subscribeProgress((event) => events.push(event));
+    platform.load.mockResolvedValue(backend);
+    render(<VisualPackManager />);
+    expect(await screen.findByRole("button", { name: /resume operation/i })).toBeInTheDocument();
     failedImage = null;
     state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [FIRST, SECOND] };
     fetchMock.mockClear();
@@ -989,6 +1123,11 @@ describe("deck-library selector and drift contract", () => {
     expect(d1Rows.every((row) => row.root === PLANNED_DIGEST)).toBe(true);
     expect((await after.get("operations", operation.id))?.state).toBe("cancelled");
     after.close();
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(events).toContainEqual(expect.objectContaining({
+      phase: "cancelled",
+      operation: expect.objectContaining({ operationId: operation.id, state: "cancelled" }),
+    }));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(cache.entries.has(d2Row.path)).toBe(true);
     expect(cache.entries.has(d2OnlyRow.path)).toBe(false);
@@ -1233,11 +1372,11 @@ describe("deck-library selector and drift contract", () => {
       changed.close();
       releaseFinish();
       await vi.waitFor(async () => expect((await recreated.operationStatus(OPERATION)).state).toBe("cancelled"));
-      expect(progress).toEqual([expect.objectContaining({
+      expect(progress[progress.length - 1]).toEqual(expect.objectContaining({
         phase: "cancelled",
         operation: expect.objectContaining({ state: "cancelled" }),
         error: null,
-      })]);
+      }));
       expect(revisions).toEqual([]);
       const after = await openDB(DATABASE, 1);
       expect((await after.get("state", "state"))?.revision).toBe(current.revision);

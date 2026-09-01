@@ -8,6 +8,7 @@ pub mod draft_wire_guard;
 pub mod emote_guard;
 pub mod filter;
 pub mod game_action_payload_guard;
+pub mod game_log;
 pub mod game_reconnect_guard;
 pub mod game_state_snapshot_wire_guard;
 #[cfg(test)]
@@ -41,6 +42,7 @@ pub use draft_wire_guard::{
 };
 pub use emote_guard::guard_emote;
 pub use filter::{filter_events_for_player, filter_state_for_player};
+pub use game_log::{GameFileCache, Stream as GameLogStream};
 pub use game_reconnect_guard::guard_game_reconnect;
 pub use game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,

@@ -10,7 +10,7 @@ use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
+    QuantityRef, StaticDefinition, TargetFilter, ThisWayCause, TypeFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -453,6 +453,51 @@ fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
         .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
 }
 
+/// CR 608.2c + CR 400.7: A bare, untyped "card put into a/your/their graveyard
+/// this way" TOKEN count (Dihada, Binder of Wills's -3: "Reveal the top four
+/// cards of your library. Put any number of legendary cards from among them
+/// into your hand and the rest into your graveyard. Create a Treasure token
+/// for each card put into your graveyard this way.").
+///
+/// The shared, context-free `oracle_quantity::parse_for_each_clause` dispatch
+/// correctly keeps this exact bare phrase on the unfiltered `TrackedSetSize`
+/// (see `bare_card_put_into_graveyard_this_way_keeps_tracked_set_size`):
+/// in isolation it cannot tell a Dig-style reveal/split's REST partition from
+/// a single-pile destroy/mill producer's whole set, and the latter reading
+/// must not regress (Volcanic Eruption-style "Mountains put into a graveyard
+/// this way" producers publish their whole destroyed set with no complementary
+/// kept pile to disambiguate from). A TOKEN's own "for each" count is never
+/// itself the producer of the tracked set, though, so a bare "graveyard"
+/// destination named directly here always identifies the discarded/rest half
+/// of a preceding reveal split — never the producer's own homogeneous set.
+/// Tagging the resulting quantity with the dedicated `PutIntoGraveyard` cause
+/// is what lets the Dig continuation runtime
+/// (`engine_resolution_choices::dig_continuation_wants_rest_pile_for_count`)
+/// tell this apart from a sibling "for each card put into your HAND this way"
+/// token count (which must keep reading the default kept-pile publish).
+pub(super) fn parse_bare_graveyard_this_way_token_count(clause: &str) -> Option<QuantityRef> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("card put into ")
+        .parse(clause)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("a graveyard"),
+        tag::<_, _, OracleError<'_>>("your graveyard"),
+        tag::<_, _, OracleError<'_>>("their graveyard"),
+        tag::<_, _, OracleError<'_>>("its owner's graveyard"),
+        tag::<_, _, OracleError<'_>>("their owner's graveyard"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(QuantityRef::FilteredTrackedSetSize {
+        filter: Box::new(TargetFilter::Any),
+        caused_by: Some(ThisWayCause::PutIntoGraveyard),
+    })
+}
+
 /// CR 303.4: The printed surfaces that bind a created token to a host inside the
 /// same create-token instruction — "an Aura enters the battlefield attached to
 /// an object or player". `" attached to "` states the relation and
@@ -839,6 +884,16 @@ fn parse_token_description_with_context(
                     .or_else(|| {
                         crate::parser::oracle_quantity::parse_for_each_clause(clause)
                             .filter(tracked_set_count_is_type_restricted)
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
+                    // CR 608.2c + CR 400.7: a bare "card put into a/your/their
+                    // graveyard this way" TOKEN count (Dihada, Binder of
+                    // Wills). Tried last, after every TYPE-restricted count
+                    // above declines, so a Dread Summons-style "creature card
+                    // put into a graveyard this way" still binds to its own
+                    // FilteredTrackedSetSize rather than being re-tagged here.
+                    .or_else(|| {
+                        parse_bare_graveyard_this_way_token_count(clause)
                             .map(|qty| QuantityExpr::Ref { qty })
                     })
                 })
@@ -2011,6 +2066,65 @@ mod tests {
                 TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
             ),
             "count must restrict to creature cards milled, got {filter:?}"
+        );
+    }
+
+    /// Issue #8159: Dihada, Binder of Wills's -3 ("Reveal the top four cards
+    /// of your library. Put any number of legendary cards from among them
+    /// into your hand and the rest into your graveyard. Create a Treasure
+    /// token for each card put into your graveyard this way.") must count the
+    /// REST (graveyard) partition, not the default kept-hand partition the
+    /// generic `TrackedSetSize` fallback would bind to at runtime. A bare
+    /// "card" filter (no type restriction) still needs the dedicated
+    /// `PutIntoGraveyard` cause — the type-restricted path above only fires on
+    /// a non-trivial filter (Dread Summons' "creature card"), and this clause
+    /// has none.
+    #[test]
+    fn for_each_card_put_into_graveyard_this_way_binds_rest_partition_cause() {
+        let txt = "Create a Treasure token for each card put into your graveyard this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Treasure");
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::PutIntoGraveyard),
+                },
+            },
+            "a bare 'card put into your graveyard this way' token count must bind \
+             the dedicated PutIntoGraveyard cause so the Dig continuation runtime \
+             can publish the REST partition instead of the default kept partition"
+        );
+    }
+
+    /// Sibling regression guard: Search for Blex ("Look at the top five cards
+    /// of your library. You may put any number of them into your hand and the
+    /// rest into your graveyard. You lose 3 life for each card you put into
+    /// your hand this way.") names the KEPT (hand) partition, not the rest —
+    /// it must keep the plain `TrackedSetSize` fallback so the Dig
+    /// continuation runtime keeps publishing the default kept-pile set. This
+    /// pins the discriminator: only a clause naming the GRAVEYARD zone gets
+    /// the new cause.
+    #[test]
+    fn for_each_card_put_into_hand_this_way_keeps_tracked_set_size() {
+        let txt = "Create a Treasure token for each card put into your hand this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            "'card put into your hand this way' names the KEPT partition and must \
+             NOT be re-tagged with PutIntoGraveyard"
         );
     }
 

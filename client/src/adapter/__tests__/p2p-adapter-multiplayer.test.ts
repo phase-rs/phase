@@ -100,6 +100,7 @@ const mocks = vi.hoisted(() => {
   return {
     initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
+    submitInteraction: vi.fn(async (_submission: unknown) => ({ events: [] })),
     checkDeckCompatibility,
     getState,
     getLegalActions,
@@ -241,6 +242,7 @@ vi.mock("../ws-adapter", () => ({
   }),
 }));
 const mockSubmitAction = mocks.submitAction;
+const mockSubmitInteraction = mocks.submitInteraction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
@@ -323,6 +325,7 @@ vi.mock("../wasm-adapter", () => {
     initialize: mocks.initialize,
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
     submitAction: mocks.submitAction,
+    submitInteraction: mocks.submitInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
@@ -3771,6 +3774,724 @@ describe("P2P wire-protocol version gate", () => {
     const reconnect = await sentOfType(rejoinConn, "reconnect");
     expect(reconnect).toBeDefined();
     expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
+    adapter.dispose();
+  });
+});
+
+/**
+ * #7924: the host's own screen must not depend on the guest fan-out.
+ *
+ * `broadcastStateUpdate` closes on `commitTerminalIfComplete`, fed by a host
+ * snapshot read; on the guest-message paths that fan-out runs inside a `try`.
+ * While the host's `stateChanged` came after it, that close rejecting froze
+ * the host on a board its own engine had already advanced, and the acting
+ * guest was told an applied action had failed. (`broadcastStateUpdateInner`'s
+ * own per-seat viewer reads stopped being a rejection source when the
+ * delivery contract isolated them, and so is the terminal close's own
+ * per-recipient read. The eventual-delivery describe below owns that half.)
+ *
+ * Not the dead-channel case: `trySend` resolves `false` rather than rejecting
+ * (`network/peer.ts:69-106`), so a broken link degrades the fan-out silently.
+ *
+ * Measured, so the claim stays honest: moving the emission back behind the
+ * fan-out reds three of the four tests here — the ordering pair and the
+ * unclosable-game test. The fourth pins a different guard, the swallowing
+ * `try` inside `publishHostSnapshot`, and reds on its own probe: remove that
+ * `try` and only that test falls.
+ */
+describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
+  /**
+   * Returns a reach guard: `consumed()` is true only if the scripted rejection
+   * actually ran. Without it every assertion below is also the picture of a
+   * completely healthy run, so an injection that silently stops being reached
+   * would leave the test green and measuring nothing.
+   *
+   * Rejects the SECOND host snapshot read. The injection is POSITIONAL, and
+   * the ordering under test decides which call that is: with the emission
+   * first it is the terminal close's read, and with the emission moved back
+   * behind the fan-out it becomes `publishHostSnapshot`'s own. That is exactly
+   * why the pair discriminates.
+   */
+  function failTerminalCloseRead(): { consumed: () => boolean } {
+    let reached = false;
+    const m = mockGetSnapshot as unknown as {
+      getMockImplementation: () => (() => Promise<unknown>) | undefined;
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    };
+    const original = m.getMockImplementation()!;
+    m.mockImplementationOnce(original);
+    m.mockImplementationOnce(async () => {
+      reached = true;
+      throw new Error("terminal close read failed");
+    });
+    return { consumed: () => reached };
+  }
+
+  /** Same guard for the host's own snapshot read. */
+  function failNextHostSnapshotRead(): { consumed: () => boolean } {
+    let reached = false;
+    (mockGetSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(async () => {
+      reached = true;
+      throw new Error("host snapshot read failed");
+    });
+    return { consumed: () => reached };
+  }
+
+  it("still updates the host and does not reject the guest's applied action", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const events: Array<{ type: string }> = [];
+    adapter.onEvent((e) => events.push(e));
+    mockSubmitAction.mockClear();
+    const injection = failTerminalCloseRead();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    // The scripted failure actually happened,
+    expect(injection.consumed()).toBe(true);
+    // the engine applied the action,
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    // so the host's own screen must have advanced despite the fan-out,
+    expect(events.some((e) => e.type === "stateChanged")).toBe(true);
+    // and the guest must not hear that its applied action failed.
+    const sent = await guest.getSentMessages();
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+    adapter.dispose();
+  });
+
+  it("still updates the host and does not reject the guest's applied interaction", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const events: Array<{ type: string }> = [];
+    adapter.onEvent((e) => events.push(e));
+    mockSubmitInteraction.mockClear();
+    const injection = failTerminalCloseRead();
+
+    await guest.simulateData({
+      type: "interaction",
+      senderPlayerId: 1,
+      submission: {},
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    expect(mockSubmitInteraction).toHaveBeenCalled();
+    expect(events.some((e) => e.type === "stateChanged")).toBe(true);
+    const sent = await guest.getSentMessages();
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+    adapter.dispose();
+  });
+
+  // The ordering must not starve the other side either: the host's own read
+  // runs first, so a rejection there would stop the fan-out for an action the
+  // engine has already applied — and the guest watchdog cannot recover a state
+  // its adapter cache never held.
+  it("still serves the guests when the host's own snapshot read fails", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    mockSubmitAction.mockClear();
+    const before = (await guest.getSentMessages()).length;
+    // `publishHostSnapshot` is the first `getSnapshot` caller after this point;
+    // the fan-out's own per-guest reads use `getViewerSnapshot` and still work.
+    const injection = failNextHostSnapshotRead();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    const sent = (await guest.getSentMessages()).slice(before);
+    expect(sent.some((m) => (m as { type?: string }).type === "state_update")).toBe(true);
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+    adapter.dispose();
+  });
+
+  // The terminal close reads the HOST's own snapshot, and that read is not part
+  // of the per-seat isolation — it decides whether the game closes at all. The
+  // `try` this PR puts around the guest-path delivery would otherwise swallow
+  // it, and nothing would ever retry: `terminalResult` stays null, so the sweep
+  // has no statement to hand out, and a finished game produces no further
+  // action to drive another close. Silent and final — so it has to surface,
+  // while the guest's already-applied action still must not be rejected.
+  it("reports an unclosable game when the terminal close cannot read the final state", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const before = (await guest.getSentMessages()).length;
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    });
+    const injection = failTerminalCloseRead();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    const typesOf = (list: unknown[]) => list.map((e) => (e as { type?: string }).type);
+    expect(typesOf(events).filter((t) => t === "terminalUnavailable")).toHaveLength(1);
+    // Not closed behind the host's back, and no seat was handed a statement.
+    expect(typesOf(events).filter((t) => t === "terminalResult")).toHaveLength(0);
+    const sent = (await guest.getSentMessages()).slice(before);
+    expect(typesOf(sent).filter((t) => t === "terminal_result")).toHaveLength(0);
+    // The PR's own contract still holds: the applied action is not rejected.
+    expect(typesOf(sent).some((t) => t === "action_rejected" || t === "action_failed")).toBe(false);
+    adapter.dispose();
+  });
+});
+
+/**
+ * #7924, delivery contract: an applied action must reach every guest
+ * EVENTUALLY, not just when the immediate fan-out succeeds.
+ *
+ * The immediate fan-out isolates a failed per-guest viewer read, but that
+ * alone still strands the seat: its adapter cache never receives the applied
+ * state, and the guest watchdog compares the screen against exactly that
+ * cache. The host-side ledger (`guestDeliveredRevisions`) plus the 5s
+ * redelivery sweep close the gap by resending the CURRENT authoritative
+ * state until the channel accepts it.
+ *
+ * Measured, so the claim stays honest: no-op'ing the sweep reds five of the
+ * seven tests here. The two it leaves green are the setup pair, and each has a
+ * probe of its own: dropping the rethrow after the setup loop reds both, and
+ * dropping the create-guard in `markGuestBehind` reds the no-adoption one —
+ * which is a NEGATIVE claim about the sweep and therefore trivially green
+ * without it. The remaining guards likewise each have their own probe: the
+ * ledger no longer recording accepted sends (the sweep then resends forever,
+ * caught by the duplicate-frame assertion), a per-guest read failure still
+ * aborting the fan-out, the per-seat isolation of the terminal close, and its
+ * `markGuestBehind` handoff.
+ */
+describe("P2PHostAdapter — per-guest eventual state delivery", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Re-pin the hoisted defaults: earlier tests in this file replace both
+    // wholesale via `mockResolvedValue` (a terminal state without
+    // `filteredFor`, and a GameOver `getState`), and neither `mockClear` nor
+    // `vi.clearAllMocks` restores a replaced implementation. The per-seat
+    // `filteredFor` assertions below need the per-viewer default, and a leaked
+    // GameOver `getState` would close the game before these tests act.
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [] },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    (mockGetState as unknown as {
+      mockImplementation: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementation(async () => ({
+      players: [],
+      objects: {},
+      waiting_for: { type: "Priority", data: { player: 0 } },
+    }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Reach guard, same shape as `failNextHostSnapshotRead` above:
+   * `consumed()` is true only if the scripted rejection actually ran. */
+  function failNextViewerSnapshot(): { consumed: () => boolean } {
+    let reached = false;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(async () => {
+      reached = true;
+      throw new Error("viewer snapshot failed");
+    });
+    return { consumed: () => reached };
+  }
+
+  /** Rejects the SECOND per-recipient viewer read: the first belongs to the
+   * state fan-out in `broadcastStateUpdateInner`, the second to the terminal
+   * close in `commitTerminalIfComplete` — the last per-seat read the fan-out
+   * isolation did not cover. */
+  function failTerminalViewerRead(): { consumed: () => boolean } {
+    let reached = false;
+    const m = mockGetViewerSnapshot as unknown as {
+      getMockImplementation: () => ((pid: number) => Promise<unknown>) | undefined;
+      mockImplementationOnce: (implementation: (pid: number) => Promise<unknown>) => void;
+    };
+    m.mockImplementationOnce(m.getMockImplementation()!);
+    m.mockImplementationOnce(async () => {
+      reached = true;
+      throw new Error("terminal viewer read failed");
+    });
+    return { consumed: () => reached };
+  }
+
+  /** Advance to the next sweep and then WAIT FOR ITS OUTPUT, instead of
+   * draining a fixed number of microtask turns.
+   *
+   * The delivery chain needs more await turns than a fixed five-microtask
+   * drain (queue, handoff, viewer read, send queue, encode, decode), and for a
+   * closed game the terminal statement additionally crosses a REAL macrotask:
+   * the `crypto.subtle.digest` inside `p2pFinalStateCommitment`, which no
+   * microtask drain can await. (Not the gzip encode — this file stubs
+   * `encodeWireMessage`, see the `vi.mock` at the top.) So a fixed drain after
+   * the timer is a race — green on an idle machine, red under CI load, which
+   * is how the terminal test below failed on the maintainer's merge head.
+   *
+   * Measured, not assumed: chaining 50 extra digests into
+   * `p2pFinalStateCommitment` reproduces that CI failure verbatim against a
+   * fixed drain (`expected … to have a length of 2 but got 1`); the same delay
+   * in the viewer-snapshot mock reds the other tests of this block, which are
+   * green in CI today but rest on the same fixed drain. With this helper they
+   * stay green under either delay and under both at once. */
+  async function sweepAndWaitFor(check: () => void | Promise<void>): Promise<void> {
+    await vi.advanceTimersByTimeAsync(5_000);
+    // `waitFor` polls on REAL timers and gives up after `timeout` of real time,
+    // while each poll advances the FAKE clock by `interval`. 2 s of real budget
+    // is sized for a loaded CI runner; the fake clock then reaches at most
+    // 5 s + 2 s, still short of the next 5 s sweep tick at 10 s, so polling can
+    // never fire a second sweep behind the assertion's back.
+    await vi.waitFor(check, { interval: 10, timeout: 2_000 });
+  }
+
+  function statesSentTo(messages: unknown[]): Array<{ revision?: number; state?: { filteredFor?: number } }> {
+    return messages.filter((m) => (m as { type?: string }).type === "state_update") as
+      Array<{ revision?: number; state?: { filteredFor?: number } }>;
+  }
+
+  it("redelivers the applied action's state after the guest's viewer read rejected", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    mockSubmitAction.mockClear();
+    const before = (await guest.getSentMessages()).length;
+    const injection = failNextViewerSnapshot();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    // The scripted failure ran, the engine applied the action,
+    expect(injection.consumed()).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    // and the immediate fan-out could not serve this seat — no state frame,
+    // but no failure report either (the action HAS applied).
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(statesSentTo(immediate)).toHaveLength(0);
+    expect(immediate.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+
+    // One sweep later the seat holds its own filtered authoritative state.
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+    });
+    const redelivered = statesSentTo((await guest.getSentMessages()).slice(before));
+    expect(redelivered[0].state?.filteredFor).toBe(1);
+
+    // The accepted redelivery advanced the ledger: further sweeps stay quiet.
+    await vi.advanceTimersByTimeAsync(5_000);
+    // A negative ("nothing more went out") cannot be polled for, so cross the
+    // real event loop the way this file already does elsewhere.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("redelivers the applied interaction's state after the guest's viewer read rejected", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    mockSubmitInteraction.mockClear();
+    const before = (await guest.getSentMessages()).length;
+    const injection = failNextViewerSnapshot();
+
+    await guest.simulateData({
+      type: "interaction",
+      senderPlayerId: 1,
+      submission: {},
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    expect(mockSubmitInteraction).toHaveBeenCalled();
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(statesSentTo(immediate)).toHaveLength(0);
+    expect(immediate.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+    });
+    const redelivered = statesSentTo((await guest.getSentMessages()).slice(before));
+    expect(redelivered[0].state?.filteredFor).toBe(1);
+    adapter.dispose();
+  });
+
+  // The isolation half of the contract: seat 1's failed viewer read must not
+  // abort seat 2's IMMEDIATE delivery (the pre-fix fan-out awaited the reads
+  // serially, so one rejection starved every later seat). Seat 2's single
+  // frame also pins that a healthy broadcast advances the ledger — without
+  // that, the sweep would resend to a seat that missed nothing.
+  it("serves the healthy seat immediately while the failed seat waits for the sweep", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const guestOne = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const guestTwo = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const beforeOne = (await guestOne.getSentMessages()).length;
+    const beforeTwo = (await guestTwo.getSentMessages()).length;
+    // Seat 1 joined first, so the fan-out reads its view first.
+    const injection = failNextViewerSnapshot();
+
+    await guestOne.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    const immediateTwo = statesSentTo((await guestTwo.getSentMessages()).slice(beforeTwo));
+    expect(immediateTwo).toHaveLength(1);
+    expect(immediateTwo[0].state?.filteredFor).toBe(2);
+    expect(statesSentTo((await guestOne.getSentMessages()).slice(beforeOne))).toHaveLength(0);
+
+    // The sweep heals seat 1 and leaves the already-served seat 2 alone.
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guestOne.getSentMessages()).slice(beforeOne))).toHaveLength(1);
+    });
+    const healedOne = statesSentTo((await guestOne.getSentMessages()).slice(beforeOne));
+    expect(healedOne[0].state?.filteredFor).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statesSentTo((await guestTwo.getSentMessages()).slice(beforeTwo))).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  // The same isolation for the SETUP fan-out, which the sweep cannot repair.
+  // Unisolated, one rejected read starved every LATER seat of its `game_setup`
+  // — permanently: such a seat has no ledger entry, so the sweep skips it by
+  // design, and a second start returns early because `gameStarted` is already
+  // true.
+  //
+  // The isolation buys those later seats their frame. It must NOT also buy
+  // silence: the seat whose own read failed waits on a promise that never
+  // settles (the guest resolves `initializeGame` only on
+  // `game_setup`/`reconnect_ack`), so the host stays the only party that can
+  // learn of it — hence the rethrow after the loop. This pins both halves.
+  it("still sends game_setup to the later seat, and still fails loudly", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const guestOne = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const guestTwo = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    // Seat 1 joined first, so the setup fan-out reads its view first.
+    const injection = failNextViewerSnapshot();
+
+    await expect(adapter.initializeGame()).rejects.toThrow("viewer snapshot failed");
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    const setupsFor = async (guest: typeof guestOne): Promise<unknown[]> =>
+      (await guest.getSentMessages()).filter((m) => (m as { type?: string }).type === "game_setup");
+    expect(await setupsFor(guestTwo)).toHaveLength(1);
+    expect(await setupsFor(guestOne)).toHaveLength(0);
+
+    // The starved seat stays with the setup/reconnect path on purpose: without
+    // a `game_setup` it has no ledger entry, and a `state_update` cannot stand
+    // in for the handshake — a guest discards state frames it cannot
+    // authenticate. So the sweep must NOT adopt it.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statesSentTo(await guestOne.getSentMessages())).toHaveLength(0);
+    adapter.dispose();
+  });
+
+  // `markGuestBehind` may LOWER a ledger entry, but must never CREATE one. A
+  // seat with no entry never took its `game_setup`, and the contract leaves it
+  // to the setup/reconnect path, because a `state_update` cannot stand in for
+  // the handshake — the guest discards state frames it cannot authenticate.
+  // Without the guard the terminal close adopts exactly such a seat, and the
+  // next sweep serves it a frame it never authenticated for.
+  it("does not adopt a seat that never took its game_setup", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const guestOne = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const guestTwo = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    // Seat 1 misses its setup frame, so it has no ledger entry. The host is
+    // told (see the test above); here only the ledger consequence matters.
+    const setupInjection = failNextViewerSnapshot();
+    await expect(adapter.initializeGame()).rejects.toThrow("viewer snapshot failed");
+    await flushPromises();
+    expect(setupInjection.consumed()).toBe(true);
+
+    const gameOverView = (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    });
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    });
+    // Seat 1's viewer stays broken for the closing broadcast's two reads (the
+    // state fan-out and the terminal close) and is healthy again afterwards.
+    // That last part is what makes this discriminate: with an entry the sweep
+    // WOULD get a snapshot and send. Without one it never asks.
+    let failuresLeft = 2;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (impl: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => {
+      if (pid === 1 && failuresLeft > 0) {
+        failuresLeft -= 1;
+        throw new Error("seat 1 viewer read failed");
+      }
+      return gameOverView(pid);
+    });
+
+    await guestTwo.simulateData({
+      type: "action",
+      senderPlayerId: 2,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    expect(failuresLeft).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    // Never adopted, across two sweeps, although its viewer would answer now.
+    expect(statesSentTo(await guestOne.getSentMessages())).toHaveLength(0);
+    adapter.dispose();
+  });
+
+  // The game-ending broadcast is the one delivery a seat cannot afford to
+  // miss twice: the terminal fan-out is one-shot, and the guest refuses a
+  // `terminal_result` whose revision it never received. The sweep therefore
+  // re-commits the terminal statement AFTER the healing state frame; the
+  // ledger advances only once both frames are accepted.
+  it("re-commits the terminal result for the seat that missed the game-ending broadcast", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const before = (await guest.getSentMessages()).length;
+    const gameOver = {
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    };
+    // Both host snapshot reads (publish + terminal close) see the final
+    // board, and so does every viewer read after the scripted rejection.
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(gameOver);
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    const injection = failNextViewerSnapshot();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    // The one-shot terminal fan already fired, at a revision this seat never
+    // cached — unusable for that guest — and no state frame went out.
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(immediate.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(1);
+    expect(statesSentTo(immediate)).toHaveLength(0);
+
+    await sweepAndWaitFor(async () => {
+      const sent = (await guest.getSentMessages()).slice(before);
+      expect(sent.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(2);
+    });
+    const afterSweep = (await guest.getSentMessages()).slice(before);
+    const states = statesSentTo(afterSweep);
+    expect(states).toHaveLength(1);
+    const terminals = afterSweep.filter((m) => (m as { type?: string }).type === "terminal_result") as
+      Array<{ result?: { recipient?: number; revision?: number; finalStateCommitment?: string } }>;
+    expect(terminals).toHaveLength(2);
+    expect(terminals[1].result?.recipient).toBe(1);
+    expect(terminals[1].result?.revision).toBe(states[0].revision);
+    // The binding that decides acceptance on the guest: the fresh statement
+    // must commit to exactly the state the healing frame delivered.
+    expect(terminals[1].result?.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(states[0].state as unknown as GameState),
+    );
+    // The healing state frame precedes the fresh terminal statement (FIFO).
+    expect(afterSweep.indexOf(states[0] as never)).toBeLessThan(afterSweep.indexOf(terminals[1] as never));
+    adapter.dispose();
+  });
+
+  // The terminal close reads a viewer snapshot PER RECIPIENT, and that read was
+  // the last per-seat read outside any `try`. One rejection there rejected the
+  // whole `Promise.all`, which cost three different things at once:
+  //   1. the seat never got its `terminal_result`,
+  //   2. no sweep ever nominated it — the state fan-out had already recorded
+  //      the seat at this revision, so the ledger called it current,
+  //   3. the host's own `terminalResult` emit never ran, which costs the prompt
+  //      overlay cleanup, the resumable save and the closing reason line. (The
+  //      board itself already reads GameOver from the published snapshot, so
+  //      the host does reach its result screen.)
+  // A retry is also impossible: `commitTerminalIfComplete` returns early once
+  // `this.terminalResult` is set. This pins all three victims.
+  it("heals a seat whose terminal-close viewer read rejected, and still closes the host", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const before = (await guest.getSentMessages()).length;
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    });
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    // Scripted AFTER the game-over implementation, so the pass-through arm
+    // replays that one and not the pre-game default.
+    const injection = failTerminalViewerRead();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    // Victim 3: the host closes regardless of one seat's failed read.
+    expect(events.filter((e) => (e as { type?: string }).type === "terminalResult")).toHaveLength(1);
+    // Victims 1 and 2: the seat holds the final board but no statement yet.
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(statesSentTo(immediate)).toHaveLength(1);
+    expect(immediate.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(0);
+
+    await sweepAndWaitFor(async () => {
+      const sent = (await guest.getSentMessages()).slice(before);
+      expect(sent.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(1);
+    });
+    const afterSweep = (await guest.getSentMessages()).slice(before);
+    const states = statesSentTo(afterSweep);
+    const healing = states[states.length - 1];
+    const terminals = afterSweep.filter((m) => (m as { type?: string }).type === "terminal_result") as
+      Array<{ result?: { recipient?: number; revision?: number; finalStateCommitment?: string } }>;
+    expect(terminals[0].result?.recipient).toBe(1);
+    expect(terminals[0].result?.revision).toBe(healing.revision);
+    // Same binding the guest checks: the statement commits to exactly the state
+    // the healing frame delivered.
+    expect(terminals[0].result?.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(healing.state as unknown as GameState),
+    );
+    expect(afterSweep.indexOf(healing as never)).toBeLessThan(afterSweep.indexOf(terminals[0] as never));
     adapter.dispose();
   });
 });

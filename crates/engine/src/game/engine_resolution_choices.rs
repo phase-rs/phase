@@ -26,6 +26,173 @@ use super::turns;
 use super::zones;
 use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
 
+/// A fresh mass library-order prompt is valid only for
+/// the exact member identities and origins frozen by its producer. Prompt cards
+/// and snapshot members remain lockstep so an arbitrary eligible id cannot be
+/// substituted into a persisted choice.
+fn mass_library_order_batch_is_current(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+    batch: &crate::types::game_state::MassLibraryOrderBatch,
+) -> bool {
+    let unique_cards: HashSet<_> = cards.iter().copied().collect();
+    batch.owner == player
+        && batch.members.len() == cards.len()
+        && unique_cards.len() == cards.len()
+        && batch.members.iter().zip(cards).all(|(member, card_id)| {
+            member.identity.object_id == *card_id
+                && state.objects.get(card_id).is_some_and(|object| {
+                    object.incarnation == member.identity.incarnation
+                        && object.zone == member.origin
+                        && object.owner == batch.owner
+                })
+        })
+}
+
+/// Admit only the old serialized shape emitted by the
+/// former `ChangeZoneAll` mass-order producer. This narrow migration gate is
+/// intentionally not a general origin exception: fresh prompts carry
+/// `mass_library_order`, and ordinary `PutAtLibraryPosition` choices
+/// retain their advertised-zone validation.
+#[allow(clippy::too_many_arguments)]
+fn legacy_mass_library_order_prompt_is_current(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+    count: usize,
+    min_count: usize,
+    up_to: bool,
+    source_id: ObjectId,
+    effect_kind: EffectKind,
+    zone: Zone,
+    destination: Option<Zone>,
+    enter_tapped: crate::types::zones::EtbTapState,
+    enter_transformed: bool,
+    enters_under_player: Option<crate::types::player::PlayerId>,
+    enters_attacking: bool,
+    owner_library: bool,
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    enter_with_counters: &[(crate::types::counter::CounterType, u32)],
+    conditional_enter_with_counters: &[(
+        crate::types::ability::TargetFilter,
+        crate::types::counter::CounterType,
+        QuantityExpr,
+    )],
+    count_param: u32,
+    library_position: Option<&LibraryPosition>,
+    is_cost_payment: bool,
+    enters_modified_if: Option<&crate::types::ability::TargetFilter>,
+    track_exiled_by_source: bool,
+    duration: Option<&crate::types::ability::Duration>,
+) -> bool {
+    if !matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+        || zone != Zone::Library
+        || destination.is_some()
+        || library_position.is_none()
+        || count != cards.len()
+        || min_count != cards.len()
+        || up_to
+        || enter_tapped != crate::types::zones::EtbTapState::Unspecified
+        || enter_transformed
+        || enters_under_player.is_some()
+        || enters_attacking
+        || owner_library
+        || face_down_profile.is_some()
+        || !enter_with_counters.is_empty()
+        || !conditional_enter_with_counters.is_empty()
+        || count_param != 0
+        || is_cost_payment
+        || enters_modified_if.is_some()
+    {
+        return false;
+    }
+
+    let Some(entry) = state.resolving_stack_entry.as_ref() else {
+        return false;
+    };
+    let Some(ability) = entry.ability() else {
+        return false;
+    };
+    let Effect::ChangeZoneAll {
+        destination: Zone::Library,
+        origin,
+        library_position: Some(position),
+        random_order: false,
+        target,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    if entry.source_id != source_id
+        || ability.source_id != source_id
+        || position != library_position.expect("checked above")
+    {
+        return false;
+    }
+
+    let permitted_origins =
+        effects::change_zone::change_zone_all_origin_zones(state, *origin, target);
+    let player_scope = effects::change_zone::change_zone_all_player_scope(state, ability, target);
+    let filter_context = super::filter::FilterContext::from_ability_with_controller(
+        ability,
+        effects::controller_for_relative_filter(ability, target),
+    );
+    let member_is_current = |card_id: ObjectId, expected_owner| {
+        state.objects.get(&card_id).is_some_and(|object| {
+            permitted_origins.contains(&object.zone)
+                && object.owner == expected_owner
+                && match player_scope {
+                    Some(scope) => {
+                        effects::change_zone::change_zone_all_player_scope_member_matches(
+                            object,
+                            scope,
+                            &permitted_origins,
+                        )
+                    }
+                    None => super::filter::matches_target_filter(
+                        state,
+                        card_id,
+                        target,
+                        &filter_context,
+                    ),
+                }
+        })
+    };
+    let mut all_members = std::collections::HashSet::new();
+    let current_batch_is_valid = cards
+        .iter()
+        .all(|card_id| all_members.insert(*card_id) && member_is_current(*card_id, player));
+    if !current_batch_is_valid {
+        return false;
+    }
+
+    match state.pending_mass_library_order_choice.as_ref() {
+        Some(pending) => {
+            pending.source_id == source_id
+                && pending.library_position == *library_position.expect("checked above")
+                && pending.track_exiled_by_source == track_exiled_by_source
+                && pending.duration.as_ref() == duration
+                && matches!(
+                    &pending.remaining_batches,
+                    crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches)
+                        if !batches.is_empty() && batches.iter().all(|(owner, batch)| {
+                        !batch.is_empty()
+                            && batch.iter().all(|card_id| {
+                                all_members.insert(*card_id) && member_is_current(*card_id, *owner)
+                            })
+                        })
+                )
+        }
+        // The old producer did not write a continuation carrier when a single
+        // owner had multiple cards to order. The exact resolving producer and
+        // the mandatory current producer-origin owner/membership check above are
+        // the only authority for that archived shape.
+        None => cards.len() > 1,
+    }
+}
+
 /// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
 /// Original survivors remain in the printed search continuation; modified cards
 /// are delivered independently and therefore cannot be consumed by that
@@ -326,6 +493,7 @@ pub(crate) fn grant_search_found_permission_after_delivery(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -790,6 +958,40 @@ fn dig_continuation_needs_full_looked_at_tracked_set(ability: &ResolvedAbility) 
         current = sub.sub_ability.as_deref();
     }
     false
+}
+
+/// CR 608.2c + CR 400.7: Dihada, Binder of Wills-style dig tails COUNT (rather
+/// than target) the non-selected "rest" partition via a downstream
+/// `QuantityRef::FilteredTrackedSetSize { caused_by: Some(PutIntoGraveyard), .. }`
+/// ("Create a Treasure token for each card put into your graveyard this
+/// way"). That cause is emitted by the parser (`oracle_effect::token`) ONLY
+/// when the Oracle text named the dig's own rest-destination zone directly
+/// before "this way", so — unlike `dig_continuation_needs_full_looked_at_tracked_set`'s
+/// downstream-move SHAPE check above — this signal is unambiguous even though
+/// the identical effect shape (`Effect::Token { count: Ref(TrackedSetSize) }`)
+/// correctly means "count the KEPT pile" for a sibling card (Search for Blex:
+/// "you lose 3 life for each card you put into your HAND this way"), which
+/// must keep reading the unchanged default kept-pile publish.
+fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool {
+    let mut wants_rest = false;
+    let mut current = Some(ability);
+    while let Some(sub) = current {
+        sub.effect.for_each_quantity_expr(&mut |expr| {
+            if matches!(
+                expr,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        caused_by: Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                        ..
+                    },
+                }
+            ) {
+                wants_rest = true;
+            }
+        });
+        current = sub.sub_ability.as_deref();
+    }
+    wants_rest
 }
 
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
@@ -1872,6 +2074,7 @@ pub(super) fn handle_resolution_choice(
                             rest_order: DigRestOrder::Preserve,
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
+                            publish_tracked_set_cause: None,
                             emit_reveal_until_resolved: None,
                             // The entry paused, so the publish below never
                             // runs — the completion drain publishes instead,
@@ -2130,6 +2333,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_order: DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
+                                    publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
@@ -2199,6 +2403,7 @@ pub(super) fn handle_resolution_choice(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -3615,6 +3820,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_order: DigRestOrder::Preserve,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
+                                    publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
@@ -3638,15 +3844,28 @@ pub(super) fn handle_resolution_choice(
                 // completion receives only the settled ZoneChanged occurrences,
                 // so redirected/prevented selections cannot leak into "this
                 // way" continuations after a pause.
-                let publish_set = if kept.is_empty() {
-                    Vec::new()
-                } else if state.active_ability_continuation().is_some_and(|cont| {
-                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
-                }) {
-                    unkept.clone()
-                } else {
-                    kept.clone()
-                };
+                // CR 608.2c: checked ahead of the `kept.is_empty()` default below —
+                // Dihada's "any number ... into your hand" can legally choose zero,
+                // in which case the REST partition (not an empty publish) is exactly
+                // what a downstream "put into your graveyard this way" count needs.
+                let (publish_set, publish_cause) =
+                    if state.active_ability_continuation().is_some_and(|cont| {
+                        dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                    }) {
+                        (unkept.clone(), None)
+                    } else if state
+                        .active_ability_continuation()
+                        .is_some_and(|cont| dig_continuation_wants_rest_pile_for_count(&cont.chain))
+                    {
+                        (
+                            unkept.clone(),
+                            Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                        )
+                    } else if kept.is_empty() {
+                        (Vec::new(), None)
+                    } else {
+                        (kept.clone(), None)
+                    };
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
@@ -3682,6 +3901,7 @@ pub(super) fn handle_resolution_choice(
                         rest_order,
                         clear_markers: Vec::new(),
                         publish_tracked_set: Some(publish_set),
+                        publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
                         manifested_for_continuation: None,
                         kept_delivery: crate::types::game_state::DigKeptDeliveryOutcome::pending(
@@ -3702,18 +3922,30 @@ pub(super) fn handle_resolution_choice(
             // sub_abilities. Reveal/keep continuations (Zimone land split) bind
             // the kept subset; Expressive Iteration's bottom/exile tail binds the
             // unkept looked-at pile when its continuation chains
-            // `PutAtLibraryPosition { TrackedSet }`.
-            let publish_set = if kept.is_empty() {
-                Vec::new()
-            } else if state
+            // `PutAtLibraryPosition { TrackedSet }`; a Dihada-style "for each card
+            // put into your graveyard this way" count also binds the unkept pile
+            // (tagged `PutIntoGraveyard`) — checked ahead of the `kept.is_empty()`
+            // default so an all-declined kept selection still publishes the
+            // (non-empty) rest pile that count needs.
+            let (publish_set, publish_cause) = if state
                 .active_ability_continuation()
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain))
             {
                 // Expressive Iteration-style bottom/exile tail: downstream
                 // `TrackedSet` steps address the unkept looked-at pile only.
-                unkept.clone()
+                (unkept.clone(), None)
+            } else if state
+                .active_ability_continuation()
+                .is_some_and(|cont| dig_continuation_wants_rest_pile_for_count(&cont.chain))
+            {
+                (
+                    unkept.clone(),
+                    Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                )
+            } else if kept.is_empty() {
+                (Vec::new(), None)
             } else {
-                kept.clone()
+                (kept.clone(), None)
             };
             // None => Graveyard; map to a concrete zone so the rest mover
             // (shared with the search-split partition) has a single Zone.
@@ -3740,6 +3972,7 @@ pub(super) fn handle_resolution_choice(
                     rest_order,
                     clear_markers: Vec::new(),
                     publish_tracked_set: Some(publish_set),
+                    publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -4924,13 +5157,14 @@ pub(super) fn handle_resolution_choice(
                 enter_transformed,
                 enters_under_player,
                 enters_attacking,
-                owner_library: _,
+                owner_library,
                 track_exiled_by_source,
                 face_down_profile,
                 enter_with_counters,
                 conditional_enter_with_counters,
                 count_param,
                 library_position,
+                mass_library_order,
                 is_cost_payment,
                 enters_modified_if,
                 duration,
@@ -4980,6 +5214,59 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            let typed_mass_library_order_is_current =
+                mass_library_order.as_ref().is_some_and(|batch| {
+                    mass_library_order_batch_is_current(state, player, &cards, batch)
+                });
+            let legacy_mass_library_order_is_current = mass_library_order.is_none()
+                && legacy_mass_library_order_prompt_is_current(
+                    state,
+                    player,
+                    &cards,
+                    count,
+                    min_count,
+                    up_to,
+                    source_id,
+                    effect_kind,
+                    zone,
+                    destination,
+                    enter_tapped,
+                    enter_transformed,
+                    enters_under_player,
+                    enters_attacking,
+                    owner_library,
+                    face_down_profile.as_ref(),
+                    &enter_with_counters,
+                    &conditional_enter_with_counters,
+                    count_param,
+                    library_position.as_ref(),
+                    is_cost_payment,
+                    enters_modified_if.as_ref(),
+                    track_exiled_by_source,
+                    duration.as_ref(),
+                );
+            if mass_library_order.is_some() && !typed_mass_library_order_is_current {
+                return Err(EngineError::InvalidAction(
+                    "Mass library-order prompt no longer names its exact members".to_string(),
+                ));
+            }
+            let resolving_mass_library_order = state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| entry.ability())
+                .is_some_and(|ability| {
+                    ability.source_id == source_id
+                        && matches!(
+                            &ability.effect,
+                            Effect::ChangeZoneAll {
+                                destination: Zone::Library,
+                                library_position: Some(position),
+                                random_order: false,
+                                ..
+                            } if library_position.as_ref() == Some(position)
+                        )
+                });
+
             for card_id in &chosen {
                 if !cards.contains(card_id) {
                     return Err(EngineError::InvalidAction(
@@ -4990,36 +5277,17 @@ pub(super) fn handle_resolution_choice(
                 // eligible IDs when the prompt is created; the cards can be
                 // in different zones, so there is no single zone to recheck.
                 let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
-                // PART 1 of a two-part fix — this half RESCUES ALREADY-WEDGED
-                // SAVES; the producer half in `effects/put_on_top.rs` PREVENTS
-                // FUTURE WEDGES. Neither is redundant, so do not delete one as
-                // duplicative of the other: `into_game_state` restores a
-                // persisted prompt verbatim, so a save wedged by the old
-                // producer still arrives here claiming `zone: Library` while
-                // its frozen members sit in Exile. Fixing only the producer
-                // leaves every such save permanently at 0 legal actions;
-                // fixing only this guard leaves the producer still lying.
-                //
-                // `PutAtLibraryPosition` freezes its eligible IDs when the
-                // prompt is created, so a member's current zone can legitimately
-                // differ from the prompt's advertised `zone` (Codie, Vociferous
-                // Codex bottoms cards that are sitting in Exile). Admit any
-                // origin from which the move into a library is a pure
-                // relocation, and no others.
-                //
-                // `current_zone` is `None` for an object that has ceased to
-                // exist. That case must stay REFUSED, deliberately and not
-                // incidentally: delivery below indexes `state.objects[&card_id]`
-                // (`effect_zone_non_library_delivery_order`,
-                // `replay_effect_zone_library_placement`), which panics rather
-                // than erroring on a missing id. `Option::is_some_and` encodes
-                // that — a vanished member never satisfies the predicate.
-                let is_put_at_library_position_member =
-                    matches!(effect_kind, EffectKind::PutAtLibraryPosition)
-                        && current_zone.is_some_and(Zone::is_library_relocation_origin);
+                // `PutAtLibraryPosition` also freezes eligible IDs. Its prompt
+                // may advertise Library while relocating a card from another
+                // non-battlefield zone, such as Codie's linked Exile set.
+                let is_library_relocation = matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                    && current_zone.is_some_and(Zone::is_library_relocation_origin)
+                    && !resolving_mass_library_order;
                 if !matches!(effect_kind, EffectKind::ChangeZone)
                     && current_zone != Some(zone)
-                    && !is_put_at_library_position_member
+                    && !typed_mass_library_order_is_current
+                    && !legacy_mass_library_order_is_current
+                    && !is_library_relocation
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
@@ -7431,6 +7699,7 @@ fn route_kept_card_or_defer(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -8063,6 +8332,7 @@ pub(crate) fn run_batch_completion(
             rest_order,
             clear_markers,
             publish_tracked_set,
+            publish_tracked_set_cause,
             emit_reveal_until_resolved,
             manifested_for_continuation,
             kept_delivery,
@@ -8089,6 +8359,7 @@ pub(crate) fn run_batch_completion(
                     rest_order,
                     clear_markers,
                     publish_tracked_set,
+                    publish_tracked_set_cause,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8127,6 +8398,7 @@ pub(crate) fn run_batch_completion(
                     rest_order,
                     clear_markers,
                     publish_tracked_set,
+                    publish_tracked_set_cause,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8160,6 +8432,7 @@ pub(crate) fn run_batch_completion(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8210,7 +8483,23 @@ pub(crate) fn run_batch_completion(
                 } else {
                     kept
                 };
-                effects::publish_fresh_tracked_set(state, published.clone());
+                let published_set_id = effects::publish_fresh_tracked_set(state, published.clone());
+                // CR 608.2c + CR 400.7: when this publish carries the REST
+                // partition for a downstream count (Dihada, Binder of Wills
+                // class — `dig_continuation_wants_rest_pile_for_count`), stamp
+                // every member with the cause so its
+                // `QuantityRef::FilteredTrackedSetSize { caused_by: Some(_), .. }`
+                // finds them. Every other publish (including the unchanged
+                // kept-pile default) carries `None` here and this is a no-op.
+                if let Some(cause) = publish_tracked_set_cause {
+                    let causes = state
+                        .tracked_set_member_causes
+                        .entry(published_set_id)
+                        .or_default();
+                    for &id in &published {
+                        causes.insert(id, cause);
+                    }
+                }
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     let continuation = if continuation_targets.is_empty() {
                         published
@@ -8606,6 +8895,7 @@ mod tests {
                     single_use_group: None,
                     single_use: false,
                     cast_cost_raise: None,
+                    alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
                 },
@@ -10607,6 +10897,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

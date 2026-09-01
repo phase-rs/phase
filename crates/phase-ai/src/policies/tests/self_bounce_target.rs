@@ -213,6 +213,7 @@ fn eval(
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
+            mass_library_order: None,
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,

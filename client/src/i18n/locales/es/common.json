@@ -5,6 +5,10 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "debug": {
+    "exportAuthoritative": "Exportar estado de juego autoritativo",
+    "exportAuthoritativeTitle": "Descarga el estado propiedad del motor que se usa para diagnosticar y restaurar esta partida"
+  },
   "quantityRef": {
     "highestNumber": "el número más alto",
     "lowestNumber": "el número más bajo",

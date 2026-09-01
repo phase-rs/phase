@@ -1364,6 +1364,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
         return;
       }
       try {
+        this.emit({ phase: "started", operation: await this.operationStatus(selectedOperation), error: null });
         await this.runAndWait(selectedOperation);
       } catch (error) {
         const afterFailure = await this.database.get("packs", packId("deck_library"));
@@ -1414,6 +1415,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     }
     const operations = await transaction.objectStore("operations").getAll();
     let superseded = false;
+    let cancelled: OperationStatus | null = null;
     const active = operations.find((operation) =>
       deckLibraryOperation(operation)
       && operation.deckLibraryGeneration === expectedGeneration
@@ -1427,9 +1429,11 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       }
       await transaction.objectStore("operations").put({ ...active, state: "cancelled" });
       superseded = true;
+      cancelled = operationStatus({ ...active, state: "cancelled" });
     }
     if (receipt.root === membership.membershipDigest) {
       await transaction.done;
+      if (cancelled) this.emit({ phase: "cancelled", operation: cancelled, error: null });
       if (superseded) {
         await this.collectLocalPackGarbage(
           packId("deck_library"),
@@ -1464,7 +1468,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
     } satisfies ScryfallOperationRecord);
     await transaction.objectStore("operations").put(operation);
     await transaction.done;
-    this.emit({ phase: "started", operation: operationStatus(operation), error: null });
+    if (cancelled) this.emit({ phase: "cancelled", operation: cancelled, error: null });
     return selectedOperation;
   }
 
@@ -1701,6 +1705,10 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const revision = String(BigInt(current.revision) + 1n);
       await transaction.objectStore("state").put({ ...current, revision });
       await transaction.done;
+      // The installed membership has committed. Publish it before cache cleanup,
+      // which can be slow on WebKit, so every observer can refresh its receipt
+      // state while the reference-aware sweep continues in the background.
+      this.publish({ cause: "remove", operationId: null, catalogRoot: null, revision: installedRevision(revision) });
       if (deckLibrarySelected) {
         for (const controller of this.reconciliationControllers) controller.abort();
         for (const selectedOperation of invalidatedDeckLibraryOperations) {
@@ -1710,7 +1718,6 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
           this.workers.get(selectedOperation)?.settled));
       }
       await this.sweepUnreferenced(paths, await caches.open(CACHE));
-      this.publish({ cause: "remove", operationId: null, catalogRoot: null, revision: installedRevision(revision) });
       return { removed: removed.map((entry) => ({ packId: entry.packId, catalogRoot: entry.root })), revision: installedRevision(revision), cleanupIssues: [] };
     } catch (error) {
       throw backendError(error);
@@ -1764,6 +1771,27 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
   }
 
   async subscribeProgress(listener: (event: ProgressEvent) => void): Promise<() => void> {
+    const liveOperations = new Set<OperationId>();
+    const forwarded = (event: ProgressEvent) => {
+      liveOperations.add(event.operation.operationId);
+      listener(event);
+    };
+    this.progressListeners.add(forwarded);
+    try {
+      const operations = await this.database.getAll("operations");
+      for (const operation of operations) {
+        if (
+          liveOperations.has(operation.id)
+          || (operation.state !== "downloading" && operation.state !== "cancel_requested" && operation.state !== "finalizing")
+        ) continue;
+        const failure = this.workerFailures.get(operation.id);
+        listener({ phase: failure ? "failed" : "running", operation: operationStatus(operation), error: failure?.kind ?? null });
+      }
+    } catch (error) {
+      this.progressListeners.delete(forwarded);
+      throw error;
+    }
+    this.progressListeners.delete(forwarded);
     this.progressListeners.add(listener);
     return () => this.progressListeners.delete(listener);
   }

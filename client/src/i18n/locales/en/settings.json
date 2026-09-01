@@ -293,6 +293,7 @@
       "root": "Scryfall snapshot",
       "packs": "Packs: {{current}} of {{total}}",
       "objects": "Images: {{current}} of {{total}}",
+      "objectsUnknown": "Images downloaded: {{current}}",
       "scanNote": "The total grows as the Scryfall snapshot is scanned. Completed images are stored locally and skipped when you resume.",
       "estimateNote": "The total was fixed when this download started. Completed images are stored locally and skipped when you resume.",
       "finalizing": "Finalizing offline image installation"
@@ -333,7 +334,10 @@
         "projection_drift": "Installed lookup records differ from the trusted catalog"
       }
     },
-    "removal": { "committed": "Removal committed at revision {{revision}}." },
+    "removal": {
+      "committed": "Removal committed at revision {{revision}}.",
+      "inProgress": "Removing offline visuals…"
+    },
     "cleanup": {
       "malformed_entry": "A malformed cache entry could not be reclaimed",
       "unsafe_entry": "An unsafe cache entry was left untouched",

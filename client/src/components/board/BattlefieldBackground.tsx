@@ -37,14 +37,24 @@ export function resolveBackground(
   }
 
   if (boardBackground === "auto-wubrg") {
+    // The lock is authoritative once set: the component memo short-circuits
+    // the deck scan to `undefined` on every render after the first lock, so
+    // this must honor an existing lock BEFORE the undefined-wait below.
+    // Checking the wait first loses the lock on the very next render — any
+    // gameState identity change (tap, phase tick, new frame) re-runs the
+    // memo guard to undefined and the layer drops to transparent (black
+    // board). (At mount the lock is fresh and re-locks, so StrictMode's dev
+    // double-render is not the trigger; the first post-lock update is.)
+    if (lockedRef.current) return { kind: "image", src: lockedRef.current };
+
+    // No seat/game state yet — hold off so the lock is never seeded from a
+    // partial deck.
     if (deckColor === undefined) return null;
 
     // Lock in a color-matched image on first color detection (includes full deck).
     // Colorless decks have no WUBRG color to match, so use the normal random pool.
-    if (!lockedRef.current) {
-      lockedRef.current = deckColor ? getRandomBattlefield(deckColor).image : pickRandomImage();
-    }
-    return lockedRef.current ? { kind: "image", src: lockedRef.current } : null;
+    lockedRef.current = deckColor ? getRandomBattlefield(deckColor).image : pickRandomImage();
+    return { kind: "image", src: lockedRef.current };
   }
 
   const plain = PLAIN_BACKGROUND_MAP[boardBackground];

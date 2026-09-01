@@ -8,7 +8,7 @@ import type {
   SubmitResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
-import { buildGameState } from "../../test/factories/gameStateFactory";
+import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
@@ -96,6 +96,8 @@ describe("WasmAdapter", () => {
     mockWorkerClient.getAiScoredCandidates.mockResolvedValue([]);
     mockWorkerClient.getAiActionProposal.mockResolvedValue(null);
     mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.getAiActionProposalFromScores.mockResolvedValue(null);
+    mockWorkerClient.getAiActionProposalFromScoresWithDiagnostics.mockResolvedValue(null);
     mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(null);
     mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue(null);
     mockWorkerClient.submitAiActionProposal.mockResolvedValue({
@@ -200,6 +202,101 @@ describe("WasmAdapter", () => {
     });
   });
 
+  it.each([false, true])("uses VeryHard pool scores from a state envelope with diagnostics %s", async (diagnostics) => {
+    const proposal: AiActionProposal = {
+      token: "scored-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: proposal.action,
+      status: "direct",
+      selectionExplanation: "The authoritative worker selected the scored action.",
+      samplingTemperature: null,
+      candidates: [],
+    };
+    const scores = [[proposal.action, 12]];
+    mockWorkerClient.getState.mockResolvedValue({
+      state: gameStateFactory.priority().build(),
+      derived: {},
+    });
+    mockWorkerClient.getAiScoredCandidates.mockResolvedValue(scores);
+    mockWorkerClient.getAiActionProposalFromScores.mockResolvedValue(proposal);
+    mockWorkerClient.getAiActionProposalFromScoresWithDiagnostics.mockResolvedValue({ proposal, receipt });
+    mockWorkerClient.submitAiActionProposal.mockResolvedValue({
+      status: "applied",
+      result: { events: [], log_entries: [] },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+      adapter.setAiDecisionDiagnosticsEnabled(diagnostics);
+      const listener = vi.fn();
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalledWith("VeryHard", 0, expect.any(Number));
+      const selectedEndpoint = diagnostics
+        ? mockWorkerClient.getAiActionProposalFromScoresWithDiagnostics
+        : mockWorkerClient.getAiActionProposalFromScores;
+      const unusedEndpoint = diagnostics
+        ? mockWorkerClient.getAiActionProposalFromScores
+        : mockWorkerClient.getAiActionProposalFromScoresWithDiagnostics;
+      expect(selectedEndpoint).toHaveBeenCalledExactlyOnceWith(JSON.stringify(scores), "VeryHard", 0, expect.any(Number));
+      expect(unusedEndpoint).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiActionProposal).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiTacticalActionProposal).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiTacticalActionProposalWithDiagnostics).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "applied" });
+      expect(mockWorkerClient.submitAiActionProposal).toHaveBeenCalledExactlyOnceWith(proposal);
+      if (diagnostics) {
+        expect(listener).toHaveBeenCalledExactlyOnceWith(receipt);
+      } else {
+        expect(listener).not.toHaveBeenCalled();
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([false, true])("skips VeryHard pool scoring for a non-Priority envelope with diagnostics %s", async (diagnostics) => {
+    mockWorkerClient.getState.mockResolvedValue({
+      state: gameStateFactory.manaPayment().build(),
+      derived: {},
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+      adapter.setAiDecisionDiagnosticsEnabled(diagnostics);
+
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toBeNull();
+
+      const selectedEndpoint = diagnostics
+        ? mockWorkerClient.getAiActionProposalWithDiagnostics
+        : mockWorkerClient.getAiActionProposal;
+      expect(selectedEndpoint).toHaveBeenCalledExactlyOnceWith("VeryHard", 0);
+      expect(mockWorkerClient.exportState).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiScoredCandidates).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiActionProposalFromScores).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiActionProposalFromScoresWithDiagnostics).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiTacticalActionProposal).not.toHaveBeenCalled();
+      expect(mockWorkerClient.getAiTacticalActionProposalWithDiagnostics).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("retires a failed VeryHard pool before the next decision", async () => {
     const proposal: AiActionProposal = {
       token: "authoritative-token",
@@ -207,7 +304,10 @@ describe("WasmAdapter", () => {
       actor: 0,
       action: { type: "PassPriority" },
     };
-    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getState.mockResolvedValue({
+      state: gameStateFactory.priority().build(),
+      derived: {},
+    });
     mockWorkerClient.getAiScoredCandidates.mockRejectedValue(new Error("pool worker crashed"));
     mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -237,7 +337,10 @@ describe("WasmAdapter", () => {
       actor: 0,
       action: { type: "PassPriority" },
     };
-    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getState.mockResolvedValue({
+      state: gameStateFactory.priority().build(),
+      derived: {},
+    });
     mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
     mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
     mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(proposal);
@@ -281,7 +384,10 @@ describe("WasmAdapter", () => {
       samplingTemperature: null,
       candidates: [],
     };
-    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getState.mockResolvedValue({
+      state: gameStateFactory.priority().build(),
+      derived: {},
+    });
     mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
     mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
