@@ -103,10 +103,14 @@ local_resource('frontend',
     serve_cmd = 'pnpm dev',
     serve_dir = 'client',
     serve_env = {'CADDY_PROXY': '1'} if 'https' in enabled else {},
-    auto_init = 'tauri' not in enabled,
     allow_parallel = True,
     links = ['http://localhost:5173'],
     labels = ['serve'],
+    # `tauri` depends on this resource being ready (see below) so it doesn't
+    # open devUrl before Vite accepts connections — the default Tilt
+    # readiness (process started) isn't enough, since Vite compiles for a
+    # moment before it binds :5173.
+    readiness_probe = probe(period_secs = 5, tcp_socket = tcp_socket_action(port = 5173)),
 )
 
 # Deck-import + lobby broker Worker. vite.config.ts proxies /import-deck to
@@ -145,21 +149,26 @@ local_resource('caddy',
     labels = ['serve'],
 )
 
-# Thin-shell dev loop. `tauri dev` starts vite itself (beforeDevCommand) and
-# points the window at devUrl http://localhost:5173, so the shell hosts the
-# LOCAL frontend instead of the production bootstrap->remote-origin flow —
-# that is why `frontend` sets auto_init = 'tauri' not in enabled (both would
-# bind :5173). The shell crate is workspace-excluded and self-contained, and
-# `tauri dev` watches client/src-tauri/src/ and rebuilds on its own; Tilt only
-# restarts the loop when the Tauri config or crate manifest changes. The old
-# phase-server sidecar build is gone with the thin shell: production shells
-# download their native engine via signed manifests, and local multiplayer
-# testing talks to the `server` resource on :9374.
+# Thin-shell dev loop. Plain `tauri dev` starts its own vite via
+# beforeDevCommand, which would fight the `frontend` resource for :5173 —
+# so this resource attaches to `frontend`'s already-running vite instead of
+# spawning a second one. tauri.tilt.conf.json overlays beforeDevCommand to a
+# no-op (--config merges over tauri.conf.json), and resource_deps ensures
+# `frontend` is up first. devUrl still points at http://localhost:5173, so
+# the shell window hosts that shared LOCAL frontend rather than the
+# production bootstrap->remote-origin flow. The shell crate is
+# workspace-excluded and self-contained, and `tauri dev` watches
+# client/src-tauri/src/ and rebuilds on its own; Tilt only restarts the loop
+# when the Tauri config or crate manifest changes. The old phase-server
+# sidecar build is gone with the thin shell: production shells download
+# their native engine via signed manifests, and local multiplayer testing
+# talks to the `server` resource on :9374.
 local_resource('tauri',
-    serve_cmd = 'pnpm tauri:dev',
+    serve_cmd = 'pnpm exec tauri dev --config src-tauri/tauri.tilt.conf.json',
     serve_dir = 'client',
-    deps = ['client/src-tauri/tauri.conf.json', 'client/src-tauri/Cargo.toml'],
+    deps = ['client/src-tauri/tauri.conf.json', 'client/src-tauri/tauri.tilt.conf.json', 'client/src-tauri/Cargo.toml'],
     ignore = TMP_IGNORE,
+    resource_deps = ['frontend'],
     auto_init = 'tauri' in enabled,
     labels = ['serve'],
 )

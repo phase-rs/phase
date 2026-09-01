@@ -150,6 +150,7 @@ const FOUR_FORM_STEMS = [
   "workspace.headers.accessible",
   "limitedDeck.spellCount",
   "limitedDeck.landCount",
+  "seat.activePackCount",
 ] as const;
 
 describe("locale parity", () => {

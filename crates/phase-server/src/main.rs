@@ -1707,7 +1707,7 @@ fn main() {
 async fn serve() {
     let cli = Cli::parse();
 
-    let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
+    let (_log_guard, game_log) = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
     let mode: Mode = if cli.lobby_only {
         ServerMode::LobbyOnly
     } else {
@@ -1801,11 +1801,16 @@ async fn serve() {
     // ten years is effectively unbounded without risking overflow in `now + grace`.
     // It also stamps `HostingMode::SingleUser` on every session this manager
     // owns, which is what grants the desktop sidecar its debug capability.
-    let state: SharedState = Arc::new(Mutex::new(if cli.single_user {
+    let mut session_manager = if cli.single_user {
         SessionManager::single_user(Duration::from_secs(10 * 365 * 24 * 60 * 60))
     } else {
         SessionManager::new()
-    }));
+    };
+    // Every session this manager creates or restores gets this cache
+    // (`SessionManager`/`GameSession` re-stamp it, same lifecycle as
+    // `hosting`) — see `server_core::game_log`.
+    session_manager.game_log = Arc::clone(&game_log);
+    let state: SharedState = Arc::new(Mutex::new(session_manager));
     let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
     let draft_pools_path = data_path.join("draft-pools.json");
     let draft_pools: SharedDraftPools = match draft_pools::DraftPools::from_path(&draft_pools_path)
@@ -6467,7 +6472,7 @@ async fn handle_client_message(
                     &deck.scheme_deck,
                     &deck.signature_spell,
                     &[],
-                    fc.format,
+                    fc,
                     Some(match_config.match_type),
                     usize::from(pc),
                 ) {
@@ -6520,7 +6525,7 @@ async fn handle_client_message(
                         &ai_deck_data.signature_spell,
                         // Constructed play, as above: no draft, no concession.
                         &[],
-                        fc.format,
+                        fc,
                         Some(match_config.match_type),
                         usize::from(pc),
                     ) {
@@ -12195,8 +12200,12 @@ mod handshake_tests {
     }
 
     #[test]
-    fn rejects_previous_protocol_for_breaking_planechase_release() {
-        let previous = PROTOCOL_VERSION.saturating_sub(1);
+    fn rejects_v49_before_it_can_omit_default_deck_copy_limit() {
+        // v49 added `active_pack_count`, but it predates the per-format
+        // `default_deck_copy_limit` required by v50. Full games must reject it
+        // at hello rather than let a client use the fail-closed singleton
+        // fallback instead of the format's declared copy limit.
+        let previous = 49;
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {

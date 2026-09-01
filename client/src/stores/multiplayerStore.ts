@@ -12,6 +12,7 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import {
@@ -519,6 +520,131 @@ export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = Object.fromEntr
   FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
 ) as Record<GameFormat, FormatConfig>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function isIntegerInRange(value: unknown, upperBound: number): value is number {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && value > 0
+    && value <= upperBound;
+}
+
+function isI32(value: unknown): value is number {
+  return isIntegerInRange(value, 2_147_483_647);
+}
+
+function isU16(value: unknown): value is number {
+  return isIntegerInRange(value, 65_535);
+}
+
+function isU8(value: unknown): value is number {
+  return isIntegerInRange(value, 255);
+}
+
+function isKnownFormat(value: unknown): value is GameFormat {
+  return typeof value === "string"
+    && Object.prototype.hasOwnProperty.call(FORMAT_DEFAULTS, value);
+}
+
+/**
+ * Rebuilds the engine-authored part of a persisted host setting from the
+ * current format registry. The browser is a durable storage boundary, so a
+ * previous release's serialized `FormatConfig` must never be sent straight
+ * back to a newer engine protocol.
+ *
+ * Only fields the host setup currently lets a player customize survive this
+ * projection. Every structural/derived field comes from the current engine
+ * default, which makes added and reshaped engine fields self-healing on the
+ * next hydration rather than requiring a one-off migration per field.
+ */
+export function normalizeRememberedHostConfig(
+  persisted: unknown,
+): RememberedHostConfig | null {
+  if (!isRecord(persisted) || !isKnownFormat(persisted.format)) return null;
+
+  const format = persisted.format;
+  const defaults = FORMAT_DEFAULTS[format];
+  const storedFormatConfig = isRecord(persisted.formatConfig)
+    ? persisted.formatConfig
+    : {};
+  const storedDeckSize = isRecord(storedFormatConfig.deck_size)
+    ? storedFormatConfig.deck_size
+    : null;
+  const deckSize: FormatConfig["deck_size"] =
+    storedDeckSize?.type === "Minimum"
+    && defaults.deck_size.type === "Minimum"
+    && isU16(storedDeckSize.data)
+      ? { type: "Minimum", data: storedDeckSize.data }
+      : storedDeckSize?.type === "Exactly"
+        && defaults.deck_size.type === "Exactly"
+        && isU16(storedDeckSize.data)
+        ? { type: "Exactly", data: storedDeckSize.data }
+        : defaults.deck_size;
+  const commanderDamageThreshold =
+    defaults.commander_damage_threshold !== null
+    && isU8(storedFormatConfig.commander_damage_threshold)
+      ? storedFormatConfig.commander_damage_threshold
+      : defaults.commander_damage_threshold;
+  const formatConfig: FormatConfig = {
+    ...defaults,
+    deck_size: deckSize,
+    starting_life: isI32(storedFormatConfig.starting_life)
+      ? storedFormatConfig.starting_life
+      : defaults.starting_life,
+    commander_damage_threshold: commanderDamageThreshold,
+    allow_debug_actions: typeof storedFormatConfig.allow_debug_actions === "boolean"
+      ? storedFormatConfig.allow_debug_actions
+      : defaults.allow_debug_actions,
+  };
+  const playerCount = isU8(persisted.playerCount)
+    ? Math.min(Math.max(persisted.playerCount, formatConfig.min_players), formatConfig.max_players)
+    : formatConfig.min_players;
+  const loopDetectionType = isRecord(persisted.loopDetection)
+    ? persisted.loopDetection.type
+    : "Off";
+  const loopDetection: LoopDetectionMode = loopDetectionType === "Interactive" || loopDetectionType === "On"
+    ? { type: "Interactive" }
+    : { type: "Off" };
+  const aiSeats: AiSeatConfig[] = [];
+  if (Array.isArray(persisted.aiSeats)) {
+    for (const seat of persisted.aiSeats) {
+      if (
+        !isRecord(seat)
+        || !isU8(seat.seatIndex)
+        || seat.seatIndex >= playerCount
+        || aiSeats.some((existing) => existing.seatIndex === seat.seatIndex)
+        || !(
+          AI_DIFFICULTIES.some((difficulty) => difficulty.id === seat.difficulty)
+          || seat.difficulty === "CEDH"
+        )
+        || typeof seat.difficulty !== "string"
+        || (typeof seat.deckName !== "string" && seat.deckName !== null)
+      ) {
+        continue;
+      }
+      aiSeats.push({
+        seatIndex: seat.seatIndex,
+        difficulty: seat.difficulty,
+        deckName: seat.deckName,
+      });
+    }
+  }
+
+  return {
+    format,
+    formatConfig,
+    playerCount,
+    matchType: playerCount === 2 && persisted.matchType === "Bo3" ? "Bo3" : "Bo1",
+    loopDetection,
+    isPublic: typeof persisted.isPublic === "boolean" ? persisted.isPublic : true,
+    startWhenFull: typeof persisted.startWhenFull === "boolean" ? persisted.startWhenFull : true,
+    ranked: false,
+    aiSeats,
+  };
+}
+
 export function migrateOfficialServerAddress(
   address: unknown,
   targetAddress: string,
@@ -553,8 +679,11 @@ export function migratePersistedMultiplayerState(
       DEFAULT_MULTIPLAYER_SERVER_URL,
     );
   }
-  if (version < 4) {
+  if (version < 4 && "lastHostConfig" in migrated) {
     migrated.lastHostConfig = migrateLegacyLoopDetectionOn(migrated.lastHostConfig);
+  }
+  if (version < 5 && "lastHostConfig" in migrated) {
+    migrated.lastHostConfig = normalizeRememberedHostConfig(migrated.lastHostConfig);
   }
   return migrated;
 }
@@ -851,7 +980,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setFormatConfig: (config) => set({ formatConfig: config }),
       setCompatibilityPlayerCount: (count) =>
         set({ compatibilityPlayerCount: count }),
-      rememberHostConfig: (config) => set({ lastHostConfig: config }),
+      rememberHostConfig: (config) => set({
+        lastHostConfig: normalizeRememberedHostConfig(config),
+      }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -1510,7 +1641,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 4,
+      version: 5,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -1529,7 +1660,26 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // "On" }` persisted under an older build is forwarded to `Interactive`
       // (its surviving semantics) rather than left to silently fall back to
       // `Off` on next read.
+      //
+      // v4 → v5: persisted host configurations used to retain a serialized
+      // `FormatConfig`. Project it onto the current engine registry while
+      // retaining only user-editable fields, so engine protocol shape changes
+      // (such as `deck_size: 100` becoming `{ type: "Exactly", data: 100 }`)
+      // cannot leave hosting stuck before GameCreated.
       migrate: migratePersistedMultiplayerState,
+      // Persisted state is external input. Migration only runs when the schema
+      // version changes, so hydrate current-version blobs through the same
+      // normalizer before the store exposes them to host setup.
+      merge: (persisted, current) => {
+        const saved = persisted && typeof persisted === "object"
+          ? persisted as Partial<MultiplayerState>
+          : {};
+        return {
+          ...current,
+          ...saved,
+          lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
+        };
+      },
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,

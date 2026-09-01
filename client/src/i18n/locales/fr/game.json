@@ -2041,6 +2041,7 @@
     "diagnostic": "diagnostic : {{reason}}",
     "showDetails": "Afficher les détails",
     "exportGameState": "Exporter l'état de la partie",
+    "exportClientSnapshot": "Exporter l’instantané du client",
     "exported": "Exporté",
     "exportFailed": "Échec de l'exportation",
     "copyDiagnostic": "Copier le diagnostic",

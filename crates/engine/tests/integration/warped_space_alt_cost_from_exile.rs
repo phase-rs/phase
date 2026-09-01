@@ -40,6 +40,7 @@ fn exile_permission() -> CastingPermission {
         single_use_group: None,
         single_use: false,
         cast_cost_raise: None,
+        alt_ability_cost: None,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }

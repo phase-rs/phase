@@ -6073,10 +6073,28 @@ fn filter_prop_names_non_battlefield_zone(prop: &FilterProp) -> bool {
     }
 }
 
+/// CR 202.3: the subject head every mana-value suffix form shares — "with ",
+/// "that have ", "that each have ". Factored out because all three of
+/// [`parse_mana_value_suffix`]'s own heads (parity, elliptical possessive, and
+/// the numeric form) accept exactly this set; a future head variant belongs in
+/// one place, not three.
+fn parse_suffix_subject_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("with "),
+            tag("that have "),
+            tag("that each have "),
+        )),
+    )
+    .parse(input)
+}
+
 /// Parse "with/that have/that each have mana value N or less" / "… or greater"
 /// suffixes, dynamic "with mana value less than or equal to that [type]"
-/// patterns, and the superlative "with the greatest/highest mana value among
-/// <set>" form.
+/// patterns, the elliptical possessive "with that spell's mana value" form, and
+/// the superlative "with the greatest/highest mana value among <set>" form.
+///
 /// Returns (FilterProp, bytes consumed from the original text).
 pub(crate) fn parse_mana_value_suffix(
     text: &str,
@@ -6093,11 +6111,7 @@ pub(crate) fn parse_mana_value_suffix(
     }
 
     if let Ok((after, _)) = (
-        alt((
-            tag::<_, _, OracleError<'_>>("with "),
-            tag::<_, _, OracleError<'_>>("that have "),
-            tag::<_, _, OracleError<'_>>("that each have "),
-        )),
+        parse_suffix_subject_head,
         tag::<_, _, OracleError<'_>>("mana value of "),
         alt((
             tag::<_, _, OracleError<'_>>("the chosen quality"),
@@ -6114,13 +6128,123 @@ pub(crate) fn parse_mana_value_suffix(
         ));
     }
 
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with mana value "),
-        tag::<_, _, OracleError<'_>>("that have mana value "),
-        tag::<_, _, OracleError<'_>>("that each have mana value "),
-    ))
-    .parse(trimmed)
-    .ok()?;
+    // Branch order in this function is: superlative -> relative ("the same /
+    // lesser / greater mana value ...") -> parity -> THIS branch -> the numeric
+    // "with mana value N" head. Do not move this earlier: the relative head
+    // above claims "with the same mana value as <X>" and "with lesser mana
+    // value than <X>", and this production would shadow both (~46 cards) if it
+    // ran first, because it matches on the property noun rather than on a
+    // comparator word.
+    //
+    // CR 202.3 + CR 608.2k: the ELLIPTICAL POSSESSIVE mana-value filter —
+    // "with <referent>'s mana value" (Celestial Kirin, Skyfire Kirin). Here the
+    // possessive precedes the noun, so no comparand follows "mana value": the
+    // clause means "mana value EQUAL TO the named object's mana value". The
+    // comparator arms above all require a trailing "than "/"as " phrase and the
+    // numeric head below requires "mana value" immediately after the head, so
+    // this production owns a disjoint slice of the grammar.
+    //
+    // CR 608.2k is the AUTHORIZING rule: "if an ability's effect refers to a
+    // specific untargeted object that has been previously referred to by that
+    // ability's cost or trigger condition, it still affects that object" — here
+    // the trigger condition named "a Spirit or Arcane spell" and the effect
+    // says "that spell's". CR 608.2c ("read the whole text and apply the rules
+    // of English to the text") is what licenses reading the possessive as
+    // pointing back at that noun phrase rather than at the clause's own
+    // subject; it does not itself confer referent authority.
+    //
+    // Binding the referent is delegated to `parse_event_context_quantity`, the
+    // single authority for "<referent>'s <property>" phrases, so the
+    // demonstrative (`that spell's`) vs. participle (`the sacrificed
+    // creature's`) scope split is decided in exactly one place. Both are
+    // CR 608.2k referents — cost and trigger condition are that rule's two
+    // enumerated sources — differing only in which resolution slot the runtime
+    // consults first. Reusing this instead of a
+    // local determiner table is also what keeps the scope correct: the
+    // `parse_mana_value_reference_qty` helper in this file maps the same
+    // surface string to `ObjectScope::Target`, which is right for a comparand
+    // in a targeted clause but wrong here — an untargeted mass effect would
+    // read 0, and a filter on a target creature would read that creature's own
+    // mana value and become a tautology.
+    if let Ok((after_head, _)) = parse_suffix_subject_head(trimmed) {
+        // Bound the phrase at the property noun itself, so the byte count this
+        // returns is the PARSE's own consumption and not "everything up to the
+        // next punctuation". Two things depend on that. A trailing clause —
+        // Skyfire Kirin's "target creature with that spell's mana value until
+        // end of turn" — must be left for the caller rather than swallowed;
+        // and the delegate's possessive arm requires full consumption of what
+        // it is handed, so a punctuation-delimited window would make that
+        // trailing clause decline the branch and silently drop the filter, the
+        // exact failure this production exists to remove. `clause_shell` peels
+        // a trailing duration before body parsers run, but this must not be
+        // load-bearing on that: the noun boundary is local and always correct.
+        if let Some((_, _, after_property)) = nom_primitives::scan_preceded(after_head, |i| {
+            alt((
+                tag::<_, _, OracleError<'_>>("mana value"),
+                tag("converted mana cost"),
+            ))
+            .parse(i)
+        }) {
+            let phrase = &after_head[..after_head.len() - after_property.len()];
+            // CR 202.3: this is the MANA-VALUE suffix parser, and
+            // `parse_event_context_quantity` recognizes far more than mana
+            // value — the sibling possessive properties ("that creature's
+            // power" / "toughness") and every other event-context quantity.
+            // Admit ONLY a mana-value object ref, so a power/toughness phrase
+            // declines here rather than being consumed and mislabeled as a
+            // `Cmc` bound. Declining is the whole of the guarantee: the P/T
+            // elliptical possessive ("with that creature's power") is not
+            // handled anywhere yet — `parse_power_suffix` takes only the
+            // comparative and superlative forms — so such a phrase is dropped,
+            // not rerouted. No card needs it today; when one is printed, the
+            // sibling production belongs next to that parser, not here. Composite forms
+            // (`Offset`/`Multiply`) also decline: no card needs one in this
+            // position, and declining is a safe fall-through while a wrong
+            // bound is not.
+            // The scope list is enumerated, not `..`: the delegate's of-form
+            // route ("the mana value of that creature") maps to
+            // `ObjectScope::Target`, which is exactly the binding this branch's
+            // rationale above rejects for this position — it reads 0 for an
+            // untargeted mass effect and is a tautology for a filter on a
+            // target. No card reaches that route here today; enumerating keeps
+            // it that way, and a new scope variant will fail to compile into
+            // this position rather than silently binding wrong.
+            //
+            // `Recipient` is likewise omitted deliberately: it is the
+            // Aura/Equipment attachment referent ("the enchanted creature's"),
+            // which names the object an effect is being applied TO, not an
+            // object an earlier cost or trigger condition introduced. No card
+            // pairs it with this suffix; one that did would be declined here
+            // and want its own production rather than this binding.
+            if let Some(
+                value @ QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectManaValue {
+                            scope:
+                                ObjectScope::Demonstrative
+                                | ObjectScope::CostPaidObject
+                                | ObjectScope::Anaphoric
+                                | ObjectScope::EventSource
+                                | ObjectScope::Source,
+                        },
+                },
+            ) = crate::parser::oracle_quantity::parse_event_context_quantity(phrase.trim())
+            {
+                return Some((
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value,
+                    },
+                    text.len() - after_property.len(),
+                ));
+            }
+        }
+    }
+
+    let (rest, _) = parse_suffix_subject_head(trimmed).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("mana value ")
+        .parse(rest)
+        .ok()?;
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).
@@ -6514,9 +6638,11 @@ fn parse_mana_value_reference_qty(
             QuantityRef::ObjectManaValue {
                 scope: ObjectScope::CostPaidObject,
             },
+            // NOTE: no `that spell's mana value` arm here — the
+            // `ObjectScope::Target` arm above matches that string first, so a
+            // duplicate tag in this `alt` is unreachable.
             alt((
-                tag::<_, _, Vbe>("that spell's mana value"),
-                tag("the creature that died"),
+                tag::<_, _, Vbe>("the creature that died"),
                 tag("the permanent that died"),
                 tag("the creature that entered"),
                 tag("the permanent that entered"),
@@ -18777,6 +18903,250 @@ mod tests {
                 } if name == "X"
             ),
             "expected Cmc LE Variable(X), got {prop:?}"
+        );
+    }
+
+    /// Assert a suffix parses to an EQ mana-value bound against `scope`, and
+    /// that the whole suffix was consumed. Shared by the elliptical-possessive
+    /// tests below so each case reads as one line of grammar.
+    fn assert_possessive_mana_value_suffix(input: &str, expected: ObjectScope) {
+        let mut ctx = ParseContext::default();
+        let (prop, consumed) = parse_mana_value_suffix(input, &mut ctx)
+            .unwrap_or_else(|| panic!("possessive suffix should parse: {input:?}"));
+        assert_eq!(consumed, input.len(), "should consume all of {input:?}");
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue { scope },
+                    },
+                } if *scope == expected
+            ),
+            "expected Cmc EQ ObjectManaValue({expected:?}) for {input:?}, got {prop:?}"
+        );
+    }
+
+    /// CR 202.3 + CR 608.2k: the elliptical possessive form
+    /// ("with <referent>'s mana value") means "mana value EQUAL TO the named
+    /// object's mana value". Exercises the full referent range the shared
+    /// possessive classifier recognizes, not one card's wording: bare
+    /// demonstratives across the object-type axis and both determiners bind
+    /// `Demonstrative`, while a participle adjective binds `CostPaidObject`;
+    /// both are CR 608.2k referents, differing only in which resolution slot
+    /// the runtime consults first. The participle case is what proves the
+    /// branch delegates to `parse_event_context_quantity` rather than carrying
+    /// a hardcoded determiner table.
+    #[test]
+    fn possessive_mana_value_suffix_binds_referent_scope() {
+        for input in [
+            "with that spell's mana value",
+            "with that card's mana value",
+            "with that permanent's mana value",
+            "with that creature's mana value",
+            "with the creature's mana value",
+            "that have that spell's mana value",
+            "that each have that spell's mana value",
+        ] {
+            assert_possessive_mana_value_suffix(input, ObjectScope::Demonstrative);
+        }
+        for input in [
+            "with the sacrificed creature's mana value",
+            "with the revealed card's mana value",
+        ] {
+            assert_possessive_mana_value_suffix(input, ObjectScope::CostPaidObject);
+        }
+    }
+
+    /// CR 202.3: the elliptical branch runs before the explicit-comparator arms,
+    /// so it must decline every phrase those arms own. "the same mana value as
+    /// <X>" keeps its `ObjectScope::Target` comparand binding — the possessive
+    /// there sits after "as", in a clause that has established a target.
+    #[test]
+    fn possessive_form_does_not_shadow_same_mana_value_as() {
+        let mut ctx = ParseContext::default();
+        let input = "with the same mana value as that creature";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("same-mana-value suffix parses");
+        assert_eq!(consumed, input.len());
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                }
+            ),
+            "expected Cmc EQ ObjectManaValue(Target), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3: branch-ordering pin for the relative and numeric heads. The
+    /// relative head runs BEFORE the elliptical branch and the numeric head
+    /// AFTER it, so this pins the ordering from both sides: a regression that
+    /// moved the elliptical branch earlier would shadow the relative forms,
+    /// and one that loosened its guard would shadow the numeric head.
+    #[test]
+    fn possessive_form_does_not_shadow_relative_or_numeric_heads() {
+        let mut ctx = ParseContext::default();
+        let (prop, _) =
+            parse_mana_value_suffix("with lesser mana value than that creature", &mut ctx)
+                .expect("relative suffix parses");
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    ..
+                }
+            ),
+            "expected Cmc LT, got {prop:?}"
+        );
+
+        let (prop, _) = parse_mana_value_suffix("with mana value 3 or less", &mut ctx)
+            .expect("numeric suffix parses");
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ),
+            "expected Cmc LE Fixed(3), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3: the branch is the MANA-VALUE suffix parser, so it must admit
+    /// only a mana-value referent. A sibling possessive property ("that
+    /// creature's power") is a valid event-context quantity but must NOT be
+    /// relabeled as a `Cmc` bound. Each negative is paired with the positive
+    /// that differs only in the rejected token, proving the `None` comes from
+    /// the guard and not from an upstream short-circuit.
+    #[test]
+    fn possessive_form_requires_a_mana_value_referent() {
+        let mut ctx = ParseContext::default();
+
+        // Missing the property noun entirely.
+        assert!(
+            parse_mana_value_suffix("with that spell", &mut ctx).is_none(),
+            "a bare possessive with no property is not a mana-value suffix"
+        );
+        // Wrong property: power is not mana value.
+        assert!(
+            parse_mana_value_suffix("with that creature's power", &mut ctx).is_none(),
+            "a power possessive must not be relabeled as a mana-value bound"
+        );
+
+        // Reach guards: the same phrases with the mana-value noun DO parse.
+        assert_possessive_mana_value_suffix(
+            "with that spell's mana value",
+            ObjectScope::Demonstrative,
+        );
+        assert_possessive_mana_value_suffix(
+            "with that creature's mana value",
+            ObjectScope::Demonstrative,
+        );
+    }
+
+    /// CR 202.3 + CR 601.2c: Skyfire Kirin's clause carries a trailing duration —
+    /// "target creature with that spell's mana value until end of turn". The
+    /// suffix must consume only through the property noun and leave the
+    /// duration for the caller. `clause_shell` normally peels a trailing
+    /// duration before body parsers run, so this pins the behavior WITHOUT that
+    /// help: if consumption were punctuation-delimited, the delegate's
+    /// full-consumption requirement would decline and the filter would be
+    /// silently dropped — the original Celestial Kirin bug, on the other card.
+    #[test]
+    fn possessive_suffix_leaves_a_trailing_clause_for_the_caller() {
+        let mut ctx = ParseContext::default();
+        let input = "with that spell's mana value until end of turn";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("possessive suffix parses");
+        assert_eq!(
+            &input[..consumed],
+            "with that spell's mana value",
+            "must consume through the property noun only, leaving the duration clause"
+        );
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Demonstrative,
+                        },
+                    },
+                }
+            ),
+            "expected Cmc EQ ObjectManaValue(Demonstrative), got {prop:?}"
+        );
+    }
+
+    /// CR 115.1 + CR 202.3: Skyfire Kirin's phrase travels a different call path
+    /// from Celestial Kirin's — a targeted `parse_target` rather than an
+    /// untargeted mass filter — so pin the composition on that path too.
+    #[test]
+    fn targeted_phrase_carries_possessive_mana_value_filter() {
+        let (filter, _rest) = parse_target("target creature with that spell's mana value");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "expected a creature type filter, got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+            }),
+            "expected an EQ mana-value bound on the demonstrative referent, got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 202.3 + CR 701.8: the composition level that was actually broken.
+    /// Celestial Kirin's "destroy all permanents with that spell's mana value"
+    /// reaches this suffix through `parse_target`; a leaf-only test would pass
+    /// on a combinator `parse_target` never calls.
+    #[test]
+    fn target_phrase_carries_possessive_mana_value_filter() {
+        let (filter, rest) = parse_target("all permanents with that spell's mana value");
+        assert!(
+            rest.trim().is_empty(),
+            "suffix should be consumed, got {rest:?}"
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Permanent),
+            "expected a permanent type filter, got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+            }),
+            "expected an EQ mana-value bound on the demonstrative referent, got {:?}",
+            typed.properties
         );
     }
 

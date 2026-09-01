@@ -18,7 +18,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 238 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
-| 7 | Wrong / dropped zone parameters on zone-change effect | 211 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
@@ -2805,7 +2805,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 7. Wrong / dropped zone parameters on zone-change effect  (211 cards)
+### 7. Wrong / dropped zone parameters on zone-change effect  (209 cards)
 
 **Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
 
@@ -2964,7 +2964,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rory Williams
 - Saheeli's Directive
 - Scaled Destruction
-- Scheming Symmetry
 - Scholar of New Horizons
 - Season of the Witch
 - Seek Thrills
@@ -3005,7 +3004,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ultron the Annihilator
 - Ultron's Auxiliary
 - Vampire Charmseeker
-- Varragoth, Bloodsky Sire
 - Vault 101: Birthday Party
 - Vaultborn Tyrant
 - Verdant Crescendo

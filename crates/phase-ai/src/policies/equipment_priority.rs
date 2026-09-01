@@ -6,10 +6,17 @@
 //! good creature, burning mana for no board improvement.
 //!
 //! The AI reaches equip via `GameAction::ActivateAbility` on the equipment's
-//! equip ability (effect `Effect::Attach`), then `GameAction::Equip` while
-//! `WaitingFor::EquipTarget`. Both route to `DecisionKind::ActivateAbility`.
-//! This policy rejects same-host activations and re-targets (including paying
-//! {1} to re-equip Skullclamp to the creature it is already on — #1986).
+//! equip ability (effect `Effect::Attach`), then the host pick at
+//! `WaitingFor::TargetSelection` (`GameAction::ChooseTarget`), or via
+//! `GameAction::Equip` while `WaitingFor::EquipTarget`. The activation and
+//! Equip routes classify to `DecisionKind::ActivateAbility`; the
+//! announcement-stage host pick classifies to `SelectTarget` and is guarded by
+//! the same same-host rejection (an equip activation can be re-targeted after
+//! it resolves — the policy only claimed `ActivateAbility`, so the
+//! `ChooseTarget` arm never fired on the announcement-stage host pick). This
+//! policy rejects same-host activations and re-targets
+//! (including paying {1} to re-equip Skullclamp to the creature it is
+//! already on — #1986).
 //!
 //! It never *rewards* equipping (the reported problem is over-equipping); fresh
 //! equips and genuine upgrades are neutral, leaving eval/other policies to
@@ -20,9 +27,12 @@
 //! creature), so the "bigger body" comparison is over creatures you control.
 
 use engine::types::ability::Effect;
+use engine::types::ability::EffectKind;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
@@ -89,7 +99,7 @@ impl TacticalPolicy for EquipmentPriorityPolicy {
     }
 
     fn decision_kinds(&self) -> &'static [DecisionKind] {
-        &[DecisionKind::ActivateAbility]
+        &[DecisionKind::ActivateAbility, DecisionKind::SelectTarget]
     }
 
     fn activation(
@@ -126,6 +136,44 @@ impl TacticalPolicy for EquipmentPriorityPolicy {
                 equipment_id,
                 target_id,
             } => (*equipment_id, Some(*target_id)),
+            // CR 602.2b + CR 601.2c (activation announcement-stage target
+            // choice): the AI's real equip flow reaches the host pick at
+            // `WaitingFor::TargetSelection` —
+            // `ChooseTarget` on the equipment's `Effect::Attach` pending cast —
+            // NOT via `GameAction::Equip` at `EquipTarget`. Before this arm the
+            // same-host guard never fired there, because TargetSelection
+            // classifies to `DecisionKind::SelectTarget` while this policy only
+            // claimed `ActivateAbility`.
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(object_id)),
+            } => {
+                let WaitingFor::TargetSelection {
+                    pending_cast,
+                    target_slots,
+                    selection,
+                    ..
+                } = &ctx.state.waiting_for
+                else {
+                    return na();
+                };
+                // CR 115.1: each target slot carries the effect kind of the
+                // enclosing ability frame (root OR chained sub-ability), so a
+                // root Attach followed by a targeted non-Attach sub-ability
+                // later in the same prompt must not have that target scored as
+                // an Equipment host. Only the ability frame's own Attach slot
+                // is this policy's lane.
+                if target_slots
+                    .get(selection.current_slot)
+                    .map(|slot| &slot.effect_kind)
+                    != Some(&EffectKind::Attach)
+                {
+                    return na();
+                }
+                // The attaching object is the ability's source; the host pick
+                // applies only when that source is itself the Equipment.
+                (pending_cast.ability.source_id, Some(*object_id))
+            }
+            GameAction::ChooseTarget { target: None } => return na(),
             _ => return na(),
         };
 
@@ -172,9 +220,12 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::game_object::AttachTarget;
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, ResolvedAbility, TargetFilter,
+    };
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
     use std::sync::Arc;
 
@@ -317,6 +368,230 @@ mod tests {
                 },
             ),
             "equipment_reequip_same_host",
+        );
+    }
+
+    /// Build a single-slot Attach `TargetSelection` prompt for `equip`, mirroring
+    /// the slot the engine stamps at an equip announcement (CR 115.1:
+    /// `effect_kind` = the enclosing ability frame's kind).
+    fn attach_selection_prompt(state: &mut GameState, equip: ObjectId, legal: Vec<TargetRef>) {
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            equip,
+            AI,
+        );
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: AI,
+            pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                equip,
+                CardId(1),
+                ability,
+                ManaCost::zero(),
+            )),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: legal,
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::Attach,
+                effect_detail: engine::types::game_state::TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress::default(),
+        };
+    }
+
+    /// The real equip flow announces the target at `WaitingFor::TargetSelection`
+    /// (`DecisionKind::SelectTarget`), not via `GameAction::Equip` at
+    /// `EquipTarget`. An equip activation can be re-targeted after it resolves
+    /// to the creature it was already attached to; this arm is what stops
+    /// that pick.
+    #[test]
+    fn target_selection_same_host_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let equip = equipment(&mut state);
+        let host = creature(&mut state, 2);
+        attach(&mut state, equip, host, 2);
+        attach_selection_prompt(&mut state, equip, vec![TargetRef::Object(host)]);
+
+        assert_reject(
+            policy_verdict(
+                &state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(host)),
+                },
+            ),
+            "equipment_reequip_same_host",
+        );
+    }
+
+    /// At the same prompt, a genuinely bigger creature stays a legal pick —
+    /// the point of activating the equip is to move it there.
+    #[test]
+    fn target_selection_upgrade_host_allowed() {
+        let mut state = GameState::new_two_player(42);
+        let equip = equipment(&mut state);
+        let host = creature(&mut state, 2);
+        let upgrade = creature(&mut state, 4);
+        attach(&mut state, equip, host, 2);
+        attach_selection_prompt(
+            &mut state,
+            equip,
+            vec![TargetRef::Object(host), TargetRef::Object(upgrade)],
+        );
+
+        assert_score(
+            policy_verdict(
+                &state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(upgrade)),
+                },
+            ),
+            "equipment_upgrade_available",
+            0.0,
+        );
+    }
+
+    /// Picking a strictly smaller creature at the announcement prompt is the
+    /// same downgrade as re-targeting at `EquipTarget` — the announcement
+    /// stage must carry the identical penalty.
+    #[test]
+    fn target_selection_downgrade_target_penalized() {
+        let mut state = GameState::new_two_player(42);
+        let equip = equipment(&mut state);
+        let host = creature(&mut state, 3);
+        let smaller = creature(&mut state, 1);
+        attach(&mut state, equip, host, 2);
+        attach_selection_prompt(
+            &mut state,
+            equip,
+            vec![TargetRef::Object(host), TargetRef::Object(smaller)],
+        );
+
+        assert_score(
+            policy_verdict(
+                &state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(smaller)),
+                },
+            ),
+            "equipment_downgrade_target",
+            -DOWNGRADE_TARGET_PENALTY,
+        );
+    }
+
+    /// A root Attach with a targeted non-Attach sub-ability yields a later
+    /// slot whose `effect_kind` is the sub-ability's own (CR 115.1). That
+    /// later target must NOT be scored as an Equipment host — here the
+    /// sub-ability's target is the bigger body, so a regression would return
+    /// `equipment_upgrade_available` instead of staying neutral.
+    #[test]
+    fn target_selection_chain_non_attach_slot_na() {
+        let mut state = GameState::new_two_player(42);
+        let equip = equipment(&mut state);
+        let host = creature(&mut state, 2);
+        let sub_target = creature(&mut state, 6);
+        attach(&mut state, equip, host, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            equip,
+            AI,
+        );
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: AI,
+            pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                equip,
+                CardId(1),
+                ability,
+                ManaCost::zero(),
+            )),
+            target_slots: vec![
+                engine::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(host)],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::Attach,
+                    effect_detail: engine::types::game_state::TargetEffectDetail::None,
+                },
+                engine::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(sub_target)],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::Draw,
+                    effect_detail: engine::types::game_state::TargetEffectDetail::None,
+                },
+            ],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 1,
+                ..Default::default()
+            },
+        };
+        assert_score(
+            policy_verdict(
+                &state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(sub_target)),
+                },
+            ),
+            "equipment_priority_na",
+            0.0,
+        );
+    }
+
+    /// A non-Attach pending cast at TargetSelection is out of this policy's
+    /// lane — the guard must not fire on e.g. a removal spell's target pick.
+    #[test]
+    fn target_selection_non_attach_na() {
+        let mut state = GameState::new_two_player(42);
+        let equip = equipment(&mut state);
+        let host = creature(&mut state, 2);
+        attach(&mut state, equip, host, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            equip,
+            AI,
+        );
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: AI,
+            pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                equip,
+                CardId(1),
+                ability,
+                ManaCost::zero(),
+            )),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(host)],
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::Draw,
+                effect_detail: engine::types::game_state::TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress::default(),
+        };
+        assert_score(
+            policy_verdict(
+                &state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(host)),
+                },
+            ),
+            "equipment_priority_na",
+            0.0,
         );
     }
 

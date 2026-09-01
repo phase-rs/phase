@@ -5,6 +5,10 @@
     "close": "Schließen",
     "closeNamed": "{{name}} schließen"
   },
+  "debug": {
+    "exportAuthoritative": "Autoritativen Spielzustand exportieren",
+    "exportAuthoritativeTitle": "Lädt den engine-eigenen Zustand herunter, mit dem dieses Spiel diagnostiziert und wiederhergestellt wird"
+  },
   "quantityRef": {
     "highestNumber": "die höchste Zahl",
     "lowestNumber": "die niedrigste Zahl",

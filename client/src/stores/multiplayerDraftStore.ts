@@ -43,7 +43,9 @@ import {
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
+import { debugLog } from "../game/debugLog";
 import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
+import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
 import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { useGameStore } from "./gameStore";
 import {
@@ -1568,7 +1570,12 @@ export const useMultiplayerDraftStore = create<
             resolveRoomFull();
           }
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              // A rejected delivery is otherwise gone and the screen freezes
+              // on the previous state — surface it and re-sync immediately.
+              debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
           }
           if (event.type === "stateChanged") {
             const wf = event.snapshot.state?.waiting_for;
@@ -1654,7 +1661,12 @@ export const useMultiplayerDraftStore = create<
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              // A rejected delivery is otherwise gone and the screen freezes
+              // on the previous state — surface it and re-sync immediately.
+              debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
           }
           if (event.type === "stateChanged") {
             const wf = event.snapshot.state?.waiting_for;

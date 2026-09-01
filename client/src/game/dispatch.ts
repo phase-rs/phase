@@ -159,6 +159,15 @@ function abandonDispatchesForStateRestore(): void {
   }
 }
 
+/**
+ * True while no local dispatch or remote update is in flight or queued.
+ * The stale-screen watchdog gates on this: while work is pending, the
+ * committed state legitimately lags the adapter's snapshot.
+ */
+export function isDispatchIdle(): boolean {
+  return !isAnimating && pendingQueue.length === 0 && inFlightLocalAction === null;
+}
+
 function releaseDispatchMutex(generation: number): void {
   if (!isCurrentDispatchGeneration(generation)) return;
 

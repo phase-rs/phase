@@ -17,7 +17,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -481,6 +481,7 @@ fn singular_batch_anaphors_are_one_shot_resolution_windows() {
                             max_casts: Some(1),
                             max_total_mv: None,
                         },
+                        ..
                     },
                     ..
                 }
@@ -3051,6 +3052,22 @@ fn a_second_resolution_offers_only_its_own_exile_batch() {
         "CR 607.2a: a card left in exile by a PREVIOUS resolution of this source \
          is not part of \"them\" and must not be re-offered; offered = {second_offers:?}"
     );
+    let decline = GameAction::FreeCastWindowChoice { selection: None };
+    runner.act(decline).unwrap();
+    let state = runner.state();
+    assert!(state.players[0].library.is_empty());
+    assert!([first_batch, second_batch]
+        .into_iter()
+        .all(|id| state.objects[&id].zone == Zone::Exile
+            && state.exile_links.iter().any(|link| link.exiled_id == id
+                && link.source_id == epic
+                && link.kind == ExileLinkKind::TrackedBySource)));
+    let third = exile_set_cast_ability(&execute, epic, Some(1));
+    engine::game::effects::resolve_ability_chain(runner.state_mut(), &third, &mut vec![], 0)
+        .unwrap();
+    let state = runner.state();
+    assert!(state.last_zone_changed_ids.is_empty());
+    assert!(!matches!(state.waiting_for, WaitingFor::CastOffer { .. }));
 }
 
 const PRIMEVAL_SPAWN_TRIGGER_BODY: &str = "exile the top ten cards of your library. You may cast any number of spells with total mana value 10 or less from among them without paying their mana costs.";

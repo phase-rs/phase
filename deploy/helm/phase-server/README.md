@@ -95,6 +95,37 @@ storage (k3s `local-path`, hostPath) the volume is the node's root filesystem,
 and a retention window sized for a quiet week fills the disk during a busy one —
 which evicts pods, this chart's included.
 
+## Game logs
+
+`logging.enabled` sets `PHASE_LOG_DIR` to `logging.dir` (default
+`/var/lib/phase-server/logs`, a subdirectory of the existing `data` PVC — no
+second or shared volume needed) and adds a `logs` sidecar (a small
+`nginxinc/nginx-unprivileged` static file server, autoindex on) that mounts
+just that subdirectory, read-only, from the same volume: it can list and serve
+log files but never touch `games.db`. The server writes the main log
+(`phase-server.log`) and one file pair per game (`games/<code>.*`) there; the
+per-game format depends on the running image — commits before `e2e5f0ae8`
+write flat text `games/<code>.log`, that commit and later write JSON-Lines
+`games/<code>.session.jsonl` + `games/<code>.events.jsonl` instead.
+
+Like `/admin`, this is never routed through the Ingress and has no
+NetworkPolicy ingress rule. Unlike `/admin`, that policy isn't the only thing
+standing between it and other pods: the sidecar binds `127.0.0.1` only, so
+the Service/pod-IP path is refused outright even with `networkPolicy.enabled:
+false` or a CNI that doesn't enforce NetworkPolicy at all. It's reachable
+only from an operator with cluster access, via `kubectl port-forward` (which
+tunnels into the pod's own network namespace, so the loopback bind doesn't
+block it):
+
+```bash
+kubectl -n <namespace> port-forward svc/<release>[-<ordinal>] 8080:<logging.server.port>
+curl http://127.0.0.1:8080/games/
+```
+
+Under `scaleOut`, logs are per-replica (each ordinal owns its own `data` PVC),
+so port-forward the specific ordinal's Service (`<release>-<ordinal>`) — same
+as reaching that ordinal's games.
+
 ## Behind Cloudflare
 
 Traefik typically sees a SNAT'd node IP (Service `externalTrafficPolicy: Cluster`),

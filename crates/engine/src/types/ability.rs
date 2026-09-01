@@ -4081,6 +4081,22 @@ pub enum CastingPermission {
         /// ("Each spell cast this way costs {1} more to cast." — Lightstall Inquisitor).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_cost_raise: Option<ManaCost>,
+        /// CR 118.9 + CR 119.4: Optional non-mana alternative cost that REPLACES
+        /// the mana cost for a spell cast via this permission ("If you cast a
+        /// spell this way, pay life equal to its mana value rather than pay its
+        /// mana cost." — Inside Information). Unlike `ExileWithAltAbilityCost`
+        /// (a standalone permission built by `CastFromZone`'s spell-only "cast"
+        /// grammar), this field lives directly on a `PlayFromExile` grant so a
+        /// single permission can authorize BOTH a CR 305.1 land play (unaffected
+        /// — lands have no mana cost to replace) and a spell cast (mana cost
+        /// replaced by this cost) from the same exiled batch. `None` (the common
+        /// case) leaves every other `PlayFromExile` grant's spells payable at
+        /// their normal printed mana cost. Read by
+        /// `casting::alt_cost_from_exile`-style zeroing and
+        /// `casting_costs::check_additional_cost_or_pay`'s alt-cost payment,
+        /// mirroring the `ExileWithAltAbilityCost` consumption path exactly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt_ability_cost: Option<AbilityCost>,
         /// CR 614.1c: Lands played via this permission enter with this tap state
         /// ("Each land played this way enters tapped." — Lightstall Inquisitor).
         /// "enters tapped" is a CR 614.1c "[permanent] enters ..." replacement.
@@ -12604,6 +12620,38 @@ impl RevealUntilDisposition {
     pub fn is_keep_each(&self) -> bool {
         matches!(self, Self::KeepEach)
     }
+}
+
+/// CR 120.1 + CR 608.2b: How a `DamageSource::Target` clause's SUBJECT slot
+/// resolved during chain descent.
+///
+/// The subject ("Target creature you control deals damage equal to its power
+/// to any target") is declared by a PARENT node of the chain, while the damage
+/// itself lives on the child. The runtime contract the damage resolver reads is
+/// positional — `targets = [subject, recipient…]` — and it is reconstructed at
+/// resolution by prepending the parent's chosen object onto the child's list.
+///
+/// CR 608.2b prunes an illegal target out of the parent's list before any
+/// effect runs, which destroys the only evidence that a subject slot was ever
+/// declared: the child would then read its own recipient out of `targets[0]`
+/// and deal that recipient's power to itself. This binding preserves the
+/// distinction the pruned list can no longer express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetDamageSourceBinding {
+    /// The parent's chosen object was prepended, so the subject is `targets[0]`.
+    /// The id itself is deliberately NOT duplicated here: the target list stays
+    /// the single source of truth for WHICH object it is, and this binding
+    /// answers only WHETHER the positional contract holds. (It also keeps
+    /// `SpellContext` — and through it `ResolutionFrame` — from growing.)
+    Bound,
+    /// CR 608.2b: the parent declared a subject slot whose chosen object was an
+    /// illegal target at resolution. "If part of the effect requires
+    /// information about an illegal target, it fails to determine any such
+    /// information. Any part of the effect that requires that information won't
+    /// happen." — the damage clause needs both the subject's identity (CR 120.1:
+    /// an object that deals damage is the source of that damage) and its power,
+    /// so it deals no damage. The rest of the chain still resolves.
+    Illegal,
 }
 
 /// CR 120.3: Override for which object is the source of damage.
@@ -23711,6 +23759,13 @@ pub struct SpellContext {
     /// `ResolvedAbility` literals.
     #[serde(default, skip_serializing_if = "AttachTargetBindings::is_empty")]
     pub attach_target_bindings: AttachTargetBindings,
+    /// CR 120.1 + CR 608.2b: How the `DamageSource::Target` subject slot bound
+    /// for the immediately following damage clause. Stamped by the chain
+    /// descent that reconstructs the `[subject, recipient…]` contract and read
+    /// by `deal_damage`'s subject authority. One-hop only: cleared by
+    /// `apply_parent_chain_context` so it never reaches a grandchild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_damage_source: Option<TargetDamageSourceBinding>,
 }
 
 impl SpellContext {

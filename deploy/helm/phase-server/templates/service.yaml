@@ -17,5 +17,11 @@ spec:
       targetPort: metrics
       protocol: TCP
     {{- end }}
+    {{- if .Values.logging.enabled }}
+    - name: logs
+      port: {{ .Values.logging.server.port }}
+      targetPort: logs
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "phase-server.selectorLabels" . | nindent 4 }}

@@ -83,7 +83,13 @@ vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { childre
   captured.menuShell = props;
   return <>{props.children}</>;
 } }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: () => null }));
+vi.mock("../../components/draft/HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
   LimitedDeckBuilder: (props: {
     local: { capabilities?: { kind: string }; onSubmitDeck: () => void };

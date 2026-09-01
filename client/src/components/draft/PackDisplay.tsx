@@ -170,7 +170,7 @@ const cardInfo = (card: DraftCardInstance): CardHoverInfo => ({
 });
 
 function PackCard({
-  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
+  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
 }: {
   card: DraftCardInstance;
   state: CardVisualState;
@@ -180,6 +180,7 @@ function PackCard({
   doubleTapPickEnabled: boolean;
   doubleClickPickEnabled: boolean;
   allowTouchPackDrag: boolean;
+  desktopLayout: boolean;
   onSelect(): void;
   onDestination(destination: DraftPickDestination): void;
   onDoubleClickPick(): void;
@@ -203,7 +204,7 @@ function PackCard({
     <motion.div
       data-instance-id={card.instance_id}
       data-visual-state={state}
-      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 transition-all duration-150 ${locked ? "" : "cursor-pointer hover:scale-[1.02]"} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_4px_2px_rgb(3,139,6)]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
+      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.08]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_7px_3px_rgb(3,139,6)] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
       style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
       onMouseEnter={() => onHover(cardInfo(card))}
       onMouseLeave={() => onHover(null)}
@@ -697,7 +698,7 @@ export function PackDisplay({
               ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
               : responsiveLayout === "tablet-landscape"
                 ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
-                : "flex flex-wrap justify-center gap-3 overflow-visible"}
+                : "flex flex-wrap justify-center gap-[23px] overflow-visible"}
       >
         <AnimatePresence initial={false}>
           {slots.map((slot) => {
@@ -722,6 +723,7 @@ export function PackDisplay({
               doubleTapPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
               doubleClickPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
               allowTouchPackDrag={responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape"}
+              desktopLayout={responsiveLayout === "desktop"}
               onSelect={() => select(card.instance_id)}
               onDestination={(destination) => void request(chosenCards(card), destination)}
               onDoubleClickPick={() => {

@@ -716,7 +716,11 @@ impl ClausePlacement {
 /// modifies a different field/aspect of the prior def.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PriorModifier {
-    /// CR 118.9 + CR 119.4: fold an alternative cost onto the prior CastFromZone.
+    /// CR 118.9 + CR 119.4: fold an alternative cost onto the prior grant —
+    /// a `CastFromZone` (Xander's Pact, Nashi) when one is in scope, else a
+    /// `GrantCastingPermission { PlayFromExile }`'s `alt_ability_cost` (Inside
+    /// Information's "you may play those cards" grant, which also authorizes
+    /// land plays the alt cost must not affect).
     AltCost(AbilityCost),
     /// CR 106.4: fold a mana-retention expiry onto the prior Mana effect.
     ManaRetention(ManaExpiry),

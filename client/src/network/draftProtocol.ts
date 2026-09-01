@@ -135,8 +135,14 @@ import type {
  *  23 — `pick_selection_mode` on player views. A v22 peer lacks the
  *       engine-owned selection procedure and can render Commander Draft as a
  *       direct selection, so the first-contact gate must refuse the pairing.
+ *  24 — the merged P2P contract requires both v23's `pick_selection_mode` on
+ *       player views and `active_pack_count` on public seats: the engine-owned
+ *       `0|1` presence signal for a seat's active pack. It never reveals a
+ *       pack's cards or remaining-card count. The independently released
+ *       `active_pack_count` contract had also claimed v23, so v24 explicitly
+ *       rejects a v23 first contact rather than conflating the two shapes.
  */
-export const DRAFT_PROTOCOL_VERSION = 23 as const;
+export const DRAFT_PROTOCOL_VERSION = 24 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -702,8 +708,15 @@ function normalizeSeatPublicView(raw: unknown): SeatPublicView {
     throw new Error("Invalid draft message: malformed public seat");
   }
   const seat = raw as Record<string, unknown>;
+  if (
+    !Number.isInteger(seat.active_pack_count)
+    || (seat.active_pack_count !== 0 && seat.active_pack_count !== 1)
+  ) {
+    throw new Error("Invalid draft message: active_pack_count must be an integer 0 or 1");
+  }
   return {
     ...seat,
+    active_pack_count: seat.active_pack_count,
     face_up_draft_cards: normalizeArrayField(seat, "face_up_draft_cards"),
   } as SeatPublicView;
 }

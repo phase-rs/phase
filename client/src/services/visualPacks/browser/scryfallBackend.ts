@@ -53,10 +53,12 @@ import {
 } from "./scryfallBulk.ts";
 
 const DATABASE = "phase-visual-packs-scryfall-v1";
+const DATABASE_VERSION = 2;
 const CACHE = "phase-visual-pack-scryfall-images-v1";
 const STATE = "state";
 const DOWNLOAD_CONCURRENCY = 4;
 const PROGRESS_INTERVAL_MS = 250;
+let pendingDatabaseOpen: Promise<IDBPDatabase<ScryfallVisualPackSchema>> | null = null;
 
 type CatalogRecord = Readonly<ScryfallBulkSource>;
 
@@ -148,7 +150,11 @@ const DECK_LIBRARY_LOCK = "phase-visual-packs:deck-library";
 interface ScryfallVisualPackSchema extends DBSchema {
   state: { key: string; value: StateRecord };
   packs: { key: string; value: PackRecord; indexes: { "by-root": CatalogRoot } };
-  objects: { key: string; value: ObjectRecord; indexes: { "by-pack": string } };
+  objects: {
+    key: string;
+    value: ObjectRecord;
+    indexes: { "by-pack": string; "by-candidate-key": CandidateKey };
+  };
   operations: { key: OperationId; value: ScryfallOperationRecord };
   operationObjects: { key: string; value: OperationObjectRecord; indexes: { "by-operation": OperationId } };
 }
@@ -319,16 +325,77 @@ function sameResolutionKey(record: ObjectRecord, key: ResolutionKey): boolean {
   return key.kind === "asset" ? record.assetKey === key.key : record.candidateKeys.includes(key.key);
 }
 
-async function openDatabase(): Promise<IDBPDatabase<ScryfallVisualPackSchema>> {
-  return openDB<ScryfallVisualPackSchema>(DATABASE, 1, {
-    upgrade(database) {
-      database.createObjectStore("state", { keyPath: "id" });
-      database.createObjectStore("packs", { keyPath: "id" }).createIndex("by-root", "root");
-      database.createObjectStore("objects", { keyPath: "id" }).createIndex("by-pack", "packId");
-      database.createObjectStore("operations", { keyPath: "id" });
-      database.createObjectStore("operationObjects", { keyPath: "id" }).createIndex("by-operation", "operationId");
-    },
+/**
+ * An upgrade blocked by an older tab cannot make render-time lookup wait:
+ * callers fall back to remote art immediately. The native open request cannot
+ * be cancelled, so a late success is closed rather than becoming another
+ * connection that blocks a future upgrade. Until that request settles, every
+ * caller shares its outcome instead of queuing another native open behind it.
+ */
+function openDatabase(): Promise<IDBPDatabase<ScryfallVisualPackSchema>> {
+  if (pendingDatabaseOpen) return pendingDatabaseOpen;
+  let resolveResult!: (database: IDBPDatabase<ScryfallVisualPackSchema>) => void;
+  let rejectResult!: (reason?: unknown) => void;
+  let settled = false;
+  const result = new Promise<IDBPDatabase<ScryfallVisualPackSchema>>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
   });
+  pendingDatabaseOpen = result;
+  const clearPendingOpen = () => {
+    if (pendingDatabaseOpen === result) pendingDatabaseOpen = null;
+  };
+  const rejectBlockedUpgrade = () => {
+    if (settled) return;
+    settled = true;
+    rejectResult(new VisualPackBackendError("unavailable"));
+  };
+  let opening: Promise<IDBPDatabase<ScryfallVisualPackSchema>>;
+  try {
+    opening = openDB<ScryfallVisualPackSchema>(DATABASE, DATABASE_VERSION, {
+      upgrade(database, oldVersion, _newVersion, transaction) {
+        if (oldVersion < 1) {
+          database.createObjectStore("state", { keyPath: "id" });
+          database.createObjectStore("packs", { keyPath: "id" }).createIndex("by-root", "root");
+          database.createObjectStore("objects", { keyPath: "id" }).createIndex("by-pack", "packId");
+          database.createObjectStore("operations", { keyPath: "id" });
+          database.createObjectStore("operationObjects", { keyPath: "id" }).createIndex("by-operation", "operationId");
+        }
+        if (oldVersion < 2) {
+          transaction.objectStore("objects").createIndex("by-candidate-key", "candidateKeys", { multiEntry: true });
+        }
+      },
+      blocked: rejectBlockedUpgrade,
+      blocking(_currentVersion, _blockedVersion, event) {
+        (event.target as IDBDatabase | null)?.close();
+      },
+    });
+  } catch (error) {
+    settled = true;
+    rejectResult(error);
+    clearPendingOpen();
+    return result;
+  }
+  void opening.then(
+    (database) => {
+      if (settled) {
+        database.close();
+        clearPendingOpen();
+        return;
+      }
+      settled = true;
+      resolveResult(database);
+      clearPendingOpen();
+    },
+    (error: unknown) => {
+      if (!settled) {
+        settled = true;
+        rejectResult(error);
+      }
+      clearPendingOpen();
+    },
+  );
+  return result;
 }
 
 async function state(database: IDBPDatabase<ScryfallVisualPackSchema>): Promise<StateRecord> {
@@ -1755,8 +1822,12 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend {
       const entries: ResolutionResponse["entries"] = [];
       for (const [ordinal, key] of keys.entries()) {
         const matches: ResolutionResponse["entries"][number]["matches"] = [];
+        const candidateObjects = key.kind === "candidate"
+          ? await this.database.getAllFromIndex("objects", "by-candidate-key", key.key)
+          : null;
         for (const selectedPack of installed) {
-          const objects = await this.database.getAllFromIndex("objects", "by-pack", selectedPack.packId);
+          const objects = candidateObjects?.filter((object) => object.packId === selectedPack.packId)
+            ?? await this.database.getAllFromIndex("objects", "by-pack", selectedPack.packId);
           for (const object of objects) {
             if (object.root !== selectedPack.root || !sameResolutionKey(object, key) || !await cache.match(object.path)) continue;
             matches.push({ packId: object.packId, assetKey: object.assetKey, catalogRoot: object.root, url: object.path, media: object.media });
