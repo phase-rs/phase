@@ -265,6 +265,47 @@ pub fn resolve(
         return Ok(completed_result(0));
     }
 
+    // CR 701.21a: "To sacrifice a permanent, its controller moves it from the
+    // battlefield directly to its owner's graveyard." Sacrifice is
+    // unconditionally battlefield-only — this module never inspects `InZone`,
+    // because no zone other than the battlefield can host a sacrifice.
+    //
+    // CR 115.1: an effect's targets are only those its own filter declares.
+    // A non-anaphoric sacrifice filter (Victimize's `Sacrifice a creature`,
+    // whose filter carries no controller clause) inherits the PARENT
+    // instruction's object targets — for Victimize, two creature cards in a
+    // GRAVEYARD. Those cards are not targets of the sacrifice and are not on
+    // the battlefield, yet their presence makes `targeted_objects` non-empty,
+    // which suppresses the untargeted-pool branch below while the targeted
+    // loop then skips every one of them on its `zone != Battlefield` guard.
+    // The result is a silently vacuous sacrifice (#7898).
+    //
+    // Safety: because sacrifice is battlefield-only, this retain can only drop
+    // objects the targeted loop below would have skipped anyway. Its sole
+    // behavioral effect is letting a fully-emptied set fall through to the
+    // untargeted pool, which is exactly what the `triggers.rs` Sacrifice
+    // carve-out intends.
+    //
+    // Anaphoric shapes are excluded deliberately: `ParentTarget` /
+    // `ParentTargetSlot` are explicit back-references (Animate Dead's "that
+    // creature's controller sacrifices it") carrying bespoke downstream
+    // handling — the stale-slot no-op directly above, and the controller
+    // exemption further below that lets the OBJECT'S OWN controller do the
+    // sacrificing. Routing an emptied anaphoric set into the untargeted pool
+    // would instead make the ABILITY'S controller sacrifice an arbitrary
+    // creature of their own, which CR 701.21a does not sanction.
+    if !matches!(
+        filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    ) {
+        targeted_objects.retain(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        });
+    }
+
     if targeted_objects.is_empty() {
         // CR 701.21a: Derive the player(s) whose permanents are in scope from
         // the target filter's ControllerRef. Defaults to `[ability.controller]`
