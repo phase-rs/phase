@@ -243,7 +243,7 @@ function imageRequests(): string[] {
 }
 
 async function objectRows(): Promise<StoredObject[]> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const rows = await database.getAll("objects") as StoredObject[];
   database.close();
   return rows;
@@ -269,7 +269,7 @@ function cachedText(path: string): string | null {
  * about to test against actually existed.
  */
 async function dropStoredSourceUrls(): Promise<number> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const rows = await database.getAll("objects") as StoredObject[];
   for (const row of rows) {
     const legacy: StoredObject = { ...row };
@@ -732,7 +732,7 @@ describe("curated delta install", () => {
     expect(source).toBeDefined();
     const foreignPack = packId("complete");
     const foreignRoot = "e".repeat(64) as CatalogRoot;
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     await database.put("objects", { ...source, id: `${foreignRoot}:${foreignPack}:${shared!.assetKey}`, root: foreignRoot, packId: foreignPack });
     await database.put("packs", { id: foreignPack, packId: foreignPack, root: foreignRoot, dependencies: [], operationId: "foreign-operation" });
     database.close();
@@ -823,7 +823,7 @@ describe("curated delta install", () => {
     internals().collectCuratedGarbage = async function (this: unknown, ...args: never[]) {
       if (!injected) {
         injected = true;
-        const database = await openDB(DATABASE, 1);
+        const database = await openDB(DATABASE);
         await database.put("objects", {
           id: `${foreignRoot}:${packId("curated")}:${foreignKey}`,
           root: foreignRoot,

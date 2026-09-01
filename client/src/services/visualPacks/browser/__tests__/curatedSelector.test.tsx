@@ -159,7 +159,7 @@ const DATABASE = "phase-visual-packs-scryfall-v1";
  * `settle()` reaching `completed`.
  */
 async function interrupt(operation: OperationId): Promise<void> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const record = await database.get("operations", operation);
   await database.put("operations", { ...record, state: "downloading", completedRevision: null });
   database.close();
@@ -188,7 +188,7 @@ async function failures(backend: ScryfallBrowserVisualPackBackend): Promise<Prog
 
 /** Every persisted operation record, read the way a fresh launch reads them. */
 async function operationRecords(): Promise<unknown[]> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const records = await database.getAll("operations");
   database.close();
   return records;
@@ -435,7 +435,7 @@ describe("curated install selector", () => {
       const source = String(input);
       if (!promoted && source.startsWith("https://cards.scryfall.io/")) {
         promoted = true;
-        const database = await openDB(DATABASE, 1);
+        const database = await openDB(DATABASE);
         await database.put("packs", {
           id: packId("curated"),
           packId: packId("curated"),
