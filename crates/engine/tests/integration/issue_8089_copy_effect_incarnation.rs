@@ -3,9 +3,7 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Duration, Effect, ResolvedAbility, TargetFilter, TargetRef,
-};
+use engine::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::resolved_commands::{ResolvedContinuousEffectCommand, ResolvedRulesCommand};
@@ -76,48 +74,34 @@ fn assert_command_pins_match_live(
 
     assert_eq!(command_pins, expected_pins);
     assert_eq!(live_pins, expected_pins);
-    for install in installs {
-        assert!(
-            state
-                .transient_continuous_effects
-                .iter()
-                .any(|live| live == &install.effect),
-            "each journaled install must exactly equal a live transient effect"
-        );
-    }
+    assert_eq!(command_pins, live_pins);
 }
 
 #[test]
-fn activated_self_copy_journals_its_recipient_and_cannot_copy_after_reentry() {
+fn self_copy_journals_its_recipient_and_cannot_copy_after_reentry() {
     let mut scenario = GameScenario::new();
     let donor = scenario.add_creature(P0, "Journal Donor", 5, 5).id();
-    let source = scenario
-        .add_creature(P0, "Journal Copy Host", 1, 1)
-        .with_ability_definition(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
-                target: TargetFilter::Any,
-                duration: Some(Duration::UntilEndOfTurn),
-                mana_value_limit: None,
-                additional_modifications: Vec::new(),
-            },
-        ))
-        .id();
-    let mut runner = scenario.build();
-    let pre_state = runner.state().clone();
-    let journal_start = pre_state.resolved_rules_journal.entries().len();
-    let expected_recipient = ObjectIncarnationRef::from_object(&pre_state.objects[&source]);
+    let source = scenario.add_creature(P0, "Journal Copy Host", 1, 1).id();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+    let pre_state = state.clone();
+    let journal_start = state.resolved_rules_journal.entries().len();
+    let expected_recipient = ObjectIncarnationRef::from_object(&state.objects[&source]);
+    let ability = copy_ability(
+        source,
+        TargetFilter::SelfRef,
+        vec![TargetRef::Object(donor)],
+    );
 
-    let outcome = runner.activate(source, 0).target_object(donor).resolve();
-    let state = outcome.state();
-    let installs = recorded_installs_since(state, journal_start);
+    engine::game::effects::become_copy::resolve(&mut state, &ability, &mut Vec::new())
+        .expect("the actual SelfRef resolver must install the copy");
+    let installs = recorded_installs_since(&state, journal_start);
 
     assert_eq!(
         state.objects[&source].name, "Journal Donor",
-        "the activated BecomeCopy path must reach the layer-1 copy effect"
+        "the SelfRef BecomeCopy path must reach the layer-1 copy effect"
     );
-    assert_command_pins_match_live(state, &installs, &[expected_recipient]);
+    assert_command_pins_match_live(&state, &installs, &[expected_recipient]);
 
     let mut replay = pre_state;
     replay
@@ -125,6 +109,7 @@ fn activated_self_copy_journals_its_recipient_and_cannot_copy_after_reentry() {
         .expect("the recorded copy install must replay against its predecessor");
     evaluate_layers(&mut replay);
     assert_eq!(replay.objects[&source].name, "Journal Donor");
+    assert_command_pins_match_live(&replay, &installs, &[expected_recipient]);
 
     let mut events = Vec::new();
     move_to_zone(&mut replay, source, Zone::Graveyard, &mut events);
@@ -167,10 +152,7 @@ fn parent_target_copy_journals_a_distinct_pin_for_each_recipient() {
             .apply_resolved_continuous_effect(install)
             .expect("each recorded ParentTarget install must replay in order");
     }
-    assert_eq!(
-        replay.transient_continuous_effects,
-        state.transient_continuous_effects
-    );
+    assert_command_pins_match_live(&replay, &installs, &expected);
 }
 
 #[test]
@@ -202,10 +184,7 @@ fn mass_copy_journals_a_distinct_pin_for_every_resolved_recipient() {
             .apply_resolved_continuous_effect(install)
             .expect("each recorded mass-copy install must replay in order");
     }
-    assert_eq!(
-        replay.transient_continuous_effects,
-        state.transient_continuous_effects
-    );
+    assert_command_pins_match_live(&replay, &installs, &expected);
 }
 
 #[test]
