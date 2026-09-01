@@ -26,7 +26,14 @@ data:
       access_log /dev/stdout;
       error_log /dev/stderr;
       server {
-        listen {{ .Values.logging.server.port }};
+        # Loopback-only: the pod's network namespace is shared by every
+        # container in it, so `kubectl port-forward` (which tunnels into
+        # that namespace and connects to localhost) still reaches this, but
+        # traffic arriving on the pod's real interface — from the Service,
+        # another pod, or a CNI that silently doesn't enforce NetworkPolicy
+        # — gets refused outright. Operator-only stays true independent of
+        # networkPolicy.enabled.
+        listen 127.0.0.1:{{ .Values.logging.server.port }};
         autoindex on;
         location / {
           root {{ .Values.logging.dir }};

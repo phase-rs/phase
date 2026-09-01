@@ -109,8 +109,13 @@ write flat text `games/<code>.log`, that commit and later write JSON-Lines
 `games/<code>.session.jsonl` + `games/<code>.events.jsonl` instead.
 
 Like `/admin`, this is never routed through the Ingress and has no
-NetworkPolicy ingress rule — it is unreachable from the public host or from
-other pods, only from an operator with cluster access:
+NetworkPolicy ingress rule. Unlike `/admin`, that policy isn't the only thing
+standing between it and other pods: the sidecar binds `127.0.0.1` only, so
+the Service/pod-IP path is refused outright even with `networkPolicy.enabled:
+false` or a CNI that doesn't enforce NetworkPolicy at all. It's reachable
+only from an operator with cluster access, via `kubectl port-forward` (which
+tunnels into the pod's own network namespace, so the loopback bind doesn't
+block it):
 
 ```bash
 kubectl -n <namespace> port-forward svc/<release>[-<ordinal>] 8080:<logging.server.port>

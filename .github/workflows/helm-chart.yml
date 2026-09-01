@@ -158,6 +158,10 @@ jobs:
           grep -Pzoq -- "$data_mount_ro" /tmp/logging-default.yaml
           # Only the entry Service in the default (non-scale-out) shape.
           test "$(grep -c 'targetPort: logs' /tmp/logging-default.yaml)" -eq 1
+          # Operator-only must not depend on networkPolicy.enabled: the sidecar
+          # binds loopback-only regardless, so the Service/pod-IP path is dead
+          # even if NetworkPolicy is off or the CNI doesn't enforce it.
+          grep -q 'listen 127.0.0.1:' /tmp/logging-default.yaml
 
           helm template phase-server deploy/helm/phase-server \
             --namespace phase -f /tmp/scaleout.yaml --set logging.enabled=true \
@@ -171,6 +175,25 @@ jobs:
           grep -Pzoq -- "$data_mount_ro" /tmp/logging-scaleout.yaml
           # Entry + headless + one per ordinal, at scaleOut.replicaMax 3 above.
           test "$(grep -c 'targetPort: logs' /tmp/logging-scaleout.yaml)" -eq 5
+          grep -q 'listen 127.0.0.1:' /tmp/logging-scaleout.yaml
+
+      # Pins the chosen invariant for the reported unsafe combination: with
+      # NetworkPolicy off, nothing in the chart restricts ingress by policy,
+      # so the sidecar's own loopback-only bind must be the thing that keeps
+      # it operator-only. Rendered with the ingress/scale-out values too, so
+      # the Service actually carries `targetPort: logs` while this holds.
+      - name: helm template (logging enabled, networkPolicy disabled) stays loopback-only
+        run: |
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set logging.enabled=true --set networkPolicy.enabled=false \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/logging-no-netpol.yaml
+          if grep -q 'kind: NetworkPolicy' /tmp/logging-no-netpol.yaml; then echo "unexpected 'kind: NetworkPolicy' in /tmp/logging-no-netpol.yaml"; exit 1; fi
+          grep -q 'targetPort: logs' /tmp/logging-no-netpol.yaml
+          grep -q 'listen 127.0.0.1:' /tmp/logging-no-netpol.yaml
 
       # Regression pin: a `logging.dir` that string-prefix-matches
       # PHASE_DATA_DIR but trims to an empty (or `..`-containing) subPath
