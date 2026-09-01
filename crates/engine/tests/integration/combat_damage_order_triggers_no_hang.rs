@@ -159,6 +159,7 @@ fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
         .expect("declining Calix's only admitted combat-damage trigger succeeds");
+    runner.advance_until_stack_empty();
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
