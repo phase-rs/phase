@@ -203,13 +203,16 @@ export function LobbyView({
             // Reactive fallback: the proactive path in `handleJoinFromList`
             // opens the modal before any server round-trip, so this only
             // fires for stale rows where the client thought the room was
-            // open and the server said otherwise. The retry must go back to
-            // the source the frame arrived on.
+            // open and the server said otherwise. The retry goes back to
+            // the socket the frame arrived on: `game_code` is unique per
+            // authority, not across the merged list, so a global rescan can
+            // name a server that never asked for a password. That rescan
+            // supplies display context only.
             const data = msg.data as { game_code: string };
             const listed = findLobbyGameByCode(data.game_code);
             setPasswordModal({
               gameCode: data.game_code,
-              origin: listed?.source ?? source,
+              origin: source,
               format: listed?.game.format,
               context: listed?.game,
             });
@@ -357,10 +360,13 @@ export function LobbyView({
   }, [entries, formatFilter, roomTypeFilter]);
 
   // Every enabled source reports its own online count; the chip shows the
-  // total reach of the lobby the user is browsing.
+  // total reach of the lobby the user is browsing. Summed over the CURRENT
+  // sources rather than every key ever seen: `playerCounts` is never pruned,
+  // so a removed source would otherwise keep its last count in the total for
+  // the life of the mounted view. Same membership rule as `entries`.
   const playerCount = useMemo(
-    () => [...playerCounts.values()].reduce((sum, count) => sum + count, 0),
-    [playerCounts],
+    () => sources.reduce((sum, source) => sum + (playerCounts.get(source.url) ?? 0), 0),
+    [playerCounts, sources],
   );
 
   // Count-free by design: the picker lists each source with its own status,

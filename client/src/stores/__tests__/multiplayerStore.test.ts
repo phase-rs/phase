@@ -187,17 +187,19 @@ function emitServerMessage(type: string, data?: unknown): void {
 }
 
 /** A fake `PhaseSocket` that remembers the URL it was opened on, so the
- * `subscribeLobbyOver` mock can key its listeners per source. */
-function fakeSocket(url: string, mode: ServerInfo["mode"] = "Full") {
+ * `subscribeLobbyOver` mock can key its listeners per source. `serverInfo`
+ * overrides let one test give each source a distinguishable identity. */
+function fakeSocket(url: string, serverInfo: Partial<ServerInfo> = {}) {
   return {
     url,
     serverInfo: {
       version: "test",
       buildCommit: "test",
-      mode,
+      mode: "Full",
       protocolVersion: PROTOCOL_VERSION,
       lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
-    },
+      ...serverInfo,
+    } satisfies ServerInfo,
     ws: {
       readyState: 1,
       addEventListener: vi.fn(),
@@ -1238,13 +1240,19 @@ describe("multiplayerStore", () => {
         { url: B, name: "b.example", origin: "user" },
       ],
       sourceStatus: new Map(),
+      serverInfo: null,
     });
     driveReconnect();
+    // Distinguishable identities per authority: A is opened AFTER the hosting
+    // preset, so if the store took every source's handshake the last writer
+    // would be the community source.
     vi.mocked(openPhaseSocket).mockImplementation(async (url: string) => {
       if (url === B) {
         throw new HandshakeError("ws_error", "connection refused");
       }
-      return fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
+      return fakeSocket(url, {
+        version: url === PRESET_URL ? "hosting-identity" : "community-identity",
+      }) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
     });
 
     const seen: { url: string; codes: string[] }[] = [];
@@ -1264,6 +1272,15 @@ describe("multiplayerStore", () => {
     expect(seen).toContainEqual({ url: A, codes: ["AAA11"] });
     expect(useMultiplayerStore.getState().sourceStatus.get(B)?.state).toBe("offline");
     expect(useMultiplayerStore.getState().sourceStatus.get(A)?.state).toBe("open");
+    // The global `serverInfo` is the HOSTING server's identity — it feeds
+    // `HostControlTile`'s join-share URL and `GamePage`'s `useBroker`
+    // inference. A browsed community source's handshake must not overwrite
+    // it. Non-vacuous: it started `null` and now holds the hosting
+    // handshake, so the field was written exactly once, by the right source.
+    expect(useMultiplayerStore.getState().serverInfo?.version).toBe("hosting-identity");
+    expect(useMultiplayerStore.getState().sourceStatus.get(A)?.serverInfo?.version).toBe(
+      "community-identity",
+    );
     detach?.();
   });
 
@@ -1313,16 +1330,40 @@ describe("multiplayerStore", () => {
     expect(useMultiplayerStore.getState().userLobbySources).toEqual([]);
   });
 
-  it("removes only the named user source", () => {
+  it("removes only the named user source and leaves the hosting choice alone", () => {
     const store = useMultiplayerStore.getState();
     store.addUserLobbySource("wss://a.example/ws");
     store.addUserLobbySource("wss://b.example/ws");
+    const hosting = useMultiplayerStore.getState().hostingServer;
+    // Guards the sibling below from passing for the wrong reason: the
+    // fixture's hosting server is not already the fallback value.
+    expect(hosting).not.toBe(DEFAULT_MULTIPLAYER_SERVER_URL);
 
     store.removeUserLobbySource("wss://a.example/ws");
 
     expect(useMultiplayerStore.getState().userLobbySources.map((s) => s.url)).toEqual([
       "wss://b.example/ws",
     ]);
+    expect(useMultiplayerStore.getState().hostingServer).toBe(hosting);
+  });
+
+  it("falls back to the official server when the hosting source is removed", () => {
+    const store = useMultiplayerStore.getState();
+    expect(store.addUserLobbySource("wss://a.example/ws").ok).toBe(true);
+    const [added] = useMultiplayerStore.getState().userLobbySources;
+    store.setHostingServer(added.url);
+    // Reach-guard: hosting really moved onto the hand-added source, so the
+    // assertions below measure the removal and not the initial state.
+    expect(useMultiplayerStore.getState().hostingServer).toBe(added.url);
+
+    store.removeUserLobbySource(added.url);
+
+    // Hosting on a URL that is no longer browsed hides the player's own game
+    // from the merged list with no selection the picker can show or change.
+    expect(useMultiplayerStore.getState().hostingServer).toBe(
+      DEFAULT_MULTIPLAYER_SERVER_URL,
+    );
+    expect(useMultiplayerStore.getState().userLobbySources).toEqual([]);
   });
 
   it("finds a code in a non-hosting source's snapshot with its source", async () => {
@@ -1382,6 +1423,39 @@ describe("multiplayerStore", () => {
     expect(brokerMocks.lobbyUpdaters.has(A)).toBe(true);
     // The RPC's channel is closed once it settles: no lingering reconnect
     // loop and no status row for a server nobody browses.
+    expect(useMultiplayerStore.getState().sourceStatus.has(AD_HOC)).toBe(false);
+    detach?.();
+  });
+
+  it("leaves nothing behind when a join-origin dial fails", async () => {
+    const A = "wss://a.example/ws";
+    const AD_HOC = "wss://adhoc.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: A,
+      userLobbySources: [{ url: A, name: "a.example", origin: "user" }],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(async (url: string) => {
+      if (url === AD_HOC) {
+        throw new HandshakeError("ws_error", "connection refused");
+      }
+      return fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
+    });
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    const origin = adHocLobbySource(AD_HOC) as LobbySource;
+    const result = await useMultiplayerStore
+      .getState()
+      .lookupJoinTarget("ABC123", origin);
+
+    // Reach-guards: the dial reached the refusal branch, and the browsed
+    // source DOES keep a status row — so the negative below is measuring the
+    // failed ad-hoc channel's cleanup, not an empty map.
+    expect(result).toMatchObject({ ok: false, reason: "connection_lost" });
+    expect(useMultiplayerStore.getState().sourceStatus.has(A)).toBe(true);
+    // A mistyped host is the likeliest way to reach this branch; each attempt
+    // must not accumulate a dead reconnect handle and a phantom status row.
     expect(useMultiplayerStore.getState().sourceStatus.has(AD_HOC)).toBe(false);
     detach?.();
   });

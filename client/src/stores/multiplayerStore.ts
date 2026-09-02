@@ -1319,6 +1319,13 @@ async function withOriginSocket<T>(
 ): Promise<T | ConnectionLostResult> {
   const socket = await get().ensureSubscriptionSocket(url);
   if (!socket) {
+    // The failed open still created the channel and wrote an "offline"
+    // status row. Tear both down on the same condition the success path
+    // uses, or a mistyped host — the likeliest way to reach this branch —
+    // accumulates a dead reconnect handle and a phantom status row per try.
+    if (!lobbySources(get()).some((source) => source.url === url)) {
+      closeChannel(set, get, url);
+    }
     return {
       ok: false,
       reason: "connection_lost",
@@ -1408,6 +1415,15 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         set({
           userLobbySources: get().userLobbySources.filter((s) => s.url !== url),
         });
+        // Hosting on a source the user no longer browses is unreachable: the
+        // removed URL is absent from `lobbySources`, so the player's own
+        // hosted game drops off the merged list and the picker's hosting
+        // section (presets + None) shows no active selection to change.
+        // Fall back to this build's official server through `setHostingServer`
+        // so `serverInfo` is re-pointed with the choice.
+        if (url === get().hostingServer) {
+          get().setHostingServer(DEFAULT_MULTIPLAYER_SERVER_URL);
+        }
         closeChannel(set, get, url);
       },
       setConnectionStatus: (status) => set({ connectionStatus: status }),

@@ -1,14 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { LobbyGame } from "../../../adapter/types";
+import type { PhaseSocket } from "../../../services/openPhaseSocket";
 import { LobbyView } from "../LobbyView";
 import { SERVER_PRESETS } from "../../../services/serverDetection";
 import {
   useMultiplayerStore,
   type LobbySource,
 } from "../../../stores/multiplayerStore";
+
+/**
+ * `findLobbyGameByCode` reads the store module's private per-source channel
+ * snapshots, which no store action these tests stub can populate. Replacing
+ * that one export (everything else stays actual, so `useMultiplayerStore` is
+ * the same singleton the component uses) is what makes a cross-source code
+ * COLLISION expressible: the rescan can be made to name a different authority
+ * than the socket a frame arrived on. Default `undefined` matches the real
+ * function against empty channels, so the other cases are unaffected.
+ */
+const storeMocks = vi.hoisted(() => ({ findLobbyGameByCode: vi.fn() }));
+vi.mock("../../../stores/multiplayerStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../stores/multiplayerStore")>()),
+  findLobbyGameByCode: storeMocks.findLobbyGameByCode,
+}));
 
 /**
  * LobbyView now delegates to the shared subscription socket via the
@@ -28,6 +44,32 @@ function lobbyGame(code: string, roomName: string, createdAt: number): LobbyGame
     created_at: createdAt,
     has_password: false,
     host_build_commit: "testhash",
+  };
+}
+
+/**
+ * Stand-in for a source's subscription socket: `LobbyView` attaches its
+ * ambient (`PlayerCount` / `PasswordRequired`) listener to `ws`, so the test
+ * can push server frames onto one specific source's socket.
+ */
+function ambientSocket() {
+  const listeners = new Set<(event: MessageEvent) => void>();
+  return {
+    socket: {
+      ws: {
+        addEventListener: (_type: string, fn: (event: MessageEvent) => void) => {
+          listeners.add(fn);
+        },
+        removeEventListener: (_type: string, fn: (event: MessageEvent) => void) => {
+          listeners.delete(fn);
+        },
+      },
+    } as unknown as PhaseSocket,
+    listenerCount: () => listeners.size,
+    emit: (type: string, data: unknown) => {
+      const event = { data: JSON.stringify({ type, data }) } as MessageEvent;
+      for (const fn of [...listeners]) fn(event);
+    },
   };
 }
 
@@ -63,6 +105,8 @@ describe("LobbyView", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    // `clearAllMocks` drops calls but keeps queued return values.
+    storeMocks.findLobbyGameByCode.mockReset();
     useMultiplayerStore.setState({
       subscribeLobby: originalSubscribeLobby,
       ensureSubscriptionSocket: originalEnsureSubscription,
@@ -311,5 +355,79 @@ describe("LobbyView", () => {
         /Table (Official|Scored|Unscored)/.exec(row.textContent ?? "")?.[0],
       ),
     ).toEqual(["Table Official", "Table Scored", "Table Unscored"]);
+  });
+
+  const SOURCE_A: LobbySource = { url: "wss://a.example/ws", name: "a.example", origin: "user" };
+  const SOURCE_B: LobbySource = { url: "wss://b.example/ws", name: "b.example", origin: "user" };
+
+  /** Both sources browsed, each with its own ambient socket. */
+  function renderTwoSources(onJoinGame?: (...args: unknown[]) => void) {
+    const sockets = new Map([
+      [SOURCE_A.url, ambientSocket()],
+      [SOURCE_B.url, ambientSocket()],
+    ]);
+    useMultiplayerStore.setState({
+      userLobbySources: [SOURCE_A, SOURCE_B],
+      subscribeLobby: vi.fn(async () => () => {}),
+      ensureSubscriptionSocket: vi.fn(
+        async (url: string) => sockets.get(url)?.socket ?? null,
+      ),
+    });
+    renderLobby(onJoinGame ? { onJoinGame } : {});
+    return sockets;
+  }
+
+  it("counts only the sources still being browsed", async () => {
+    const sockets = renderTwoSources();
+    await waitFor(() => {
+      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
+    });
+
+    act(() => {
+      sockets.get(SOURCE_A.url)!.emit("PlayerCount", { count: 3 });
+      sockets.get(SOURCE_B.url)!.emit("PlayerCount", { count: 5 });
+    });
+
+    // Reach-guard: both counts really are in the total before the removal, so
+    // the assertion after it measures the drop and not an empty chip.
+    expect(await screen.findByText("8 online")).toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({ userLobbySources: [SOURCE_A] });
+    });
+
+    // B's last reported count is still in `playerCounts` (never pruned); the
+    // chip must not keep counting a server nobody browses.
+    expect(await screen.findByText("3 online")).toBeInTheDocument();
+    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+  });
+
+  it("sends a reactive password retry to the source the frame arrived on", async () => {
+    // Codes are unique per authority, not across the merged list: the same
+    // code is listed on A while B is the server actually demanding a password.
+    const listedOnA = lobbyGame("ABC123", "Table A", 100);
+    storeMocks.findLobbyGameByCode.mockReturnValue({ game: listedOnA, source: SOURCE_A });
+    const onJoinGame = vi.fn();
+    const sockets = renderTwoSources(onJoinGame);
+    await waitFor(() => {
+      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
+    });
+
+    act(() => {
+      sockets.get(SOURCE_B.url)!.emit("PasswordRequired", { game_code: "ABC123" });
+    });
+
+    const user = userEvent.setup();
+    await user.type(await screen.findByPlaceholderText("Enter password"), "hunter2{Enter}");
+
+    // The retry goes to B — the socket the demand arrived on — while the
+    // rescan still supplies the display context.
+    expect(onJoinGame).toHaveBeenCalledWith(
+      "ABC123",
+      SOURCE_B,
+      "hunter2",
+      listedOnA.format,
+      listedOnA,
+    );
   });
 });
