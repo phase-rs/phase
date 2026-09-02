@@ -1,3 +1,4 @@
+use engine::ai_support::copy_target_filter;
 use engine::game::game_object::GameObject;
 #[cfg(test)]
 use engine::types::ability::TapStateChange;
@@ -119,6 +120,18 @@ pub struct CastFacts<'a> {
     pub profile: EffectProfile,
     pub requires_targets_in_spell_text: bool,
     pub requires_targets_in_immediate_etb: bool,
+    /// The copy-source filter of an enter-as-copy replacement (Clone /
+    /// Phantasmal Image class), when this candidate carries one.
+    ///
+    /// A copy source is CHOSEN while the permanent enters, not targeted, so
+    /// this is deliberately kept out of `requires_targets_in_immediate_etb`:
+    /// that flag's consumers answer it with `find_legal_targets`, which is the
+    /// wrong authority here (it enumerates legal *targets* on the battlefield,
+    /// while a copy source may live in a graveyard or exile and ignores
+    /// hexproof/shroud). Resolve this filter with
+    /// `engine::ai_support::find_copy_targets`, the same enumeration the
+    /// replacement pipeline uses.
+    pub requires_copy_source_on_entry: Option<&'a TargetFilter>,
     /// CR 118.9: which cost this candidate actually pays. Derived from the
     /// candidate ACTION, so [`cast_facts_for_object`] (which has no action)
     /// reports [`CastCostMode::Printed`]; [`cast_facts_for_action`] overrides
@@ -366,6 +379,15 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
         })
     });
 
+    // Enter-as-copy replacements (Clone / Phantasmal Image class). Read the
+    // filter off the replacement's own execute chain with the engine's copy
+    // accessor so the AI and the replacement pipeline agree on what a copy
+    // source is; the presence check itself belongs to the consuming policy.
+    let requires_copy_source_on_entry = immediate_replacements
+        .iter()
+        .filter_map(|replacement| replacement.execute.as_deref())
+        .find_map(copy_target_filter);
+
     let profile = EffectProfile::from_effects(&all_effects);
 
     CastFacts {
@@ -377,6 +399,7 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
         profile,
         requires_targets_in_spell_text,
         requires_targets_in_immediate_etb,
+        requires_copy_source_on_entry,
         // No action in hand here — `cast_facts_for_action` refines this.
         cost_mode: CastCostMode::Printed,
     }
@@ -600,7 +623,9 @@ mod tests {
     use super::*;
     use engine::game::game_object::GameObject;
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter, TypedFilter,
+    };
     use engine::types::actions::GameAction;
     use engine::types::game_state::GameState;
     use engine::types::identifiers::{CardId, ObjectId};
@@ -703,6 +728,67 @@ mod tests {
 
         let facts = cast_facts_for_object(&object);
         assert_eq!(facts.immediate_replacements.len(), 1);
+    }
+
+    /// Clone / Phantasmal Image shape: one `Moved`-to-battlefield replacement
+    /// whose execute is `BecomeCopy`.
+    fn enter_as_copy_replacement(target: TargetFilter) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target,
+                    recipient: TargetFilter::SelfRef,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+    }
+
+    #[test]
+    fn enter_as_copy_replacement_sets_copy_source_fact() {
+        let mut object = make_object();
+        object
+            .replacement_definitions
+            .push(enter_as_copy_replacement(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+
+        let facts = cast_facts_for_object(&object);
+
+        assert_eq!(
+            facts.requires_copy_source_on_entry,
+            Some(&TargetFilter::Typed(TypedFilter::creature()))
+        );
+        // The copy source is chosen as the permanent enters, not targeted — the
+        // target-driven ETB gate must not claim it.
+        assert!(!facts.requires_targets_in_immediate_etb);
+    }
+
+    #[test]
+    fn non_copy_replacement_does_not() {
+        let mut object = make_object();
+        object.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield),
+        );
+
+        let facts = cast_facts_for_object(&object);
+
+        assert_eq!(facts.immediate_replacements.len(), 1);
+        assert!(facts.requires_copy_source_on_entry.is_none());
     }
 
     #[test]

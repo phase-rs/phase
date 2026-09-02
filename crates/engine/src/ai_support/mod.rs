@@ -38,6 +38,12 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// The engine owns copy-source enumeration: which zone the filter names
+/// (`FilterProp::InZone`, battlefield by default), the `ExiledCardByIndex`
+/// resolution, the source exclusion, and the mana-value ceiling. Surfaced here
+/// beside the other copy accessors so AI policies ask that single authority
+/// instead of re-deriving a battlefield scan.
+pub use crate::game::engine_replacement::find_copy_targets;
 pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     balanced_pile_partition, candidate_actions, candidate_actions_broad, candidate_actions_exact,

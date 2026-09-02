@@ -1,7 +1,7 @@
 #[cfg(test)]
 use engine::ai_support::is_pact_payment_ability;
 use engine::ai_support::{
-    certify_pact_plan, current_target_selection_targets, is_pact_payment_cast,
+    certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
 use engine::game::filter::{matches_target_filter, FilterContext};
@@ -350,21 +350,23 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // ETB-only permanents (e.g. Gravedigger): the spell itself has no targets,
     // but the card's value may come from a targeted ETB trigger. If no valid
     // target exists for that ETB trigger, casting wastes the card.
-    let etb_whiff_penalty = if let Some(facts) = ctx.cast_facts() {
-        if facts.requires_targets_in_immediate_etb
-            && !facts.requires_targets_in_spell_text
-            && !etb_trigger_has_valid_targets(ctx, &facts)
-        {
-            ctx.penalties().wasted_cast_penalty
-        } else {
-            0.0
+    let (etb_whiff_penalty, copy_whiff_penalty) = match ctx.cast_facts() {
+        Some(facts) => {
+            let etb_whiff = if facts.requires_targets_in_immediate_etb
+                && !facts.requires_targets_in_spell_text
+                && !etb_trigger_has_valid_targets(ctx, &facts)
+            {
+                ctx.penalties().wasted_cast_penalty
+            } else {
+                0.0
+            };
+            (etb_whiff, copy_source_whiff_penalty(ctx, &facts))
         }
-    } else {
-        0.0
+        None => (0.0, 0.0),
     };
 
     if !has_beneficial_creature_target && !has_harmful_creature_only_target && !has_harmful_bounce {
-        return legend_penalty + etb_whiff_penalty;
+        return legend_penalty + etb_whiff_penalty + copy_whiff_penalty;
     }
 
     let has_own_creature = ctx.state.battlefield.iter().any(|&id| {
@@ -435,6 +437,8 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     }
 
     penalty += etb_whiff_penalty;
+
+    penalty += copy_whiff_penalty;
 
     penalty += legend_penalty;
 
@@ -510,6 +514,48 @@ fn optional_effect_life_cost(ctx: &PolicyContext<'_>, source_id: ObjectId) -> Op
             _ => None,
         })
         .max()
+}
+
+/// CR 614.1c + CR 707.2: an "enters as a copy" replacement is what gives a
+/// clone-class permanent its characteristics — the printed card is a bodyless
+/// 0/0 shell. With no legal copy source it enters as that shell and CR 704.5f
+/// puts it straight into its owner's graveyard, so the cast is wasted.
+///
+/// A copy source is chosen while the permanent enters, not targeted, so the
+/// presence question goes to the engine's `find_copy_targets` (which reads the
+/// source zone off the filter and ignores hexproof/shroud) rather than to
+/// `find_legal_targets`.
+fn copy_source_whiff_penalty(
+    ctx: &PolicyContext<'_>,
+    facts: &crate::cast_facts::CastFacts<'_>,
+) -> f64 {
+    // Card-local gates first — only a clone-class candidate reaches the scan.
+    let Some(filter) = facts.requires_copy_source_on_entry else {
+        return 0.0;
+    };
+    // CR 704.5f kills only a creature whose toughness is 0 or less. A bodied
+    // clone (Sakashima the Impostor 3/1, Hulking Metamorph 7/7) survives an
+    // un-copied entry, and a non-creature copier has no toughness at all.
+    if !facts.is_creature()
+        || !facts
+            .object
+            .base_toughness
+            .is_some_and(|toughness| toughness <= 0)
+    {
+        return 0.0;
+    }
+    // CR 607.2a: The Mimeoplasm's copy source is one of the cards exiled by its
+    // own linked entry cost, so it is established only after that cost is paid
+    // and a pre-payment lookup cannot disqualify the replacement. The engine's
+    // replacement applicability check skips this filter for the same reason.
+    if matches!(filter, TargetFilter::ExiledCardByIndex { .. }) {
+        return 0.0;
+    }
+    if find_copy_targets(ctx.state, filter, facts.object.id, ctx.ai_player, None).is_empty() {
+        ctx.penalties().wasted_cast_penalty
+    } else {
+        0.0
+    }
 }
 
 /// Check if any ETB trigger on the permanent has a valid target on the battlefield.
@@ -1990,6 +2036,223 @@ mod tests {
         assert!(
             score > -1.0,
             "Matching graveyard target should avoid ETB whiff penalty, got {score}"
+        );
+    }
+
+    /// Clone-class shell in hand: a printed 0/T body plus an "enters as a copy"
+    /// replacement. Phantasmal Image, Clone, Phyrexian Metamorph, Body Double
+    /// and The Mimeoplasm all parse to this shape (card-data verified); only the
+    /// copy filter and the printed toughness differ.
+    fn enter_as_copy_creature(
+        state: &mut GameState,
+        name: &str,
+        copy_filter: TargetFilter,
+        printed_toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(0);
+        obj.toughness = Some(printed_toughness);
+        obj.base_power = Some(0);
+        obj.base_toughness = Some(printed_toughness);
+        obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: copy_filter,
+                        recipient: TargetFilter::SelfRef,
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield),
+        );
+        id
+    }
+
+    fn score_cast_candidate(state: &GameState, spell_id: ObjectId) -> f64 {
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    #[test]
+    fn clone_with_no_creature_on_battlefield_is_penalised() {
+        let mut state = make_state();
+        let spell_id = enter_as_copy_creature(
+            &mut state,
+            "Phantasmal Image",
+            TargetFilter::Typed(TypedFilter::creature()),
+            0,
+        );
+
+        let score = score_cast_candidate(&state, spell_id);
+
+        assert!(
+            score < -5.0,
+            "A 0/0 clone with nothing to copy enters as a 0/0 and dies (CR 704.5f), got {score}"
+        );
+    }
+
+    #[test]
+    fn clone_with_a_creature_on_battlefield_is_not() {
+        let mut state = make_state();
+        // Copying is a choice, not targeting — an opponent's hexproof creature
+        // is a perfectly legal copy source.
+        let opponent = add_creature(&mut state, PlayerId(1), "Hexproof Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&opponent)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        let spell_id = enter_as_copy_creature(
+            &mut state,
+            "Phantasmal Image",
+            TargetFilter::Typed(TypedFilter::creature()),
+            0,
+        );
+
+        let score = score_cast_candidate(&state, spell_id);
+
+        assert!(
+            score > -1.0,
+            "An opponent's hexproof creature is a legal copy source, got {score}"
+        );
+    }
+
+    #[test]
+    fn clone_filter_respects_type() {
+        let mut state = make_state();
+        let artifact_card = CardId(state.next_object_id);
+        let artifact = create_object(
+            &mut state,
+            artifact_card,
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        // Phyrexian Metamorph copies "any artifact or creature".
+        let metamorph_id = enter_as_copy_creature(
+            &mut state,
+            "Phyrexian Metamorph",
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            },
+            0,
+        );
+        let clone_id = enter_as_copy_creature(
+            &mut state,
+            "Clone",
+            TargetFilter::Typed(TypedFilter::creature()),
+            0,
+        );
+
+        let metamorph_score = score_cast_candidate(&state, metamorph_id);
+        let clone_score = score_cast_candidate(&state, clone_id);
+
+        assert!(
+            metamorph_score > -1.0,
+            "An artifact satisfies the artifact-or-creature copy filter, got {metamorph_score}"
+        );
+        assert!(
+            clone_score < -5.0,
+            "The same board has no creature for a creature-only copy filter, got {clone_score}"
+        );
+    }
+
+    #[test]
+    fn bodied_clone_with_no_copy_source_is_not_penalised() {
+        let mut state = make_state();
+        // Sakashima the Impostor / Hulking Metamorph class: a printed body that
+        // survives entering without a copy source, so CR 704.5f never fires.
+        let spell_id = enter_as_copy_creature(
+            &mut state,
+            "Sakashima the Impostor",
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        );
+
+        let score = score_cast_candidate(&state, spell_id);
+
+        assert!(
+            score > -1.0,
+            "A bodied clone survives an un-copied entry, got {score}"
+        );
+    }
+
+    #[test]
+    fn body_double_with_only_battlefield_creatures_is_penalised() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Grizzly Bears", 2, 2);
+        let mut graveyard_creature = TypedFilter::creature();
+        graveyard_creature.properties.push(FilterProp::InZone {
+            zone: Zone::Graveyard,
+        });
+        let spell_id = enter_as_copy_creature(
+            &mut state,
+            "Body Double",
+            TargetFilter::Typed(graveyard_creature),
+            0,
+        );
+
+        let score = score_cast_candidate(&state, spell_id);
+
+        assert!(
+            score < -5.0,
+            "Body Double copies a creature card in a GRAVEYARD; a battlefield \
+             creature is not a legal source, got {score}"
+        );
+    }
+
+    #[test]
+    fn mimeoplasm_shape_is_never_penalised() {
+        let mut state = make_state();
+        let spell_id = enter_as_copy_creature(
+            &mut state,
+            "The Mimeoplasm",
+            TargetFilter::ExiledCardByIndex { index: 0 },
+            0,
+        );
+
+        let score = score_cast_candidate(&state, spell_id);
+
+        assert!(
+            score > -1.0,
+            "The Mimeoplasm's copy source only exists after its exile cost is \
+             paid, so it can never be pre-judged a whiff, got {score}"
         );
     }
 
