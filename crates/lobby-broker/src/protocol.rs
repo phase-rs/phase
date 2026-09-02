@@ -38,6 +38,23 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 54 — `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
+///      A Chaos client sends only candidate set codes; the Full server resolves
+///      and persists the private seat-by-round assignment matrix. This changes
+///      a Full-server client message, so the full handshake refuses stale
+///      peers. Lobby messages are unchanged.
+/// 53 — `DraftPlayerView::launch_capability` publishes the engine-authorized
+///      post-draft multiplayer launch. The client renders this procedure-owned
+///      capability instead of inferring it from `DraftKind`; an older server
+///      would omit it and silently hide a completed Commander pod's launch.
+///      Full-game handshakes must refuse that capability mismatch. Lobby
+///      messages are unchanged.
+/// 52 — `DerivedViews::storm_count` publishes the engine-owned number of
+///      copies a current Storm trigger will create, or a newly cast Storm spell
+///      would create. The field is serde-additive, but the client renders this
+///      scalar directly rather than deriving Storm from raw state; a v51 host
+///      would therefore silently omit the HUD status. Full-game handshakes
+///      must refuse that capability mismatch. Lobby messages are unchanged.
 /// Note: renaming or removing a variant silently fails at JSON parse time
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
@@ -233,7 +250,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 51;
+pub const PROTOCOL_VERSION: u32 = 54;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -979,12 +996,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 51);
+        assert_eq!(PROTOCOL_VERSION, 54);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 50);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 53);
     }
 
     #[test]

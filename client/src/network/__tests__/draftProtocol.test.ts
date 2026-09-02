@@ -19,6 +19,8 @@ const validWorkspace = {
   virtualBasics: [{ instanceId: "basic-1", name: "Island" }],
 };
 
+const validDraftView = { launch_capability: "None" as const };
+
 function workspaceWithPlacementCount(count: number) {
   return {
     schemaVersion: 1 as const,
@@ -40,8 +42,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 24", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(24);
+    it("is version 25", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(25);
     });
   });
 
@@ -61,6 +63,7 @@ describe("draftProtocol", () => {
       const msg = validateDraftMessage({
         type: "draft_state_update",
         view: {
+          ...validDraftView,
           status: "Deckbuilding",
           draft_effects: [],
           seats: [],
@@ -101,6 +104,7 @@ describe("draftProtocol", () => {
       const msg = validateDraftMessage({
         type: "draft_state_update",
         view: {
+          ...validDraftView,
           status: "Deckbuilding",
           draft_effects: [],
           seats: [],
@@ -157,6 +161,7 @@ describe("draftProtocol", () => {
     ) => validateDraftMessage({
       type: "draft_state_update",
       view: {
+        ...validDraftView,
         draft_effects: [],
         seats: [],
         pool_groups: {
@@ -208,7 +213,7 @@ describe("draftProtocol", () => {
 
         const msg = validateDraftMessage({
           type: "draft_state_update",
-          view: { draft_effects: [], seats: [], pool_groups: poolGroups },
+          view: { ...validDraftView, draft_effects: [], seats: [], pool_groups: poolGroups },
         });
         expect(msg).toMatchObject({
           view: {
@@ -433,7 +438,7 @@ describe("draftProtocol", () => {
       })).toThrow("Invalid draft deck acknowledgement");
       expect(() => validateDraftMessage({
         type: "draft_deck_submit_ack",
-        view: {},
+        view: validDraftView,
       })).toThrow("Invalid deck acknowledgement");
     });
 
@@ -476,17 +481,27 @@ describe("draftProtocol", () => {
         draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
         draftToken: "token-123",
         seatIndex: 3,
-        view: {},
+        view: validDraftView,
         draftCode: "draft-abc",
         workspaceState: validWorkspace,
       });
       expect(msg.type).toBe("draft_welcome");
     });
 
+    it.each([undefined, null, "Commander", "Unknown"])(
+      "rejects a missing or unknown launch capability at protocol v25",
+      (launch_capability) => {
+        expect(() => validateDraftMessage({
+          type: "draft_state_update",
+          view: { launch_capability },
+        })).toThrow("launch_capability must be a known capability");
+      },
+    );
+
     it.each(["draft_welcome", "draft_reconnect_ack"])(
       "accepts nullable workspace state for %s",
       (type) => {
-        const msg = validateDraftMessage({ type, view: {}, workspaceState: null });
+        const msg = validateDraftMessage({ type, view: validDraftView, workspaceState: null });
         expect(msg).toMatchObject({ type, workspaceState: null });
       },
     );
@@ -533,7 +548,7 @@ describe("draftProtocol", () => {
     it.each(["draft_welcome", "draft_reconnect_ack", "draft_workspace_update"])(
       "rejects missing workspace state for %s",
       (type) => {
-        expect(() => validateDraftMessage({ type, view: {} })).toThrow("missing workspaceState");
+        expect(() => validateDraftMessage({ type, view: validDraftView })).toThrow("missing workspaceState");
       },
     );
 
@@ -565,10 +580,10 @@ describe("draftProtocol", () => {
     it.each(["draft_welcome", "draft_reconnect_ack", "draft_workspace_update"] as const)(
       "validates complete snapshots for %s",
       (type) => {
-        expect(validateDraftMessage({ type, view: {}, workspaceState: validWorkspace }))
+        expect(validateDraftMessage({ type, view: validDraftView, workspaceState: validWorkspace }))
           .toMatchObject({ type, workspaceState: validWorkspace });
         for (const [, workspaceState] of malformedWorkspaces) {
-          expect(() => validateDraftMessage({ type, view: {}, workspaceState }))
+          expect(() => validateDraftMessage({ type, view: validDraftView, workspaceState }))
             .toThrow("Invalid draft message");
         }
       },
@@ -578,6 +593,7 @@ describe("draftProtocol", () => {
       const msg = validateDraftMessage({
         type: "draft_state_update",
         view: {
+          ...validDraftView,
           seats: [{ seat_index: 1, display_name: "Alex", active_pack_count: 1 }],
         },
       });
@@ -590,12 +606,54 @@ describe("draftProtocol", () => {
       }
     });
 
+    it("projects a Chaos source view without retaining a host assignment matrix", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          ...validDraftView,
+          source: {
+            type: "Set",
+            data: {
+              layout: {
+                Chaos: {
+                  candidate_codes: ["AAA", "BBB"],
+                  current_pack_code: "BBB",
+                  completed_own_pack_codes: null,
+                  actual_set_codes: null,
+                  assignments: [["AAA", "BBB"]],
+                },
+              },
+            },
+          },
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect(msg.view.source).toEqual({
+          type: "Set",
+          data: {
+            layout: {
+              Chaos: {
+                candidate_codes: ["AAA", "BBB"],
+                current_pack_code: "BBB",
+                completed_own_pack_codes: null,
+                actual_set_codes: null,
+              },
+            },
+          },
+        });
+        expect(JSON.stringify(msg.view.source)).not.toContain("assignments");
+      }
+    });
+
     it.each([undefined, null, "1", 0.5, -1, 2])(
       "rejects invalid active-pack presence %j",
       (activePackCount) => {
         expect(() => validateDraftMessage({
           type: "draft_state_update",
           view: {
+            ...validDraftView,
             seats: [{ active_pack_count: activePackCount }],
           },
         })).toThrow("active_pack_count must be an integer 0 or 1");
@@ -623,14 +681,14 @@ describe("draftProtocol", () => {
     it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
       expect(() => validateDraftMessage({
         type: "draft_state_update",
-        view: { draft_effects: draftEffects, seats: [] },
+        view: { ...validDraftView, draft_effects: draftEffects, seats: [] },
       })).toThrow("draft_effects must be an array");
     });
 
     it.each([null, {}])("rejects present non-array seats values", (seats) => {
       expect(() => validateDraftMessage({
         type: "draft_state_update",
-        view: { draft_effects: [], seats },
+        view: { ...validDraftView, draft_effects: [], seats },
       })).toThrow("seats must be an array");
     });
 
@@ -638,6 +696,7 @@ describe("draftProtocol", () => {
       expect(() => validateDraftMessage({
         type: "draft_state_update",
         view: {
+          ...validDraftView,
           draft_effects: [],
           seats: [{ active_pack_count: 0, face_up_draft_cards: faceUpCards }],
         },
@@ -740,7 +799,9 @@ describe("draftProtocol", () => {
         msgType === "draft_workspace_update"
             ? { type: msgType, workspaceState: validWorkspace }
             : msgType === "draft_welcome" || msgType === "draft_reconnect_ack"
-              ? { type: msgType, view: {}, workspaceState: null }
+              ? { type: msgType, view: validDraftView, workspaceState: null }
+              : msgType === "draft_state_update" || msgType === "draft_pick_ack"
+                ? { type: msgType, view: validDraftView }
               : { type: msgType, ...bespokePayloads[msgType] },
       );
       expect(msg.type).toBe(msgType);
@@ -822,6 +883,7 @@ describe("draftProtocol", () => {
     it("round-trips a large message (gzip path)", async () => {
       // Build a message large enough to trigger compression
       const longView = {
+        launch_capability: "None" as const,
         status: "Deckbuilding",
         kind: "Sealed",
         current_pack_number: 1,

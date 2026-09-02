@@ -660,7 +660,9 @@
   },
   "storm": {
     "copies_one": "Tormenta: {{count}} copia",
-    "copies_other": "Tormenta: {{count}} copias"
+    "copies_other": "Tormenta: {{count}} copias",
+    "count_one": "Contador de tormenta: {{count}} copia",
+    "count_other": "Contador de tormenta: {{count}} copias"
   },
   "opponentHud": {
     "ally": "Aliado",

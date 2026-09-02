@@ -19,6 +19,7 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
     pack_pick_steps,
     pick_steps_per_pack,
     pack_set_codes,
+    source,
     pack_count,
     pass_direction,
   } = view;
@@ -30,6 +31,10 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
   // is holding needs naming. A single-set draft names the same set every round,
   // where the label would be noise.
   const mixedSets = new Set(pack_set_codes ?? []).size > 1;
+  const chaosCurrentPackCode = source?.type === "Set"
+    && "Chaos" in source.data.layout
+    ? source.data.layout.Chaos.current_pack_code
+    : undefined;
 
   return (
     <div data-draft-progress className="flex items-center rounded-[16px] border border-hairline bg-white/[0.035] px-4 py-1.5 shadow-[inset_0_-1px_0_rgba(0,0,0,0.28)]">
@@ -54,7 +59,11 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
                 filledPicks={isComplete ? packSteps(packIdx) : isCurrent ? pick_number : 0}
                 packNumber={packIdx + 1}
                 isCurrent={isCurrent}
-                setCode={mixedSets ? pack_set_codes?.[packIdx] : undefined}
+                setCode={
+                  chaosCurrentPackCode !== undefined
+                    ? (isCurrent ? chaosCurrentPackCode ?? undefined : undefined)
+                    : (mixedSets ? pack_set_codes?.[packIdx] : undefined)
+                }
               />
             </div>
           );

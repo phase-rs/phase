@@ -47,6 +47,7 @@ function card(instanceId: string): DraftPlayerView["pool"][number] {
 function view(): DraftPlayerView {
   return {
     status: "Deckbuilding", kind: "Traditional", pool: [card("twin-a"), card("twin-b")],
+    launch_capability: "None",
     current_pack: null, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],

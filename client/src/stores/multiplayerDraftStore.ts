@@ -1491,7 +1491,7 @@ export const useMultiplayerDraftStore = create<
     if (
       role !== "host" ||
       !view ||
-      view.kind !== "CommanderDraft" ||
+      view.launch_capability !== "CommanderMultiplayer" ||
       view.status !== "Complete" ||
       seatIndex === null ||
       !activeHostAdapter

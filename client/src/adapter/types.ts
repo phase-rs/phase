@@ -3248,6 +3248,12 @@ export interface DerivedViews {
    */
   stack_entry_details?: Record<string, StackEntryDisplay>;
   /**
+   * CR 702.40a: public, table-wide number of copies the current Storm trigger
+   * will create, or a newly cast Storm spell would create. Engine-authored;
+   * spell copies do not count.
+   */
+  storm_count?: number;
+  /**
    * CR 702.40a: prospective Storm copy counts for the viewing player's own
    * hand, keyed by hand object id. The engine owns qualification and counting.
    */

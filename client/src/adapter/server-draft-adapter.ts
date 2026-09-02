@@ -40,6 +40,15 @@ export type DraftPhase =
   | "between_rounds"
   | "complete";
 
+/**
+ * Client intent for a server-hosted set draft. This is intentionally not the
+ * persisted engine `DraftSource`: a Chaos request names candidate sets only,
+ * and the native server privately resolves its per-seat pack assignments.
+ */
+export type DraftSourceIntent =
+  | { type: "Uniform"; data: { set_codes: string[] } }
+  | { type: "Chaos"; data: { candidate_codes: string[] } };
+
 /** Settings for creating a new server-hosted draft pod. */
 export interface CreateDraftSettings {
   displayName: string;
@@ -47,9 +56,12 @@ export interface CreateDraftSettings {
    * The set filling each booster, in pack order. One entry per pack the pod
    * opens; the same set may fill several, and a one-element list fills every
    * booster (the server repeats the last entry). Mirrors the wire field
-   * `set_codes` on `CreateDraftWithSettings`.
+   * Legacy UI input for a Uniform source. New callers may pass `source`
+   * directly; the adapter always serializes the tagged source boundary.
    */
-  setCodes: string[];
+  setCodes?: string[];
+  /** Canonical server source intent. Never contains Chaos assignments. */
+  source?: DraftSourceIntent;
   kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
@@ -57,6 +69,13 @@ export interface CreateDraftSettings {
   tournamentFormat: TournamentFormat;
   podPolicy: PodPolicy;
   podSize: number;
+}
+
+function draftSourceIntent(settings: CreateDraftSettings): DraftSourceIntent {
+  return settings.source ?? {
+    type: "Uniform",
+    data: { set_codes: settings.setCodes ?? [] },
+  };
 }
 
 /** Events emitted by ServerDraftAdapter for UI state updates. */
@@ -304,7 +323,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
-          set_codes: settings.setCodes,
+          source: draftSourceIntent(settings),
           kind: settings.kind,
           public: settings.public,
           password: settings.password ?? null,

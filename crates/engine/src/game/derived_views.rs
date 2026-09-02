@@ -728,6 +728,12 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
 
+    /// CR 702.40a: the public number of copies the current Storm trigger will
+    /// create, or that a newly cast Storm spell would create when no Storm
+    /// trigger is pending. It is table-wide; spell copies never increment it.
+    #[serde(default)]
+    pub storm_count: u32,
+
     /// CR 702.40a: copy counts for Storm spells in the viewing player's hand.
     /// Keyed only by that viewer's hand object ids so hidden opponents' card
     /// abilities and the table-wide spell ledger cannot leak through the view.
@@ -1402,6 +1408,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         debug_library_cards: debug_library_cards(state, viewer),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        storm_count: storm_count(state),
         ..DerivedViews::default()
     };
 
@@ -1554,13 +1561,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                             .iter()
                             .any(|keyword| matches!(keyword, Keyword::Storm)))
                 {
-                    let copy_count = *copy_count.get_or_insert_with(|| {
-                        state
-                            .spells_cast_this_turn_by_player
-                            .values()
-                            .map(|records| records.len())
-                            .sum::<usize>() as u32
-                    });
+                    let copy_count =
+                        *copy_count.get_or_insert_with(|| spells_cast_this_turn(state));
                     views.prospective_storm_counts.insert(hand_id, copy_count);
                 }
             }
@@ -1988,6 +1990,41 @@ pub fn derive_filtered_views(
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     views
+}
+
+/// CR 702.40a: Storm counts each other spell cast before it this turn. A
+/// pending Storm trigger carries the cast-time snapshot that the production
+/// trigger uses, so it excludes its own spell even though that spell is already
+/// in the cast ledger. With no pending Storm trigger, the ledger total is the
+/// number a newly cast Storm spell would snapshot.
+fn storm_count(state: &GameState) -> u32 {
+    state
+        .stack
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                provenance: Some(SyntheticTriggerProvenance::Storm { copy_count }),
+                ..
+            } => Some(*copy_count),
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. } => None,
+        })
+        .unwrap_or_else(|| spells_cast_this_turn(state))
+}
+
+/// The table-wide count of spells actually cast this turn. This is intentionally
+/// private: public Storm presentation must use [`storm_count`] so an active
+/// Storm trigger uses its cast-time snapshot rather than including itself.
+fn spells_cast_this_turn(state: &GameState) -> u32 {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .fold(0, |count, records| {
+            count.saturating_add(records.len() as u32)
+        })
 }
 
 fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectId>> {
@@ -4469,6 +4506,104 @@ mod tests {
         let views = derive_views(&state, Some(PlayerId(0)));
         assert_eq!(views.prospective_storm_counts.get(&p0_storm), Some(&2));
         assert!(!views.prospective_storm_counts.contains_key(&p1_storm));
+    }
+
+    #[test]
+    fn storm_count_uses_the_current_storm_trigger_snapshot_table_wide() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let p0_prior = scenario
+            .add_spell_to_hand(P0, "P0 prior spell", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let p1_prior = scenario
+            .add_spell_to_hand(P1, "P1 prior spell", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let storm_spell = scenario
+            .add_spell_to_hand(P0, "Storm spell", true)
+            .with_keyword(Keyword::Storm)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+
+        runner.cast(p0_prior).resolve();
+        runner.state_mut().priority_player = P1;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+        runner.cast(p1_prior).resolve();
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+        // This exercises the full cast pipeline: the current Storm spell is
+        // already in the ledger when its production trigger snapshots the two
+        // earlier table-wide casts.
+        let committed = runner.cast(storm_spell).commit();
+        let state = committed.state();
+        assert_eq!(
+            state
+                .spells_cast_this_turn_by_player
+                .get(&P0)
+                .map_or(0, im::Vector::len),
+            2,
+            "the current Storm spell is recorded alongside P0's earlier cast"
+        );
+        assert_eq!(
+            state
+                .spells_cast_this_turn_by_player
+                .get(&P1)
+                .map_or(0, im::Vector::len),
+            1,
+            "an opponent's earlier cast contributes to Storm"
+        );
+        assert!(state.stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility {
+                provenance: Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
+                ..
+            }
+        )));
+        for viewer in [P0, P1, PlayerId(2)] {
+            assert_eq!(derive_views(state, Some(viewer)).storm_count, 2);
+        }
+        assert_eq!(
+            serde_json::to_value(derive_views(state, Some(PlayerId(2))))
+                .expect("serialize public storm projection")["storm_count"],
+            2,
+        );
+
+        let outcome = committed.resolve();
+        assert_eq!(
+            outcome
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::SpellCopied { original_id, .. } if *original_id == storm_spell
+                ))
+                .count(),
+            2,
+            "the production Storm trigger creates one copy for each prior spell"
+        );
+        assert_eq!(
+            outcome
+                .state()
+                .spells_cast_this_turn_by_player
+                .values()
+                .map(im::Vector::len)
+                .sum::<usize>(),
+            3,
+            "the generated spell copies do not enter the cast ledger"
+        );
+
+        // The turn-transition authority clears the table-wide cast ledger.
+        crate::game::turns::start_next_turn(runner.state_mut(), &mut Vec::new());
+        assert!(runner.state().spells_cast_this_turn_by_player.is_empty());
+        assert_eq!(
+            derive_views(runner.state(), Some(PlayerId(2))).storm_count,
+            0
+        );
     }
 
     #[test]

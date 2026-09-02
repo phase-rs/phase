@@ -193,6 +193,27 @@ describe("SetSelector", () => {
     ]);
   });
 
+  it("collects distinct, unbounded candidate sets for a Chaos host", async () => {
+    const onStartDraft = vi.fn();
+    render(<SetSelector onStartDraft={onStartDraft} defaultPackCount={1} candidatePool />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add Innistrad as a candidate" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add Dark Ascension as a candidate" }));
+    // A candidate list is not a pack order: the same set cannot bias the
+    // host's random assignment just because it was clicked twice.
+    await userEvent.click(screen.getByRole("button", { name: "Add Innistrad as a candidate" }));
+
+    expect(await packEntries()).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /Move pack/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Fill the/ })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start Draft" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+    ]);
+  });
+
   it("trims a flexible selection when the event pack count decreases", async () => {
     const onStartDraft = vi.fn();
     const { rerender } = render(

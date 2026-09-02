@@ -41,7 +41,7 @@ use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
 };
-use rand::Rng;
+use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
@@ -66,8 +66,8 @@ use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
-    build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
-    LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
+    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerMessage,
+    ServerMode, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
@@ -190,6 +190,33 @@ fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, St
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
     GameSession::from_persisted(persisted, db.as_ref())
+}
+
+/// Admit a persisted draft row only when its SQLite key names the enclosed
+/// session, then prepare its post-admission startup data.
+///
+/// The persisted wrapper and core session validate each other in `server-core`,
+/// but the database row key is a separate authority used by startup lookups and
+/// lobby registration. Validate it before admission so a corrupt row cannot
+/// leave the manager indexed under one code and the caller looking up another.
+fn restore_persisted_draft_session(
+    row_draft_code: &str,
+    persisted: server_core::persist::PersistedDraftSession,
+    drafts: &mut DraftSessionManager,
+) -> Result<(Option<RegisterGameRequest>, Option<u32>), String> {
+    if persisted.draft_code != row_draft_code {
+        return Err("persisted draft code does not match its database row".to_string());
+    }
+    drafts.restore_persisted_session(persisted)?;
+    let restored = drafts
+        .sessions
+        .get(row_draft_code)
+        .ok_or_else(|| "admitted persisted draft session is missing".to_string())?;
+    let restored_snapshot = restored.to_persisted();
+    Ok((
+        server_core::persist::restored_draft_lobby_register_request(&restored_snapshot),
+        restored.timer_remaining_ms,
+    ))
 }
 
 /// The startup restore owner keeps a session private until this handoff has
@@ -1193,25 +1220,18 @@ fn guard_full_create_game_settings_inbound(
     Ok(pc)
 }
 
-/// Whether the single-elimination seat rule applies to a requested pod.
+/// Whether the engine procedure permits this pod's requested seat count.
 ///
-/// A single named authority so the `CreateDraftWithSettings` handler and its
-/// test read the SAME predicate — a test that re-states the rule inline would
-/// stay green after the handler's rule changed, which is no evidence at all.
-///
-/// CR 903.13a: a Commander Draft pod plays one multiplayer game, not a bracket,
-/// so the seat requirement does not reach it — its `post_draft_play` is
-/// `CompleteImmediately`, and the kind is read through the procedure table
-/// rather than compared by name. The rule is a property of running tournament
-/// pairings, not of any particular kind.
-fn single_elimination_seat_rule_applies(
+/// The socket preflight deliberately delegates the full range and
+/// tournament-pairing bracket policy to `DraftProcedure`; this boundary only
+/// reports that policy before resolving pool data.
+fn draft_pod_size_is_allowed(
     kind: draft_core::types::DraftKind,
     tournament_format: draft_core::types::TournamentFormat,
     pod_size: u8,
 ) -> bool {
-    kind.procedure().post_draft_play == draft_core::types::PostDraftPlay::TournamentPairings
-        && tournament_format == draft_core::types::TournamentFormat::SingleElimination
-        && pod_size != 8
+    kind.procedure()
+        .allows_pod_size(tournament_format, pod_size)
 }
 
 /// Returns `Some(reason)` if `action` cannot legitimately come from a client
@@ -2024,23 +2044,21 @@ async fn serve() {
                 for (draft_code, json) in &persisted_drafts {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
-                        Ok(ps) => {
-                            let register_req =
-                                server_core::persist::restored_draft_lobby_register_request(&ps);
-                            let timer_ms = ps.timer_remaining_ms;
-                            if let Err(error) = dsm.restore_persisted_session(ps) {
+                        Ok(ps) => match restore_persisted_draft_session(draft_code, ps, &mut dsm) {
+                            Ok((register_req, timer_ms)) => {
+                                if let Some(req) = register_req {
+                                    lob.register_game(draft_code, req, &SysEnv);
+                                }
+                                if let Some(ms) = timer_ms {
+                                    info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
+                                }
+                                restored_drafts += 1;
+                            }
+                            Err(error) => {
                                 warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
                                 let _ = game_db.delete_draft_session(draft_code);
-                                continue;
                             }
-                            if let Some(req) = register_req {
-                                lob.register_game(draft_code, req, &SysEnv);
-                            }
-                            if let Some(ms) = timer_ms {
-                                info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
-                            }
-                            restored_drafts += 1;
-                        }
+                        },
                         Err(e) => {
                             warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
                             let _ = game_db.delete_draft_session(draft_code);
@@ -2775,6 +2793,65 @@ mod lifecycle_tests {
             )),
             "...and receive the refreshed list: {received:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod restored_draft_startup_tests {
+    use super::restore_persisted_draft_session;
+    use draft_core::types::{
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
+        TournamentFormat,
+    };
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::persist::{PersistedDraftSession, PersistedLobbyMeta};
+
+    fn uniform_lobby_snapshot() -> PersistedDraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let mut drafts = DraftSessionManager::new();
+        let (draft_code, _, _) = drafts.create_draft(config, "Alice".to_string());
+        drafts.sessions.get_mut(&draft_code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        drafts.sessions[&draft_code].to_persisted()
+    }
+
+    #[test]
+    fn persisted_draft_row_key_must_match_before_admission_or_lobby_registration() {
+        let snapshot = uniform_lobby_snapshot();
+        let mut restored = DraftSessionManager::new();
+
+        let rejected_registration =
+            match restore_persisted_draft_session("WRONG1", snapshot.clone(), &mut restored) {
+                Ok((registration, _)) => registration,
+                Err(_) => None,
+            };
+        assert!(rejected_registration.is_none());
+        assert!(restored.sessions.is_empty());
+
+        let (registration, _) =
+            restore_persisted_draft_session(&snapshot.draft_code, snapshot.clone(), &mut restored)
+                .expect("a valid Uniform snapshot restores under its own row key");
+        assert!(registration.is_some());
+        assert!(restored.sessions.contains_key(&snapshot.draft_code));
     }
 }
 
@@ -4772,23 +4849,37 @@ async fn draft_pack_generator_for_start(
 ) -> Result<draft_core::pack_generator::PackGenerator, String> {
     // The SOURCE, not `config.set_code`. `set_code` is the whole-source display
     // label, which a multi-set pod joins into `"ISD+DKA+AVR"` — a string no pool
-    // map can key on. The per-pack sequence lives on `DraftSource::Set`, and it
-    // is what decides which set fills each booster.
-    let set_codes = {
+    // map can key on. The persisted core source is the single authority for
+    // both Uniform and Chaos rebuilds; Chaos assignments were resolved once at
+    // admission and are never drawn again here.
+    let (source, pod_size, pack_count) = {
         let mgr = draft_state.lock().await;
         let session = mgr
             .sessions
             .get(draft_code)
             .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
-        match &session.config.source {
-            draft_core::types::DraftSource::Set { codes } => codes.clone(),
-            draft_core::types::DraftSource::Cube { .. } => {
-                return Err("Server-hosted drafts require a set pool".to_string());
-            }
-        }
+        (
+            session.config.source.clone(),
+            session.config.pod_size,
+            session.config.pack_count,
+        )
     };
 
-    draft_pools.generator_for_sequence(&set_codes)
+    match source {
+        draft_core::types::DraftSource::Set {
+            layout: draft_core::types::SetLayout::UniformByRound { codes },
+        } => draft_pools.generator_for_sequence(&codes),
+        draft_core::types::DraftSource::Set {
+            layout:
+                draft_core::types::SetLayout::Chaos {
+                    candidate_codes,
+                    assignments,
+                },
+        } => draft_pools.generator_for_chaos(&candidate_codes, &assignments, pod_size, pack_count),
+        draft_core::types::DraftSource::Cube { .. } => {
+            Err("Server-hosted drafts require a set pool".to_string())
+        }
+    }
 }
 
 /// Per-AI-result fan-out for a batch of `run_ai` results.
@@ -8933,6 +9024,7 @@ async fn handle_client_message(
 
         ClientMessage::CreateDraftWithSettings {
             display_name,
+            source,
             set_codes,
             kind,
             public,
@@ -8942,9 +9034,20 @@ async fn handle_client_message(
             pod_policy,
             pod_size,
         } => {
+            let source_intent = match resolve_draft_source_intent(source, set_codes) {
+                Ok(intent) => intent,
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+            let source_codes = source_intent.set_codes();
             info!(
                 display_name = %display_name,
-                set_codes = ?set_codes,
+                source = ?source_intent,
                 kind = ?kind,
                 public,
                 pod_size,
@@ -8953,11 +9056,12 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_create_draft_with_settings(
                 &display_name,
-                &set_codes,
+                source_codes,
                 &password,
                 timer_seconds,
                 pod_size,
                 kind,
+                tournament_format,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
@@ -8966,51 +9070,70 @@ async fn handle_client_message(
                 return;
             }
 
-            // Resolve the WHOLE sequence up front: a pod whose second pack
-            // names a set with no pool data must be refused at creation, not
-            // discovered when that booster fails to open mid-draft. The
-            // generator this proves out is rebuilt at StartDraft from the same
-            // source, so the two can never disagree.
-            //
-            // A sequence SHORTER than the kind's pack count repeats its last
-            // entry (`entry_for_pack`), which is how a single-set pod stays a
-            // one-element sequence; a LONGER one names boosters the event never
-            // opens, so it is the host's error rather than a silent truncation.
             let procedure = kind.procedure();
-            if set_codes.len() > usize::from(procedure.packs_per_player) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: format!(
-                        "{kind:?} opens {} packs, but {} sets were named",
-                        procedure.packs_per_player,
-                        set_codes.len()
-                    ),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-            //
-            // Booster size follows pack 1's set, matching the single-player
-            // boundary (`ResolvedSetSelection`); per-pack sizes are recorded on
-            // the session from the packs the generator produces.
-            let resolved = draft_pools
-                .generator_for_sequence(&set_codes)
-                .and_then(|_| {
-                    let first = set_codes
-                        .first()
-                        .ok_or_else(|| "A pod must name at least one set".to_string())?;
-                    draft_pools
-                        .pool_for_set(first)
-                        .and_then(|pool| pool.cards_per_pack())
-                        .ok_or_else(|| {
-                            format!(
-                                "Set {first} has no single MTGJSON pack size across its booster variants"
-                            )
+            let resolved_source = match source_intent {
+                // A Uniform sequence names the booster set for each round. A
+                // short sequence retains its legacy repeat-final shorthand;
+                // a longer one would silently name boosters that never open.
+                server_core::protocol::DraftSourceIntent::Uniform { set_codes } => {
+                    if set_codes.len() > usize::from(procedure.packs_per_player) {
+                        Err(format!(
+                            "{kind:?} opens {} packs, but {} sets were named",
+                            procedure.packs_per_player,
+                            set_codes.len()
+                        ))
+                    } else {
+                        draft_pools.generator_for_sequence(&set_codes).and_then(|_| {
+                            let first = set_codes
+                                .first()
+                                .ok_or_else(|| "A pod must name at least one set".to_string())?;
+                            draft_pools
+                                .pool_for_set(first)
+                                .and_then(|pool| pool.cards_per_pack())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Set {first} has no single MTGJSON pack size across its booster variants"
+                                    )
+                                })
+                                .map(|cards_per_pack| {
+                                    (
+                                        draft_core::types::DraftSource::Set {
+                                            layout: draft_core::types::SetLayout::UniformByRound {
+                                                codes: set_codes,
+                                            },
+                                        },
+                                        cards_per_pack,
+                                    )
+                                })
                         })
-                });
-            let cards_per_pack = match resolved {
-                Ok(cards_per_pack) => cards_per_pack,
+                    }
+                }
+                // The OS entropy draw is made once at admission. The persisted
+                // core layout holds the result, so reconnect/start never reroll
+                // a pod and a client never transmits assignments.
+                server_core::protocol::DraftSourceIntent::Chaos { candidate_codes } => {
+                    let seed = rand::rngs::OsRng.try_next_u64().map_err(|error| {
+                        format!("Unable to seed Chaos draft assignments: {error}")
+                    });
+                    seed.and_then(|seed| {
+                        draft_pools
+                            .resolve_chaos_layout(
+                                &candidate_codes,
+                                pod_size,
+                                procedure.packs_per_player,
+                                seed,
+                            )
+                            .map(|(layout, cards_per_pack)| {
+                                (
+                                    draft_core::types::DraftSource::Set { layout },
+                                    cards_per_pack,
+                                )
+                            })
+                    })
+                }
+            };
+            let (source, cards_per_pack) = match resolved_source {
+                Ok(resolved) => resolved,
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
@@ -9020,24 +9143,9 @@ async fn handle_client_message(
                 }
             };
 
-            // CR 903.13a: a Commander Draft pod plays one multiplayer game, not
-            // a bracket, so the single-elimination seat requirement does not
-            // apply to it. Was `kind != DraftKind::Quick`, which is TRUE for
-            // the fifth kind and would reject a legitimate 4-seat pod that the
-            // reducer accepts — the wire and the reducer disagreeing about the
-            // same kind in opposite directions.
-            //
-            // The predicate itself is covered by
-            // `single_elimination_seat_rule_skips_commander_draft` below, which
-            // asserts it over the procedure table: it must NOT fire for
-            // CommanderDraft (whose `post_draft_play` is `CompleteImmediately`)
-            // and MUST fire for Traditional at a 4-seat SE pod. The live socket
-            // path around it remains uncovered — reaching it needs a real
-            // connection and a created pod — so what is verified here is the
-            // typed comparison, not the frame handling.
-            if single_elimination_seat_rule_applies(kind, tournament_format, pod_size) {
+            if !draft_pod_size_is_allowed(kind, tournament_format, pod_size) {
                 let msg = ServerMessage::DraftActionRejected {
-                    reason: "Single-elimination draft events require exactly 8 seats".to_string(),
+                    reason: "Pod size is not allowed by the draft procedure".to_string(),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -9045,12 +9153,11 @@ async fn handle_client_message(
                 return;
             }
 
-            let source = draft_core::types::DraftSource::Set { codes: set_codes };
-            // One label naming the whole source, deduped in first-appearance
-            // order by the engine ("ISD+DKA+AVR"). The lobby listing and the
-            // session share it, so a listing can never describe a pod the
-            // session does not.
+            // The session label names only the resolved core source. The lobby
+            // row uses `lobby_set_label` below so a Chaos listing advertises
+            // candidate intent without leaking the assignment union.
             let set_label = source.set_code();
+            let lobby_set_label = server_core::persist::draft_lobby_source_label(&source);
             let config = draft_core::types::DraftConfig {
                 set_code: set_label.clone(),
                 source,
@@ -9123,7 +9230,7 @@ async fn handle_client_message(
                         room_name: None,
                         host_peer_id: String::new(),
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code: set_label,
+                            set_code: lobby_set_label,
                             draft_kind: format!("{kind:?}"),
                             cube_name: None,
                         }),
@@ -10517,8 +10624,8 @@ mod full_socket_authority_tests {
 mod draft_socket_authority_tests {
     use super::*;
     use draft_core::types::{
-        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
-        TournamentFormat,
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SetLayout,
+        SpectatorVisibility, TournamentFormat,
     };
 
     fn empty_identity() -> SocketIdentity {
@@ -10572,7 +10679,8 @@ mod draft_socket_authority_tests {
         [
             ClientMessage::CreateDraftWithSettings {
                 display_name: "Alice".to_string(),
-                set_codes: vec!["TST".to_string()],
+                source: None,
+                set_codes: Some(vec!["TST".to_string()]),
                 kind: DraftKind::Premier,
                 public: false,
                 password: None,
@@ -10587,6 +10695,34 @@ mod draft_socket_authority_tests {
                 password: None,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn server_rebuilds_a_persisted_chaos_source_at_draft_start() {
+        let (draft_state, _connections, draft_code, _player_token) = test_draft();
+        {
+            let mut manager = draft_state.lock().await;
+            let draft = manager
+                .sessions
+                .get_mut(&draft_code)
+                .expect("test draft exists");
+            draft.config.source = DraftSource::Set {
+                layout: SetLayout::Chaos {
+                    candidate_codes: vec!["TST".to_string()],
+                    assignments: vec![vec!["TST".to_string(); 3]; 8],
+                },
+            };
+        }
+
+        let error = draft_pack_generator_for_start(
+            &draft_state,
+            &Arc::new(draft_pools::DraftPools::default()),
+            &draft_code,
+        )
+        .await
+        .expect_err("the empty test pool must fail after reaching Chaos generator construction");
+
+        assert_eq!(error, "No draft pool data for set: TST");
     }
 
     #[test]
@@ -11111,42 +11247,36 @@ mod live_spectator_tests {
 }
 
 #[cfg(test)]
-mod single_elimination_seat_rule_tests {
-    use super::single_elimination_seat_rule_applies;
+mod draft_pod_size_policy_tests {
+    use super::draft_pod_size_is_allowed;
     use draft_core::types::{DraftKind, TournamentFormat};
 
-    /// CR 903.13a: a Commander pod plays one multiplayer game rather than a
-    /// bracket, so the 8-seat single-elimination requirement must not reject
-    /// its 4-seat product default.
-    ///
-    /// REVERT-PROBE: restore the old `kind != DraftKind::Quick` form of the
-    /// rule — which is TRUE for the fifth kind — and this reds.
+    /// Commander completes outside tournament pairings, so its normal 3-seat
+    /// floor remains valid even when this transport value is selected.
     #[test]
-    fn single_elimination_seat_rule_skips_commander_draft() {
-        assert!(!single_elimination_seat_rule_applies(
+    fn procedure_keeps_commander_single_elimination_at_its_normal_range() {
+        assert!(draft_pod_size_is_allowed(
             DraftKind::CommanderDraft,
             TournamentFormat::SingleElimination,
-            4
+            3
         ));
     }
 
-    /// The paired positive reach-guard: the rule still fires for a kind that
-    /// DOES run tournament pairings, so the negative above cannot pass merely
-    /// because the predicate never fires for anything.
+    /// The paired positive reach-guard: a procedure that does run tournament
+    /// pairings still requires the full single-elimination bracket.
     #[test]
-    fn single_elimination_seat_rule_fires_for_traditional_four_seat_pod() {
-        assert!(single_elimination_seat_rule_applies(
+    fn procedure_requires_the_full_pairing_bracket() {
+        assert!(!draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             4
         ));
-        // ...and not at the legal 8-seat size, nor under Swiss.
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             8
         ));
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::Swiss,
             4
@@ -12268,7 +12398,8 @@ mod mode_gate_tests {
             },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -12411,7 +12542,8 @@ mod mode_gate_tests {
             ClientMessage::Ping { timestamp: 0 },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -13619,9 +13751,12 @@ mod p2p_backup_delete_tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use axum::routing::{get, post};
-    use axum::Router;
+    use axum::{Json, Router};
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
@@ -13761,6 +13896,90 @@ mod p2p_backup_delete_tests {
             StatusCode::OK,
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn public_backup_store_and_get_redact_chaos_assignments() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let nested = serde_json::json!({
+            "config": {
+                "source": {
+                    "type": "Set",
+                    "data": {
+                        "candidate_codes": ["TST", "ALT"],
+                        "assignments": [["TST", "ALT"], ["ALT", "TST"]]
+                    }
+                }
+            }
+        });
+        let snapshot = serde_json::json!({ "draftSessionJson": nested.to_string() }).to_string();
+
+        let stored = admin::p2p_backup_store(
+            State(app_state.clone()),
+            Json(admin::P2pBackupRequest {
+                draft_code: DRAFT_CODE.to_string(),
+                host_peer_id: HOST_PEER.to_string(),
+                snapshot_json: snapshot,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), StatusCode::OK);
+
+        let (_, stored_snapshot, _) = app_state
+            .game_db
+            .load_p2p_backup(DRAFT_CODE)
+            .expect("load")
+            .expect("stored backup");
+        let stored_value: serde_json::Value =
+            serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
+        let stored_session: serde_json::Value = serde_json::from_str(
+            stored_value["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        let stored_source = &stored_session["config"]["source"];
+        assert_eq!(stored_source["type"], "Set");
+        let stored_layout = &stored_source["data"];
+        assert!(stored_layout.get("assignments").is_none());
+        assert_eq!(
+            stored_layout["candidate_codes"],
+            serde_json::json!(["TST", "ALT"])
+        );
+
+        let response = admin::p2p_backup_get(
+            State(app_state),
+            Path(DRAFT_CODE.to_string()),
+            Query(admin::P2pBackupGetQuery {
+                host_peer_id: HOST_PEER.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let public_response: serde_json::Value =
+            serde_json::from_slice(&body).expect("response JSON");
+        let public_snapshot: serde_json::Value = serde_json::from_str(
+            public_response["snapshot_json"]
+                .as_str()
+                .expect("snapshot JSON string"),
+        )
+        .expect("snapshot JSON");
+        let public_session: serde_json::Value = serde_json::from_str(
+            public_snapshot["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        assert_eq!(public_session["config"]["source"]["type"], "Set");
+        assert!(public_session["config"]["source"]["data"]
+            .get("assignments")
+            .is_none());
     }
 
     #[tokio::test]

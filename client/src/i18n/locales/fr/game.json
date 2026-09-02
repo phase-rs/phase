@@ -660,7 +660,9 @@
   },
   "storm": {
     "copies_one": "Déluge : {{count}} copie",
-    "copies_other": "Déluge : {{count}} copies"
+    "copies_other": "Déluge : {{count}} copies",
+    "count_one": "Compteur de déluge : {{count}} copie",
+    "count_other": "Compteur de déluge : {{count}} copies"
   },
   "opponentHud": {
     "ally": "Allié",

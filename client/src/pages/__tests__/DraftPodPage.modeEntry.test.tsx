@@ -92,10 +92,12 @@ function engineView(
     cards_per_pack: number;
     pack_sizes: number[];
     min_deck_size: number;
+    launch_capability: "None" | "CommanderMultiplayer";
   }> = {},
 ) {
   return {
     kind,
+    launch_capability: "None",
     seats: Array.from({ length: seatCount }, (_, seat_index) => ({ seat_index })),
     pack_count: 4,
     cards_per_pack: 12,
@@ -125,9 +127,13 @@ describe("DraftPodPage ?kind= mode entry", () => {
       pod_size: 6,
       human_seats: 1,
       min_pod_size: 3,
+      max_pod_size: 8,
+      allowed_pod_sizes: [3, 4, 5, 6, 7, 8],
       packs_per_player: 3,
       cards_per_pick: 2,
+      distribution: "PickAndPass",
       min_deck_size: 60,
+      post_draft_play: "CompleteImmediately",
       match_config: { best_of: 1 },
     });
     useDraftPodStore.getState().reset();
@@ -144,7 +150,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
         podSize: 6,
       }),
     );
-    expect(mocks.draftProcedure).toHaveBeenCalledWith("CommanderDraft");
+    expect(mocks.draftProcedure).toHaveBeenCalledWith("CommanderDraft", "Swiss");
   });
 
   it("offers Commander Draft in the pod kind selector", async () => {
@@ -183,8 +189,147 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // `enterKind`. Adopting the kind's `pod_size` still is, and the fixture
     // publishes 6 against the store's 8 default precisely so a stray
     // `enterKind` cannot hide behind a coincidence.
-    await waitFor(() => expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier"));
+    await waitFor(() => expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier", "Swiss"));
     expect(useDraftPodStore.getState().config.podSize).toBe(8);
+  });
+
+  it.each([
+    {
+      description: "normal Swiss pod",
+      kind: "Premier",
+      tournamentFormat: "Swiss",
+      expectedSizes: [2, 3, 4, 5, 6, 7, 8],
+    },
+    {
+      description: "Commander Swiss pod",
+      kind: "CommanderDraft",
+      tournamentFormat: "Swiss",
+      expectedSizes: [3, 4, 5, 6, 7, 8],
+    },
+    {
+      description: "normal single-elimination pod",
+      kind: "Premier",
+      tournamentFormat: "SingleElimination",
+      expectedSizes: [8],
+    },
+    {
+      description: "Commander single-elimination pod",
+      kind: "CommanderDraft",
+      tournamentFormat: "SingleElimination",
+      expectedSizes: [3, 4, 5, 6, 7, 8],
+    },
+  ])("offers exactly the legal seat counts for a $description", async ({
+    kind,
+    tournamentFormat,
+    expectedSizes,
+  }) => {
+    const user = userEvent.setup();
+    mocks.draftProcedure.mockImplementation(async (
+      requestedKind: string,
+      requestedTournamentFormat: string,
+    ) => ({
+      pod_size: 8,
+      human_seats: 1,
+      min_pod_size: requestedKind === "CommanderDraft" ? 3 : 2,
+      max_pod_size: 8,
+      allowed_pod_sizes: requestedTournamentFormat === "SingleElimination"
+        && requestedKind !== "CommanderDraft"
+        ? [8]
+        : requestedKind === "CommanderDraft"
+          ? [3, 4, 5, 6, 7, 8]
+          : [2, 3, 4, 5, 6, 7, 8],
+      packs_per_player: 3,
+      cards_per_pick: requestedKind === "CommanderDraft" ? 2 : 1,
+      distribution: "PickAndPass",
+      min_deck_size: 60,
+      post_draft_play: requestedKind === "CommanderDraft"
+        ? "CompleteImmediately"
+        : "TournamentPairings",
+      match_config: { best_of: 1 },
+    }));
+
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: "Host a Pod" }));
+
+    if (kind === "CommanderDraft") {
+      await user.click(screen.getByRole("radio", { name: "Commander" }));
+    }
+    if (tournamentFormat === "SingleElimination") {
+      await user.click(screen.getByRole("radio", { name: "Single Elimination" }));
+    }
+
+    await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual(expectedSizes));
+    const podSizeSelect = screen.getByRole("button", { name: "Pod Size" });
+    expect(podSizeSelect).toBeEnabled();
+    await user.click(podSizeSelect);
+
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(
+      expectedSizes.map((size) => `${size} players`),
+    );
+  });
+
+  it("waits for Commander procedure data instead of offering the previous kind's floor", async () => {
+    let resolveCommanderProcedure!: () => void;
+    mocks.draftProcedure.mockImplementation((kind: string) => {
+      if (kind !== "CommanderDraft") {
+        return Promise.resolve({
+          pod_size: 8,
+          human_seats: 1,
+          min_pod_size: 2,
+          max_pod_size: 8,
+          allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+          packs_per_player: 3,
+          cards_per_pick: 1,
+          distribution: "PickAndPass",
+          min_deck_size: 60,
+          post_draft_play: "TournamentPairings",
+          match_config: { best_of: 1 },
+        });
+      }
+
+      return new Promise((resolve) => {
+        resolveCommanderProcedure = () => resolve({
+          pod_size: 4,
+          human_seats: 1,
+          min_pod_size: 3,
+          max_pod_size: 8,
+          allowed_pod_sizes: [3, 4, 5, 6, 7, 8],
+          packs_per_player: 3,
+          cards_per_pick: 2,
+          distribution: "PickAndPass",
+          min_deck_size: 60,
+          post_draft_play: "CompleteImmediately",
+          match_config: { best_of: 1 },
+        });
+      });
+    });
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: "Host a Pod" }));
+    await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual([2, 3, 4, 5, 6, 7, 8]));
+
+    await user.click(screen.getByRole("radio", { name: "Commander" }));
+
+    const podSizeSelect = screen.getByRole("button", { name: "Pod Size" });
+    expect(useDraftPodStore.getState().allowedPodSizes).toBeNull();
+    expect(podSizeSelect).toBeDisabled();
+    expect(screen.queryByRole("option", { name: "2 players" })).toBeNull();
+    await waitFor(() => expect(resolveCommanderProcedure).toBeTypeOf("function"));
+
+    resolveCommanderProcedure();
+
+    await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual([3, 4, 5, 6, 7, 8]));
+    expect(podSizeSelect).toBeEnabled();
+    await user.click(podSizeSelect);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "3 players",
+      "4 players",
+      "5 players",
+      "6 players",
+      "7 players",
+      "8 players",
+    ]);
   });
 
   it("lets the persisted session win over a URL kind intent", async () => {
@@ -204,13 +349,14 @@ describe("DraftPodPage ?kind= mode entry", () => {
     expect(useDraftPodStore.getState().config.podSize).toBe(8);
   });
 
-  it("picks the intro variant from the ENGINE-published kind", () => {
+  it("picks the intro variant from the ENGINE-published launch capability", () => {
     // A guest's local `draftPodStore.config` is never populated from the host's
-    // kind, so the intro must read `view.kind`. This fixture is exactly that
+    // kind, so the intro must read the engine capability. This fixture is exactly that
     // case: the store is left on its "Premier" default.
     mocks.multiplayerState.phase = "drafting";
-    mocks.multiplayerState.view = engineView("CommanderDraft", 4, {
+    mocks.multiplayerState.view = engineView("Premier", 4, {
       min_deck_size: 63,
+      launch_capability: "CommanderMultiplayer",
     });
     renderAt("/draft-pod");
 
@@ -233,7 +379,9 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // while `draftPodStore.config.podSize` sits on this client's own `8` default,
     // which a guest never overwrites. The two authorities disagree by construction.
     mocks.multiplayerState.phase = "drafting";
-    mocks.multiplayerState.view = engineView("CommanderDraft", 4);
+    mocks.multiplayerState.view = engineView("Premier", 4, {
+      launch_capability: "CommanderMultiplayer",
+    });
     renderAt("/draft-pod");
 
     // Reach guard on the WRONG authority: the config really does still say 8, so

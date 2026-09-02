@@ -660,7 +660,9 @@
   },
   "storm": {
     "copies_one": "Sztorm: {{count}} kopia",
-    "copies_other": "Sztorm: {{count}} kopie"
+    "copies_other": "Sztorm: {{count}} kopie",
+    "count_one": "Licznik sztormu: {{count}} kopia",
+    "count_other": "Licznik sztormu: {{count}} kopie"
   },
   "opponentHud": {
     "ally": "Sojusznik",

@@ -95,6 +95,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  39 — DerivedViews.storm_count publishes the engine-owned number of copies a
+ *       current Storm trigger will create, or a newly cast Storm spell would
+ *       create. The field is additive, but this client renders the scalar
+ *       directly; a v38 host would silently omit the Storm HUD status. Since
+ *       game_setup and reconnect_ack carry GameState, first contact rejects
+ *       the version skew rather than allowing that capability loss.
  *  38 — Casting permissions gained a typed lifetime. Two parts, with different
  *       compatibility consequences:
  *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
@@ -233,7 +239,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 38 as const;
+export const WIRE_PROTOCOL_VERSION = 39 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

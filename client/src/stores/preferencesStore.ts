@@ -95,6 +95,9 @@ export type SpellPaymentMode = "auto" | "autoExceptSacrificialMana" | "manual";
  *  User-chosen so a player can keep the stack off whichever side of the
  *  battlefield they care about — e.g. dock left to free the right action rail. */
 export type StackDockSide = "left" | "right";
+/** Screen edge the game-log panel docks to. Kept separate from the resolving
+ * stack's dock because players may deliberately place the two panels apart. */
+export type LogDockSide = "left" | "right";
 /** Opponent HUD density in the multi-opponent rail. "comfortable" = the full
  *  two-row tab (name + life over the board-composition breakdown); "compact" =
  *  a single thin row (small avatar + name + life) that trades the breakdown for
@@ -309,6 +312,7 @@ function buildDefaultPreferences(): PreferencesState {
     cardPreviewHoverDelayMs: 0,
     showCardPreviewFooter: true,
     stackDockSide: "right",
+    logDockSide: "right",
     opponentHudDensity: "comfortable",
     multiplayerBoardLayout: "auto",
     multiplayerSplitLayoutNudgeDismissed: true,
@@ -406,6 +410,8 @@ interface PreferencesState {
   showCardPreviewFooter: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
+  /** Screen edge the game-log panel docks to. */
+  logDockSide: LogDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
   /** Multiplayer board presentation: one focused opponent, or all opponent seats. */
@@ -448,6 +454,7 @@ interface PreferencesActions {
   setHudLayout: (layout: HudLayout) => void;
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
+  setLogDockSide: (side: LogDockSide) => void;
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
   setMultiplayerSplitLayoutNudgeDismissed: (dismissed: boolean) => void;
@@ -592,6 +599,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
+      setLogDockSide: (side) => set({ logDockSide: side }),
       setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
       setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
       setMultiplayerSplitLayoutNudgeDismissed: (dismissed) =>
@@ -812,7 +820,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 32,
+      version: 33,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -885,6 +893,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v31 → v32: Add dismissedStatusId; legacy stores default to undefined
       //          via the shallow merge, so no operator status message counts as
       //          already dismissed for an existing user.
+      // v32 → v33: Add logDockSide; existing and malformed stores reset to the
+      //          prior fixed-right behavior.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1074,6 +1084,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           };
         }
 
+        if (version < 33) {
+          migrated = { ...migrated, logDockSide: "right" };
+        }
+
         return {
           ...migrated,
           language: normalizeSupportedLng(migrated.language, detectInitialLanguage()),
@@ -1090,6 +1104,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           ...current,
           ...saved,
           language: normalizeSupportedLng(saved.language, current.language),
+          logDockSide: saved.logDockSide === "left" || saved.logDockSide === "right"
+            ? saved.logDockSide
+            : "right",
         };
       },
     },

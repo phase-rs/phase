@@ -312,6 +312,9 @@ interface UiStoreActions {
     timing?: "hover" | "immediate",
     placement?: PreviewPlacement,
   ) => void;
+  /** Open a preview from an explicit interaction and keep it visible until a
+   * later outside interaction dismisses it. */
+  inspectObjectSticky: (id: ObjectId, faceIndex?: number, placement?: PreviewPlacement) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   setShiftHeld: (held: boolean) => void;
@@ -540,6 +543,21 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         });
       }, 50);
     }
+  },
+
+  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor") => {
+    if (pendingClearTimer != null) {
+      clearTimeout(pendingClearTimer);
+      pendingClearTimer = null;
+    }
+    cancelPendingShow();
+    set({
+      inspectedObjectId: id,
+      inspectedFaceIndex: faceIndex,
+      previewPlacement: placement,
+      previewSticky: true,
+      altHeld: false,
+    });
   },
 
   dismissPreview: () => {

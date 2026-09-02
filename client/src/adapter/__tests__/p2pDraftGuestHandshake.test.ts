@@ -61,7 +61,7 @@ const reconnectAck = {
   draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
   seatIndex: 2,
   draftCode: "draft-xyz",
-  view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+  view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
 };
 
 describe("P2P draft guest handshake attempts", () => {
@@ -91,7 +91,7 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
 
@@ -112,7 +112,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_deck_submit_ack",
       submissionId: sent.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await submitted;
     expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(
@@ -136,7 +136,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     await Promise.resolve();
@@ -163,7 +163,7 @@ describe("P2P draft guest handshake attempts", () => {
     const command = commands[0]![0] as { submissionId: string };
     sessionState.sessions[0]!.handler!({
       type: "draft_deck_submit_ack", submissionId: command.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
   });
@@ -183,7 +183,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     const first = guest.submitDeck(["Island"], []);
@@ -219,7 +219,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     const submitted = guest.submitDeck(["Island"], []);
@@ -254,7 +254,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await initialHandshake;
     const submitted = guest.submitDeck(["Island"], []);
@@ -279,7 +279,7 @@ describe("P2P draft guest handshake attempts", () => {
     ));
     sessionState.sessions[1]!.handler!({
       type: "draft_deck_submit_ack", submissionId: command.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await submitted;
   });
@@ -315,7 +315,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "new-token", seatIndex: 2, draftCode: "new-pod",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     await vi.waitFor(() => expect(persistenceState.loadDraftDeckSubmission).toHaveBeenCalledWith(
@@ -354,7 +354,7 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await Promise.resolve();
 
@@ -390,7 +390,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
     });
     await handshake;
 
@@ -426,7 +426,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
     });
     await handshake;
 
@@ -472,7 +472,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
     });
     await handshake;
     persistenceState.clearDraftGuestRecovery.mockClear();
@@ -504,7 +504,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
     });
     await handshake;
 
@@ -535,7 +535,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
     });
     await handshake;
     persistenceState.clearDraftGuestRecovery.mockRejectedValueOnce(new Error("storage unavailable"));
@@ -606,7 +606,7 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
 
     await expect(handshake).rejects.toThrow("IDB unavailable");

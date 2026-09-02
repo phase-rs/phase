@@ -92,7 +92,7 @@ describe("DraftAdapter engine coordinator", () => {
     await adapter.submitPickForSeat(2, ["first", "second"]);
     await adapter.submitDeck(["Island"], ["Commander"]);
     await adapter.submitDeckForSeat(2, ["Island"], ["Commander"]);
-    const procedure = await adapter.draftProcedure("CommanderDraft");
+    const procedure = await adapter.draftProcedure("CommanderDraft", "Swiss");
 
     expect(wasm.create_multiplayer_draft).toHaveBeenCalledWith(
       JSON.stringify({ type: "Set", data: { set_pool_json: "{}" } }),
@@ -103,10 +103,10 @@ describe("DraftAdapter engine coordinator", () => {
       "Swiss",
       "Competitive",
     );
+    expect(wasm.draft_procedure).toHaveBeenCalledWith(4, "Swiss");
     expect(wasm.submit_pick_for_seat).toHaveBeenCalledWith(2, '["first","second"]');
     expect(wasm.submit_deck).toHaveBeenCalledWith('["Island"]', '["Commander"]');
     expect(wasm.submit_deck_for_seat).toHaveBeenCalledWith(2, '["Island"]', '["Commander"]');
-    expect(wasm.draft_procedure).toHaveBeenCalledWith(4);
     expect(procedure.pick_selection_mode).toBe("Ordered");
   });
 

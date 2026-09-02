@@ -45,11 +45,12 @@ pub const MAX_DRAFT_SET_CODE_LEN: usize = 32;
 ///
 /// Not one set code: a multi-set draft joins its distinct set codes with `+`
 /// into a single label (`draft_core::types::DraftSource::set_code`, e.g.
-/// `"ISD+DKA+AVR"`), so a listing may name one code per pack the event opens.
-/// The multiplier is `draft_core`'s `MAX_PACK_COUNT`, inlined because the
-/// broker deliberately carries no draft-core dependency — it validates the
-/// shape of a listing, never the rules of a draft.
-pub const MAX_DRAFT_SET_LABEL_LEN: usize = 8 * (MAX_DRAFT_SET_CODE_LEN + 1);
+/// `"ISD+DKA+AVR"`), while a Chaos listing prefixes its candidate intent with
+/// `"Chaos:"` so it never exposes the private resolved assignment union. The
+/// multiplier is `draft_core`'s `MAX_PACK_COUNT`, inlined because the broker
+/// deliberately carries no draft-core dependency — it validates the shape of
+/// a listing, never the rules of a draft.
+pub const MAX_DRAFT_SET_LABEL_LEN: usize = 6 + 8 * (MAX_DRAFT_SET_CODE_LEN + 1);
 /// Max draft kind label length, in bytes.
 pub const MAX_DRAFT_KIND_LEN: usize = 32;
 

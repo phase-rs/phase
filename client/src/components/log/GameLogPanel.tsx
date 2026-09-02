@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { LOG_CATEGORIES, type GameLogEntry, type LogCategory } from "../../adapter/types.ts";
 import { useDraggableWidget } from "../../hooks/useDraggableWidget.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -56,12 +57,16 @@ export function GameLogPanel() {
   const { t } = useTranslation("game");
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const logDockSide = usePreferencesStore((s) => s.logDockSide);
+  const setLogDockSide = usePreferencesStore((s) => s.setLogDockSide);
   const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
   const isOpen = useUiStore((s) => s.logPanelOpen);
   const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const inspectObjectSticky = useUiStore((s) => s.inspectObjectSticky);
   const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
   const reduceMotion = useReducedMotion();
+  const isMobile = useIsMobile();
+  const dockedLeft = !isMobile && logDockSide === "left";
 
   const [view, setView] = useState<LogView>("timeline");
   const [searchQuery, setSearchQuery] = useState("");
@@ -201,9 +206,19 @@ export function GameLogPanel() {
 
   useEffect(() => {
     const root = document.documentElement;
-    root.style.setProperty("--game-right-rail-offset", isOpen ? `${LOG_PANEL_WIDTH_PX}px` : "0px");
-    return () => root.style.setProperty("--game-right-rail-offset", "0px");
-  }, [isOpen]);
+    root.style.setProperty(
+      "--game-right-rail-offset",
+      isOpen && !isMobile && !dockedLeft ? `${LOG_PANEL_WIDTH_PX}px` : "0px",
+    );
+    root.style.setProperty(
+      "--game-left-rail-offset",
+      isOpen && !isMobile && dockedLeft ? `${LOG_PANEL_WIDTH_PX}px` : "0px",
+    );
+    return () => {
+      root.style.setProperty("--game-right-rail-offset", "0px");
+      root.style.setProperty("--game-left-rail-offset", "0px");
+    };
+  }, [dockedLeft, isMobile, isOpen]);
 
   const toggleCategory = (category: LogCategory) => {
     setCategoryFilter((previous) => {
@@ -266,7 +281,7 @@ export function GameLogPanel() {
           onDragStart={logDrag.onDragStart}
           onDragEnd={logDrag.onDragEnd}
           onClickCapture={logDrag.onClickCapture}
-          className={`fixed bottom-0 right-0 top-0 z-[60] flex w-[min(20rem,100vw)] flex-col border-l border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl ${logDrag.drag ? "cursor-grab active:cursor-grabbing" : ""}`}
+          className={`fixed bottom-0 top-0 z-[60] flex w-[min(20rem,100vw)] flex-col bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl ${dockedLeft ? "left-0 border-r border-gray-700" : "right-0 border-l border-gray-700"} ${logDrag.drag ? "cursor-grab active:cursor-grabbing" : ""}`}
           style={logDrag.style}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -276,6 +291,13 @@ export function GameLogPanel() {
           <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">{t("log.title")}</h3>
             <div className="flex items-center gap-1">
+              {!isMobile && (
+                <button type="button" onClick={() => setLogDockSide(dockedLeft ? "right" : "left")} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t(dockedLeft ? "log.dockRight" : "log.dockLeft")} title={t(dockedLeft ? "log.dockRight" : "log.dockLeft")}>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-9L21 3m0 0-4.5 4.5M21 3H7.5" />
+                  </svg>
+                </button>
+              )}
               <button type="button" onClick={() => void handleCopy()} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.copyFiltered", { count: filteredEntries.length })}>{t("log.copy")}</button>
               <button type="button" onClick={handleExport} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.exportFiltered", { count: filteredEntries.length })}>{t("log.export")}</button>
               <button type="button" onClick={closeIfAllowed} disabled={logDrag.drag} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40" aria-label={t("log.closeLog")}>×</button>
@@ -309,7 +331,7 @@ export function GameLogPanel() {
           </div>
 
           <div ref={scrollRef} role="region" tabIndex={0} aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
-            {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObject={inspectObject} /> : <div key={`divider-${row.divider.seq}`} className="my-2 border-y border-gray-700 py-1 text-center text-[9px] font-semibold uppercase tracking-wide text-gray-500">{row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
+            {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObjectSticky={inspectObjectSticky} /> : <div key={`divider-${row.divider.seq}`} className="my-2 border-y border-gray-700 py-1 text-center text-[9px] font-semibold uppercase tracking-wide text-gray-500">{row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
           </div>
           {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>
