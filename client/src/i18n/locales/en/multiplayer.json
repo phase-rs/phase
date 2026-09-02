@@ -118,11 +118,14 @@
     "anonymous": "Anonymous",
     "by": "by {{name}}",
     "passwordProtected": "Password protected",
-    "join": "Join"
+    "join": "Join",
+    "originTitle": "Listed by {{name}} {{kind}}",
+    "kindFull": "(game server)",
+    "kindLobbyOnly": "(lobby broker)"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Pick a region, or connect to a self-hosted instance.",
+    "subtitle": "Choose where you host, and which lobbies you browse.",
     "noneLabel": "None (P2P only)",
     "directCodes": "direct codes",
     "official": "Official",
@@ -133,7 +136,18 @@
     "urlError": "URL must start with ws:// or wss://",
     "connected": "Connected",
     "connectionFailed": "Connection failed",
-    "testing": "Testing…"
+    "testing": "Testing…",
+    "hostingServer": "Hosting server",
+    "hostingServerHelp": "Where the games you host are created and registered.",
+    "sources": "Lobby sources",
+    "sourcesHelp": "Open tables from every source below are merged into one list.",
+    "addSource": "Add a source",
+    "remove": "Remove",
+    "useForHosting": "Use for hosting",
+    "sourceStatusConnecting": "Connecting…",
+    "sourceStatusDegraded": "Unreachable",
+    "sourceDuplicate": "That server is already a lobby source.",
+    "sourceCapReached": "Up to {{max}} sources can be added."
   },
   "lobbyDraftRooms": {
     "noRooms": "No draft rooms available",
@@ -183,7 +197,9 @@
     "hostGame": "Host Game",
     "hostP2PGame": "Host P2P Game",
     "passwordRequired": "Password Required",
-    "passwordPlaceholder": "Enter password"
+    "passwordPlaceholder": "Enter password",
+    "sourcesDegraded": "Some lobby sources are unreachable",
+    "invalidJoinServer": "That join code's server address isn't valid."
   },
   "hostSetup": {
     "hostDirectMatch": "Host Direct Match",
@@ -260,7 +276,8 @@
     "noDeckWarning": "No deck selected — you'll need to pick one before hosting.",
     "pickDeck": "Pick Deck",
     "anonymous": "Anonymous",
-    "joining": "Joining"
+    "joining": "Joining",
+    "joinNeedsServer": "Pick a server before joining a game."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft Pod",

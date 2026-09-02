@@ -14,8 +14,14 @@ const mocks = vi.hoisted(() => ({
     roomCode: null as string | null,
     hostDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
   },
+  // Shaped like the real store's source model: `configuredBackupEndpoint`
+  // reads `hostingServer`, so a mock still carrying `serverAddress` would
+  // feed it `undefined` and the assertions below would pass for the wrong
+  // reason.
   multiplayerConfig: {
-    serverAddress: "wss://phase.example/ws",
+    hostingServer: "wss://phase.example/ws" as string | null,
+    userLobbySources: [],
+    sourceStatus: new Map(),
   },
 }));
 
@@ -105,7 +111,7 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
     mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
-    mocks.multiplayerConfig.serverAddress = "wss://phase.example/ws";
+    mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
     mocks.persistedDraftHostSessionState.mockReturnValue("live");
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",

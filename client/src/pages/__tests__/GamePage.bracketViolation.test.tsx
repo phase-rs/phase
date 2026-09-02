@@ -20,7 +20,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
@@ -44,6 +44,8 @@ let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | 
 let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
+// The join/spectate origin the route carried, handed down as a provider prop.
+let capturedServerUrl: string | undefined;
 
 const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
   mockClearPromptOverlayState: vi.fn(),
@@ -105,17 +107,20 @@ vi.mock("../../providers/GameProvider", () => ({
     onWsEvent,
     onP2PEvent,
     formatConfig,
+    serverUrl,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
     onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
+    serverUrl?: string;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
+    capturedServerUrl = serverUrl;
     return <>{children}</>;
   },
 }));
@@ -321,6 +326,13 @@ vi.mock("../../hooks/useCardDataMeta", () => ({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Renders whatever router state the deck-rejected re-entry navigated with,
+ * so a dropped field is visible rather than inferred. */
+function MultiplayerStub() {
+  const { state } = useLocation();
+  return <div data-testid="multiplayer-stub">{JSON.stringify(state)}</div>;
+}
+
 function gamePageTree(
   initialEntry: string | { pathname: string; search: string; state: unknown } =
     "/game/test-game-123?mode=ai",
@@ -330,6 +342,7 @@ function gamePageTree(
       <Routes>
         <Route path="/game/:id" element={<GamePage />} />
         <Route path="/setup" element={<div data-testid="setup-page">Setup</div>} />
+        <Route path="/multiplayer" element={<MultiplayerStub />} />
         <Route path="/" element={<div>Home</div>} />
       </Routes>
     </MemoryRouter>
@@ -376,6 +389,7 @@ beforeEach(() => {
   capturedFormatConfig = undefined;
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
+  capturedServerUrl = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
@@ -1312,5 +1326,47 @@ describe("GamePage — rematch preserves the format the game was played with", (
     // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
     // as `undefined` here rather than as the real 40.
     expect(capturedFormatConfig?.starting_life).toBe(25);
+  });
+});
+
+describe("GamePage — join origin", () => {
+  const ORIGIN = "wss://play.example.com/ws";
+
+  it("passes the route's server to GameProvider and carries it through deck rejection", async () => {
+    renderGamePage(
+      `/game/g1?mode=join&code=ABC123&server=${encodeURIComponent(ORIGIN)}`,
+    );
+
+    expect(capturedServerUrl).toBe(ORIGIN);
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+      server: ORIGIN,
+    });
+  });
+
+  it("carries no server when the route had none", async () => {
+    renderGamePage("/game/g1?mode=join&code=ABC123");
+
+    expect(capturedServerUrl).toBeUndefined();
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    // Paired with the case above: the field is absent, not stale.
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+    });
   });
 });

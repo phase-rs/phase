@@ -52,9 +52,15 @@ export function isValidWebSocketUrl(value: string): boolean {
 }
 
 /**
- * The server a game socket must open on: the address the player chose — server
- * picker, or the host carried in a `CODE@host` join code — falling back to this
- * build's default when nothing valid is stored.
+ * The fallback server a socket opens on when the caller carries no explicit
+ * origin: the hosting server the player chose in the server picker, falling
+ * back to this build's default when none is chosen or the stored value is
+ * unusable.
+ *
+ * A join or spectate origin is NOT read from here — it is carried explicitly
+ * by the route (`?server=`) from the source that listed the game, so browsing
+ * one authority and joining another cannot silently switch the player's
+ * hosting target.
  *
  * Reachability is deliberately not consulted. The desktop shell reaches its own
  * native engine over a Tauri IPC bridge (`services/nativeEngineSocket.ts`) on an
@@ -64,8 +70,8 @@ export function isValidWebSocketUrl(value: string): boolean {
  * Stays `async` for its awaiting callers; there is nothing left to wait for.
  */
 export async function detectServerUrl(): Promise<string> {
-  const stored = useMultiplayerStore.getState().serverAddress;
-  return isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
+  const stored = useMultiplayerStore.getState().hostingServer;
+  return stored !== null && isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
 }
 
 /**

@@ -118,11 +118,14 @@
     "anonymous": "Anônimo",
     "by": "por {{name}}",
     "passwordProtected": "Protegido por senha",
-    "join": "Entrar"
+    "join": "Entrar",
+    "originTitle": "Listada por {{name}} {{kind}}",
+    "kindFull": "(servidor de jogo)",
+    "kindLobbyOnly": "(intermediário de sala)"
   },
   "serverPicker": {
     "title": "Servidor",
-    "subtitle": "Escolha uma região ou conecte-se a uma instância auto-hospedada.",
+    "subtitle": "Escolha onde você hospeda e quais salas você navega.",
     "noneLabel": "Nenhum (apenas P2P)",
     "directCodes": "códigos diretos",
     "official": "Oficial",
@@ -133,7 +136,18 @@
     "urlError": "A URL deve começar com ws:// ou wss://",
     "connected": "Conectado",
     "connectionFailed": "Falha na conexão",
-    "testing": "Testando…"
+    "testing": "Testando…",
+    "hostingServer": "Servidor de hospedagem",
+    "hostingServerHelp": "Onde os jogos que você hospeda são criados e registrados.",
+    "sources": "Fontes de sala",
+    "sourcesHelp": "As mesas abertas de todas as fontes abaixo são reunidas em uma única lista.",
+    "addSource": "Adicionar uma fonte",
+    "remove": "Remover",
+    "useForHosting": "Usar para hospedar",
+    "sourceStatusConnecting": "Conectando…",
+    "sourceStatusDegraded": "Inacessível",
+    "sourceDuplicate": "Esse servidor já é uma fonte de sala.",
+    "sourceCapReached": "É possível adicionar até {{max}} fontes."
   },
   "lobbyDraftRooms": {
     "noRooms": "Nenhuma sala de draft disponível",
@@ -183,7 +197,9 @@
     "hostP2PGame": "Hospedar Jogo P2P",
     "passwordRequired": "Senha Necessária",
     "passwordPlaceholder": "Insira a senha",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Algumas fontes de sala estão inacessíveis",
+    "invalidJoinServer": "O endereço de servidor desse código não é válido."
   },
   "hostSetup": {
     "hostDirectMatch": "Hospedar Partida Direta",
@@ -260,7 +276,8 @@
     "noDeckWarning": "Nenhum deck selecionado — você precisará escolher um antes de hospedar.",
     "pickDeck": "Escolher Deck",
     "anonymous": "Anônimo",
-    "joining": "Entrando"
+    "joining": "Entrando",
+    "joinNeedsServer": "Escolha um servidor antes de entrar em um jogo."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de Draft",

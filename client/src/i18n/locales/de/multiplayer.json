@@ -118,11 +118,14 @@
     "anonymous": "Anonym",
     "by": "von {{name}}",
     "passwordProtected": "Passwortgeschützt",
-    "join": "Beitreten"
+    "join": "Beitreten",
+    "originTitle": "Gelistet von {{name}} {{kind}}",
+    "kindFull": "(Spielserver)",
+    "kindLobbyOnly": "(Lobby-Broker)"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Wähle eine Region oder verbinde dich mit einer selbst gehosteten Instanz.",
+    "subtitle": "Wähle, wo du hostest und welche Lobbys du durchsuchst.",
     "noneLabel": "Keiner (nur P2P)",
     "directCodes": "direkte Codes",
     "official": "Offiziell",
@@ -133,7 +136,18 @@
     "urlError": "Die URL muss mit ws:// oder wss:// beginnen",
     "connected": "Verbunden",
     "connectionFailed": "Verbindung fehlgeschlagen",
-    "testing": "Wird getestet…"
+    "testing": "Wird getestet…",
+    "hostingServer": "Host-Server",
+    "hostingServerHelp": "Wo die von dir gehosteten Spiele erstellt und registriert werden.",
+    "sources": "Lobby-Quellen",
+    "sourcesHelp": "Offene Tische aller Quellen unten werden zu einer Liste zusammengeführt.",
+    "addSource": "Quelle hinzufügen",
+    "remove": "Entfernen",
+    "useForHosting": "Zum Hosten verwenden",
+    "sourceStatusConnecting": "Verbinde…",
+    "sourceStatusDegraded": "Nicht erreichbar",
+    "sourceDuplicate": "Dieser Server ist bereits eine Lobby-Quelle.",
+    "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden."
   },
   "lobbyDraftRooms": {
     "noRooms": "Keine Draft-Räume verfügbar",
@@ -183,7 +197,9 @@
     "hostP2PGame": "P2P-Spiel hosten",
     "passwordRequired": "Passwort erforderlich",
     "passwordPlaceholder": "Passwort eingeben",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Einige Lobby-Quellen sind nicht erreichbar",
+    "invalidJoinServer": "Die Serveradresse in diesem Beitrittscode ist ungültig."
   },
   "hostSetup": {
     "hostDirectMatch": "Direkte Partie hosten",
@@ -260,7 +276,8 @@
     "noDeckWarning": "Kein Deck ausgewählt — du musst vor dem Hosten eines auswählen.",
     "pickDeck": "Deck wählen",
     "anonymous": "Anonym",
-    "joining": "Tritt bei"
+    "joining": "Tritt bei",
+    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft-Pod",

@@ -524,6 +524,12 @@ export interface GameProviderProps {
   roomName?: string;
   source?: string;
   draftId?: string;
+  /**
+   * The lobby authority this join or spectate was launched from, carried by
+   * the route (`/game?...&server=`). Absent for flows with no explicit
+   * origin, which fall back to the hosting server via `detectServerUrl()`.
+   */
+  serverUrl?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -551,6 +557,7 @@ export function GameProvider({
   roomName,
   source,
   draftId,
+  serverUrl: originUrl,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -1181,7 +1188,15 @@ export function GameProvider({
             return;
           }
         }
-        const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
+        // Origin precedence: an explicit build override wins; then the
+        // server a resumable session was recorded on (that server holds the
+        // session); then the origin the route carried; and only with none of
+        // those, this client's hosting server.
+        const serverUrl =
+          import.meta.env.VITE_WS_URL
+          ?? reconnectSession?.serverUrl
+          ?? originUrl
+          ?? await detectServerUrl();
         if (cancelled) return;
 
         wsAdapter = new WebSocketAdapter(
@@ -1869,7 +1884,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

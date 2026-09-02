@@ -42,7 +42,8 @@ export type HostedPodResumeOutcome = "resumed" | "absent" | "terminal" | "invali
 
 /** The backup API is served beside the selected phase-server's WebSocket API. */
 function configuredBackupEndpoint(): string | undefined {
-  const server = parseWebSocketUrl(useMultiplayerStore.getState().serverAddress);
+  const hosting = useMultiplayerStore.getState().hostingServer;
+  const server = hosting === null ? null : parseWebSocketUrl(hosting);
   if (!server) return undefined;
   server.protocol = server.protocol === "wss:" ? "https:" : "http:";
   return server.origin;

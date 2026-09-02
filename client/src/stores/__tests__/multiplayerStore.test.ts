@@ -29,14 +29,25 @@ import type { PlayerSlot } from "../../multiplayer/seatTypes";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
+  MAX_USER_LOBBY_SOURCES,
+  adHocLobbySource,
+  compareLobbyGameEntries,
+  findLobbyGameByCode,
   isServerCompatible,
   migrateLegacyLoopDetectionOn,
   migrateOfficialServerAddress,
   migratePersistedMultiplayerState,
+  migrateServerAddressToSources,
   normalizeRememberedHostConfig,
+  normalizeUserLobbySources,
+  userLobbySource,
   type HostingSettings,
+  type LobbyGameEntry,
+  type LobbySource,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import { SERVER_PRESETS } from "../../services/serverDetection";
+import type { LobbyGame } from "../../adapter/types";
 import {
   LOBBY_PROTOCOL_VERSION,
   MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
@@ -50,7 +61,7 @@ import {
   loadWsSession,
   saveWsSession,
 } from "../../services/multiplayerSession";
-import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import { HandshakeError, openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -63,6 +74,14 @@ const p2pMocks = vi.hoisted(() => ({
 }));
 
 const brokerMocks = vi.hoisted(() => ({
+  /** Lobby-update callbacks the store registered, keyed by the URL of the
+   * socket they were attached to. A URL missing from this map has no lobby
+   * listener at all — which is how an ad-hoc join-origin channel is
+   * distinguished from a browsed source. */
+  lobbyUpdaters: new Map<string, (games: unknown[]) => void>(),
+  subscribeLobbyOver: vi.fn(),
+  lookupJoinTargetOver: vi.fn(),
+  resolveGuestOver: vi.fn(),
   openBrokerClient: vi.fn(),
   registerHost: vi.fn(async () => ({
     gameCode: "ABCDE",
@@ -110,13 +129,17 @@ vi.mock("../../adapter/p2p-adapter", () => ({
 
 vi.mock("../../services/brokerClient", () => ({
   openBrokerClient: brokerMocks.openBrokerClient,
+  subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
+  lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
+  resolveGuestOver: brokerMocks.resolveGuestOver,
 }));
 
 vi.mock("../../services/openPhaseSocket", () => ({
+  // Argument order mirrors the production class: `(kind, message)`.
   HandshakeError: class HandshakeError extends Error {
     kind: string;
 
-    constructor(message: string, kind: string) {
+    constructor(kind: string, message: string) {
       super(message);
       this.kind = kind;
     }
@@ -163,10 +186,75 @@ function emitServerMessage(type: string, data?: unknown): void {
   } as MessageEvent);
 }
 
+/** A fake `PhaseSocket` that remembers the URL it was opened on, so the
+ * `subscribeLobbyOver` mock can key its listeners per source. */
+function fakeSocket(url: string, mode: ServerInfo["mode"] = "Full") {
+  return {
+    url,
+    serverInfo: {
+      version: "test",
+      buildCommit: "test",
+      mode,
+      protocolVersion: PROTOCOL_VERSION,
+      lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+    },
+    ws: {
+      readyState: 1,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      send: vi.fn(),
+    },
+    close: vi.fn(),
+  };
+}
+
+/**
+ * Drive `withReconnect` the way the real one does: notify from an async
+ * continuation (so the store has stored the handle before `current()` is
+ * read), `"open"` when the factory resolves and `"offline"` when it has
+ * exhausted its attempts.
+ */
+function driveReconnect(): void {
+  vi.mocked(withReconnect).mockImplementation((factory, opts) => {
+    let current: Awaited<ReturnType<typeof factory>> | null = null;
+    void (async () => {
+      try {
+        current = await factory(0);
+        opts?.onStateChange?.("open");
+      } catch {
+        opts?.onStateChange?.("offline");
+      }
+    })();
+    return { current: () => current, close: vi.fn() };
+  });
+}
+
+function lobbyGame(overrides: Partial<LobbyGame> & { game_code: string }): LobbyGame {
+  return {
+    host_name: "Alice",
+    created_at: 1_700_000_000,
+    has_password: false,
+    ...overrides,
+  };
+}
+
+const PRESET_URL = SERVER_PRESETS[0].url;
+
 describe("multiplayerStore", () => {
   beforeEach(() => {
     useMultiplayerStore.getState().cancelHosting();
+    useMultiplayerStore.getState().closeSubscriptionSocket();
     vi.clearAllMocks();
+    brokerMocks.lobbyUpdaters.clear();
+    brokerMocks.subscribeLobbyOver.mockImplementation(
+      (socket: unknown, onUpdate: (games: unknown[]) => void) => {
+        const { url } = socket as { url: string };
+        brokerMocks.lobbyUpdaters.set(url, onUpdate);
+        return () => {
+          brokerMocks.lobbyUpdaters.delete(url);
+        };
+      },
+    );
     brokerMocks.openBrokerClient.mockResolvedValue({
       serverInfo: { mode: "LobbyOnly", protocolVersion: 14 },
       registerHost: brokerMocks.registerHost,
@@ -182,7 +270,9 @@ describe("multiplayerStore", () => {
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
-      serverAddress: "ws://localhost:8787",
+      hostingServer: "ws://localhost:8787",
+      userLobbySources: [],
+      sourceStatus: new Map(),
     });
   });
 
@@ -274,7 +364,9 @@ describe("multiplayerStore", () => {
       socket as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
     );
 
-    const opened = await useMultiplayerStore.getState().ensureSubscriptionSocket();
+    const opened = await useMultiplayerStore
+      .getState()
+      .ensureSubscriptionSocket("ws://localhost:8787");
 
     expect(opened).toBe(socket);
     expect(openPhaseSocket).toHaveBeenCalledWith(
@@ -357,13 +449,19 @@ describe("multiplayerStore", () => {
     ).toBe("wss://lobby.phase-rs.dev/ws");
   });
 
+  // Both the v3 remap and the v6 source split run on an old blob, in that
+  // order: the address is repointed at this channel's broker first, and the
+  // result is an official address, so it yields no user source.
   it("re-runs the official-address migration for v2 stores (v2 -> v3)", () => {
     expect(
       migratePersistedMultiplayerState(
         { serverAddress: "wss://lobby.phase-rs.dev/ws" },
         2,
       ),
-    ).toEqual({ serverAddress: DEFAULT_MULTIPLAYER_SERVER_URL });
+    ).toEqual({
+      hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL,
+      userLobbySources: [],
+    });
   });
 
   it("leaves a user-typed address alone across the v3 migration", () => {
@@ -372,16 +470,107 @@ describe("multiplayerStore", () => {
         { serverAddress: "wss://play.example.com/ws" },
         2,
       ),
-    ).toEqual({ serverAddress: "wss://play.example.com/ws" });
+    ).toEqual({
+      hostingServer: "wss://play.example.com/ws",
+      userLobbySources: [
+        { url: "wss://play.example.com/ws", name: "play.example.com", origin: "user" },
+      ],
+    });
   });
 
-  it("does not re-migrate a store already at v3", () => {
+  it("does not re-run the official-address remap for a v3 store", () => {
     expect(
       migratePersistedMultiplayerState(
         { serverAddress: "wss://lobby.phase-rs.dev/ws" },
         3,
       ),
-    ).toEqual({ serverAddress: "wss://lobby.phase-rs.dev/ws" });
+    ).toEqual({
+      hostingServer: "wss://lobby.phase-rs.dev/ws",
+      userLobbySources: [],
+    });
+  });
+
+  // v5 -> v6: the single address splits into "where I host" plus "what I
+  // browse". A hand-typed address is both; a built-in one is only the first,
+  // because it is already derived as a preset source every session.
+  it("migrates a custom v5 serverAddress into hostingServer plus one user source", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://play.example.com/ws", displayName: "Tester" },
+        5,
+      ),
+    ).toEqual({
+      displayName: "Tester",
+      hostingServer: "wss://play.example.com/ws",
+      userLobbySources: [
+        { url: "wss://play.example.com/ws", name: "play.example.com", origin: "user" },
+      ],
+    });
+  });
+
+  it("migrates an official v5 serverAddress without adding a user source", () => {
+    expect(migrateServerAddressToSources("wss://lobby.phase-rs.dev/ws")).toEqual({
+      hostingServer: "wss://lobby.phase-rs.dev/ws",
+      userLobbySources: [],
+    });
+    expect(migrateServerAddressToSources(DEFAULT_MULTIPLAYER_SERVER_URL)).toEqual({
+      hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL,
+      userLobbySources: [],
+    });
+  });
+
+  it("migrates the None sentinel to a null hosting server", () => {
+    expect(migrateServerAddressToSources("")).toEqual({
+      hostingServer: null,
+      userLobbySources: [],
+    });
+  });
+
+  it("migrates a malformed stored address to this build's default", () => {
+    expect(migrateServerAddressToSources("wss:")).toEqual({
+      hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL,
+      userLobbySources: [],
+    });
+    expect(migrateServerAddressToSources(undefined)).toEqual({
+      hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL,
+      userLobbySources: [],
+    });
+  });
+
+  it("does not re-migrate a store already at v6", () => {
+    const blob = {
+      hostingServer: "wss://play.example.com/ws",
+      userLobbySources: [
+        { url: "wss://play.example.com/ws", name: "play.example.com", origin: "user" },
+      ],
+    };
+    expect(migratePersistedMultiplayerState(blob, 6)).toEqual(blob);
+  });
+
+  it("drops malformed persisted user sources on hydration", () => {
+    const normalized = normalizeUserLobbySources([
+      { url: "wss://keep.example/ws", name: "keep.example", origin: "user" },
+      // Not a user entry: presets are rebuilt per session, never hydrated.
+      { url: "wss://lobby.phase-rs.dev/ws", name: "lobby.phase-rs.dev", origin: "official" },
+      { url: "not a url", name: "junk", origin: "user" },
+      { url: "wss://keep.example/ws", name: "dupe", origin: "user" },
+      "nonsense",
+    ]);
+
+    expect(normalized).toEqual([
+      { url: "wss://keep.example/ws", name: "keep.example", origin: "user" },
+    ]);
+  });
+
+  it("trims a hydrated blob to the same cap the add path enforces", () => {
+    const persisted = Array.from({ length: MAX_USER_LOBBY_SOURCES + 1 }, (_, i) => ({
+      url: `wss://s${i}.example/ws`,
+      name: `s${i}.example`,
+      origin: "user",
+    }));
+
+    expect(normalizeUserLobbySources(persisted)).toHaveLength(MAX_USER_LOBBY_SOURCES);
+    expect(normalizeUserLobbySources("not an array")).toEqual([]);
   });
 
   it("forwards a legacy 'On' loop-detection choice to Interactive", () => {
@@ -1036,4 +1225,218 @@ describe("multiplayerStore", () => {
       useMultiplayerStore.getState().seatMutateAsync({ type: "Start" }),
     ).rejects.toThrow("Host connection is not active.");
   });
+
+  // ── Multi-source subscription channels ──────────────────────────────────
+
+  it("keeps the healthy source's lobby when another source's handshake fails", async () => {
+    const A = "wss://a.example/ws";
+    const B = "wss://b.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: PRESET_URL,
+      userLobbySources: [
+        { url: A, name: "a.example", origin: "user" },
+        { url: B, name: "b.example", origin: "user" },
+      ],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(async (url: string) => {
+      if (url === B) {
+        throw new HandshakeError("ws_error", "connection refused");
+      }
+      return fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
+    });
+
+    const seen: { url: string; codes: string[] }[] = [];
+    const detach = await useMultiplayerStore
+      .getState()
+      .subscribeLobby((games, source) => {
+        seen.push({ url: source.url, codes: games.map((g) => g.game_code) });
+      });
+
+    // A degraded source must not take the lobby down with it.
+    expect(detach).not.toBeNull();
+    brokerMocks.lobbyUpdaters.get(A)?.([lobbyGame({ game_code: "AAA11" })]);
+
+    // Reach-guard: the healthy source's snapshot actually arrived, tagged
+    // with the source that listed it — the assertion is not vacuous on an
+    // empty fan-out.
+    expect(seen).toContainEqual({ url: A, codes: ["AAA11"] });
+    expect(useMultiplayerStore.getState().sourceStatus.get(B)?.state).toBe("offline");
+    expect(useMultiplayerStore.getState().sourceStatus.get(A)?.state).toBe("open");
+    detach?.();
+  });
+
+  it("reports the lobby offline only when every source fails", async () => {
+    useMultiplayerStore.setState({
+      userLobbySources: [{ url: "wss://a.example/ws", name: "a.example", origin: "user" }],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(async () => {
+      throw new HandshakeError("ws_error", "connection refused");
+    });
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+
+    expect(detach).toBeNull();
+  });
+
+  it("only counts user entries against the source cap", () => {
+    driveReconnect();
+    const store = useMultiplayerStore.getState();
+    for (let i = 0; i < MAX_USER_LOBBY_SOURCES; i++) {
+      expect(store.addUserLobbySource(`wss://s${i}.example/ws`).ok).toBe(true);
+    }
+    // Reach-guard above: the cap is reached by user entries alone, whatever
+    // `SERVER_PRESETS.length` happens to be on this build.
+    expect(useMultiplayerStore.getState().userLobbySources).toHaveLength(
+      MAX_USER_LOBBY_SOURCES,
+    );
+    expect(store.addUserLobbySource("wss://one-too-many.example/ws")).toEqual({
+      ok: false,
+      reason: "cap_reached",
+    });
+  });
+
+  it("refuses a preset URL and a malformed URL as user sources", () => {
+    const store = useMultiplayerStore.getState();
+
+    expect(store.addUserLobbySource(PRESET_URL)).toEqual({
+      ok: false,
+      reason: "duplicate",
+    });
+    expect(store.addUserLobbySource("http://not-a-socket.example")).toEqual({
+      ok: false,
+      reason: "invalid_url",
+    });
+    expect(useMultiplayerStore.getState().userLobbySources).toEqual([]);
+  });
+
+  it("removes only the named user source", () => {
+    const store = useMultiplayerStore.getState();
+    store.addUserLobbySource("wss://a.example/ws");
+    store.addUserLobbySource("wss://b.example/ws");
+
+    store.removeUserLobbySource("wss://a.example/ws");
+
+    expect(useMultiplayerStore.getState().userLobbySources.map((s) => s.url)).toEqual([
+      "wss://b.example/ws",
+    ]);
+  });
+
+  it("finds a code in a non-hosting source's snapshot with its source", async () => {
+    const A = "wss://a.example/ws";
+    const B = "wss://b.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: A,
+      userLobbySources: [
+        { url: A, name: "a.example", origin: "user" },
+        { url: B, name: "b.example", origin: "user" },
+      ],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    brokerMocks.lobbyUpdaters.get(A)?.([lobbyGame({ game_code: "ONA11" })]);
+    brokerMocks.lobbyUpdaters.get(B)?.([lobbyGame({ game_code: "ONB22" })]);
+
+    expect(findLobbyGameByCode("onb22")?.source.url).toBe(B);
+    expect(findLobbyGameByCode("ona11")?.source.url).toBe(A);
+    expect(findLobbyGameByCode("NOPE9")).toBeUndefined();
+    detach?.();
+  });
+
+  it("does not list games from a join-origin socket", async () => {
+    const A = "wss://a.example/ws";
+    const AD_HOC = "wss://adhoc.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: A,
+      userLobbySources: [{ url: A, name: "a.example", origin: "user" }],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    brokerMocks.lookupJoinTargetOver.mockResolvedValue({
+      ok: true,
+      info: { is_p2p: false, format_config: null },
+    });
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    const origin = adHocLobbySource(AD_HOC) as LobbySource;
+    await useMultiplayerStore.getState().lookupJoinTarget("ABC123", origin);
+
+    // The ad-hoc channel never gets a lobby listener attached, so no frame on
+    // it can reach a subscriber; the browsed source's channel does have one.
+    // (Paired positive below — a bare `not.toHaveBeenCalled` here would pass
+    // even if fan-out were broken everywhere.)
+    expect(brokerMocks.lobbyUpdaters.has(AD_HOC)).toBe(false);
+    expect(brokerMocks.lobbyUpdaters.has(A)).toBe(true);
+    // The RPC's channel is closed once it settles: no lingering reconnect
+    // loop and no status row for a server nobody browses.
+    expect(useMultiplayerStore.getState().sourceStatus.has(AD_HOC)).toBe(false);
+    detach?.();
+  });
+
+  // ── Merged-list ordering ────────────────────────────────────────────────
+
+  it("orders official rows first, then by score, then by wait time", () => {
+    const official: LobbySource = { url: PRESET_URL, name: "official", origin: "official" };
+    const scored: LobbySource = { url: "wss://s.example/ws", name: "s", origin: "user", score: 70 };
+    const unscored: LobbySource = { url: "wss://u.example/ws", name: "u", origin: "user" };
+    const zero: LobbySource = { url: "wss://z.example/ws", name: "z", origin: "user", score: 0 };
+
+    const entry = (source: LobbySource, createdAt: number, code: string): LobbyGameEntry => ({
+      game: lobbyGame({ game_code: code, created_at: createdAt }),
+      source,
+    });
+
+    const ordered = [
+      entry(unscored, 100, "UNSC1"),
+      entry(scored, 300, "SCOR1"),
+      entry(official, 400, "OFFI1"),
+      entry(zero, 200, "ZERO1"),
+    ]
+      .sort(compareLobbyGameEntries)
+      .map((e) => e.game.game_code);
+
+    // Official first despite being newest; then score descending with an
+    // absent score ranking below an explicit 0.
+    expect(ordered).toEqual(["OFFI1", "SCOR1", "ZERO1", "UNSC1"]);
+  });
+
+  it("breaks ties on the longest-waiting table", () => {
+    const source: LobbySource = { url: "wss://s.example/ws", name: "s", origin: "user" };
+    const older: LobbyGameEntry = {
+      game: lobbyGame({ game_code: "OLD11", created_at: 10 }),
+      source,
+    };
+    const newer: LobbyGameEntry = {
+      game: lobbyGame({ game_code: "NEW11", created_at: 20 }),
+      source,
+    };
+
+    expect([newer, older].sort(compareLobbyGameEntries).map((e) => e.game.game_code)).toEqual([
+      "OLD11",
+      "NEW11",
+    ]);
+  });
+
+  it("canonicalises a hand-added source's URL and host name", () => {
+    expect(userLobbySource("  WSS://Play.Example.COM/ws  ")).toEqual({
+      url: "wss://play.example.com/ws",
+      name: "play.example.com",
+      origin: "user",
+    });
+    expect(userLobbySource("wss:")).toBeNull();
+  });
 });
+

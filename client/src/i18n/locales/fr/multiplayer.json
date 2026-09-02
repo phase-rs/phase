@@ -118,11 +118,14 @@
     "anonymous": "Anonyme",
     "by": "par {{name}}",
     "passwordProtected": "Protégé par mot de passe",
-    "join": "Rejoindre"
+    "join": "Rejoindre",
+    "originTitle": "Référencée par {{name}} {{kind}}",
+    "kindFull": "(serveur de jeu)",
+    "kindLobbyOnly": "(courtier de salon)"
   },
   "serverPicker": {
     "title": "Serveur",
-    "subtitle": "Choisissez une région, ou connectez-vous à une instance auto-hébergée.",
+    "subtitle": "Choisissez où vous hébergez, et quels salons vous parcourez.",
     "noneLabel": "Aucun (P2P uniquement)",
     "directCodes": "codes directs",
     "official": "Officiel",
@@ -133,7 +136,18 @@
     "urlError": "L'URL doit commencer par ws:// ou wss://",
     "connected": "Connecté",
     "connectionFailed": "Échec de la connexion",
-    "testing": "Test en cours…"
+    "testing": "Test en cours…",
+    "hostingServer": "Serveur d'hébergement",
+    "hostingServerHelp": "Où les parties que vous hébergez sont créées et enregistrées.",
+    "sources": "Sources de salon",
+    "sourcesHelp": "Les tables ouvertes de toutes les sources ci-dessous sont fusionnées en une seule liste.",
+    "addSource": "Ajouter une source",
+    "remove": "Retirer",
+    "useForHosting": "Utiliser pour héberger",
+    "sourceStatusConnecting": "Connexion…",
+    "sourceStatusDegraded": "Injoignable",
+    "sourceDuplicate": "Ce serveur est déjà une source de salon.",
+    "sourceCapReached": "Jusqu'à {{max}} sources peuvent être ajoutées."
   },
   "lobbyDraftRooms": {
     "noRooms": "Aucune salle de draft disponible",
@@ -183,7 +197,9 @@
     "hostP2PGame": "Héberger une partie P2P",
     "passwordRequired": "Mot de passe requis",
     "passwordPlaceholder": "Saisissez le mot de passe",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Certaines sources de salon sont injoignables",
+    "invalidJoinServer": "L'adresse de serveur de ce code n'est pas valide."
   },
   "hostSetup": {
     "hostDirectMatch": "Héberger un match direct",
@@ -260,7 +276,8 @@
     "noDeckWarning": "Aucun deck sélectionné — vous devrez en choisir un avant d'héberger.",
     "pickDeck": "Choisir un deck",
     "anonymous": "Anonyme",
-    "joining": "Connexion"
+    "joining": "Connexion",
+    "joinNeedsServer": "Choisissez un serveur avant de rejoindre une partie."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",

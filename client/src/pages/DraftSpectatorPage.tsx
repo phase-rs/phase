@@ -15,6 +15,9 @@ export function DraftSpectatorPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const code = (searchParams.get("code") ?? "").trim().toUpperCase();
+  // The authority that listed this draft, carried by the route from the
+  // lobby. Absent → the store falls back to the hosting server.
+  const serverUrl = searchParams.get("server") ?? undefined;
 
   useAudioContext("menu");
 
@@ -26,9 +29,9 @@ export function DraftSpectatorPage() {
 
   useEffect(() => {
     if (!code) return;
-    void watchDraft(code);
+    void watchDraft(code, serverUrl);
     return () => leave();
-  }, [code, watchDraft, leave]);
+  }, [code, serverUrl, watchDraft, leave]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">

@@ -1,8 +1,10 @@
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
-import type { FormatGroup, GameFormat, LobbyGame } from "../../adapter/types";
+import type { FormatGroup, LobbyGame } from "../../adapter/types";
 import { formatMetadata } from "../../data/formatRegistry";
+import { SERVER_PRESETS } from "../../services/serverDetection";
+import type { LobbyGameEntry } from "../../stores/multiplayerStore";
 
 // Re-export so existing `import { LobbyGame } from "./GameListItem"` call
 // sites continue to resolve without needing to update every consumer in
@@ -10,8 +12,10 @@ import { formatMetadata } from "../../data/formatRegistry";
 export type { LobbyGame };
 
 interface GameListItemProps {
-  game: LobbyGame;
-  onJoin: (code: string, format?: GameFormat) => void;
+  /** The lobby row together with the authority that listed it — rows from
+   * different sources share a list, so the origin travels with the row. */
+  entry: LobbyGameEntry;
+  onJoin: (entry: LobbyGameEntry) => void;
   /**
    * When false, the row is visible but disabled with a tooltip explaining
    * the mismatch. Computed by the parent from the server's `build_commit`
@@ -47,8 +51,9 @@ function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string 
   return t("gameListItem.waitTimeHours", { count: hours });
 }
 
-export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: GameListItemProps) {
+export function GameListItem({ entry, onJoin, compatible = true, hostGameCode }: GameListItemProps) {
   const { t } = useTranslation("multiplayer");
+  const { game, source } = entry;
   const format = game.format ?? "Standard";
   const meta = formatMetadata(format);
   const badgeClass = meta ? GROUP_BADGE_CLASSES[meta.group] : UNKNOWN_FORMAT_BADGE;
@@ -67,6 +72,20 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
   const isCurrentPlayerHost = Boolean(hostGameCode && game.game_code === hostGameCode);
 
   const disabled = !compatible || isFull || isCurrentPlayerHost;
+
+  // Built-in sources show their picker label ("Official", "Self-hosted") so
+  // an official row reads the same as it did before the list became
+  // multi-source; hand-added and directory sources show their host. The
+  // server kind is only known once that source's handshake has landed, so
+  // the suffix is empty until then and the title is trimmed.
+  const preset = SERVER_PRESETS.find((p) => p.url === source.url);
+  const sourceLabel = preset ? t(preset.labelKey) : source.name;
+  const kindLabel =
+    source.kind === "Full"
+      ? t("gameListItem.kindFull")
+      : source.kind === "LobbyOnly"
+        ? t("gameListItem.kindLobbyOnly")
+        : "";
 
   const disabledTitle = !compatible
     ? t("gameListItem.buildMismatchTitle", {
@@ -87,7 +106,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           const ok = window.confirm(t("gameListItem.sandboxConfirm"));
           if (!ok) return;
         }
-        onJoin(game.game_code, game.format);
+        onJoin(entry);
       }}
       disabled={disabled}
       title={disabledTitle}
@@ -141,6 +160,16 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           SANDBOX
         </span>
       )}
+      {/* Origin badge — which authority listed this row. The merged list
+          spans every enabled lobby source, so a row without its origin is
+          ambiguous about which server the join will open on. */}
+      <span
+        className="flex-shrink-0 rounded-[5px] border border-sky-300/20 bg-sky-500/15 px-1.5 py-0.5 text-xs font-medium text-sky-200"
+        title={t("gameListItem.originTitle", { name: sourceLabel, kind: kindLabel }).trim()}
+      >
+        {sourceLabel}
+      </span>
+
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name
           to the secondary line; otherwise fall back to showing the player

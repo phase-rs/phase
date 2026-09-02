@@ -42,8 +42,14 @@ import {
   type PhaseSocket,
   type PhaseSocketTransport,
   type ReconnectHandle,
+  type ReconnectState,
 } from "../services/openPhaseSocket";
-import { isValidWebSocketUrl } from "../services/serverDetection";
+import {
+  SERVER_PRESETS,
+  isValidWebSocketUrl,
+  parseWebSocketUrl,
+  type ServerPreset,
+} from "../services/serverDetection";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
@@ -118,50 +124,262 @@ let hostReconnectAttempt = 0;
 let hostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const HOST_MAX_RECONNECT_ATTEMPTS = 3;
 
-/**
- * Long-lived, reconnecting subscription channel. Opened on first
- * multiplayer-home entry via `ensureSubscriptionSocket`, not at app boot:
- * users who never touch multiplayer don't pay for a WS. Shared between
- * the lobby subscribe path (SubscribeLobby / LobbyUpdate traffic) and the
- * P2P guest resolve path (JoinGameWithPassword → PeerInfo). The
- * `withReconnect` wrapper re-handshakes up to 3 times on unexpected
- * drops; `onStateChange` drives pending-RPC rejection and re-subscribe.
- */
-let subscriptionReconnect: ReconnectHandle | null = null;
-/** Awaiters of the first open — resolves once the handshake lands, or with
- * `null` if the factory exhausts all retries without ever connecting. */
-let subscriptionFirstOpen: Promise<PhaseSocket | null> | null = null;
+/** Where a lobby source came from. `directory` is a typed member from day
+ * one; no producer exists in this build (the official directory service
+ * supplies them in a later phase). */
+export type LobbySourceOrigin = "official" | "directory" | "user";
 
 /**
- * AbortControllers for in-flight join-adjacent RPCs (`resolveGuest`,
- * `lookupJoinTarget`). On the socket's `reconnecting` transition we abort
- * every pending call so the caller gets a `connection_lost` result
- * immediately rather than waiting for its own timeout. New calls after
- * reconnect use fresh controllers.
+ * One lobby authority the client browses. The client is a multi-authority
+ * cache: every enabled source gets its own subscription socket and its rows
+ * are merged into one list, tagged with the source that listed them.
  */
-const pendingJoinRpcAborts: Set<AbortController> = new Set();
+export interface LobbySource {
+  /** Canonical `URL.href` of a `ws(s)://` endpoint. */
+  readonly url: string;
+  /** Display label — the URL host for built-in and hand-added sources. */
+  readonly name: string;
+  readonly origin: LobbySourceOrigin;
+  /** Learned from the handshake's `ServerHello`; undefined until this
+   * source's socket has opened at least once. */
+  readonly kind?: ServerInfo["mode"];
+  /** 0–100 health score. No producer in this build; the list comparator
+   * treats `undefined` as the lowest rank. */
+  readonly score?: number;
+}
+
+/** A lobby row together with the source that listed it. `LobbyGame` mirrors
+ * an engine-authored wire type and must not grow an origin field, so the
+ * origin rides beside it in this client-only wrapper. */
+export interface LobbyGameEntry {
+  game: LobbyGame;
+  source: LobbySource;
+}
+
+/** Live connection state of one source's subscription channel. Reuses
+ * `ReconnectState` rather than inventing a parallel status enum;
+ * `"offline"` is the degraded state the UI reports. */
+export interface LobbySourceStatus {
+  state: ReconnectState;
+  serverInfo: ServerInfo | null;
+}
+
+/** Result of {@link MultiplayerActions.addUserLobbySource}. Mirrors the
+ * `{ ok, reason }` result idiom used by the broker RPCs. */
+export type AddLobbySourceResult =
+  | { ok: true; source: LobbySource }
+  | { ok: false; reason: "invalid_url" | "duplicate" | "cap_reached" };
+
+/**
+ * Bound on hand-added (`user`) lobby sources. Built-in presets are not
+ * counted — they are not user-removable, so the dialed total is at most
+ * `SERVER_PRESETS.length + MAX_USER_LOBBY_SOURCES`. Hydration trims to the
+ * same constant, so a persisted blob can never dial more than the add path
+ * would allow.
+ */
+export const MAX_USER_LOBBY_SOURCES = 8;
+
+/** Built-in source for a picker preset. */
+export function presetLobbySource(preset: ServerPreset): LobbySource {
+  return {
+    url: preset.url,
+    name: parseWebSocketUrl(preset.url)?.host ?? preset.url,
+    origin: "official",
+  };
+}
+
+/** A hand-added source, canonicalised through the URL parser. `null` when
+ * the value is not a `ws(s)://` URL. */
+export function userLobbySource(url: string): LobbySource | null {
+  const parsed = parseWebSocketUrl(url.trim());
+  if (!parsed) return null;
+  return { url: parsed.href, name: parsed.host, origin: "user" };
+}
+
+/**
+ * The origin of a `CODE@host` join: a one-off authority that is browsed by
+ * nobody and persisted nowhere. Same shape as a hand-added source — the
+ * distinct name is what makes the intent readable at the call sites.
+ */
+export function adHocLobbySource(url: string): LobbySource | null {
+  return userLobbySource(url);
+}
+
+/**
+ * The enabled lobby sources, derived at call time rather than persisted.
+ *
+ * Built-in presets are rebuilt every session (a build's default can move
+ * between releases) and only `user` entries are stored, so `partialize` has
+ * nothing to filter and `merge` has nothing to re-insert. Deriving here is
+ * also what keeps `SERVER_PRESETS` out of the store's own module evaluation:
+ * `serverDetection.ts` imports this module, so reading that `export const`
+ * while this module evaluates (the `create()` initializer, or persist
+ * hydration, which zustand runs synchronously inside `create()`) would hit
+ * the import cycle's temporal dead zone.
+ */
+export function lobbySources(
+  state: Pick<MultiplayerState, "userLobbySources" | "sourceStatus">,
+): LobbySource[] {
+  const presets = SERVER_PRESETS.map(presetLobbySource);
+  const presetUrls = new Set(presets.map((preset) => preset.url));
+  // A hand-added URL that is also a preset is dropped here rather than at
+  // hydration: `merge` runs while this module evaluates and must not read
+  // `SERVER_PRESETS` (import cycle, temporal dead zone).
+  return [
+    ...presets,
+    ...state.userLobbySources.filter((source) => !presetUrls.has(source.url)),
+  ].map((source) => {
+    const mode = state.sourceStatus.get(source.url)?.serverInfo?.mode;
+    return mode === undefined ? source : { ...source, kind: mode };
+  });
+}
+
+/** The source games are hosted/registered on, as a `LobbySource`. `null` in
+ * direct-codes mode. A hosting server that is not (or no longer) a browsed
+ * source still resolves, as an ad-hoc origin. */
+export function hostingLobbySource(
+  state: Pick<MultiplayerState, "hostingServer" | "userLobbySources" | "sourceStatus">,
+): LobbySource | null {
+  const { hostingServer } = state;
+  if (hostingServer === null) return null;
+  return (
+    lobbySources(state).find((source) => source.url === hostingServer)
+    ?? adHocLobbySource(hostingServer)
+  );
+}
+
+/**
+ * Display order for the merged multi-authority list: official sources
+ * first, then by source score (undefined ranks lowest), then oldest table
+ * first so the longest-waiting host is at the top.
+ *
+ * This is presentation of a client-side cache — the engine has no ordering
+ * opinion about rows that came from different authorities.
+ */
+export function compareLobbyGameEntries(a: LobbyGameEntry, b: LobbyGameEntry): number {
+  const officialRank = (entry: LobbyGameEntry) => (entry.source.origin === "official" ? 0 : 1);
+  const byOfficial = officialRank(a) - officialRank(b);
+  if (byOfficial !== 0) return byOfficial;
+  const byScore = (b.source.score ?? -1) - (a.source.score ?? -1);
+  if (byScore !== 0) return byScore;
+  return a.game.created_at - b.game.created_at;
+}
+
+/**
+ * One lobby source's long-lived, reconnecting subscription channel. Opened
+ * on first multiplayer-home entry via `ensureSubscriptionSocket`, not at app
+ * boot: users who never touch multiplayer don't pay for a WS. Shared between
+ * the lobby subscribe path (SubscribeLobby / LobbyUpdate traffic) and the
+ * join-adjacent RPCs aimed at that same authority. The `withReconnect`
+ * wrapper re-handshakes on unexpected drops; `onStateChange` drives
+ * pending-RPC rejection, per-source status and re-subscribe.
+ */
+interface SourceChannel {
+  reconnect: ReconnectHandle | null;
+  /** Awaiters of the first open — resolves once the handshake lands, or with
+   * `null` if the factory exhausts all retries without ever connecting. */
+  firstOpen: Promise<PhaseSocket | null> | null;
+  /**
+   * AbortControllers for in-flight join-adjacent RPCs (`resolveGuest`,
+   * `lookupJoinTarget`) on this channel. On the socket's `reconnecting`
+   * transition we abort every pending call so the caller gets a
+   * `connection_lost` result immediately rather than waiting for its own
+   * timeout. New calls after reconnect use fresh controllers.
+   */
+  pendingRpcAborts: Set<AbortController>;
+  /** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
+   * reconnect; `null` when no listener is attached. */
+  attachDetach: (() => void) | null;
+  /** Most recent `LobbyUpdate` snapshot from this source, used to seed new
+   * subscribers and to resolve a typed code to its listing authority. */
+  snapshot: LobbyGame[] | null;
+}
+
+const subscriptionChannels = new Map<string, SourceChannel>();
 
 /**
  * Registered lobby subscribers. The store multiplexes one
- * `subscribeLobbyOver` attachment across all of them: the first
- * subscriber sends `SubscribeLobby` to the server, subsequent
- * subscribers are fanned-out snapshots from the cached `lobbySnapshot`,
- * and only the *last* subscriber leaving sends `UnsubscribeLobby`. This
- * prevents the ref-counting bug where one caller's unsubscribe would
- * silence every other caller on the same shared socket.
+ * `subscribeLobbyOver` attachment per channel across all of them: the first
+ * subscriber attaches on every source, subsequent subscribers are seeded
+ * from each channel's cached snapshot, and only the *last* subscriber
+ * leaving sends `UnsubscribeLobby`. This prevents the ref-counting bug
+ * where one caller's unsubscribe would silence every other caller.
  */
-const lobbySubscribers: Set<(games: LobbyGame[]) => void> = new Set();
-/** Most recent `LobbyUpdate` snapshot, used to seed new subscribers. */
-let lobbySnapshot: LobbyGame[] | null = null;
+const lobbySubscribers: Set<(games: LobbyGame[], source: LobbySource) => void> = new Set();
 
-/** Lobby row for a game/draft code from the cached subscription snapshot. */
-export function findLobbyGameByCode(code: string): LobbyGame | undefined {
-  const normalized = code.trim().toUpperCase();
-  return lobbySnapshot?.find((g) => g.game_code.toUpperCase() === normalized);
+function channelFor(url: string): SourceChannel {
+  const existing = subscriptionChannels.get(url);
+  if (existing) return existing;
+  const channel: SourceChannel = {
+    reconnect: null,
+    firstOpen: null,
+    pendingRpcAborts: new Set(),
+    attachDetach: null,
+    snapshot: null,
+  };
+  subscriptionChannels.set(url, channel);
+  return channel;
 }
-/** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
- * reconnect; `null` when no socket is attached. */
-let lobbyAttachDetach: (() => void) | null = null;
+
+/** Tear one source's channel down: abort its RPCs, stop listening, close
+ * the socket and drop its status row. */
+function closeChannel(set: MultiplayerSet, get: MultiplayerGet, url: string): void {
+  const channel = subscriptionChannels.get(url);
+  if (!channel) return;
+  for (const ac of channel.pendingRpcAborts) ac.abort();
+  channel.pendingRpcAborts.clear();
+  channel.attachDetach?.();
+  channel.attachDetach = null;
+  channel.snapshot = null;
+  channel.firstOpen = null;
+  channel.reconnect?.close();
+  channel.reconnect = null;
+  subscriptionChannels.delete(url);
+  const status = new Map(get().sourceStatus);
+  if (status.delete(url)) set({ sourceStatus: status });
+}
+
+function setSourceStatus(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  url: string,
+  status: LobbySourceStatus,
+): void {
+  const next = new Map(get().sourceStatus);
+  next.set(url, status);
+  set({ sourceStatus: next });
+}
+
+/** Attach this channel's `LobbyUpdate` listener and fan its snapshots out to
+ * every subscriber, tagged with the source that listed them. */
+function attachLobbyListener(
+  get: MultiplayerGet,
+  channel: SourceChannel,
+  url: string,
+  socket: PhaseSocket,
+): void {
+  channel.attachDetach = subscribeLobbyOver(socket, (games) => {
+    channel.snapshot = games;
+    const source = lobbySources(get()).find((s) => s.url === url);
+    if (!source) return;
+    for (const cb of lobbySubscribers) cb(games, source);
+  });
+}
+
+/** Lobby row for a game/draft code, with the source that listed it, from the
+ * cached channel snapshots. Sources are scanned in derived order, so a code
+ * listed by two authorities resolves to the first one browsed. */
+export function findLobbyGameByCode(code: string): LobbyGameEntry | undefined {
+  const normalized = code.trim().toUpperCase();
+  for (const source of lobbySources(useMultiplayerStore.getState())) {
+    const game = subscriptionChannels
+      .get(source.url)
+      ?.snapshot
+      ?.find((g) => g.game_code.toUpperCase() === normalized);
+    if (game) return { game, source };
+  }
+  return undefined;
+}
 
 export interface AiSeatConfig {
   seatIndex: number;
@@ -270,7 +488,20 @@ const GENERIC_TOAST_KEY = "generic";
 interface MultiplayerState {
   playerId: string;
   displayName: string;
-  serverAddress: string;
+  /**
+   * Where this client hosts and registers games — the P2P broker target and
+   * the server-run hosting endpoint. `null` is the direct-codes sentinel:
+   * no lobby is browsed and `MultiplayerPage` runs in P2P mode, so any
+   * `userLobbySources` are inert until a hosting server is chosen again.
+   * A non-null value is always a valid `ws(s)://` URL (enforced at
+   * `setHostingServer`, migration and hydration).
+   */
+  hostingServer: string | null;
+  /** Hand-added lobby authorities. Persisted; built-in presets are derived
+   * per session by {@link lobbySources} and are never stored here. */
+  userLobbySources: LobbySource[];
+  /** Per-source connection state, keyed by source URL. Ephemeral. */
+  sourceStatus: Map<string, LobbySourceStatus>;
   connectionStatus: ConnectionStatus;
   activePlayerId: PlayerId | null;
   opponentDisplayName: string | null;
@@ -312,7 +543,15 @@ interface MultiplayerState {
 
 interface MultiplayerActions {
   setDisplayName: (name: string) => void;
-  setServerAddress: (address: string) => void;
+  /** Choose the hosting/registration server, or `null` for direct codes.
+   * Invalid URLs are ignored. Refreshes the global `serverInfo` from the
+   * new target's live socket, if it has one. */
+  setHostingServer: (url: string | null) => void;
+  /** Add a hand-added lobby source. Refuses malformed URLs, URLs already
+   * derived as a source (presets included) and adds past the cap. */
+  addUserLobbySource: (url: string) => AddLobbySourceResult;
+  /** Remove a hand-added lobby source and close its channel. */
+  removeUserLobbySource: (url: string) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setActivePlayerId: (id: PlayerId | null) => void;
   setOpponentDisplayName: (name: string | null) => void;
@@ -372,27 +611,34 @@ interface MultiplayerActions {
   /** Remove open seats, then start — mutations run in order (fixes Start-now races). */
   startLobbyWithCurrentPlayers: () => Promise<void>;
   /**
-   * Lazily open the long-lived subscription socket and return the
-   * `PhaseSocket`. Idempotent: a second call while an open is in flight
-   * returns the same promise. Resolves `null` if the handshake fails so
-   * callers can fall back rather than crash.
+   * Lazily open one source's long-lived subscription socket and return the
+   * `PhaseSocket`. Idempotent per URL: a second call while that channel's
+   * open is in flight returns the same promise. Resolves `null` if the URL
+   * is invalid or the handshake fails so callers can fall back rather than
+   * crash.
    */
-  ensureSubscriptionSocket: () => Promise<PhaseSocket | null>;
-  /** Close and discard the subscription socket. Called on store teardown. */
+  ensureSubscriptionSocket: (url: string) => Promise<PhaseSocket | null>;
+  /** Close and discard every source's subscription socket. Called on store
+   * teardown. */
   closeSubscriptionSocket: () => void;
   /**
-   * Send `JoinGameWithPassword` over the subscription socket and return a
-   * discriminated `ResolveResult`. Opens the socket lazily if it's not yet
+   * Send `JoinGameWithPassword` to `origin` and return a discriminated
+   * `ResolveResult`. Opens that source's socket lazily if it's not yet
    * alive. Does NOT navigate — the caller inspects the result and handles
    * password retry, build mismatch, etc. before navigation.
    */
-  resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
+  resolveGuest: (
+    code: string,
+    origin: LobbySource,
+    password?: string,
+  ) => Promise<ResolveResult>;
   /**
-   * Read-only typed-code lookup. Returns format/routing metadata without
-   * consuming a seat.
+   * Read-only typed-code lookup against `origin`. Returns format/routing
+   * metadata without consuming a seat.
    */
   lookupJoinTarget: (
     code: string,
+    origin: LobbySource,
     password?: string,
     opts?: Pick<
       LookupJoinTargetOptions,
@@ -400,14 +646,15 @@ interface MultiplayerActions {
     >,
   ) => Promise<LookupJoinTargetResult>;
   /**
-   * Subscribe to lobby-list updates over the subscription socket. Returns
-   * a cleanup function that detaches listeners and sends `UnsubscribeLobby`.
-   * Callers should not await; `onUpdate` fires asynchronously once the
-   * first `LobbyUpdate` snapshot arrives. Returns `null` when the socket
-   * could not be opened so the caller can render a fallback.
+   * Subscribe to lobby-list updates across every enabled source. `onUpdate`
+   * fires once per source per snapshot, tagged with the source that listed
+   * the rows, so a degraded source never blocks the others. Returns a
+   * cleanup function that detaches listeners and sends `UnsubscribeLobby`,
+   * or `null` when *every* source failed to open so the caller can render
+   * a fallback.
    */
   subscribeLobby: (
-    onUpdate: (games: LobbyGame[]) => void,
+    onUpdate: (games: LobbyGame[], source: LobbySource) => void,
   ) => Promise<(() => void) | null>;
   /**
    * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
@@ -773,6 +1020,53 @@ export function migrateLegacyLoopDetectionOn(lastHostConfig: unknown): unknown {
   return { ...config, loopDetection: { type: "Interactive" } };
 }
 
+/**
+ * v5 → v6: the single persisted `serverAddress` becomes a `hostingServer`
+ * plus, for a hand-typed address, one `user` lobby source. An official or
+ * build-default address is already derived as a preset, so it yields no
+ * user source; the `""` direct-codes sentinel becomes `null`.
+ */
+export function migrateServerAddressToSources(serverAddress: unknown): {
+  hostingServer: string | null;
+  userLobbySources: LobbySource[];
+} {
+  if (serverAddress === "") {
+    return { hostingServer: null, userLobbySources: [] };
+  }
+  const source = typeof serverAddress === "string" ? userLobbySource(serverAddress) : null;
+  if (!source) {
+    return { hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL, userLobbySources: [] };
+  }
+  const isBuiltIn =
+    isOfficialMultiplayerServerUrl(source.url)
+    || source.url === DEFAULT_MULTIPLAYER_SERVER_URL;
+  return {
+    hostingServer: source.url,
+    userLobbySources: isBuiltIn ? [] : [source],
+  };
+}
+
+/**
+ * Persisted user sources are external input: rebuild every entry through
+ * the URL canonicaliser, drop anything that is not a valid `user` row,
+ * dedupe, and trim to the same cap the add path enforces so a hydrated blob
+ * can never dial more sources than a user could have added.
+ */
+export function normalizeUserLobbySources(persisted: unknown): LobbySource[] {
+  if (!Array.isArray(persisted)) return [];
+  const sources: LobbySource[] = [];
+  for (const entry of persisted) {
+    if (!isRecord(entry) || entry.origin !== "user" || typeof entry.url !== "string") {
+      continue;
+    }
+    const source = userLobbySource(entry.url);
+    if (!source || sources.some((existing) => existing.url === source.url)) continue;
+    sources.push(source);
+    if (sources.length === MAX_USER_LOBBY_SOURCES) break;
+  }
+  return sources;
+}
+
 export function migratePersistedMultiplayerState(
   persisted: unknown,
   version: number,
@@ -790,6 +1084,11 @@ export function migratePersistedMultiplayerState(
   }
   if (version < 5 && "lastHostConfig" in migrated) {
     migrated.lastHostConfig = normalizeRememberedHostConfig(migrated.lastHostConfig);
+  }
+  if (version < 6 && "serverAddress" in migrated) {
+    const legacyAddress = migrated.serverAddress;
+    delete migrated.serverAddress;
+    return { ...migrated, ...migrateServerAddressToSources(legacyAddress) };
   }
   return migrated;
 }
@@ -815,6 +1114,7 @@ function resetServerHostSession(set: MultiplayerSet): void {
 function savePregameHostSession(
   get: MultiplayerGet,
   data: { game_code: string; player_token: string; full_key?: { game_code: string; generation: number } },
+  serverUrl: string,
 ): void {
   if (!data.full_key || data.full_key.game_code !== data.game_code) return;
   const existing = loadWsSession();
@@ -823,7 +1123,7 @@ function savePregameHostSession(
     gameCode: data.game_code,
     playerToken: data.player_token,
     fullKey: data.full_key,
-    serverUrl: get().serverAddress,
+    serverUrl,
     timestamp: Date.now(),
     ...(hostSession ? { hostSession } : {}),
     ...(hostSession ? { hostIsPublic: get().hostIsPublic } : {}),
@@ -847,6 +1147,7 @@ function handleServerHostMessage(
   get: MultiplayerGet,
   ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
+  serverUrl: string,
 ): void {
   if (msg.type === "GameCreated") {
     const data = msg.data as {
@@ -854,7 +1155,7 @@ function handleServerHostMessage(
       player_token: string;
       full_key?: { game_code: string; generation: number };
     };
-    savePregameHostSession(get, data);
+    savePregameHostSession(get, data, serverUrl);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
     set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
@@ -906,7 +1207,10 @@ async function openServerHostSocket(
   setupFrame: () => unknown,
   onReopen: () => void,
 ): Promise<void> {
-  if (!isValidWebSocketUrl(get().serverAddress)) {
+  // Read the hosting server once: every frame this socket sends, and the
+  // session it records, must belong to the URL we actually dialed.
+  const url = get().hostingServer;
+  if (url === null || !isValidWebSocketUrl(url)) {
     resetServerHostSession(set);
     get().showToast("Invalid server address. Update it in Settings.");
     return;
@@ -914,7 +1218,7 @@ async function openServerHostSocket(
 
   let socket;
   try {
-    socket = await openPhaseSocket(get().serverAddress);
+    socket = await openPhaseSocket(url);
   } catch (err) {
     if (
       err instanceof HandshakeError &&
@@ -939,7 +1243,7 @@ async function openServerHostSocket(
       type: string;
       data?: unknown;
     };
-    handleServerHostMessage(set, get, socket.ws, msg);
+    handleServerHostMessage(set, get, socket.ws, msg, url);
   };
   socket.ws.onerror = () => {
     if (!gameStartedFired) {
@@ -990,12 +1294,61 @@ function attemptServerHostReconnect(
   }, delay);
 }
 
+/** The shared "we could not reach that authority" result, structurally
+ * compatible with both broker RPC result types. */
+type ConnectionLostResult = {
+  ok: false;
+  reason: "connection_lost";
+  message: string;
+};
+
+/**
+ * Run one join-adjacent RPC against a specific lobby authority.
+ *
+ * Opens (or reuses) that source's channel, registers an abort controller on
+ * it so a mid-RPC `reconnecting` transition cuts the wait short, and — when
+ * the URL is a one-off join origin rather than a browsed source — closes the
+ * channel once the last RPC on it settles, so a `CODE@host` join leaves no
+ * lingering reconnect loop behind.
+ */
+async function withOriginSocket<T>(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  url: string,
+  run: (socket: PhaseSocket, signal: AbortSignal) => Promise<T>,
+): Promise<T | ConnectionLostResult> {
+  const socket = await get().ensureSubscriptionSocket(url);
+  if (!socket) {
+    return {
+      ok: false,
+      reason: "connection_lost",
+      message: "Lobby connection unavailable. Check your server address.",
+    };
+  }
+  const channel = channelFor(url);
+  const ac = new AbortController();
+  channel.pendingRpcAborts.add(ac);
+  try {
+    return await run(socket, ac.signal);
+  } finally {
+    channel.pendingRpcAborts.delete(ac);
+    if (
+      channel.pendingRpcAborts.size === 0
+      && !lobbySources(get()).some((source) => source.url === url)
+    ) {
+      closeChannel(set, get, url);
+    }
+  }
+}
+
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
   persist(
     (set, get) => ({
       playerId: crypto.randomUUID(),
       displayName: "",
-      serverAddress: DEFAULT_MULTIPLAYER_SERVER_URL,
+      hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL as string | null,
+      userLobbySources: [] as LobbySource[],
+      sourceStatus: new Map<string, LobbySourceStatus>(),
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
@@ -1023,16 +1376,39 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
-      setServerAddress: (address) => {
-        // Switching servers invalidates the live subscription socket: it's
-        // still connected to the previous region and would keep streaming
-        // that lobby's games and PlayerCount. Tear it down so the next
-        // `ensureSubscriptionSocket` dials the new address. No-op when the
-        // address is unchanged (re-selecting the current server).
-        if (address !== get().serverAddress) {
-          get().closeSubscriptionSocket();
+      setHostingServer: (url) => {
+        if (url !== null && !isValidWebSocketUrl(url)) return;
+        if (url === get().hostingServer) return;
+        // `serverInfo` is the hosting server's handshake identity (the
+        // LobbyOnly-vs-Full branch reads it). Re-point it at the new
+        // target's live socket, or clear it until that socket opens.
+        const live = url === null
+          ? null
+          : subscriptionChannels.get(url)?.reconnect?.current() ?? null;
+        set({ hostingServer: url, serverInfo: live?.serverInfo ?? null });
+      },
+
+      addUserLobbySource: (url) => {
+        const source = userLobbySource(url);
+        if (!source) return { ok: false, reason: "invalid_url" };
+        // Duplicates are judged against the DERIVED list, so a preset URL
+        // cannot be re-added as a user entry; the cap counts user entries
+        // only, so the allowance does not shift with the preset count.
+        if (lobbySources(get()).some((existing) => existing.url === source.url)) {
+          return { ok: false, reason: "duplicate" };
         }
-        set({ serverAddress: address });
+        if (get().userLobbySources.length >= MAX_USER_LOBBY_SOURCES) {
+          return { ok: false, reason: "cap_reached" };
+        }
+        set({ userLobbySources: [...get().userLobbySources, source] });
+        return { ok: true, source };
+      },
+
+      removeUserLobbySource: (url) => {
+        set({
+          userLobbySources: get().userLobbySources.filter((s) => s.url !== url),
+        });
+        closeChannel(set, get, url);
       },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
@@ -1170,7 +1546,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
 
         const session = loadWsSession();
-        if (!session?.hostSession || session.serverUrl !== get().serverAddress) {
+        if (!session?.hostSession || session.serverUrl !== get().hostingServer) {
           return false;
         }
 
@@ -1235,8 +1611,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           activeBroker = null;
           activeBrokerGameCode = null;
         }
+        const url = get().hostingServer;
+        if (url === null) {
+          console.error("[openBroker] no hosting server selected");
+          return null;
+        }
         try {
-          const broker = await openBrokerClient(get().serverAddress);
+          const broker = await openBrokerClient(url);
           const registered = await broker.registerHost(req);
           activeBroker = broker;
           activeBrokerGameCode = registered.gameCode;
@@ -1357,7 +1738,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             return false;
           }
           if (opts.useBroker) {
-            broker = await openBrokerClient(get().serverAddress);
+            // Unreachable through `MultiplayerPage`: `useBroker` is only set
+            // after the hosting server's own socket reported `LobbyOnly`. The
+            // throw lands in this function's catch and resets hosting.
+            const brokerUrl = get().hostingServer;
+            if (brokerUrl === null) {
+              throw new Error("No hosting server to register on.");
+            }
+            broker = await openBrokerClient(brokerUrl);
             if (!isCurrentAttempt()) {
               releaseAttempt();
               return false;
@@ -1543,20 +1931,19 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         await get().seatMutateAsync({ type: "Start" });
       },
 
-      ensureSubscriptionSocket: async () => {
+      ensureSubscriptionSocket: async (url) => {
+        if (!isValidWebSocketUrl(url)) return null;
+        const channel = channelFor(url);
         // Fast path: handle is live and currently has a connected socket.
-        const existing = subscriptionReconnect?.current();
+        const existing = channel.reconnect?.current();
         if (existing && existing.ws.readyState === WebSocket.OPEN) {
           return existing;
         }
         // Deduped first-open promise: concurrent callers await the same
         // `withReconnect` bootstrapping without racing handshakes.
-        if (subscriptionFirstOpen) return subscriptionFirstOpen;
+        if (channel.firstOpen) return channel.firstOpen;
 
-        const addr = get().serverAddress;
-        if (!isValidWebSocketUrl(addr)) return null;
-
-        subscriptionFirstOpen = new Promise<PhaseSocket | null>((resolve) => {
+        channel.firstOpen = new Promise<PhaseSocket | null>((resolve) => {
           let settled = false;
           const settle = (val: PhaseSocket | null) => {
             if (settled) return;
@@ -1564,7 +1951,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             resolve(val);
           };
 
-          subscriptionReconnect = withReconnect(
+          channel.reconnect = withReconnect(
             () =>
               // The shared subscription socket carries lobby frames only —
               // `SubscribeLobby`, the join-target RPCs, `PlayerCount`. Declaring
@@ -1572,7 +1959,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               // protocol has drifted from this build's, which is the whole point
               // of versioning the lobby separately. Server-run hosting and
               // joining open their own sockets and keep the exact-match window.
-              openPhaseSocket(addr, { surface: "lobby" }).catch((err) => {
+              openPhaseSocket(url, { surface: "lobby" }).catch((err) => {
                 // Protocol mismatch is not retryable — surface the toast
                 // on the *first* handshake attempt, then let
                 // `withReconnect` treat subsequent attempts as plain
@@ -1594,111 +1981,90 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               attempts: 1,
               onStateChange: (state) => {
                 if (state === "open") {
-                  const socket = subscriptionReconnect?.current() ?? null;
+                  const socket = channel.reconnect?.current() ?? null;
                   if (socket) {
-                    set({ serverInfo: socket.serverInfo });
-                    // Re-attach the single multiplexed lobby listener if
-                    // any subscribers are registered. The first snapshot
-                    // from the server will overwrite `lobbySnapshot` and
-                    // fan-out; stale cached data is not authoritative
-                    // across a reconnect.
-                    if (lobbySubscribers.size > 0) {
-                      lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
-                        lobbySnapshot = games;
-                        for (const cb of lobbySubscribers) cb(games);
-                      });
+                    setSourceStatus(set, get, url, {
+                      state,
+                      serverInfo: socket.serverInfo,
+                    });
+                    // `serverInfo` is the *hosting* server's identity — the
+                    // LobbyOnly-vs-Full host branch reads it. Another
+                    // source's handshake must not overwrite it.
+                    if (url === get().hostingServer) {
+                      set({ serverInfo: socket.serverInfo });
+                    }
+                    // Re-attach this channel's multiplexed lobby listener if
+                    // any subscribers are registered AND this URL is still a
+                    // browsed source — a channel opened only to carry a
+                    // `CODE@host` RPC is never fanned out as a listing. The
+                    // first snapshot from the server overwrites the cached
+                    // one; stale data is not authoritative across a reconnect.
+                    if (
+                      lobbySubscribers.size > 0
+                      && lobbySources(get()).some((source) => source.url === url)
+                    ) {
+                      attachLobbyListener(get, channel, url, socket);
                     }
                   }
                   settle(socket);
                 } else if (state === "reconnecting") {
+                  setSourceStatus(set, get, url, { state, serverInfo: null });
                   // In-flight RPCs would otherwise hang until their own
                   // timeout. Abort them now so the caller can branch
                   // immediately. New RPCs registered after this point
                   // use fresh controllers and are unaffected.
-                  for (const ac of pendingJoinRpcAborts) ac.abort();
-                  pendingJoinRpcAborts.clear();
+                  for (const ac of channel.pendingRpcAborts) ac.abort();
+                  channel.pendingRpcAborts.clear();
                   // Drop the handle to the old socket's listener; it
                   // will be re-bound on the next "open".
-                  lobbyAttachDetach = null;
+                  channel.attachDetach = null;
                 } else if (state === "offline") {
-                  // Reconnect exhausted. Caller's `ensureSubscriptionSocket`
-                  // resolves `null` so fallback UI renders. Also drain any
+                  // Reconnect exhausted. This source is degraded; the others
+                  // keep streaming. `ensureSubscriptionSocket` resolves
+                  // `null` so the caller renders a fallback. Also drain any
                   // stragglers that joined between reconnecting and offline.
-                  for (const ac of pendingJoinRpcAborts) ac.abort();
-                  pendingJoinRpcAborts.clear();
+                  setSourceStatus(set, get, url, { state, serverInfo: null });
+                  for (const ac of channel.pendingRpcAborts) ac.abort();
+                  channel.pendingRpcAborts.clear();
                   settle(null);
                 }
               },
             },
           );
         }).finally(() => {
-          subscriptionFirstOpen = null;
+          channel.firstOpen = null;
         });
 
-        return subscriptionFirstOpen;
+        return channel.firstOpen;
       },
 
       closeSubscriptionSocket: () => {
-        for (const ac of pendingJoinRpcAborts) ac.abort();
-        pendingJoinRpcAborts.clear();
-        lobbyAttachDetach?.();
-        lobbyAttachDetach = null;
         lobbySubscribers.clear();
-        lobbySnapshot = null;
-        subscriptionReconnect?.close();
-        subscriptionReconnect = null;
-      },
-
-      resolveGuest: async (code, password) => {
-        const socket = await get().ensureSubscriptionSocket();
-        if (!socket) {
-          return {
-            ok: false,
-            reason: "connection_lost",
-            message: "Lobby connection unavailable. Check your server address.",
-          };
+        for (const url of [...subscriptionChannels.keys()]) {
+          closeChannel(set, get, url);
         }
-        // Register an abort controller so a mid-RPC `reconnecting`
-        // transition can cut short the wait with `connection_lost`
-        // rather than letting the caller's own timeout fire.
-        const ac = new AbortController();
-        pendingJoinRpcAborts.add(ac);
-        try {
-          return await resolveGuestOver(socket, code, password, {
-            signal: ac.signal,
+      },
+      resolveGuest: async (code, origin, password) =>
+        withOriginSocket(set, get, origin.url, (socket, signal) =>
+          resolveGuestOver(socket, code, password, {
+            signal,
             // The broker rejects a blank display_name on the resolve frame
             // (required-label rule) and the worker shell drops it without a
             // reply — the guest then times out at deck-select. Always carry
             // the player's name so the frame validates.
             displayName: get().displayName || "Player",
-          });
-        } finally {
-          pendingJoinRpcAborts.delete(ac);
-        }
-      },
+          }),
+        ),
 
-      lookupJoinTarget: async (code, password, opts) => {
-        const socket = await get().ensureSubscriptionSocket();
-        if (!socket) {
-          return {
-            ok: false,
-            reason: "connection_lost",
-            message: "Lobby connection unavailable. Check your server address.",
-          };
-        }
-        const ac = new AbortController();
-        pendingJoinRpcAborts.add(ac);
-        try {
-          return await lookupJoinTargetOver(socket, code, password, {
-            signal: ac.signal,
+      lookupJoinTarget: async (code, origin, password, opts) =>
+        withOriginSocket(set, get, origin.url, (socket, signal) =>
+          lookupJoinTargetOver(socket, code, password, {
+            signal,
             reserve: opts?.reserve,
             displayName: opts?.displayName,
             releaseReservationToken: opts?.releaseReservationToken,
-          });
-        } finally {
-          pendingJoinRpcAborts.delete(ac);
-        }
-      },
+          }),
+        ),
 
       joinServerDraft: async (serverUrl, draftCode, displayName, password) => {
         // Dispose any previous draft adapter before creating a new one.
@@ -1717,38 +2083,60 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       subscribeLobby: async (onUpdate) => {
-        const socket = await get().ensureSubscriptionSocket();
-        if (!socket) return null;
-        const wasEmpty = lobbySubscribers.size === 0;
+        // Register before dialing: each channel's "open" handler attaches its
+        // own listener when subscribers exist, so a source that connects
+        // while we are still awaiting a slower one starts streaming at once.
         lobbySubscribers.add(onUpdate);
-        // First subscriber sends `SubscribeLobby`. Later subscribers ride
-        // the same upstream attachment — sending the frame again per
-        // subscriber, then detaching on their own cleanup, would send
-        // `UnsubscribeLobby` on the shared socket and silence every
-        // other subscriber (the ref-counting bug this structure fixes).
-        if (wasEmpty) {
-          lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
-            lobbySnapshot = games;
-            for (const cb of lobbySubscribers) cb(games);
-          });
-        } else if (lobbySnapshot) {
-          // Immediate seed for late subscribers so they don't wait on
-          // the next server push to render anything.
-          onUpdate(lobbySnapshot);
+        const sources = lobbySources(get());
+        const sockets = await Promise.all(
+          sources.map((source) => get().ensureSubscriptionSocket(source.url)),
+        );
+
+        let anyOpen = false;
+        sources.forEach((source, index) => {
+          const socket = sockets[index];
+          if (!socket) return;
+          anyOpen = true;
+          const channel = channelFor(source.url);
+          // First subscriber attaches this channel's listener. Later
+          // subscribers ride the same upstream attachment — sending
+          // `SubscribeLobby` again per subscriber, then detaching on their
+          // own cleanup, would send `UnsubscribeLobby` on the shared socket
+          // and silence every other subscriber (the ref-counting bug this
+          // structure fixes) — and are seeded from the cached snapshot so
+          // they don't wait on the next server push to render anything.
+          if (channel.attachDetach === null) {
+            attachLobbyListener(get, channel, source.url, socket);
+          } else if (channel.snapshot) {
+            onUpdate(channel.snapshot, source);
+          }
+        });
+
+        // Only "every source is unreachable" is an offline lobby. A single
+        // degraded authority leaves the rest browsable. This waits for the
+        // slowest source's first open before answering, which is bounded by
+        // the handshake timeout; listings from faster sources have already
+        // streamed to the subscriber by then.
+        if (!anyOpen) {
+          lobbySubscribers.delete(onUpdate);
+          return null;
         }
+
         return () => {
           lobbySubscribers.delete(onUpdate);
           if (lobbySubscribers.size === 0) {
-            lobbyAttachDetach?.();
-            lobbyAttachDetach = null;
-            lobbySnapshot = null;
+            for (const channel of subscriptionChannels.values()) {
+              channel.attachDetach?.();
+              channel.attachDetach = null;
+              channel.snapshot = null;
+            }
           }
         };
       },
     }),
     {
       name: "phase-multiplayer",
-      version: 5,
+      version: 6,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -1773,6 +2161,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // retaining only user-editable fields, so engine protocol shape changes
       // (such as `deck_size: 100` becoming `{ type: "Exactly", data: 100 }`)
       // cannot leave hosting stuck before GameCreated.
+      //
+      // v5 → v6: the single `serverAddress` splits into `hostingServer` (where
+      // this client hosts and registers) and `userLobbySources` (the
+      // authorities it browses). A hand-typed address becomes both; an
+      // official or build-default address is already derived as a preset, so
+      // it becomes the hosting server only.
       migrate: migratePersistedMultiplayerState,
       // Persisted state is external input. Migration only runs when the schema
       // version changes, so hydrate current-version blobs through the same
@@ -1785,12 +2179,23 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...current,
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
+          userLobbySources: normalizeUserLobbySources(saved.userLobbySources),
+          // `null` is a meaningful stored value (direct-codes mode), so it is
+          // honoured; anything else that is not a valid URL falls back to the
+          // initial hosting server rather than leaving the store unusable.
+          hostingServer:
+            typeof saved.hostingServer === "string" && isValidWebSocketUrl(saved.hostingServer)
+              ? saved.hostingServer
+              : saved.hostingServer === null
+                ? null
+                : current.hostingServer,
         };
       },
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,
-        serverAddress: state.serverAddress,
+        hostingServer: state.hostingServer,
+        userLobbySources: state.userLobbySources,
         lastHostConfig: state.lastHostConfig,
       }),
     },

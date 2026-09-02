@@ -26,7 +26,13 @@ import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
-import { findLobbyGameByCode, useMultiplayerStore } from "../stores/multiplayerStore";
+import {
+  adHocLobbySource,
+  findLobbyGameByCode,
+  hostingLobbySource,
+  useMultiplayerStore,
+  type LobbySource,
+} from "../stores/multiplayerStore";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -50,6 +56,13 @@ type PendingAction =
       password?: string;
       format?: GameFormat;
       isP2P?: boolean;
+      /**
+       * The authority this join opens on, latched when the user acted. It
+       * rides to the `/game` route as `?server=` and is never re-derived
+       * from store state afterwards, so browsing one server and joining a
+       * game listed on another cannot cross the wires.
+       */
+      origin: LobbySource | null;
       /**
        * Full lobby row, populated when the join originated from a lobby list
        * click (not from a typed code). Lets the deck-select view render
@@ -87,12 +100,11 @@ export function MultiplayerPage() {
     parseViewParam(new URLSearchParams(location.search).get("view"))
   ));
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  // Initial mode tracks `serverAddress`: if the user has picked "None" in
-  // `ServerPicker` (empty string sentinel), skip straight to P2P so the
-  // lobby doesn't attempt a doomed subscription.
-  const initialServerAddress = useMultiplayerStore.getState().serverAddress;
+  // Initial mode tracks `hostingServer`: if the user has picked "None" in
+  // `ServerPicker` (the `null` direct-codes sentinel), skip straight to P2P
+  // so the lobby doesn't attempt a doomed subscription.
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>(
-    initialServerAddress ? "server" : "p2p",
+    useMultiplayerStore.getState().hostingServer !== null ? "server" : "p2p",
   );
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
@@ -126,7 +138,7 @@ export function MultiplayerPage() {
   // multiplayer entirely.
   const [deckSelectReturn, setDeckSelectReturn] =
     useState<MultiplayerView>("lobby");
-  const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  const hostingServer = useMultiplayerStore((s) => s.hostingServer);
   // HostSetup mirrors its in-flight format into the store on every change,
   // so reading it here lets both the deck-picker filter and the live
   // compatibility check react to the user's format choice without any
@@ -151,6 +163,10 @@ export function MultiplayerPage() {
       reason?: string;
       format?: string;
       joinCode?: string;
+      /** The origin the rejected join was opened on, carried back by
+       * `GamePage` so the retry re-joins the same server rather than
+       * whichever one this client happens to host on. */
+      server?: string;
     } | null;
     if (!state?.deckRejected) return;
     showToast(state.reason ?? t("page.deckRejected"));
@@ -158,23 +174,22 @@ export function MultiplayerPage() {
       type: "join",
       code: state.joinCode ?? "",
       format: (state.format as GameFormat) ?? undefined,
+      origin:
+        (typeof state.server === "string" ? adHocLobbySource(state.server) : null)
+        ?? hostingLobbySource(useMultiplayerStore.getState()),
     });
     setView("deck-select");
     navigate(location.pathname, { replace: true, state: null });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync connectionMode when the user changes their server address via
-  // ServerPicker. Empty address → P2P (no server to talk to). Restored
-  // address → server (selecting a server IS the explicit intent). Only
-  // reacts to serverAddress changes — not connectionMode — so an explicit
-  // "Use Direct Code" selection isn't immediately reversed.
+  // Sync connectionMode when the user changes their hosting server via
+  // ServerPicker. `null` → P2P (no server to talk to). Restored address →
+  // server (selecting a server IS the explicit intent). Only reacts to
+  // `hostingServer` changes — not connectionMode — so an explicit "Use
+  // Direct Code" selection isn't immediately reversed.
   useEffect(() => {
-    if (!serverAddress) {
-      setConnectionMode("p2p");
-    } else {
-      setConnectionMode("server");
-    }
-  }, [serverAddress]);
+    setConnectionMode(hostingServer === null ? "p2p" : "server");
+  }, [hostingServer]);
 
   // Live legality check: whenever the user is on host-setup with an active
   // deck and a chosen format, re-run the engine's compatibility check after
@@ -290,10 +305,14 @@ export function MultiplayerPage() {
    * is referenced as an identifier (stable across renders via React).
    */
   const joinP2PRoom = useCallback(
-    async (code: string, initialPassword?: string): Promise<boolean> => {
+    async (
+      code: string,
+      origin: LobbySource,
+      initialPassword?: string,
+    ): Promise<boolean> => {
       let password = initialPassword;
       while (true) {
-        const result = await resolveGuestFromStore(code, password);
+        const result = await resolveGuestFromStore(code, origin, password);
         if (result.ok) {
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
@@ -439,7 +458,10 @@ export function MultiplayerPage() {
         // (server mode) against such a server is implicitly asking for a
         // broker-advertised P2P game.
         const store = useMultiplayerStore.getState();
-        const socket = await store.ensureSubscriptionSocket();
+        const hosting = store.hostingServer;
+        const socket = hosting === null
+          ? null
+          : await store.ensureSubscriptionSocket(hosting);
         const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
 
         if (action.connectionMode === "p2p" || mode === "LobbyOnly") {
@@ -468,10 +490,10 @@ export function MultiplayerPage() {
           navigate("/");
         }
       } else {
-        const { code, password, context } = action;
+        const { code, password, context, origin } = action;
 
-        if (context?.is_p2p === true || action.isP2P === true) {
-          return joinP2PRoom(code, password);
+        if (origin !== null && (context?.is_p2p === true || action.isP2P === true)) {
+          return joinP2PRoom(code, origin, password);
         }
 
         const p2pCode = parseRoomCode(code);
@@ -482,11 +504,22 @@ export function MultiplayerPage() {
           return true;
         }
 
+        // Reachable when a deck-rejected re-entry lands after the user
+        // switched the picker to "None": there is no lobby authority left to
+        // re-join through.
+        if (origin === null) {
+          showToast(t("page.joinNeedsServer"));
+          return false;
+        }
+
         clearWsSession();
         const gameId = crypto.randomUUID();
         saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
         useGameStore.setState({ gameId });
-        const params = new URLSearchParams({ mode: "join", code });
+        // The join origin rides on the route: `GamePage` reads it and
+        // `GameProvider` opens the game socket on it, so the server that
+        // listed the game is the server the join reaches.
+        const params = new URLSearchParams({ mode: "join", code, server: origin.url });
         window.sessionStorage.removeItem(`phase-join-reservation:${code}`);
         if (password) {
           params.set("password", password);
@@ -535,18 +568,27 @@ export function MultiplayerPage() {
   );
 
   const handleSpectate = useCallback(
-    async (code: string, context?: LobbyGame) => {
-      const resolved = context ?? findLobbyGameByCode(code);
+    async (code: string, origin: LobbySource | null, context?: LobbyGame) => {
+      // Boundary guard: `onSpectate` is only passed in server mode, so a
+      // null origin here means the lobby has no authority to watch through.
+      if (origin === null) {
+        showToast(t("page.joinNeedsServer"));
+        return;
+      }
+      const resolved = context ?? findLobbyGameByCode(code)?.game;
+      // Every spectate navigation carries the origin — the draft-spectator
+      // socket opens on it exactly as the game socket does.
+      const spectatorParams = new URLSearchParams({ code, server: origin.url });
       if (resolved?.draft_metadata) {
-        navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+        navigate(`/draft-spectator?${spectatorParams.toString()}`);
         return;
       }
       // Typed codes skip lobby-row context; drafts not in the public lobby
       // still resolve via SpectateDraft when lookup reports not_found.
       if (!resolved?.draft_metadata && connectionMode === "server") {
-        const lookup = await lookupJoinTargetFromStore(code);
+        const lookup = await lookupJoinTargetFromStore(code, origin);
         if (!lookup.ok && lookup.reason === "not_found") {
-          navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+          navigate(`/draft-spectator?${spectatorParams.toString()}`);
           return;
         }
         if (!lookup.ok) {
@@ -556,15 +598,18 @@ export function MultiplayerPage() {
       }
       const gameId = crypto.randomUUID();
       useGameStore.setState({ gameId });
-      navigate(`/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}`);
+      navigate(
+        `/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}&server=${encodeURIComponent(origin.url)}`,
+      );
     },
-    [navigate, connectionMode, lookupJoinTargetFromStore, showToast],
+    [navigate, connectionMode, lookupJoinTargetFromStore, showToast, t],
   );
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     async (
       code: string,
+      origin: LobbySource | null,
       password?: string,
       format?: GameFormat,
       context?: LobbyGame,
@@ -587,8 +632,17 @@ export function MultiplayerPage() {
           code,
           password,
           format,
+          origin,
         });
         setView("deck-select");
+        return;
+      }
+
+      // Past the direct-code branch every path needs a lobby authority to
+      // query, so refuse rather than silently falling back to this client's
+      // own hosting server.
+      if (origin === null) {
+        showToast(t("page.joinNeedsServer"));
         return;
       }
 
@@ -598,7 +652,7 @@ export function MultiplayerPage() {
       let resolvedFormat = format;
       let resolvedPassword = password;
       let resolvedIsP2P = context?.is_p2p === true;
-      const result = await lookupJoinTargetFromStore(code, resolvedPassword);
+      const result = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
       if (result.ok) {
         resolvedFormat = result.info.format_config?.format ?? resolvedFormat;
         resolvedIsP2P = result.info.is_p2p;
@@ -606,7 +660,7 @@ export function MultiplayerPage() {
         const entered = window.prompt(t("page.passwordPrompt"));
         if (!entered) return;
         resolvedPassword = entered;
-        const retry = await lookupJoinTargetFromStore(code, resolvedPassword);
+        const retry = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
         if (retry.ok) {
           resolvedFormat = retry.info.format_config?.format ?? resolvedFormat;
           resolvedIsP2P = retry.info.is_p2p;
@@ -624,6 +678,7 @@ export function MultiplayerPage() {
         password: resolvedPassword,
         format: resolvedFormat,
         isP2P: resolvedIsP2P,
+        origin,
         context,
       };
       setPendingAction(action);
@@ -785,7 +840,7 @@ export function MultiplayerPage() {
             // the freshly-dialed socket — without this, switching servers
             // left the previous region's PlayerCount on screen. lobbyRetryKey
             // still drives the "Keep waiting" offline retry.
-            key={`${serverAddress}:${lobbyRetryKey}`}
+            key={`${hostingServer ?? "direct"}:${lobbyRetryKey}`}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={handleHostDraft}
@@ -874,7 +929,7 @@ export function MultiplayerPage() {
       <ConnectionToast />
       {serverOfflinePrompt && view === "lobby" && (
         <ServerOfflinePrompt
-          serverAddress={serverAddress}
+          serverAddress={hostingServer ?? undefined}
           onUseDirect={() => {
             setConnectionMode("p2p");
             setServerOfflinePrompt(false);
@@ -890,7 +945,7 @@ export function MultiplayerPage() {
       )}
       {brokerOfflinePrompt && (
         <BrokerOfflinePrompt
-          serverAddress={serverAddress}
+          serverAddress={hostingServer ?? undefined}
           onCancel={() => setBrokerOfflinePrompt(null)}
           onContinueWithoutLobby={() => {
             const { action } = brokerOfflinePrompt;

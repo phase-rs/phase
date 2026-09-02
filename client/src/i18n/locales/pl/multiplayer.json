@@ -118,11 +118,14 @@
     "anonymous": "Anonimowy",
     "by": "autor: {{name}}",
     "passwordProtected": "Chronione hasłem",
-    "join": "Dołącz"
+    "join": "Dołącz",
+    "originTitle": "Wystawione przez {{name}} {{kind}}",
+    "kindFull": "(serwer gry)",
+    "kindLobbyOnly": "(broker poczekalni)"
   },
   "serverPicker": {
     "title": "Serwer",
-    "subtitle": "Wybierz region lub połącz się z własną instancją.",
+    "subtitle": "Wybierz, gdzie hostujesz i które poczekalnie przeglądasz.",
     "noneLabel": "Brak (tylko P2P)",
     "directCodes": "bezpośrednie kody",
     "official": "Oficjalny",
@@ -133,7 +136,18 @@
     "urlError": "URL musi zaczynać się od ws:// lub wss://",
     "connected": "Połączono",
     "connectionFailed": "Połączenie nie powiodło się",
-    "testing": "Testowanie…"
+    "testing": "Testowanie…",
+    "hostingServer": "Serwer hostujący",
+    "hostingServerHelp": "Tam są tworzone i rejestrowane hostowane przez ciebie gry.",
+    "sources": "Źródła poczekalni",
+    "sourcesHelp": "Otwarte stoły ze wszystkich poniższych źródeł są łączone w jedną listę.",
+    "addSource": "Dodaj źródło",
+    "remove": "Usuń",
+    "useForHosting": "Użyj do hostowania",
+    "sourceStatusConnecting": "Łączenie…",
+    "sourceStatusDegraded": "Niedostępny",
+    "sourceDuplicate": "Ten serwer jest już źródłem poczekalni.",
+    "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł."
   },
   "lobbyDraftRooms": {
     "noRooms": "Brak dostępnych pokoi draftu",
@@ -183,7 +197,9 @@
     "hostP2PGame": "Hostuj grę P2P",
     "passwordRequired": "Wymagane hasło",
     "passwordPlaceholder": "Wpisz hasło",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Część źródeł poczekalni jest niedostępna",
+    "invalidJoinServer": "Adres serwera w tym kodzie jest nieprawidłowy."
   },
   "hostSetup": {
     "hostDirectMatch": "Hostuj mecz bezpośredni",
@@ -260,7 +276,8 @@
     "noDeckWarning": "Nie wybrano talii — musisz wybrać jedną przed hostowaniem.",
     "pickDeck": "Wybierz talię",
     "anonymous": "Anonimowy",
-    "joining": "Dołączanie"
+    "joining": "Dołączanie",
+    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry."
   },
   "draftLobbyPanel": {
     "draftPod": "Grupa draftu",

@@ -118,11 +118,14 @@
     "anonymous": "Anonimo",
     "by": "di {{name}}",
     "passwordProtected": "Protetta da password",
-    "join": "Entra"
+    "join": "Entra",
+    "originTitle": "Elencata da {{name}} {{kind}}",
+    "kindFull": "(server di gioco)",
+    "kindLobbyOnly": "(broker lobby)"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Scegli una regione, o connettiti a un'istanza self-hosted.",
+    "subtitle": "Scegli dove ospitare e quali lobby sfogliare.",
     "noneLabel": "Nessuno (solo P2P)",
     "directCodes": "codici diretti",
     "official": "Ufficiale",
@@ -133,7 +136,18 @@
     "urlError": "L'URL deve iniziare con ws:// o wss://",
     "connected": "Connesso",
     "connectionFailed": "Connessione fallita",
-    "testing": "Test in corso…"
+    "testing": "Test in corso…",
+    "hostingServer": "Server di hosting",
+    "hostingServerHelp": "Dove vengono create e registrate le partite che ospiti.",
+    "sources": "Fonti lobby",
+    "sourcesHelp": "I tavoli aperti di tutte le fonti qui sotto vengono uniti in un unico elenco.",
+    "addSource": "Aggiungi una fonte",
+    "remove": "Rimuovi",
+    "useForHosting": "Usa per ospitare",
+    "sourceStatusConnecting": "Connessione…",
+    "sourceStatusDegraded": "Irraggiungibile",
+    "sourceDuplicate": "Quel server è già una fonte lobby.",
+    "sourceCapReached": "Si possono aggiungere fino a {{max}} fonti."
   },
   "lobbyDraftRooms": {
     "noRooms": "Nessuna stanza di draft disponibile",
@@ -183,7 +197,9 @@
     "hostP2PGame": "Ospita partita P2P",
     "passwordRequired": "Password richiesta",
     "passwordPlaceholder": "Inserisci password",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Alcune fonti lobby sono irraggiungibili",
+    "invalidJoinServer": "L'indirizzo del server in quel codice non è valido."
   },
   "hostSetup": {
     "hostDirectMatch": "Ospita partita diretta",
@@ -260,7 +276,8 @@
     "noDeckWarning": "Nessun mazzo selezionato — dovrai sceglierne uno prima di ospitare.",
     "pickDeck": "Scegli mazzo",
     "anonymous": "Anonimo",
-    "joining": "Connessione in corso"
+    "joining": "Connessione in corso",
+    "joinNeedsServer": "Scegli un server prima di unirti a una partita."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod di draft",
