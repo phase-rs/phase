@@ -7,6 +7,7 @@ type SavedDeckSubmission = {
   draftToken: string;
   submissionId: string;
   mainDeck: string[];
+  commanders: string[];
   timestamp: number;
 };
 
@@ -71,7 +72,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
   });
 
-  it("keeps a deck submission in the participant outbox until its matching receipt", async () => {
+  it("keeps an ordered duplicate commander designation in the participant outbox until its matching receipt", async () => {
     sessionState.sessions.length = 0;
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
     const guest = new P2PDraftGuest(
@@ -95,12 +96,17 @@ describe("P2P draft guest handshake attempts", () => {
     });
     await handshake;
 
-    const submitted = guest.submitDeck(["Island"], []);
+    const commanders = ["The Prismatic Piper", "The Prismatic Piper"];
+    const submitted = guest.submitDeck(["Island"], commanders);
     await vi.waitFor(() => expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledOnce());
+    expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledWith(
+      "phase2-ABCDE",
+      expect.objectContaining({ mainDeck: ["Island"], commanders }),
+    );
     const sent = sessionState.sessions[0]!.send.mock.calls.find(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
-    )?.[0] as { submissionId: string; mainDeck: string[] };
-    expect(sent).toMatchObject({ mainDeck: ["Island"] });
+    )?.[0] as { submissionId: string; mainDeck: string[]; commanders: string[] };
+    expect(sent).toMatchObject({ mainDeck: ["Island"], commanders });
     const sendIndex = sessionState.sessions[0]!.send.mock.calls.findIndex(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     );

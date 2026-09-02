@@ -294,6 +294,21 @@ describe("DraftPodPage workspace", () => {
     expect(captured.deckbuilder?.capabilities).toEqual({ kind: "editable-pool", suggestions: false });
   });
 
+  it("enables designation only for initial Commander Pod deckbuilding", () => {
+    store.state.phase = "deckbuilding";
+    const rendered = render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+
+    expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
+
+    act(() => { store.state.view.kind = "CommanderDraft"; });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.deckbuilder?.commanderDesignation).toBe("initial-pod");
+
+    act(() => { store.state.view.kind = "Premier"; });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
+  });
+
   it("forwards explicit preview settings in match pool review", () => {
     usePreferencesStore.setState({ draftCardPreviewMode: "follow" });
     store.state.phase = "matchInProgress";

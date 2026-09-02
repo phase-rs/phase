@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
@@ -1189,6 +1189,12 @@ const PRISMATIC_PIPER = {
   cmc: 3,
 };
 
+const SECOND_PRISMATIC_PIPER = {
+  ...PRISMATIC_PIPER,
+  instance_id: "cmd-5",
+  collector_number: "5",
+};
+
 const COMMANDER_VIEW: BuilderView = {
   ...TEST_VIEW,
   kind: "CommanderDraft",
@@ -1212,6 +1218,9 @@ const SIXTY_CARD_DECK = [
 ];
 
 function commanderPanelScope() {
+  if (!screen.queryByRole("heading", { name: "Commander", level: 4 })) {
+    fireEvent.click(screen.getByRole("button", { name: "Commander" }));
+  }
   return within(
     screen.getByRole("heading", { name: "Commander", level: 4 })
       .parentElement as HTMLElement,
@@ -1725,18 +1734,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     fireEvent.click(screen.getByRole("button", { name: "The Prismatic Piper" }));
     await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledTimes(2));
 
-    // Reach-guard: the first answer really does pair. If this is 1, the row
-    // below would pass on a builder where designation never worked at all.
-    await act(async () => {
-      answer[0]();
-    });
-    await waitFor(() =>
-      expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2),
-    );
-
-    // The second answer's premise — a SINGLE commander, the one it was asked
-    // about — no longer holds, so it may not append. It replaces instead, which
-    // is exactly what these two clicks do when they resolve one after the other.
+    // Resolve in reverse request order: the latest intent commits first.
     await act(async () => {
       answer[1]();
     });
@@ -1745,7 +1743,348 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     );
     expect(
       commanderPanelScope().getAllByRole("button", { name: "Remove" }),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+
+    // The older response cannot overwrite that newer committed intent.
+    await act(async () => {
+      answer[0]();
+    });
+    expect(
+      commanderPanelScope().getAllByRole("button", { name: "Remove" })
+        .map((button) => button.parentElement?.textContent),
+    ).toEqual(["Vehicle CommanderRemove", "The Prismatic PiperRemove"]);
+  });
+
+  it("invalidates an in-flight pairing response when its commander is removed", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
+    );
+    let resolvePairing!: () => void;
+    enginePartnerCandidates.mockImplementation(
+      (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
+        resolvePairing = () => resolve(candidates);
+      }),
+    );
+
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander", "Second Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() => expect(
+      commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+    ).toHaveLength(1));
+    const secondCandidate = await commanderPanelScope().findByRole(
+      "button",
+      { name: "Second Commander" },
+    );
+    fireEvent.click(secondCandidate);
+    await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledOnce());
+    fireEvent.click(commanderPanelScope().getByRole("button", { name: "Remove" }));
+    await act(async () => resolvePairing());
+
+    expect(screen.getByText("No commander selected")).toBeInTheDocument();
+    expect(commanderPanelScope().queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+  });
+
+  it("rejects an in-flight pairing response after the candidate loses backing", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
+    );
+    let resolvePairing!: () => void;
+    enginePartnerCandidates.mockImplementation(
+      (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
+        resolvePairing = () => resolve(candidates);
+      }),
+    );
+
+    function BackingLossHarness() {
+      const [mainDeck, setMainDeck] = useState(["Vehicle Commander", "Second Commander"]);
+      return (
+        <LimitedDeckBuilder
+          view={COMMANDER_VIEW}
+          mainDeck={mainDeck}
+          landCounts={NO_LANDS}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={(cardName) => setMainDeck((current) => {
+            const index = current.indexOf(cardName);
+            return index < 0
+              ? current
+              : [...current.slice(0, index), ...current.slice(index + 1)];
+          })}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />
+      );
+    }
+
+    render(<BackingLossHarness />);
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() => expect(
+      commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+    ).toHaveLength(1));
+    const secondCandidate = await commanderPanelScope().findByRole(
+      "button",
+      { name: "Second Commander" },
+    );
+    fireEvent.click(secondCandidate);
+    await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledOnce());
+    fireEvent.click(sectionScope("Main Deck").getByRole("button", { name: /second commander/i }));
+    await act(async () => resolvePairing());
+
+    expect(commanderPanelScope().getByText("Vehicle Commander")).toBeInTheDocument();
+    expect(commanderPanelScope().queryByText("Second Commander")).not.toBeInTheDocument();
+    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+  });
+
+  it("ignores an in-flight pairing response after unmount", async () => {
+    engineEligible.mockImplementation(
+      async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
+    );
+    let resolvePairing!: () => void;
+    enginePartnerCandidates.mockImplementation(
+      (_first: string, candidates: string[]) => new Promise<string[]>((resolve) => {
+        resolvePairing = () => resolve(candidates);
+      }),
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rendered = render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={["Vehicle Commander", "Second Commander"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() => expect(
+      commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+    ).toHaveLength(1));
+    const secondCandidate = await commanderPanelScope().findByRole(
+      "button",
+      { name: "Second Commander" },
+    );
+    fireEvent.click(secondCandidate);
+    await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledOnce());
+    rendered.unmount();
+    await act(async () => resolvePairing());
+
+    expect(consoleError.mock.calls.flat().join(" ")).not.toMatch(/unmounted|state update/i);
+    consoleError.mockRestore();
+  });
+
+  it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
+    "designates and submits two backed copies of The Prismatic Piper on %s",
+    async (responsiveLayout) => {
+      engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+      enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
+      const submitSpy = vi.fn();
+      const view = {
+        ...COMMANDER_VIEW,
+        min_deck_size: 2,
+        pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER],
+      };
+
+      function WorkspaceHarness() {
+        const [workspace, setWorkspace] = useState({
+          schemaVersion: 1 as const,
+          placements: {
+            "cmd-4": { zone: "deck" as const, row: 0 as const, column: 0, order: 0 },
+            "cmd-5": { zone: "deck" as const, row: 0 as const, column: 0, order: 1 },
+          },
+          virtualBasics: [],
+        });
+        return (
+          <LimitedDeckBuilder
+            local={{
+              view,
+              workspace,
+              preferences: createDefaultDraftWorkspacePreferences(),
+              interactionLocked: false,
+              commanderDesignation: "initial-pod",
+              capabilities: { kind: "editable-pool", suggestions: false },
+              onWorkspaceChange: setWorkspace,
+              onPreferencesChange: () => {},
+              onSubmitDeck: submitSpy,
+              onAddBasicLand: () => {},
+              onRemoveBasicLand: () => {},
+            }}
+            responsiveLayout={responsiveLayout}
+            showSuggestions={false}
+          />
+        );
+      }
+
+      render(
+        <StrictMode>
+          <WorkspaceHarness />
+        </StrictMode>,
+      );
+      fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+      fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+      await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2));
+      expect(enginePartnerCandidates).toHaveBeenCalledWith(
+        "The Prismatic Piper",
+        ["The Prismatic Piper"],
+        ["CMM"],
+      );
+
+      const submitButton = responsiveLayout === "phone-portrait"
+        ? within(document.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]")!)
+          .getByRole("button", { name: "Submit Deck" })
+        : screen.getByRole("button", { name: "Submit Deck" });
+      fireEvent.click(submitButton);
+      await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([
+        "The Prismatic Piper",
+        "The Prismatic Piper",
+      ]));
+
+      fireEvent.click(commanderPanelScope().getAllByRole("button", { name: "Remove" })[0]);
+      await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1));
+    },
+  );
+
+  it("prunes duplicate designations to the currently backed copy count", async () => {
+    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
+    const view = { ...COMMANDER_VIEW, pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER] };
+
+    function BackingHarness() {
+      const [twoCopies, setTwoCopies] = useState(true);
+      const workspace = {
+        schemaVersion: 1 as const,
+        placements: {
+          "cmd-4": { zone: "deck" as const, row: 0 as const, column: 0, order: 0 },
+          "cmd-5": { zone: (twoCopies ? "deck" : "sideboard") as "deck" | "sideboard", row: 0 as const, column: 0, order: 1 },
+        },
+        virtualBasics: [],
+      };
+      return (
+        <>
+          <button onClick={() => setTwoCopies(false)}>Reduce backing</button>
+          <LimitedDeckBuilder
+            local={{
+              view,
+              workspace,
+              preferences: createDefaultDraftWorkspacePreferences(),
+              interactionLocked: false,
+              commanderDesignation: "initial-pod",
+              capabilities: { kind: "editable-pool", suggestions: false },
+              onWorkspaceChange: () => {},
+              onPreferencesChange: () => {},
+              onSubmitDeck: () => {},
+              onAddBasicLand: () => {},
+              onRemoveBasicLand: () => {},
+            }}
+            responsiveLayout="desktop"
+          />
+        </>
+      );
+    }
+
+    render(<BackingHarness />);
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+    await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Reduce backing" }));
+    await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1));
+  });
+
+  it("does not let one copy back two designations", async () => {
+    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, min_deck_size: 1, pool: [PRISMATIC_PIPER] },
+          workspace: {
+            schemaVersion: 1,
+            placements: { "cmd-4": { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          commanderDesignation: "initial-pod",
+          capabilities: { kind: "editable-pool", suggestions: false },
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+      />,
+    );
+
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+    await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1));
+    expect(commanderPanelScope().queryByRole("button", { name: "The Prismatic Piper" })).not.toBeInTheDocument();
+    expect(enginePartnerCandidates).not.toHaveBeenCalled();
+  });
+
+  it("displays engine-granted filler controls without enforcing the grant cap in the client", () => {
+    const onAddBasicLand = vi.fn();
+    const onRemoveBasicLand = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: {
+            ...COMMANDER_VIEW,
+            min_deck_size: 2,
+            pool: [],
+            grantable_commander_fillers: [
+              { card_name: "The Prismatic Piper", max_copies: 2 },
+            ],
+          },
+          workspace: {
+            schemaVersion: 1,
+            placements: {
+              "piper-virtual-1": { zone: "deck", row: 0, column: 0, order: 0 },
+              "piper-virtual-2": { zone: "deck", row: 0, column: 0, order: 1 },
+            },
+            virtualBasics: [
+              { instanceId: "piper-virtual-1", name: "The Prismatic Piper" },
+              { instanceId: "piper-virtual-2", name: "The Prismatic Piper" },
+            ],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          commanderDesignation: "initial-pod",
+          capabilities: { kind: "editable-pool", suggestions: false },
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand,
+          onRemoveBasicLand,
+        }}
+        responsiveLayout="desktop"
+      />,
+    );
+
+    expect(screen.getByText(
+      "Your pool also includes up to 2 × The Prismatic Piper, usable only as your commander.",
+    )).toBeInTheDocument();
+    const add = screen.getByRole("button", { name: "Add The Prismatic Piper" });
+    expect(add).not.toBeDisabled();
+    fireEvent.click(add);
+    fireEvent.click(screen.getByRole("button", { name: "Remove The Prismatic Piper" }));
+    expect(onAddBasicLand).toHaveBeenCalledWith("The Prismatic Piper");
+    expect(onRemoveBasicLand).toHaveBeenCalledWith("The Prismatic Piper");
   });
 
   /**

@@ -51,6 +51,7 @@ const { captured, draftState, intergameWorkspace, playerView, sideboardPrompt } 
     intergameWorkspaceState: intergameWorkspace as typeof intergameWorkspace | null,
     setIntergameWorkspaceState: vi.fn(),
     submitSideboard: vi.fn(),
+    submitDeck: vi.fn(),
     choosePlayDraw: vi.fn(),
     leave: vi.fn(),
   } };
@@ -92,13 +93,20 @@ vi.mock("../../components/draft/HostControls", () => {
 });
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
   LimitedDeckBuilder: (props: {
-    local: { capabilities?: { kind: string }; onSubmitDeck: () => void };
+    local: { capabilities?: { kind: string }; onSubmitDeck: (commanders: string[]) => void };
     responsiveLayout?: string;
     responsiveHeightMode?: string;
   }) => {
     captured.builderProps = props;
     return (
-      <button data-testid="limited-builder" data-capability={props.local.capabilities?.kind} onClick={props.local.onSubmitDeck}>
+      <button
+        data-testid="limited-builder"
+        data-capability={props.local.capabilities?.kind}
+        onClick={() => props.local.onSubmitDeck([
+          "The Prismatic Piper",
+          "The Prismatic Piper",
+        ])}
+      >
         Submit Sideboard
       </button>
     );
@@ -132,6 +140,7 @@ describe("DraftPodPage betweenGames", () => {
     draftState.view = playerView;
     draftState.intergameWorkspaceState = intergameWorkspace;
     draftState.submitSideboard.mockClear();
+    draftState.submitDeck.mockClear();
     captured.shellMode = "";
     captured.menuShell = null;
     captured.builderProps = null;
@@ -151,6 +160,8 @@ describe("DraftPodPage betweenGames", () => {
       ["Twin", "Island"],
       [{ name: "Twin", count: 1 }, { name: "Forest", count: 1 }],
     );
+    expect(draftState.submitSideboard).toHaveBeenCalledOnce();
+    expect(draftState.submitDeck).not.toHaveBeenCalled();
   });
 
   it("shows the submitted deck read-only while waiting for the opponent", () => {

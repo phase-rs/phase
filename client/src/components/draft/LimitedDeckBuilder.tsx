@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -48,6 +48,7 @@ import {
   type ResponsiveDraftLayout,
 } from "./workspace/workspacePreferences";
 import {
+  countProjectedNames,
   projectDeckNames,
 } from "./workspace/workspaceProjection";
 
@@ -265,6 +266,162 @@ function computeRemainingPool(
   return remaining;
 }
 
+function sameOrderedNames(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((name, index) => name === right[index]);
+}
+
+function namesAreBacked(names: readonly string[], counts: ReadonlyMap<string, number>): boolean {
+  const remaining = new Map(counts);
+  return names.every((name) => {
+    const count = remaining.get(name) ?? 0;
+    if (count <= 0) return false;
+    remaining.set(name, count - 1);
+    return true;
+  });
+}
+
+function useCommanderDesignation({
+  designationRequired,
+  deckFormat,
+  deckEntries,
+  draftSetCodes,
+}: {
+  designationRequired: boolean;
+  deckFormat: GameFormat | null;
+  deckEntries: DeckEntry[];
+  draftSetCodes: readonly string[];
+}) {
+  const [commanders, setCommanders] = useState<string[]>([]);
+  const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string> | null>(null);
+  const [eligibilityFailed, setEligibilityFailed] = useState(false);
+  const commandersRef = useRef(commanders);
+  const requestGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
+  const deckCounts = useMemo(
+    () => new Map(deckEntries.map((entry) => [entry.name, entry.count])),
+    [deckEntries],
+  );
+  const deckCountsRef = useRef(deckCounts);
+  commandersRef.current = commanders;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestGenerationRef.current += 1;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    deckCountsRef.current = deckCounts;
+  }, [deckCounts]);
+
+  useEffect(() => {
+    if (!designationRequired || !deckFormat) {
+      setCommanderEligibleNames(null);
+      setEligibilityFailed(false);
+      return;
+    }
+    let cancelled = false;
+    const names = [...new Set(deckEntries.map((entry) => entry.name))];
+    Promise.all(names.map(async (name) => (
+      [name, await isCardCommanderEligibleForFormat(name, deckFormat)] as const
+    )))
+      .then((results) => {
+        if (cancelled) return;
+        setCommanderEligibleNames(
+          new Set(results.filter(([, eligible]) => eligible).map(([name]) => name)),
+        );
+        setEligibilityFailed(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCommanderEligibleNames(null);
+        setEligibilityFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [designationRequired, deckFormat, deckEntries]);
+
+  const isCommanderEligible = useCallback(
+    (name: string) => commanderEligibleNames?.has(name) ?? false,
+    [commanderEligibleNames],
+  );
+
+  const handleSetCommander = useCallback((cardName: string) => {
+    if (!commanderEligibleNames?.has(cardName)) return;
+    const premise = [...commandersRef.current];
+    const generation = ++requestGenerationRef.current;
+    void (async () => {
+      let pairs = false;
+      if (premise.length === 1) {
+        try {
+          pairs = (
+            await commanderPartnerCandidates(premise[0], [cardName], draftSetCodes)
+          ).includes(cardName);
+        } catch {
+          return;
+        }
+      }
+      if (
+        !mountedRef.current
+        || generation !== requestGenerationRef.current
+        || !sameOrderedNames(commandersRef.current, premise)
+      ) return;
+
+      // CR 702.124g: partner can never produce more than two commanders.
+      const next = pairs && premise.length === 1 ? [...premise, cardName] : [cardName];
+      if (next.length > 2 || !namesAreBacked(next, deckCountsRef.current)) return;
+      setCommanders((current) => {
+        if (
+          generation !== requestGenerationRef.current
+          || !sameOrderedNames(current, premise)
+          || !namesAreBacked(next, deckCountsRef.current)
+        ) return current;
+        commandersRef.current = next;
+        return next;
+      });
+    })();
+  }, [commanderEligibleNames, draftSetCodes]);
+
+  const handleRemoveCommander = useCallback((cardName: string) => {
+    requestGenerationRef.current += 1;
+    setCommanders((current) => {
+      const index = current.indexOf(cardName);
+      if (index < 0) return current;
+      const next = [...current.slice(0, index), ...current.slice(index + 1)];
+      commandersRef.current = next;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    setCommanders((current) => {
+      const remaining = new Map(deckCounts);
+      const next = current.filter((name) => {
+        const count = remaining.get(name) ?? 0;
+        if (count <= 0) return false;
+        remaining.set(name, count - 1);
+        return true;
+      });
+      if (next.length === current.length) return current;
+      requestGenerationRef.current += 1;
+      commandersRef.current = next;
+      return next;
+    });
+  }, [deckCounts]);
+
+  return {
+    commanders,
+    eligibilityFailed,
+    isCommanderEligible,
+    handleSetCommander,
+    handleRemoveCommander,
+    designationSatisfied: !designationRequired || commanders.length > 0,
+  };
+}
+
 // ── Main component ──────────────────────────────────────────────────────
 
 interface LimitedDeckBuilderProps {
@@ -299,12 +456,13 @@ interface WorkspaceDeckBuilderControllerBase {
   interactionLocked: boolean;
   onWorkspaceChange: (next: DraftWorkspaceState) => void;
   onPreferencesChange: (next: DraftWorkspacePreferences) => void;
-  onSubmitDeck: () => void | Promise<void>;
+  onSubmitDeck: (commanders: string[]) => void | Promise<void>;
   onCardHover?: (info: CardHoverInfo | null) => void;
 }
 
 export type LocalDeckBuilderController = WorkspaceDeckBuilderControllerBase & {
   capabilities?: { kind: "editable-pool"; suggestions: boolean };
+  commanderDesignation?: "initial-pod";
   onAddBasicLand: (name: string) => void;
   onRemoveBasicLand: (name: string) => void;
   onAutoSuggestDeck?: () => void | Promise<void>;
@@ -312,7 +470,10 @@ export type LocalDeckBuilderController = WorkspaceDeckBuilderControllerBase & {
 };
 
 export type WorkspaceDeckBuilderController = LocalDeckBuilderController
-  | (WorkspaceDeckBuilderControllerBase & { capabilities: { kind: "fixed-pool" } });
+  | (WorkspaceDeckBuilderControllerBase & {
+      capabilities: { kind: "fixed-pool" };
+      commanderDesignation?: never;
+    });
 
 function isEditableWorkspaceController(
   controller: WorkspaceDeckBuilderController,
@@ -387,11 +548,6 @@ function ControlledDeckBuilder({
     () => view?.grantable_commander_fillers ?? [],
     [view?.grantable_commander_fillers],
   );
-
-  const [commanders, setCommanders] = useState<string[]>([]);
-  // `null` = not loaded yet or not applicable; an empty Set = loaded, nothing eligible.
-  const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string> | null>(null);
-  const [eligibilityFailed, setEligibilityFailed] = useState(false);
 
   const remainingPool = useMemo(
     () => computeRemainingPool(pool, mainDeck),
@@ -510,152 +666,20 @@ function ControlledDeckBuilder({
     return [...byName].map(([name, count]) => ({ name, count }));
   }, [deckGroups, landCounts]);
 
-  useEffect(() => {
-    if (!designationRequired || !deckFormat) {
-      setCommanderEligibleNames(null);
-      setEligibilityFailed(false);
-      return;
-    }
-    let cancelled = false;
-    const names = [...new Set(commanderDeckEntries.map((e) => e.name))];
-    Promise.all(
-      // CR 903.3 eligibility is the ENGINE's predicate. It admits creature,
-      // Vehicle and Spacecraft cards, so no `type_line` test can stand in.
-      names.map(
-        async (name) =>
-          [name, await isCardCommanderEligibleForFormat(name, deckFormat)] as const,
-      ),
-    )
-      .then((results) => {
-        if (cancelled) return;
-        setCommanderEligibleNames(
-          new Set(results.filter(([, eligible]) => eligible).map(([name]) => name)),
-        );
-        setEligibilityFailed(false);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // Same standard as the pool filter above: the surface must SAY the
-        // engine is unavailable rather than silently offer no commander and
-        // leave Submit permanently disabled with no explanation.
-        setCommanderEligibleNames(null);
-        setEligibilityFailed(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [designationRequired, deckFormat, commanderDeckEntries]);
-
+  const {
+    commanders,
+    eligibilityFailed,
+    isCommanderEligible,
+    handleSetCommander,
+    handleRemoveCommander,
+    designationSatisfied,
+  } = useCommanderDesignation({
+    designationRequired,
+    deckFormat,
+    deckEntries: commanderDeckEntries,
+    draftSetCodes,
+  });
   const { cardDataCache } = useDeckCardData(commanders);
-
-  const isCommanderEligible = useCallback(
-    (name: string) => commanderEligibleNames?.has(name) ?? false,
-    [commanderEligibleNames],
-  );
-
-  const handleSetCommander = useCallback(
-    (cardName: string) => {
-      if (!commanderEligibleNames?.has(cardName)) return;
-      void (async () => {
-        // The name this pairing was ANSWERED FOR, or null for "does not pair".
-        // Carrying the identity rather than a bare boolean is what lets the
-        // commit below tell a still-valid answer from a stale one.
-        let pairsWith: string | null = null;
-        if (commanders.length === 1) {
-          try {
-            // CR 702.124 + CR 903.13f(3): the engine decides whether a second
-            // designation pairs or replaces. Queried at CLICK time so a stale
-            // precomputed value can never misclassify an add as a swap. The
-            // set codes are the ENGINE-latched tokens from the view — never a
-            // pool card's printing.
-            const first = commanders[0];
-            pairsWith = (
-              await commanderPartnerCandidates(first, [cardName], draftSetCodes)
-            ).includes(cardName)
-              ? first
-              : null;
-          } catch {
-            return;
-          }
-        }
-        // CR 702.124b / CR 903.5a: the designated cards stay IN the main deck —
-        // draft-core's `validate_limited_deck` step 5 requires a copy in the
-        // deck for each designation. This is the opposite of the constructed
-        // builder, whose commander is not part of the 99.
-        //
-        // CR 702.124g (no combination of partner abilities can ever give a
-        // player more than two commanders) is enforced HERE, structurally, and
-        // not by the pre-`await` gate above: that gate reads the `commanders`
-        // this callback closed over, so two clicks landing inside one in-flight
-        // query both saw length 1 and both appended. The functional updater
-        // sees LIVE state, so the pair arm re-checks the exact premise the
-        // engine answered for — `prev` is still the single commander named in
-        // the query — and therefore can only ever produce a 2-element result.
-        // Any other shape falls through to replace, which is what the same two
-        // clicks do when they resolve one after the other WITH NO INTERVENING
-        // REMOVAL. That qualifier is load-bearing, not throat-clearing: remove
-        // the first commander while this query is in flight and designate a
-        // third name into the freed slot, and this answer -- whose `pairsWith`
-        // still names the removed card -- replaces that newer designation
-        // instead of pairing with it. Legal under CR 702.124g either way, and
-        // strictly better than dropping the guard, so the replace arm stays;
-        // the equivalence above simply does not reach that interleaving.
-        setCommanders((prev) => {
-          // Raced onto an already-designated name. The panel does not offer
-          // one (`eligibleCommanders` filters `commanders.includes`), so this
-          // click beat that re-render; honour the panel's rule instead of
-          // duplicating the name or discarding the other commander.
-          if (prev.includes(cardName)) return prev;
-          return pairsWith !== null && prev.length === 1 && prev[0] === pairsWith
-            ? [...prev, cardName]
-            : [cardName];
-        });
-      })();
-    },
-    [commanderEligibleNames, commanders, draftSetCodes],
-  );
-
-  const handleRemoveCommander = useCallback((cardName: string) => {
-    setCommanders((prev) => prev.filter((name) => name !== cardName));
-  }, []);
-
-  useEffect(() => {
-    // CR 702.124b / CR 903.5a: a designation is only meaningful while the deck
-    // still holds a copy, so the bound is the deck COUNT rather than mere
-    // membership.
-    //
-    // The count is a conservative bound HERE, not a live discriminator, and the
-    // comment should not claim otherwise: `prev` cannot hold one name twice, so
-    // every name is visited once and `left = 1` decides exactly as `left = 2`
-    // does. Two guards keep that true -- the panel's `eligibleCommanders`
-    // filters `commanders.includes`, and the click updater above returns `prev`
-    // unchanged on `prev.includes(cardName)`, the racing path that filter
-    // misses. The only other writers are this filter and the remove filter,
-    // and a filter cannot introduce a duplicate.
-    //
-    // The count form is still what belongs here, because the CR quantity is
-    // COPIES. The multiset requirement is the ENGINE's, not this component's:
-    // draft-core's `validate_limited_deck` step 5 compares `designated` against
-    // `in_deck` per CR 702.124h ("two legendary CARDS"), so one name designated
-    // twice against two copies in the deck is a legal deck the engine accepts.
-    // A membership test would go silently wrong the day a second designation of
-    // one name becomes reachable at this surface; a count never does.
-    //
-    // The counts this Map reads are merged by name upstream, so two copies of
-    // one name -- a drafted *Prismatic Piper* plus the CR 903.13e granted one --
-    // arrive as a single entry of 2 rather than as two entries of 1, the last of
-    // which is all `new Map` would otherwise keep.
-    setCommanders((prev) => {
-      const available = new Map(commanderDeckEntries.map((e) => [e.name, e.count]));
-      const kept = prev.filter((name) => {
-        const left = available.get(name) ?? 0;
-        if (left <= 0) return false;
-        available.set(name, left - 1);
-        return true;
-      });
-      return kept.length === prev.length ? prev : kept;
-    });
-  }, [commanderDeckEntries]);
 
   const totalCards = mainDeck.length + totalLands;
   const minDeckSize = view?.min_deck_size ?? 40;
@@ -691,7 +715,6 @@ function ControlledDeckBuilder({
   // updater that re-checks `prev.length === 1` against live state, so
   // concurrent in-flight partner queries cannot stack designations. Every other
   // `setCommanders` writer here only shrinks the list.
-  const designationSatisfied = !designationRequired || commanders.length > 0;
   const deckValid = totalCards >= minDeckSize && designationSatisfied;
   const displayedSubmissionError = submissionError ?? localSubmissionError;
 
@@ -967,6 +990,7 @@ function WorkspaceDeckBuilder({
   responsiveHeightMode: "viewport" | "container";
 }) {
   const { t } = useTranslation("draft");
+  const { t: tDeckBuilder } = useTranslation("deck-builder");
   const draftCardPreviewMode = usePreferencesStore((s) => s.draftCardPreviewMode);
   const {
     view,
@@ -1007,13 +1031,37 @@ function WorkspaceDeckBuilder({
     ...deckVirtualBasics.filter((card) => !BASIC_LAND_NAMES.has(card.name)).map((card) => card.name),
   ], [deckCards, deckVirtualBasics]);
   const deckNames = useMemo(() => projectDeckNames(workspace, pool), [workspace, pool]);
+  const commanderDeckEntries = useMemo(() => countProjectedNames(deckNames), [deckNames]);
+  const commanderDesignationEnabled = controller.commanderDesignation === "initial-pod";
+  const deckFormat = commanderDesignationEnabled ? DECK_FORMAT_FOR_KIND[view.kind] : null;
+  const deckFormatConfig = deckFormat ? formatMetadata(deckFormat)?.default_config : undefined;
+  const designationRequired = commanderDesignationEnabled && (deckFormatConfig?.command_zone ?? false);
+  const draftSetCodes = useMemo(() => view.draft_set_codes ?? [], [view.draft_set_codes]);
+  const fillers = useMemo(
+    () => view.grantable_commander_fillers ?? [],
+    [view.grantable_commander_fillers],
+  );
+  const {
+    commanders,
+    eligibilityFailed,
+    isCommanderEligible,
+    handleSetCommander,
+    handleRemoveCommander,
+    designationSatisfied,
+  } = useCommanderDesignation({
+    designationRequired,
+    deckFormat,
+    deckEntries: commanderDeckEntries,
+    draftSetCodes,
+  });
+  const { cardDataCache } = useDeckCardData(commanders);
   const totalLands = useMemo(
     () => deckCards.filter((card) => /\bland\b/i.test(card.type_line)).length
       + deckVirtualBasics.filter((card) => BASIC_LAND_NAMES.has(card.name)).length,
     [deckCards, deckVirtualBasics],
   );
   const minDeckSize = view.min_deck_size ?? 40;
-  const deckValid = deckNames.length >= minDeckSize;
+  const deckValid = deckNames.length >= minDeckSize && designationSatisfied;
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
   const tabletLandscapeLayout = responsiveLayout === "tablet-landscape";
@@ -1048,7 +1096,7 @@ function WorkspaceDeckBuilder({
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
-      await onSubmitDeck();
+      await onSubmitDeck(commanders);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
@@ -1192,6 +1240,73 @@ function WorkspaceDeckBuilder({
       onCardHover={handleHover}
     />
   );
+  const commanderControls = designationRequired && deckFormatConfig ? (
+    <section className="flex flex-col gap-2">
+      {eligibilityFailed && (
+        <p role="alert" className="text-xs text-amber-300/80">
+          {t("limitedDeck.commanderUnavailable")}
+        </p>
+      )}
+      {fillers.map((granted) => (
+        <div key={granted.card_name} className="flex flex-col gap-1">
+          <p className="text-xs text-white/45">
+            {t("limitedDeck.grantedFiller", {
+              name: granted.card_name,
+              maximum: granted.max_copies,
+            })}
+          </p>
+          {editableController && (
+            <LandRow
+              name={granted.card_name}
+              colorClass="bg-cyan-300"
+              count={commanderDeckEntries.find((entry) => entry.name === granted.card_name)?.count ?? 0}
+              onDecrement={() => editableController.onRemoveBasicLand(granted.card_name)}
+              onIncrement={() => editableController.onAddBasicLand(granted.card_name)}
+            />
+          )}
+        </div>
+      ))}
+      <CommanderPanel
+        commanders={commanders}
+        deck={commanderDeckEntries}
+        deckComposition="commanders-inside"
+        cardDataCache={cardDataCache}
+        deckSizeRule={deckFormatConfig.deck_size}
+        isCommanderEligible={isCommanderEligible}
+        onSetCommander={handleSetCommander}
+        onRemoveCommander={handleRemoveCommander}
+        onCardHover={handleHover}
+      />
+      {!designationSatisfied && (
+        <p className="text-xs text-white/55">{t("limitedDeck.commanderRequired")}</p>
+      )}
+    </section>
+  ) : null;
+  const compactCommanderControls = commanderControls ? (
+    <PopoverMenu
+      ariaLabel={tDeckBuilder("commanderPanel.heading")}
+      variant="dialog"
+      menuWidthPx={320}
+      renderTrigger={({ ref, open, toggle }) => (
+        <button
+          ref={ref}
+          type="button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          onClick={toggle}
+          className={menuButtonClass({
+            tone: "neutral",
+            size: "sm",
+            className: "min-h-11 shrink-0",
+          })}
+        >
+          {tDeckBuilder("commanderPanel.heading")}
+        </button>
+      )}
+    >
+      {() => <div className="overflow-y-auto p-3">{commanderControls}</div>}
+    </PopoverMenu>
+  ) : null;
 
   return (
     <div
@@ -1211,7 +1326,14 @@ function WorkspaceDeckBuilder({
         mobileLayout="compact"
         onDismiss={() => handleHover(null)}
       />
-      {!phoneLayout && <DeckStatus spells={spellNames.length} lands={totalLands} min={minDeckSize} />}
+      {!phoneLayout && (
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <DeckStatus spells={spellNames.length} lands={totalLands} min={minDeckSize} />
+          </div>
+          {tabletLayout && compactCommanderControls}
+        </div>
+      )}
 
       {tabletLayout ? (
         <>
@@ -1332,6 +1454,7 @@ function WorkspaceDeckBuilder({
 
           {/* Right column: deck analysis, suggestions and submission. */}
           <div className={`${phoneLayout ? "hidden" : "flex"} w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto`}>
+            {commanderControls}
             {suggestionsEnabled && editableController?.onAutoSuggestDeck && (
               <section>
                 <button
@@ -1384,6 +1507,7 @@ function WorkspaceDeckBuilder({
                 : t("limitedDeck.moreNeeded", { count: minDeckSize - deckNames.length })}
             </span>
           </div>
+          {compactCommanderControls}
           <button
             type="button"
             onClick={() => void handleSubmit()}

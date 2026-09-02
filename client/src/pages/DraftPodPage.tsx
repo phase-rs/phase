@@ -789,7 +789,7 @@ function BetweenGamesView({
               capabilities: { kind: "fixed-pool" },
               onWorkspaceChange: setIntergameWorkspaceState,
               onPreferencesChange: handlePreferencesChange,
-              onSubmitDeck: () => {
+              onSubmitDeck: (_commanders) => {
                 const partition = projectWorkspacePartition(intergameWorkspace, view.pool);
                 submitSideboard(
                   sideboardPrompt.matchId,
@@ -1076,6 +1076,9 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
         preferences,
         interactionLocked,
         capabilities: { kind: "editable-pool", suggestions: false },
+        ...(view.kind === "CommanderDraft"
+          ? { commanderDesignation: "initial-pod" as const }
+          : {}),
         onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
         onPreferencesChange: handlePreferencesChange,
         onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
