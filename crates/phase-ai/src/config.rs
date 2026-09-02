@@ -567,6 +567,21 @@ pub struct PolicyPenalties {
     /// options with equal presence. Consumed by `CreatureTypeChoicePolicy`.
     #[serde(default = "default_creature_type_tribe_bonus")]
     pub creature_type_tribe_bonus: f64,
+    /// Card-equivalent value of ONE colored pip the AI's near-term
+    /// hand demands, that its battlefield lands cannot yet produce, and that the
+    /// land being played does produce. Counted per unmet color and capped by the
+    /// policy, so a dual covering two open colors is worth twice a basic that
+    /// covers one. Consumed by `LandSequencingPolicy`.
+    #[serde(default = "default_land_color_demand_unit")]
+    pub land_color_demand_unit: f64,
+    /// Card-equivalent cost of ONE tempo rider on the
+    /// land being played — an unconditional "enters tapped" replacement, or an
+    /// ETB "sacrifice it unless you pay" trigger — charged only while an
+    /// alternative land with neither rider is also playable this turn. A land
+    /// carrying both riders (Gateway Plaza) is charged twice. Consumed by
+    /// `LandSequencingPolicy`, which subtracts this magnitude.
+    #[serde(default = "default_land_tempo_rider_penalty")]
+    pub land_tempo_rider_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -649,6 +664,8 @@ impl Default for PolicyPenalties {
             discard_payoff_bonus: default_discard_payoff_bonus(),
             creature_type_presence_unit: default_creature_type_presence_unit(),
             creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
+            land_color_demand_unit: default_land_color_demand_unit(),
+            land_tempo_rider_penalty: default_land_tempo_rider_penalty(),
         }
     }
 }
@@ -673,6 +690,27 @@ fn default_creature_type_presence_unit() -> f64 {
 /// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
 fn default_creature_type_tribe_bonus() -> f64 {
     0.25
+}
+
+/// Half a card per unmet color the land covers, so the capped
+/// two-color maximum (1.0) stays inside the preference band and never outranks
+/// the tempo riders it competes with. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_land_color_demand_unit() -> f64 {
+    0.5
+}
+
+/// A positive MAGNITUDE the policy subtracts, matching
+/// the module's `BOUNCE_DEPRIORITIZE` convention. Seeded at one card: entering
+/// tapped costs a whole turn of that land's mana, which is worth strictly more
+/// than the capped color-fixing bonus above (so a tapped dual does not out-score
+/// an untapped basic on fixing alone) and strictly less than the bounce-land
+/// deprioritization (1.5), whose downside is a whole land drop. Shared by
+/// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
+fn default_land_tempo_rider_penalty() -> f64 {
+    1.0
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -1115,6 +1153,14 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "creature_type_tribe_bonus",
         "CreatureTypeChoicePolicy dominant-tribe tiebreak; must stay strictly below creature_type_presence_unit, and no paired-seed calibration exists — the duel suite never raises a creature-type prompt",
+    ),
+    (
+        "land_color_demand_unit",
+        "LandSequencingPolicy per-unmet-color fixing weight; land sequencing moves duel trajectories, so promotion needs a paired-seed ai-gate run read for land-count curves rather than a win-rate delta alone",
+    ),
+    (
+        "land_tempo_rider_penalty",
+        "LandSequencingPolicy enters-tapped / unless-pay rider cost; must stay strictly above land_color_demand_unit's capped maximum and strictly below the module's BOUNCE_DEPRIORITIZE, and no paired-seed ai-gate calibration exists for it yet",
     ),
 ];
 
