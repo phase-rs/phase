@@ -1,4 +1,5 @@
 use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::game::ability_utils::modal_spell_mode_ability_refs;
 use engine::game::game_object::GameObject;
 use engine::game::players::is_opponent;
 use engine::game::targeting::find_legal_targets;
@@ -10,8 +11,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{
-    cast_facts_for_action, effect_profile_for_action, effective_activated_ability, CastFacts,
-    EffectProfile,
+    cast_facts_for_action, collect_definition_effects, collect_definition_effects_with,
+    effect_profile_for_action, effective_activated_ability, CastFacts, EffectProfile, ModeWalk,
 };
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
@@ -145,6 +146,19 @@ impl<'a> PolicyContext<'a> {
                     _ => None,
                 }
             }
+            // CR 700.2a / CR 700.2b: mode selection is a step of casting the
+            // spell or putting the ability on the stack, so the source is the
+            // object being cast (a modal spell) or the ability's own source (a
+            // modal activated/triggered ability).
+            GameAction::SelectModes { .. } => match &self.decision.waiting_for {
+                WaitingFor::ModeChoice { pending_cast, .. } => {
+                    self.state.objects.get(&pending_cast.object_id)
+                }
+                WaitingFor::AbilityModeChoice { source_id, .. } => {
+                    self.state.objects.get(source_id)
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -159,6 +173,15 @@ impl<'a> PolicyContext<'a> {
                     .flat_map(|object| object.abilities.iter().flat_map(collect_definition_effects))
                     .collect();
             }
+            // CR 700.2a: an activation announces the ability; if it is modal the
+            // mode is chosen at the separate `AbilityModeChoice` prompt, which
+            // the `SelectModes` arm below scores on its own. Reading every
+            // printed mode here would price one activation as the CONJUNCTION of
+            // all its modes — an Umezawa's Jitte activation would carry a
+            // combat trick and a no-opposing-creature whiff even when the
+            // intended mode is "gain 2 life". Hence `RootOnly`; the `CastSpell`
+            // arm keeps `All` (CR 601.2b: at cast-commit no mode is chosen yet,
+            // which is what `cast_facts` already reports to cast-time policies).
             GameAction::ActivateAbility {
                 ability_index,
                 source_id,
@@ -168,8 +191,26 @@ impl<'a> PolicyContext<'a> {
                     .objects
                     .get(source_id)
                     .and_then(|object| object.abilities.get(*ability_index))
-                    .map(collect_definition_effects)
+                    .map(|ability| collect_definition_effects_with(ability, ModeWalk::RootOnly))
                     .unwrap_or_default();
+            }
+            // CR 601.2b + CR 700.2a: the mode IS chosen here, so report exactly
+            // the branches this candidate commits to. Reporting every printed
+            // mode instead would make every `SelectModes` candidate for one
+            // card carry identical effects, and no policy could tell a
+            // harmful mode from a beneficial one.
+            //
+            // This arm is plumbing: it makes modes visible to EVERY policy that
+            // reads `effects()` at a `ModeChoice` / `AbilityModeChoice` prompt,
+            // where the whole set previously came back empty and every mode
+            // scored identically. `anti_self_harm::score_selected_modes` is the
+            // one consumer written against it so far; the rest of the policy
+            // set simply stops being blind here.
+            GameAction::SelectModes { indices } => {
+                return selected_mode_abilities(self.state, &self.decision.waiting_for, indices)
+                    .into_iter()
+                    .flat_map(collect_definition_effects)
+                    .collect();
             }
             _ => {}
         }
@@ -251,25 +292,74 @@ impl<'a> PolicyContext<'a> {
     }
 }
 
-/// Walk a ResolvedAbility's sub_ability chain, collecting all effects.
+/// Walk a `ResolvedAbility`'s chain, collecting every effect it can produce.
+///
+/// A `ResolvedAbility` has only `sub_ability` and `else_ability` — the modes a
+/// modal spell/ability commits to are linearised into one `sub_ability` chain
+/// before resolution, so there is no `mode_abilities` branch to walk here. The
+/// `else_ability` half is the "if you don't / otherwise" leg, which is a real
+/// outcome of the same ability and must be visible to the policies that read
+/// [`PolicyContext::effects`] during target selection. Structural twin of
+/// `cast_facts::collect_definition_effects`, which does the same walk one level
+/// up on `AbilityDefinition`.
 pub(crate) fn collect_ability_effects(ability: &ResolvedAbility) -> Vec<&Effect> {
-    let mut effects = vec![&ability.effect];
-    let mut current = &ability.sub_ability;
-    while let Some(sub) = current {
-        effects.push(&sub.effect);
-        current = &sub.sub_ability;
-    }
+    let mut effects = Vec::new();
+    push_resolved_effects(&mut effects, ability);
     effects
 }
 
-fn collect_definition_effects(ability: &AbilityDefinition) -> Vec<&Effect> {
-    let mut effects = vec![&*ability.effect];
-    let mut current = &ability.sub_ability;
-    while let Some(sub) = current {
-        effects.push(&*sub.effect);
-        current = &sub.sub_ability;
+fn push_resolved_effects<'a>(effects: &mut Vec<&'a Effect>, ability: &'a ResolvedAbility) {
+    effects.push(&ability.effect);
+    if let Some(sub_ability) = &ability.sub_ability {
+        push_resolved_effects(effects, sub_ability);
     }
-    effects
+    if let Some(else_ability) = &ability.else_ability {
+        push_resolved_effects(effects, else_ability);
+    }
+}
+
+/// CR 700.2: the modes a pending `SelectModes` decision is choosing among.
+///
+/// A modal SPELL carries them as the spell-kind abilities of the object being
+/// cast (`modal_spell_mode_ability_refs`, the engine's authority, which
+/// `handle_select_modes` indexes with the same `indices`); a modal activated or
+/// triggered ABILITY carries them on the waiting payload.
+///
+/// Ordering invariant for the spell arm: `ModeChoice` indices address the FULL
+/// `obj.abilities` list, while `modal_spell_mode_ability_refs` filters to
+/// `AbilityKind::Spell`. The two index spaces coincide only while no non-Spell
+/// ability precedes a Spell ability on a modal card — no modal card in the
+/// current card data violates that. This function does NOT renumber; callers
+/// stay in the engine's index space.
+fn pending_mode_abilities<'a>(
+    state: &'a GameState,
+    waiting_for: &'a WaitingFor,
+) -> Vec<&'a AbilityDefinition> {
+    match waiting_for {
+        WaitingFor::ModeChoice { pending_cast, .. } => state
+            .objects
+            .get(&pending_cast.object_id)
+            .map(|obj| modal_spell_mode_ability_refs(obj).collect())
+            .unwrap_or_default(),
+        WaitingFor::AbilityModeChoice { mode_abilities, .. } => mode_abilities.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// CR 601.2b / CR 700.2a: exactly the modes a `SelectModes { indices }`
+/// candidate commits to, in the order the candidate names them. Out-of-range
+/// indices are dropped rather than panicking — the candidate list is the
+/// engine's, but a policy must never abort a search node on a stale index.
+pub(crate) fn selected_mode_abilities<'a>(
+    state: &'a GameState,
+    waiting_for: &'a WaitingFor,
+    indices: &[usize],
+) -> Vec<&'a AbilityDefinition> {
+    let modes = pending_mode_abilities(state, waiting_for);
+    indices
+        .iter()
+        .filter_map(|index| modes.get(*index).copied())
+        .collect()
 }
 
 #[cfg(test)]
@@ -280,14 +370,431 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, EffectKind, PtValue, QuantityExpr, TargetFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, EffectKind, ModalChoice, PtValue, QuantityExpr,
+        TargetFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{PendingCast, TargetEffectDetail, TargetSelectionSlot};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
+
+    fn gain_life(amount: i32) -> Effect {
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        }
+    }
+
+    fn draw(count: i32) -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: count },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn destroy_any() -> Effect {
+        Effect::Destroy {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        }
+    }
+
+    /// A modal spell on the stack whose printed modes are its spell-kind
+    /// abilities (`modal_spell_mode_ability_refs`, the engine's index space),
+    /// plus the matching `WaitingFor::ModeChoice`.
+    fn modal_spell_decision(
+        state: &mut GameState,
+        modes: Vec<AbilityDefinition>,
+    ) -> (ObjectId, AiDecisionContext) {
+        let mode_count = modes.len();
+        let card_id = CardId(77);
+        let spell_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Modal Specimen".to_string(),
+            Zone::Stack,
+        );
+        let object = state.objects.get_mut(&spell_id).unwrap();
+        *Arc::make_mut(&mut object.abilities) = modes;
+
+        let resolved = ResolvedAbility::new(gain_life(1), Vec::new(), spell_id, PlayerId(0));
+        let pending_cast = PendingCast::new(spell_id, card_id, resolved, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::ModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count,
+                    ..ModalChoice::default()
+                },
+                pending_cast: Box::new(pending_cast),
+                unavailable_modes: Vec::new(),
+            },
+            candidates: Vec::new(),
+        };
+        (spell_id, decision)
+    }
+
+    fn select_modes_candidate(indices: Vec<usize>) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::SelectModes { indices },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+        }
+    }
+
+    fn policy_ctx<'a>(
+        state: &'a GameState,
+        decision: &'a AiDecisionContext,
+        candidate: &'a CandidateAction,
+        config: &'a AiConfig,
+        context: &'a crate::context::AiContext,
+    ) -> PolicyContext<'a> {
+        PolicyContext {
+            state,
+            decision,
+            candidate,
+            ai_player: PlayerId(0),
+            config,
+            context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        }
+    }
+
+    /// CR 601.2b + CR 700.2a: the modes ARE chosen at this prompt, so
+    /// `effects()` must report exactly the branches the candidate commits to.
+    /// Before mode visibility landed this returned an empty Vec for every
+    /// `SelectModes` candidate, so no policy could tell a card's harmful mode
+    /// from its beneficial one.
+    #[test]
+    fn select_modes_effects_are_only_the_selected_modes() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        // Witherbloom Charm shape: draw / gain life / destroy.
+        let mut draw_mode = AbilityDefinition::new(AbilityKind::Spell, draw(2));
+        draw_mode.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            gain_life(1),
+        )));
+        let (_, decision) = modal_spell_decision(
+            &mut state,
+            vec![
+                draw_mode,
+                AbilityDefinition::new(AbilityKind::Spell, gain_life(5)),
+                AbilityDefinition::new(AbilityKind::Spell, destroy_any()),
+            ],
+        );
+
+        let destroy_candidate = select_modes_candidate(vec![2]);
+        let destroy_effects =
+            policy_ctx(&state, &decision, &destroy_candidate, &config, &context).effects();
+        assert_eq!(
+            destroy_effects.len(),
+            1,
+            "only the chosen mode's chain may be reported, got {destroy_effects:?}"
+        );
+        assert!(matches!(destroy_effects[0], Effect::Destroy { .. }));
+
+        let draw_candidate = select_modes_candidate(vec![0]);
+        let draw_effects =
+            policy_ctx(&state, &decision, &draw_candidate, &config, &context).effects();
+        assert_eq!(
+            draw_effects.len(),
+            2,
+            "the chosen mode's own sub-ability chain is part of that mode"
+        );
+        assert!(matches!(draw_effects[0], Effect::Draw { .. }));
+        assert!(matches!(draw_effects[1], Effect::GainLife { .. }));
+
+        let both = select_modes_candidate(vec![1, 2]);
+        let both_effects = policy_ctx(&state, &decision, &both, &config, &context).effects();
+        assert_eq!(both_effects.len(), 2, "a two-mode selection reports both");
+
+        let out_of_range = select_modes_candidate(vec![9]);
+        assert!(
+            policy_ctx(&state, &decision, &out_of_range, &config, &context)
+                .effects()
+                .is_empty(),
+            "a stale index is dropped, never a panic inside a search node"
+        );
+    }
+
+    /// CR 700.2a / CR 700.2b: mode selection belongs to the spell being cast or
+    /// to the modal ability's own source, so both prompt shapes must resolve a
+    /// source object (policies that read the card — legend rule, aura polarity,
+    /// ward — are otherwise blind at this prompt).
+    #[test]
+    fn select_modes_source_object_resolves_for_both_variants() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let (spell_id, decision) = modal_spell_decision(
+            &mut state,
+            vec![AbilityDefinition::new(AbilityKind::Spell, gain_life(5))],
+        );
+        let candidate = select_modes_candidate(vec![0]);
+        assert_eq!(
+            policy_ctx(&state, &decision, &candidate, &config, &context)
+                .source_object()
+                .map(|object| object.id),
+            Some(spell_id),
+            "ModeChoice resolves through the pending cast"
+        );
+
+        let permanent_id = create_object(
+            &mut state,
+            CardId(78),
+            PlayerId(0),
+            "Modal Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_decision = AiDecisionContext {
+            waiting_for: WaitingFor::AbilityModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    ..ModalChoice::default()
+                },
+                source_id: permanent_id,
+                mode_abilities: vec![
+                    AbilityDefinition::new(AbilityKind::Activated, gain_life(3)),
+                    AbilityDefinition::new(AbilityKind::Activated, destroy_any()),
+                ],
+                is_activated: true,
+                ability_index: Some(0),
+                ability_cost: None,
+                unavailable_modes: Vec::new(),
+            },
+            candidates: Vec::new(),
+        };
+        let ability_candidate = select_modes_candidate(vec![1]);
+        let ctx = policy_ctx(
+            &state,
+            &ability_decision,
+            &ability_candidate,
+            &config,
+            &context,
+        );
+        assert_eq!(
+            ctx.source_object().map(|object| object.id),
+            Some(permanent_id),
+            "AbilityModeChoice resolves through source_id"
+        );
+        let effects = ctx.effects();
+        assert_eq!(effects.len(), 1);
+        assert!(
+            matches!(effects[0], Effect::Destroy { .. }),
+            "the ability variant reads its modes off the waiting payload"
+        );
+    }
+
+    /// One definition walker for the whole crate: at cast-commit `effects()`
+    /// must report the same set `cast_facts::collect_definition_effects` does,
+    /// including the `else_ability` (CR 608.2c "otherwise" leg) and
+    /// `mode_abilities` (CR 601.2b — no mode is chosen yet at announcement)
+    /// branches that the private walker this replaced silently dropped.
+    #[test]
+    fn definition_walker_is_the_cast_facts_walker() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Branching Spell".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = AbilityDefinition::new(AbilityKind::Spell, draw(1));
+        ability.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            gain_life(2),
+        )));
+        ability.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Spell, destroy_any())];
+        *Arc::make_mut(&mut state.objects.get_mut(&source_id).unwrap().abilities) = vec![ability];
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: source_id,
+                card_id: CardId(80),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let effects = policy_ctx(&state, &decision, &candidate, &config, &context).effects();
+
+        assert_eq!(effects.len(), 3, "got {effects:?}");
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::GainLife { .. })),
+            "the else_ability leg must be visible"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Destroy { .. })),
+            "the mode_abilities branch must be visible"
+        );
+    }
+
+    /// CR 700.2a: activating a modal ability announces the ability; the mode is
+    /// chosen at the separate `AbilityModeChoice` prompt. So the activation step
+    /// must NOT read the unchosen modes — Umezawa's Jitte activated at main
+    /// phase would otherwise carry a Pump (combat_trick) and a Destroy
+    /// (no-opposing-creature whiff) even when the intended mode is "gain 2
+    /// life". The chosen modes stay visible at the `SelectModes` prompt.
+    #[test]
+    fn activate_ability_effects_exclude_unchosen_modes() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        // Umezawa's Jitte shape: one activated root ("Remove a counter:")
+        // carrying three modes.
+        let source_id = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Umezawa's Jitte".to_string(),
+            Zone::Battlefield,
+        );
+        let mut jitte = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        jitte.mode_abilities = vec![
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ),
+            AbilityDefinition::new(AbilityKind::Activated, destroy_any()),
+            AbilityDefinition::new(AbilityKind::Activated, gain_life(2)),
+        ];
+        *Arc::make_mut(&mut state.objects.get_mut(&source_id).unwrap().abilities) =
+            vec![jitte.clone()];
+
+        let priority = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let activate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
+        };
+        let activation_effects =
+            policy_ctx(&state, &priority, &activate, &config, &context).effects();
+        assert_eq!(
+            activation_effects.len(),
+            1,
+            "the activation step sees the root chain only, got {activation_effects:?}"
+        );
+        assert!(matches!(activation_effects[0], Effect::NoOp));
+
+        // The chosen mode is still visible one step later, at its own prompt.
+        let mode_decision = AiDecisionContext {
+            waiting_for: WaitingFor::AbilityModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 3,
+                    ..ModalChoice::default()
+                },
+                source_id,
+                mode_abilities: jitte.mode_abilities.clone(),
+                is_activated: true,
+                ability_index: Some(0),
+                ability_cost: None,
+                unavailable_modes: Vec::new(),
+            },
+            candidates: Vec::new(),
+        };
+        let gain_life_mode = select_modes_candidate(vec![2]);
+        let mode_effects =
+            policy_ctx(&state, &mode_decision, &gain_life_mode, &config, &context).effects();
+        assert_eq!(mode_effects.len(), 1, "got {mode_effects:?}");
+        assert!(
+            matches!(mode_effects[0], Effect::GainLife { .. }),
+            "the gain-life mode must not drag the Pump and Destroy modes with it"
+        );
+    }
+
+    /// CR 608.2c: a resolving ability's "otherwise" leg is a real outcome of
+    /// that ability, so target-selection policies must see it.
+    #[test]
+    fn resolved_walker_includes_else_ability() {
+        let state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let ability = ResolvedAbility::new(draw(1), Vec::new(), ObjectId(1), PlayerId(0))
+            .sub_ability(ResolvedAbility::new(
+                gain_life(2),
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            ))
+            .else_ability(ResolvedAbility::new(
+                destroy_any(),
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            ));
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let effects = policy_ctx(&state, &decision, &candidate, &config, &context).effects();
+
+        assert_eq!(effects.len(), 3, "got {effects:?}");
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Destroy { .. })),
+            "the else_ability leg must be visible"
+        );
+    }
 
     #[test]
     fn effects_returns_pending_cast_during_target_selection() {

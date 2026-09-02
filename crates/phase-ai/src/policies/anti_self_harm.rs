@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
 use engine::game::mana_abilities;
@@ -76,6 +77,7 @@ impl AntiSelfHarmPolicy {
                 .iter()
                 .map(|target| score_target_ref(ctx, target))
                 .sum(),
+            GameAction::SelectModes { .. } => score_selected_modes(ctx),
             // Penalise accepting an optional effect whose life cost would kill or nearly kill us.
             GameAction::DecideOptionalEffect { accept: true } => score_optional_effect_accept(ctx),
             GameAction::ChooseLegend { keep } => score_legend_rule_keep(ctx.state, *keep),
@@ -761,6 +763,120 @@ fn own_permanent_with_opponent_alternative(
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
 }
 
+/// CR 601.2b + CR 700.2a: a mode is chosen while the spell is being cast (or
+/// the ability put on the stack), one step BEFORE targets. Since
+/// [`PolicyContext::effects`] now reports exactly the modes a `SelectModes`
+/// candidate commits to, the same three-way [`slot_polarity`] ladder the target
+/// arms use can price the branch itself: penalise a harmful mode whose own
+/// target filter describes nothing but the AI's own board. Witherbloom Charm
+/// chose "Destroy target nonland permanent with mana value 2 or less" while its
+/// own Signet was the only permanent matching that filter.
+///
+/// A soft penalty, not a Reject. The engine has already removed modes with no
+/// legal target at all (`filter_modes_by_target_legality`, CR 700.2a), so this
+/// mode IS playable, and a modal card whose every mode is poor still has to
+/// pick one — the veto belongs at the target step
+/// ([`own_permanent_with_opponent_alternative`]), where an alternative exists.
+///
+/// Root-only, and card-local by construction: one `state.battlefield` property
+/// scan per selected harmful mode, never `find_legal_targets`. The question is
+/// "does this filter describe anything an opponent controls", not target
+/// legality — hexproof and friends are the target step's business.
+fn score_selected_modes(ctx: &PolicyContext<'_>) -> f64 {
+    if !ctx.at_root() {
+        return 0.0;
+    }
+
+    let effects = ctx.effects();
+    if effects.iter().any(is_deliberate_self_target_rider) {
+        return 0.0;
+    }
+    if slot_polarity(ctx, None) != EffectPolarity::Harmful {
+        return 0.0;
+    }
+
+    let Some(source) = ctx.source_object() else {
+        return 0.0;
+    };
+    let filter_ctx = FilterContext::from_source(ctx.state, source.id);
+
+    let only_own_board = effects
+        .iter()
+        .filter(|effect| matches!(effect_polarity(effect), EffectPolarity::Harmful))
+        .filter_map(|effect| extract_target_filter(effect))
+        .filter(|filter| filter_is_object_population(filter))
+        .filter(|filter| filter_can_reach_an_opponent(filter))
+        .any(|filter| filter_reaches_only_own_permanents(ctx, filter, &filter_ctx));
+
+    if only_own_board {
+        ctx.penalties().wasted_cast_penalty
+    } else {
+        0.0
+    }
+}
+
+/// CR 115.4: an "any target" / player-reference filter can still be aimed at an
+/// opponent, so a battlefield scan is NOT the whole legal-target space for it
+/// and a mode carrying one is never "own board only". Only a filter whose every
+/// leaf is a typed object population can be answered by scanning permanents.
+fn filter_is_object_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_is_object_population)
+        }
+        _ => false,
+    }
+}
+
+/// A filter that names only the AI's own permanents (`controller: You`) can
+/// never match an opponent's board, so "no opponent matched" is vacuously true
+/// for it and every such mode would be penalised unconditionally: Orzhov Charm's
+/// self-bounce, Light the Way, Paths of Tuinvale, Alley Evasion, You're Ambushed
+/// on the Road, Airbender's Reversal, Clash of the Eikons, Nexus Mentality.
+/// Aiming a "harmful" effect at your own board IS the mode there. Mirrors the
+/// `controller: You` exclusion [`is_hostile_or_neutral_bounce`] applies for
+/// `score_pre_cast`.
+fn filter_can_reach_an_opponent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => !matches!(
+            typed.controller,
+            Some(engine::types::ability::ControllerRef::You)
+        ),
+        // Every conjunct must be satisfiable by an opponent's permanent.
+        TargetFilter::And { filters } => filters.iter().all(filter_can_reach_an_opponent),
+        TargetFilter::Or { filters } => filters.iter().any(filter_can_reach_an_opponent),
+        // Unreachable through `filter_is_object_population`, which admits only
+        // the three arms above; conservative for any future caller.
+        _ => false,
+    }
+}
+
+/// True when at least one permanent the AI controls matches `filter` and no
+/// permanent an opponent controls does. A teammate's permanent counts as
+/// neither, so a filter reaching only a teammate's board stands the penalty
+/// down rather than guessing at team politics.
+fn filter_reaches_only_own_permanents(
+    ctx: &PolicyContext<'_>,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> bool {
+    let mut reaches_own = false;
+    for &id in ctx.state.battlefield.iter() {
+        let Some(object) = ctx.state.objects.get(&id) else {
+            continue;
+        };
+        if !matches_target_filter(ctx.state, id, filter, filter_ctx) {
+            continue;
+        }
+        if players::is_opponent(ctx.state, ctx.ai_player, object.controller) {
+            return false;
+        }
+        reaches_own |= object.controller == ctx.ai_player;
+    }
+    reaches_own
+}
+
 fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
     match target {
         TargetRef::Player(player_id) => {
@@ -1314,9 +1430,10 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostRepeatability,
         BounceSelection, CardSelectionMode, ContinuousModification, ControllerRef,
-        DiscardSelfScope, EffectKind, FilterProp, PtValue, QuantityModification, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayScaling,
+        DiscardSelfScope, EffectKind, FilterProp, ModalChoice, PtValue, QuantityModification,
+        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayScaling,
     };
     use engine::types::game_state::{
         CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionProgress,
@@ -6499,6 +6616,249 @@ mod tests {
              NON-targeted (CR 115.10a) and hits the hexproof 3/3's population \
              (hexproof gates targeting only, CR 702.11b), so the mass seam \
              rescues the mixed spell from the wasted-cast penalty"
+        );
+    }
+    const WITHERBLOOM_CHARM_ORACLE: &str = "Choose one —\n\
+         • You may sacrifice a permanent. If you do, draw two cards.\n\
+         • You gain 5 life.\n\
+         • Destroy target nonland permanent with mana value 2 or less.";
+
+    /// A battlefield artifact with a real mana value, so `Cmc` filter
+    /// properties resolve against it.
+    fn add_mana_rock(state: &mut GameState, owner: PlayerId, name: &str, generic: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Artifact);
+        object.mana_cost = ManaCost::Cost {
+            shards: Vec::new(),
+            generic,
+        };
+        id
+    }
+
+    /// Put the real parse of `oracle` on the stack as an AI-controlled modal
+    /// spell and score the `SelectModes { indices }` candidate. Mirrors
+    /// production: `ModeChoice` carries the `PendingCast`, and the modes are the
+    /// object's spell-kind abilities (`modal_spell_mode_ability_refs`).
+    fn select_modes_score(
+        state: &mut GameState,
+        card_name: &str,
+        modes: &[AbilityDefinition],
+        indices: Vec<usize>,
+    ) -> f64 {
+        let source_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            card_name.to_string(),
+            Zone::Stack,
+        );
+        let card_id = state.objects[&source_id].card_id;
+        let object = state.objects.get_mut(&source_id).unwrap();
+        object.card_types.core_types.push(CoreType::Instant);
+        *Arc::make_mut(&mut object.abilities) = modes.to_vec();
+
+        let resolved = build_resolved_from_def(&modes[0], source_id, PlayerId(0));
+        let pending_cast = PendingCast::new(source_id, card_id, resolved, ManaCost::zero());
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: modes.len(),
+                ..ModalChoice::default()
+            },
+            pending_cast: Box::new(pending_cast),
+            unavailable_modes: Vec::new(),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectModes { indices },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    fn witherbloom_charm_modes() -> Vec<AbilityDefinition> {
+        let modes = parsed_abilities(
+            "Witherbloom Charm",
+            WITHERBLOOM_CHARM_ORACLE,
+            &[],
+            &["Instant"],
+        );
+        assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
+        assert!(
+            matches!(*modes[1].effect, Effect::GainLife { .. }),
+            "mode 2 must still parse as the beneficial GainLife comparator: {:?}",
+            modes[1].effect
+        );
+        assert!(
+            matches!(*modes[2].effect, Effect::Destroy { .. }),
+            "mode 3 must still parse as a Destroy: {:?}",
+            modes[2].effect
+        );
+        modes
+    }
+
+    /// CR 601.2b + CR 700.2a: the reported Witherbloom Charm line. With the AI's
+    /// own two-mana rock the only permanent matching "nonland permanent with
+    /// mana value 2 or less", the Destroy mode can only blow up our own board,
+    /// so it must score below the beneficial GainLife mode.
+    #[test]
+    fn witherbloom_destroy_mode_penalised_when_only_own_permanent_matches() {
+        let mut state = make_state();
+        add_mana_rock(&mut state, PlayerId(0), "Dimir Signet", 2);
+        // The opponent's board is out of the filter's reach (mana value 4).
+        add_mana_rock(&mut state, PlayerId(1), "Coalition Relic", 4);
+        let modes = witherbloom_charm_modes();
+
+        let destroy = select_modes_score(&mut state, "Witherbloom Charm", &modes, vec![2]);
+        let gain_life = select_modes_score(&mut state, "Witherbloom Charm", &modes, vec![1]);
+
+        assert_eq!(
+            destroy,
+            AiConfig::default().policy_penalties.wasted_cast_penalty,
+            "a harmful mode whose filter reaches only our own board is a wasted mode"
+        );
+        assert_eq!(gain_life, 0.0, "the beneficial mode is not penalised");
+        assert!(destroy < gain_life);
+    }
+
+    /// The mirror: one opponent-controlled permanent inside the filter and the
+    /// arm stands down entirely — the mode is a real removal line and the AI
+    /// must be free to take it.
+    #[test]
+    fn witherbloom_destroy_mode_unpenalised_when_an_opponent_permanent_matches() {
+        let mut state = make_state();
+        add_mana_rock(&mut state, PlayerId(0), "Dimir Signet", 2);
+        add_mana_rock(&mut state, PlayerId(1), "Opposing Signet", 2);
+        let modes = witherbloom_charm_modes();
+
+        assert_eq!(
+            select_modes_score(&mut state, "Witherbloom Charm", &modes, vec![2]),
+            0.0,
+            "an opponent's permanent inside the mode's own filter makes it a real removal mode"
+        );
+    }
+
+    const ORZHOV_CHARM_ORACLE: &str = "Choose one —\n\
+         • Return target creature you control and all Auras you control attached to it to their \
+         owner's hand.\n\
+         • Destroy target creature and you lose life equal to its toughness.\n\
+         • Return target creature card with mana value 1 or less from your graveyard to the \
+         battlefield.";
+
+    /// A `controller: You` filter can never match an opponent's permanent, so
+    /// "no opponent matched" is vacuously true and the mode would be penalised
+    /// unconditionally. Orzhov Charm's self-bounce mode IS aimed at our own
+    /// board by design (re-buy an ETB, dodge removal). REVERT-FAILING: without
+    /// the `filter_can_reach_an_opponent` guard this scores the wasted-cast
+    /// penalty even with an opposing creature sitting on the battlefield.
+    #[test]
+    fn self_scoped_harmful_mode_is_not_penalised() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "Blood Artist", 0, 1);
+        add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+
+        let modes = parsed_abilities("Orzhov Charm", ORZHOV_CHARM_ORACLE, &[], &["Instant"]);
+        assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
+        let Effect::Bounce { target, .. } = &*modes[0].effect else {
+            panic!("mode 1 must still parse as a Bounce: {:?}", modes[0].effect);
+        };
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(typed)
+                    if matches!(typed.controller, Some(ControllerRef::You))
+            ),
+            "the fixture is only meaningful while mode 1 is self-scoped: {target:?}"
+        );
+
+        assert_eq!(
+            select_modes_score(&mut state, "Orzhov Charm", &modes, vec![0]),
+            0.0,
+            "a mode that can only ever name our own permanents is the play, not a whiff"
+        );
+    }
+
+    /// The scan is board-wide, so it is root-only: inside lookahead the
+    /// resulting-state eval already prices the branch and the policy must be
+    /// free (the documented `at_root` discipline for board-walking policies).
+    #[test]
+    fn select_modes_arm_is_root_only() {
+        let mut state = make_state();
+        add_mana_rock(&mut state, PlayerId(0), "Dimir Signet", 2);
+        let modes = witherbloom_charm_modes();
+
+        let card_id = CardId(state.next_object_id);
+        let source_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Witherbloom Charm".to_string(),
+            Zone::Stack,
+        );
+        let object = state.objects.get_mut(&source_id).unwrap();
+        object.card_types.core_types.push(CoreType::Instant);
+        *Arc::make_mut(&mut object.abilities) = modes.clone();
+
+        let resolved = build_resolved_from_def(&modes[0], source_id, PlayerId(0));
+        let pending_cast = PendingCast::new(source_id, card_id, resolved, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::ModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 3,
+                    ..ModalChoice::default()
+                },
+                pending_cast: Box::new(pending_cast),
+                unavailable_modes: Vec::new(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectModes { indices: vec![2] },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        assert_eq!(
+            AntiSelfHarmPolicy.score(&ctx),
+            0.0,
+            "the battlefield scan must not run in lookahead"
         );
     }
 }

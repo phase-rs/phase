@@ -701,4 +701,114 @@ mod tests {
             "Combat trick should be strongly penalized during post-combat main with no combat, got {score}"
         );
     }
+    /// CR 601.2b + CR 700.2a: a mode is chosen while the spell is being cast, so
+    /// a `SelectModes` candidate is where a modal card's removal mode has to be
+    /// priced. This policy is an UNGATED consumer of the S11 mode plumbing — it
+    /// reads `ctx.effects()` at every search depth — so with mode visibility the
+    /// Destroy mode earns `removal_score` while the gain-life mode earns
+    /// nothing. REVERT-FAILING: without the `SelectModes` arm of
+    /// `PolicyContext::effects` both modes report an empty effect list and both
+    /// score exactly 0.0, which is the reported "every mode looks the same"
+    /// defect.
+    #[test]
+    fn select_modes_prices_a_removal_mode_above_a_lifegain_mode() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+
+        // Something worth killing, so `removal_score`'s threat term is live.
+        let victim = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_obj = state.objects.get_mut(&victim).unwrap();
+        victim_obj
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Creature);
+        victim_obj.power = Some(3);
+        victim_obj.toughness = Some(3);
+
+        // A two-mode spell on the stack: gain life, or destroy a creature.
+        let spell_id = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Modal Removal".to_string(),
+            Zone::Stack,
+        );
+        let modes = vec![
+            engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 4 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+            engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(engine::types::ability::TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ),
+        ];
+        *std::sync::Arc::make_mut(&mut state.objects.get_mut(&spell_id).unwrap().abilities) =
+            modes.clone();
+
+        let resolved =
+            ResolvedAbility::new(*modes[0].effect.clone(), Vec::new(), spell_id, PlayerId(0));
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::ModeChoice {
+                player: PlayerId(0),
+                modal: engine::types::ability::ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    ..Default::default()
+                },
+                pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                    spell_id,
+                    CardId(32),
+                    resolved,
+                    ManaCost::zero(),
+                )),
+                unavailable_modes: Vec::new(),
+            },
+            candidates: Vec::new(),
+        };
+
+        let config = AiConfig::default();
+        let ai_context = crate::context::AiContext::empty(&config.weights);
+        let score_for = |indices: Vec<usize>| {
+            let candidate = CandidateAction {
+                action: GameAction::SelectModes { indices },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+            };
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &ai_context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            EffectTimingPolicy.score(&ctx)
+        };
+
+        let removal = score_for(vec![1]);
+        let lifegain = score_for(vec![0]);
+        assert_eq!(
+            lifegain, 0.0,
+            "the gain-life mode carries no timing signal, got {lifegain}"
+        );
+        assert!(
+            removal >= 0.3,
+            "the removal mode must earn removal_score at the mode prompt, got {removal}"
+        );
+    }
 }

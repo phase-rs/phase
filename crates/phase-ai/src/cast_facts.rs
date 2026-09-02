@@ -382,22 +382,53 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
     }
 }
 
+/// CR 700.2a: whether an ability walk descends into `mode_abilities`, the
+/// branches a modal spell or ability has NOT chosen yet.
+///
+/// `All` is the cast-commit reading (CR 601.2b — at announcement no mode is
+/// chosen, so a cast candidate is priced against everything the card can do).
+/// `RootOnly` is the activation-step reading: `WaitingFor::AbilityModeChoice`
+/// is a separate decision that scores the chosen modes on their own, so reading
+/// every printed mode as a conjunction at the activation step charges an
+/// Umezawa's Jitte activation with a combat trick and a no-target whiff even
+/// when the intended mode is "gain 2 life".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeWalk {
+    All,
+    RootOnly,
+}
+
 pub(crate) fn collect_definition_effects(ability: &AbilityDefinition) -> Vec<&Effect> {
+    collect_definition_effects_with(ability, ModeWalk::All)
+}
+
+/// [`collect_definition_effects`] with the unchosen-mode branch under caller
+/// control. One walker, two readings — never a second traversal to drift.
+pub(crate) fn collect_definition_effects_with(
+    ability: &AbilityDefinition,
+    modes: ModeWalk,
+) -> Vec<&Effect> {
     let mut effects = Vec::new();
-    push_ability_effects(&mut effects, ability);
+    push_ability_effects(&mut effects, ability, modes);
     effects
 }
 
-fn push_ability_effects<'a>(effects: &mut Vec<&'a Effect>, ability: &'a AbilityDefinition) {
+fn push_ability_effects<'a>(
+    effects: &mut Vec<&'a Effect>,
+    ability: &'a AbilityDefinition,
+    modes: ModeWalk,
+) {
     effects.push(&ability.effect);
     if let Some(sub_ability) = &ability.sub_ability {
-        push_ability_effects(effects, sub_ability);
+        push_ability_effects(effects, sub_ability, modes);
     }
     if let Some(else_ability) = &ability.else_ability {
-        push_ability_effects(effects, else_ability);
+        push_ability_effects(effects, else_ability, modes);
     }
-    for mode_ability in &ability.mode_abilities {
-        push_ability_effects(effects, mode_ability);
+    if modes == ModeWalk::All {
+        for mode_ability in &ability.mode_abilities {
+            push_ability_effects(effects, mode_ability, modes);
+        }
     }
 }
 
