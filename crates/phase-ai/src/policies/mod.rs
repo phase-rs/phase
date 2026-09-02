@@ -60,6 +60,7 @@ mod self_bounce_target;
 mod self_cost;
 mod self_cost_value;
 mod self_protection_classify;
+mod self_untap_loop;
 mod separate_piles_timing;
 mod spellskite_priority;
 mod spellslinger_casting;

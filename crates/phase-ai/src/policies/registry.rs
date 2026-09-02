@@ -120,6 +120,9 @@ pub enum PolicyId {
     SacrificeCostManaGate,
     SacrificeLandProtection,
     SelfCostValue,
+    /// CR 605.3a + CR 106.4: activating "{N}: Untap this" on an already-untapped
+    /// mana rock (Basalt Monolith class) — a self-funded, net-zero loop.
+    SelfUntapLoop,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
@@ -398,6 +401,7 @@ impl Default for PolicyRegistry {
             Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
             Box::new(SelfCostValuePolicy),
+            Box::new(super::self_untap_loop::SelfUntapLoopPolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
