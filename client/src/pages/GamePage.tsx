@@ -3267,6 +3267,11 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  // CR 709.5b: engine-published Room halves, already resolved through the
+  // COPIED halves for a permanent that copies a Room.
+  const roomHalfIdentities = useGameStore(
+    (s) => s.gameState?.derived?.room_half_identities,
+  );
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
@@ -3313,6 +3318,7 @@ function AbilityChoiceModal() {
           obj,
           objects,
           webSlingingCosts,
+          roomHalfIdentities,
         );
         if (action.type === "TapLandForMana") {
           const surfaces = action.interactionActionId

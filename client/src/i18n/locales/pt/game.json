@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "Conjurar a mágica preparada?",
       "subtitleActivate": "Ativar esta habilidade?",
       "subtitlePlay": "Escolha como jogar esta carta",
-      "subtitleChoose": "Escolha uma habilidade para ativar"
+      "subtitleChoose": "Escolha uma habilidade para ativar",
+      "unlockThisDoor": "Desbloquear esta porta",
+      "unlockHalf": "Desbloquear {{name}}",
+      "unlockHalfWithCost": "Desbloquear {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Virar para gerar mana",

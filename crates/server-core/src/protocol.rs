@@ -56,6 +56,18 @@ pub enum ServerMode {
     LobbyOnly,
 }
 
+/// Optional binary JSON envelopes a WebSocket peer can encode and decode.
+/// Capabilities are negotiated independently of the semantic protocol version
+/// so old peers retain the plain-text JSON path during rolling deployments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFormat {
+    GzipEnvelopeV1,
+    /// Future capability advertised by a newer peer. Unknown entries must not
+    /// make an otherwise compatible additive handshake fail.
+    #[serde(other)]
+    Unknown,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -267,6 +279,8 @@ pub enum ClientMessage {
         /// versions its own message set separately from `PROTOCOL_VERSION`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lobby_protocol_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
     },
     CreateGame {
         deck: DeckData,
@@ -566,6 +580,9 @@ pub enum ServerMessage {
         /// LobbyOnly brokers and for servers with no advertised address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_url: Option<String>,
+        /// Binary envelopes this server can negotiate after the text hello.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
     },
     GameCreated {
         game_code: String,
@@ -1935,6 +1952,7 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1944,14 +1962,32 @@ mod tests {
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_hello_defaults_missing_and_future_wire_formats_safely() {
+        let legacy = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(legacy).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. } if wire_formats.is_empty()
+        ));
+
+        let future = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1,"wire_formats":["FutureEnvelopeV2"]}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(future).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. }
+                if wire_formats == vec![WireFormat::Unknown]
+        ));
     }
 
     #[test]
@@ -1963,6 +1999,7 @@ mod tests {
             mode: ServerMode::Full,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1974,6 +2011,7 @@ mod tests {
                 mode,
                 lobby_protocol_version,
                 public_url,
+                wire_formats,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -1981,6 +2019,7 @@ mod tests {
                 assert_eq!(mode, ServerMode::Full);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
             }
             _ => panic!("wrong variant"),
         }
@@ -1998,6 +2037,7 @@ mod tests {
             mode: ServerMode::LobbyOnly,
             lobby_protocol_version: None,
             public_url: None,
+            wire_formats: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2006,6 +2046,10 @@ mod tests {
         assert!(
             !json.contains("lobby_protocol_version"),
             "None must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("wire_formats"),
+            "empty list must be omitted: {json}"
         );
     }
 
@@ -2876,8 +2920,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_54_for_draft_source_intent() {
-        assert_eq!(PROTOCOL_VERSION, 54);
+    fn protocol_version_is_55_for_room_half_identities() {
+        assert_eq!(PROTOCOL_VERSION, 55);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2888,7 +2932,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_54_for_draft_source_intent` stays
+    /// `protocol_version_is_55_for_room_half_identities` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

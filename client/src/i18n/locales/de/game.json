@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "Den vorbereiteten Zauberspruch wirken?",
       "subtitleActivate": "Diese Fähigkeit aktivieren?",
       "subtitlePlay": "Wähle, wie du diese Karte spielst",
-      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit"
+      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit",
+      "unlockThisDoor": "Diese Tür entriegeln",
+      "unlockHalf": "{{name}} entriegeln",
+      "unlockHalfWithCost": "{{name}} ({{cost}}) entriegeln"
     },
     "manaRestrictions": {
       "tapForMana": "Für Mana tappen",

@@ -5,6 +5,8 @@ import {
   type ProtocolSurface,
   type ServerInfo,
 } from "../adapter/ws-adapter";
+import { supportsGzipEnvelope, type WireFormat } from "../network/wireEnvelope";
+import { GzipEnvelopeSocket } from "./gzipEnvelopeSocket";
 
 /**
  * Result of a successful handshake with `phase-server`. Wraps the live
@@ -23,7 +25,13 @@ export interface PhaseSocketTransport {
     listener: (event: CloseEvent) => void,
     options?: AddEventListenerOptions | boolean,
   ): void;
+  addEventListener(
+    type: "message",
+    listener: (event: MessageEvent<string>) => void,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
   removeEventListener(type: "close", listener: (event: CloseEvent) => void): void;
+  removeEventListener(type: "message", listener: (event: MessageEvent<string>) => void): void;
   send(data: string): void;
   close(): void;
 }
@@ -31,7 +39,7 @@ export interface PhaseSocketTransport {
 export type PhaseSocketFactory<T extends PhaseSocketTransport = PhaseSocketTransport> =
   (url: string) => T;
 
-export interface PhaseSocket<T extends PhaseSocketTransport = WebSocket> {
+export interface PhaseSocket<T extends PhaseSocketTransport = PhaseSocketTransport> {
   readonly ws: T;
   readonly serverInfo: ServerInfo;
   close(): void;
@@ -111,11 +119,11 @@ export class HandshakeError extends Error {
 export function openPhaseSocket(
   wsUrl: string,
   opts?: OpenOptions<WebSocket>,
-): Promise<PhaseSocket<WebSocket>>;
+): Promise<PhaseSocket<PhaseSocketTransport>>;
 export function openPhaseSocket<T extends PhaseSocketTransport>(
   wsUrl: string,
   opts: OpenOptions<T>,
-): Promise<PhaseSocket<T>>;
+): Promise<PhaseSocket<PhaseSocketTransport>>;
 export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
@@ -231,6 +239,7 @@ export function openPhaseSocket(
         mode: "Full" | "LobbyOnly";
         lobby_protocol_version?: number;
         public_url?: string;
+        wire_formats?: WireFormat[];
       };
       const info: ServerInfo = {
         version: data.server_version,
@@ -239,6 +248,7 @@ export function openPhaseSocket(
         mode: data.mode,
         lobbyProtocolVersion: data.lobby_protocol_version,
         publicUrl: data.public_url,
+        wireFormats: data.wire_formats ?? [],
       };
 
       const rejection = serverProtocolRejection(info, surface);
@@ -270,6 +280,9 @@ export function openPhaseSocket(
       // it gates on that instead, which is what decouples the lobby handshake
       // from full-game churn. Servers that predate the field ignore it (nothing
       // sets `deny_unknown_fields`).
+      const localWireFormats: WireFormat[] = supportsGzipEnvelope() && "binaryType" in ws
+        ? ["GzipEnvelopeV1"]
+        : [];
       ws.send(
         JSON.stringify({
           type: "ClientHello",
@@ -278,13 +291,16 @@ export function openPhaseSocket(
             build_commit: __BUILD_HASH__,
             protocol_version: clientProtocolVersion,
             lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+            wire_formats: localWireFormats,
           },
         }),
       );
 
       settle(() => {
+        const useGzipEnvelope = localWireFormats.includes("GzipEnvelopeV1")
+          && info.wireFormats?.includes("GzipEnvelopeV1");
         resolve({
-          ws,
+          ws: useGzipEnvelope ? new GzipEnvelopeSocket(ws) : ws,
           serverInfo: info,
           close: () => ws.close(),
         });

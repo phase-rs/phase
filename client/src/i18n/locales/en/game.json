@@ -1163,7 +1163,10 @@
       "subtitlePreparedCopy": "Cast the prepared spell?",
       "subtitleActivate": "Activate this ability?",
       "subtitlePlay": "Choose how to play this card",
-      "subtitleChoose": "Choose an ability to activate"
+      "subtitleChoose": "Choose an ability to activate",
+      "unlockThisDoor": "Unlock this door",
+      "unlockHalf": "Unlock {{name}}",
+      "unlockHalfWithCost": "Unlock {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tap for mana",

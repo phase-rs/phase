@@ -721,6 +721,22 @@ export type CoreType =
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
 export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
+/** CR 709.5b: one printed Room half's identity — the name and mana cost it
+ *  contributes while unlocked (CR 709.5), and the cost its door demands to
+ *  unlock (CR 709.5e). Mirrors `engine::types::ability::RoomHalfIdentity`. */
+export interface RoomHalfIdentityView {
+  name: string;
+  mana_cost: ManaCost;
+}
+
+/** CR 709.5b: a Room's two halves in PRINTED order. `right` is absent on a Room
+ *  printed without a second half. Mirrors
+ *  `engine::types::ability::RoomCopiableHalves`. */
+export interface RoomHalvesView {
+  left: RoomHalfIdentityView;
+  right?: RoomHalfIdentityView | null;
+}
+
 export type RoomDoor = "Left" | "Right";
 
 // CR 709.5f-g: Operation a lock/unlock-door effect performs on a Room door
@@ -3430,6 +3446,16 @@ export interface DerivedViews {
    *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
    *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
   web_slinging_costs?: Record<string, ManaCost>;
+  /**
+   * CR 709.5b + CR 709.5e + CR 707.2: both halves of each battlefield Room, in
+   * printed order, resolved by the engine — a permanent that is a COPY of a
+   * Room reports the halves it COPIED. Keyed by battlefield ObjectId (string).
+   * The unlock special action names a half and costs that half's mana cost,
+   * and for a copy neither is on the recipient's own printed card. Face-down
+   * permanents are absent (CR 708.2a). Mirrors
+   * `engine::game::derived_views::DerivedViews::room_half_identities`.
+   */
+  room_half_identities?: Record<string, RoomHalvesView>;
   /**
    * Player-affecting continuous conditions (can't gain life, can't cast, etc.)
    * the HUD renders as status icons. Engine-aggregated from static abilities +

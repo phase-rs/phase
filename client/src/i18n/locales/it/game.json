@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "Lanciare la magia preparata?",
       "subtitleActivate": "Attivare questa abilità?",
       "subtitlePlay": "Scegli come giocare questa carta",
-      "subtitleChoose": "Scegli un'abilità da attivare"
+      "subtitleChoose": "Scegli un'abilità da attivare",
+      "unlockThisDoor": "Sblocca questa porta",
+      "unlockHalf": "Sblocca {{name}}",
+      "unlockHalfWithCost": "Sblocca {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tappa per mana",

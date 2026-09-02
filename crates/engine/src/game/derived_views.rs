@@ -761,6 +761,20 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub web_slinging_costs: HashMap<ObjectId, ManaCost>,
 
+    /// CR 709.5b + CR 709.5e + CR 707.2: both halves of each battlefield Room,
+    /// resolved through `room::effective_room_halves` so a permanent that is a
+    /// COPY of a Room reports the halves it COPIED. The unlock special action
+    /// names a half and costs that half's mana cost, and for a copy neither is
+    /// on the recipient's own printed card — its `back_face` is empty and its
+    /// printed name is its own. Deriving printed order is engine work besides
+    /// (`room::live_face_door` reads `modal_back_face`, the CR 709.5d mapping),
+    /// so the frontend is handed the resolved pair and only formats it.
+    ///
+    /// Face-down permanents are excluded: CR 708.2a gives them no name or mana
+    /// cost to publish.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub room_half_identities: HashMap<ObjectId, crate::types::ability::RoomCopiableHalves>,
+
     /// Player-affecting continuous conditions (CR 104.2b / 119.7 / 119.8 /
     /// 118.3 / 101.2 / 702.50b) the HUD renders as status icons. Aggregates
     /// the statics-scanned `player_has_*` authorities and the stored
@@ -1446,6 +1460,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
+        }
+        // CR 709.5b + CR 708.2a: publish a Room's two halves for the unlock
+        // offer. Room-ness is this caller's gate — `effective_room_halves` is a
+        // pure projection and does not check it (see its doc).
+        if !obj.face_down && obj.card_types.subtypes.iter().any(|s| s == "Room") {
+            views
+                .room_half_identities
+                .insert(obj_id, crate::game::room::effective_room_halves(obj));
         }
         if obj.card_types.core_types.contains(&CoreType::Creature)
             && crate::game::combat::has_cant_be_blocked_static_from_precomputed(
@@ -5499,6 +5521,98 @@ mod tests {
         assert!(
             afflicted.contains(&PlayerId(0)) && afflicted.contains(&PlayerId(2)),
             "both opponents (P0, P2) should be cast-locked",
+        );
+    }
+
+    /// CR 709.5b + CR 707.2 + CR 708.2a: the published halves come from the
+    /// EFFECTIVE form. A permanent that copies a Room has no `back_face` of its
+    /// own, so a projection off its printed shape would report a single half
+    /// named after the recipient — the copied pair is the only correct answer.
+    /// A face-down permanent publishes nothing, and a non-Room is absent.
+    ///
+    /// Revert-failing assertions: the copy's two halves (drop
+    /// `effective_room_halves` for `own_room_halves` and both names are wrong)
+    /// and the face-down absence (drop the `face_down` guard and it appears).
+    #[test]
+    fn room_half_identities_report_the_copied_halves_and_skip_face_down() {
+        use crate::types::ability::{RoomCopiableHalves, RoomHalfIdentity};
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+
+        let halves = RoomCopiableHalves {
+            left: RoomHalfIdentity {
+                name: "Greenhouse".to_string(),
+                mana_cost: ManaCost::default(),
+            },
+            right: Some(RoomHalfIdentity {
+                name: "Rickety Gazebo".to_string(),
+                mana_cost: ManaCost::default(),
+            }),
+        };
+
+        // A Copy Enchantment that entered as a copy of a two-halved Room: its
+        // OWN printed shape is a single-faced enchantment.
+        let copy = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copy).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.back_face = None;
+            obj.copied_room_halves = Some(halves.clone());
+        }
+
+        // Same shape, but face down (CR 708.2a).
+        let hidden = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&hidden).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.back_face = None;
+            obj.copied_room_halves = Some(halves);
+            obj.face_down = true;
+        }
+
+        // An ordinary permanent that is not a Room at all.
+        let bear = create_object(
+            &mut state,
+            CardId(9102),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+
+        let published = views
+            .room_half_identities
+            .get(&copy)
+            .expect("a battlefield Room publishes its halves");
+        assert_eq!(published.left.name, "Greenhouse");
+        assert_eq!(
+            published.right.as_ref().map(|half| half.name.as_str()),
+            Some("Rickety Gazebo"),
+            "the right door exists through the COPIED halves, not through the \
+             recipient's own (absent) back face"
+        );
+
+        assert!(
+            !views.room_half_identities.contains_key(&hidden),
+            "CR 708.2a: a face-down permanent has no name or mana cost to publish"
+        );
+        assert!(
+            !views.room_half_identities.contains_key(&bear),
+            "a non-Room permanent has no halves"
         );
     }
 

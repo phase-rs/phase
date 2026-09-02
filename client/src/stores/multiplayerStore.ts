@@ -40,6 +40,7 @@ import {
   openPhaseSocket,
   withReconnect,
   type PhaseSocket,
+  type PhaseSocketTransport,
   type ReconnectHandle,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
@@ -72,7 +73,7 @@ type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type HostingStatus = "idle" | "connecting" | "waiting";
 
 // Module-level WebSocket ref (non-serializable, lives outside store)
-let hostWs: WebSocket | null = null;
+let hostWs: PhaseSocketTransport | null = null;
 // Module-level broker client for P2P LobbyOnly hosting. Survives page
 // navigations so the lobby entry stays alive while the tile is showing.
 let activeBroker: BrokerClient | null = null;
@@ -447,7 +448,7 @@ function closeHostWebSocket(): void {
   }
 }
 
-function activeServerHostingSocket(get: () => MultiplayerState): WebSocket | null {
+function activeServerHostingSocket(get: () => MultiplayerState): PhaseSocketTransport | null {
   if (hostWs) {
     if (hostWs.readyState !== WebSocket.OPEN) {
       throw new Error("Host connection is not active.");
@@ -844,7 +845,7 @@ function clearPregameHostMetadataFromWsSession(): void {
 function handleServerHostMessage(
   set: MultiplayerSet,
   get: MultiplayerGet,
-  ws: WebSocket,
+  ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
 ): void {
   if (msg.type === "GameCreated") {

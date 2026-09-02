@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "¿Lanzar el hechizo preparado?",
       "subtitleActivate": "¿Activar esta habilidad?",
       "subtitlePlay": "Elige cómo jugar esta carta",
-      "subtitleChoose": "Elige una habilidad para activar"
+      "subtitleChoose": "Elige una habilidad para activar",
+      "unlockThisDoor": "Desbloquear esta puerta",
+      "unlockHalf": "Desbloquear {{name}}",
+      "unlockHalfWithCost": "Desbloquear {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Girar para obtener maná",

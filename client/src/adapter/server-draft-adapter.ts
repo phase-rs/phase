@@ -19,6 +19,7 @@ import {
   HandshakeError,
   openPhaseSocket,
   type PhaseSocket,
+  type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import type {
@@ -133,7 +134,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   private _gameCode: string | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
-  private ws: WebSocket | null = null;
+  private ws: PhaseSocketTransport | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
   private nextManaPaymentPreviewRequestId = 1;

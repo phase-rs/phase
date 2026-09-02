@@ -32,6 +32,7 @@ import {
   commitFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
+import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -202,6 +203,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 55 — DerivedViews.room_half_identities publishes both halves of every
+ *      battlefield Room in printed order, resolved through the COPIED halves
+ *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *      offer names the half and shows its unlock cost (CR 709.5e) from this
+ *      map; an enter-as-copy recipient carries neither on its own printed
+ *      card. Serde-additive, but the client renders the map directly, so an
+ *      older server would silently label every door "Tap for Mana" again. The
+ *      full handshake refuses stale peers. Lobby messages are unchanged.
  * 54 — CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
  *      Chaos client sends candidate set codes only; the Full server resolves
  *      and persists the private seat-by-round assignment matrix. The full
@@ -379,7 +388,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 54;
+export const PROTOCOL_VERSION = 55;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -457,6 +466,8 @@ export interface ServerInfo {
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+  /** Optional binary JSON envelopes understood by this server. */
+  wireFormats?: WireFormat[];
 }
 
 /**

@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "Rzucić przygotowany czar?",
       "subtitleActivate": "Aktywować tę zdolność?",
       "subtitlePlay": "Wybierz, jak zagrać tę kartę",
-      "subtitleChoose": "Wybierz zdolność do aktywowania"
+      "subtitleChoose": "Wybierz zdolność do aktywowania",
+      "unlockThisDoor": "Odblokuj te drzwi",
+      "unlockHalf": "Odblokuj {{name}}",
+      "unlockHalfWithCost": "Odblokuj {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Przekręć, aby dodać manę",

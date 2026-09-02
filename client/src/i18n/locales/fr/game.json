@@ -1110,7 +1110,10 @@
       "subtitlePreparedCopy": "Lancer le sort préparé ?",
       "subtitleActivate": "Activer cette capacité ?",
       "subtitlePlay": "Choisissez comment jouer cette carte",
-      "subtitleChoose": "Choisissez une capacité à activer"
+      "subtitleChoose": "Choisissez une capacité à activer",
+      "unlockThisDoor": "Déverrouiller cette porte",
+      "unlockHalf": "Déverrouiller {{name}}",
+      "unlockHalfWithCost": "Déverrouiller {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Engager pour du mana",

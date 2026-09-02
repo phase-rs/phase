@@ -67,6 +67,42 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
         .collect()
 }
 
+/// CR 709.5 + CR 709.5a: does this type line have the two shared halves? The
+/// engine marker is the `Room` subtype, which CR 709.5a puts on both halves.
+/// Single authority, so the current-form and printed-form readers below cannot
+/// drift apart — they differ only in WHICH type line they hand it.
+fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
+    types.subtypes.iter().any(|s| s == "Room")
+}
+
+/// The object IS a Room right now — its current, post-copy card types. Every
+/// battlefield question (name, door existence, lock/unlock eligibility) asks
+/// this one, because those all describe what the permanent is.
+pub(crate) fn is_room(obj: &crate::game::game_object::GameObject) -> bool {
+    has_shared_type_line(&obj.card_types)
+}
+
+/// CR 709.5d: the unlocked designation an entering permanent is given — "if
+/// its left half was cast as a spell … if its right half was cast as a spell".
+/// `None` is that rule's last sentence: neither half was cast, so it enters
+/// with neither designation.
+///
+/// Read from the object's PRINTED form (`base_card_types`), not its current
+/// one. "Its left half" is a half of THIS card; a card without a shared type
+/// line has none, and no half of it can have been cast. An enter-as-copy
+/// replacement (Copy Enchantment, Mirrormade) makes such a spell into a Room
+/// permanent DURING entry — asking its post-copy form would answer a different
+/// question and hand it a designation although nothing of its own was cast.
+/// The printed form survives the copy (`apply_copiable_values` writes
+/// `card_types`, never `base_card_types`), so both entry seams — the ordinary
+/// resolution tail and the replacement-choice resume — can ask this same
+/// question at the point they need it.
+pub(crate) fn cast_half_designation(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<RoomDoor> {
+    has_shared_type_line(&obj.base_card_types).then(|| live_face_door(obj))
+}
+
 /// CR 709.5j + CR 709.5d: The door (printed half) the object's LIVE face is.
 /// `modal_back_face` records that the right (second printed) half was cast —
 /// the same mapping CR 709.5d entry-unlocking uses. Single authority: the
@@ -166,7 +202,7 @@ pub(crate) fn effective_room_halves(
 pub(crate) fn door_gated_battlefield_name(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<String> {
-    if obj.zone != Zone::Battlefield || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+    if obj.zone != Zone::Battlefield || !is_room(obj) {
         return None;
     }
     let halves = effective_room_halves(obj);
@@ -223,7 +259,7 @@ pub fn eligible_doors(
         return Vec::new();
     };
     // CR 709.5f-g: only a battlefield Room has lockable/unlockable doors.
-    if obj.zone != Zone::Battlefield || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+    if obj.zone != Zone::Battlefield || !is_room(obj) {
         return Vec::new();
     }
     let unlocks = obj.room_unlocks.unwrap_or_default();
@@ -269,7 +305,7 @@ pub fn unlock_door_designation(
     let Some(obj) = state.objects.get_mut(&object_id) else {
         return false;
     };
-    if obj.zone != Zone::Battlefield || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+    if obj.zone != Zone::Battlefield || !is_room(obj) {
         return false;
     }
 
@@ -298,7 +334,7 @@ pub fn lock_door_designation(state: &mut GameState, object_id: ObjectId, door: R
     let Some(obj) = state.objects.get_mut(&object_id) else {
         return false;
     };
-    if obj.zone != Zone::Battlefield || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+    if obj.zone != Zone::Battlefield || !is_room(obj) {
         return false;
     }
 

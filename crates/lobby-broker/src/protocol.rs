@@ -38,6 +38,16 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 55 — `DerivedViews::room_half_identities` publishes both halves of every
+///      battlefield Room in printed order, resolved through the COPIED halves
+///      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+///      special action's offer names the half and shows its unlock cost
+///      (CR 709.5e) from this map; an enter-as-copy recipient carries neither
+///      on its own printed card, and printed order is engine work. The field
+///      is serde-additive, but the client renders the map directly rather than
+///      deriving halves from raw state; a v54 host would silently label every
+///      offered door "Tap for Mana" again. Full-game handshakes must refuse
+///      that capability mismatch. Lobby messages are unchanged.
 /// 54 — `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
 ///      A Chaos client sends only candidate set codes; the Full server resolves
 ///      and persists the private seat-by-round assignment matrix. This changes
@@ -250,7 +260,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 54;
+pub const PROTOCOL_VERSION: u32 = 55;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -996,12 +1006,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 54);
+        assert_eq!(PROTOCOL_VERSION, 55);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 53);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 54);
     }
 
     #[test]

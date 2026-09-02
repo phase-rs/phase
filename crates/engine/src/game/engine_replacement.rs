@@ -2958,13 +2958,27 @@ pub(crate) fn apply_pending_spell_resolution(
         }
     }
 
-    super::room::unlock_door_designation(
-        state,
-        ctx.object_id,
-        ctx.controller,
-        crate::game::game_object::RoomDoor::Left,
-        events,
-    );
+    // CR 709.5d: the replacement-choice resume path delivers the same entry as
+    // the ordinary resolution tail in `stack.rs`, so it asks the same single
+    // authority. Previously it granted `RoomDoor::Left` unconditionally — no
+    // door check and no Room check: every permanent spell that paused for a
+    // replacement choice and then entered as a copy of a Room (Copy
+    // Enchantment, Mirrormade, Estrid's Invocation) was handed a designation
+    // although neither of ITS halves was cast, which is exactly the case
+    // CR 709.5d's last sentence covers.
+    if let Some(cast_door) = state
+        .objects
+        .get(&ctx.object_id)
+        .and_then(super::room::cast_half_designation)
+    {
+        super::room::unlock_door_designation(
+            state,
+            ctx.object_id,
+            ctx.controller,
+            cast_door,
+            events,
+        );
+    }
 
     // CR 702.185a: Warp delayed trigger setup.
     if ctx.casting_variant == CastingVariant::Warp {
