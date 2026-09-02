@@ -914,16 +914,38 @@ fn low_value_priority_pass_from_actions(
         && actions
             .iter()
             .all(|action| priority_action_is_safe_to_defer_on_own_stack(state, action));
+    let only_pass_or_mana = actions
+        .iter()
+        .all(|action| priority_action_is_pass_or_mana(state, action));
     let empty_stack_pass = state.stack.is_empty()
         && actions
             .iter()
             .all(|action| priority_action_is_safe_to_defer_empty_stack(state, action))
-        && (low_value_empty_stack_phase(state.phase)
-            || actions
-                .iter()
-                .all(|action| priority_action_is_pass_or_mana(state, action)));
+        && (low_value_empty_stack_phase(state.phase) || only_pass_or_mana);
 
-    if own_stack_pass || empty_stack_pass {
+    // `only_pass_or_mana` is stack-agnostic on purpose: when every legal
+    // candidate is `PassPriority` or a mana ability, there is nothing to search
+    // for no matter who controls the stack. A MIXED own+foreign stack passes too
+    // — still nothing to respond with.
+    //
+    // CR 605.3b: an activated mana ability doesn't go on the stack, so it can't
+    // be targeted, countered, or otherwise responded to; it resolves immediately
+    // after activation. Producing mana therefore does not interact with a
+    // foreign stack entry at all.
+    //
+    // CR 106.4: each player's mana pool empties at the end of each step and
+    // phase, so mana floated in this window is lost unspent when no candidate
+    // here is castable.
+    //
+    // Two lines are deliberately forgone, exactly as the `own_stack_pass` and
+    // `empty_stack_pass` arms above already forgo them:
+    //   * Float mana in response and cast after the foreign entry resolves
+    //     (Armageddon-style). CR 106.4 bounds how long such a float survives.
+    //   * `is_mana_ability` also admits sacrifice-cost mana abilities (Ashnod's
+    //     Altar / Phyrexian Altar shape). Activating one in response to foreign
+    //     removal is a real pseudo-response: it denies an exile effect its
+    //     object and fires dies triggers.
+    if own_stack_pass || empty_stack_pass || only_pass_or_mana {
         Some(GameAction::PassPriority)
     } else {
         None
@@ -7035,6 +7057,77 @@ mod tests {
         assert_eq!(
             low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
             None
+        );
+    }
+
+    /// A foreign entry is on the stack and the AI's only candidates are
+    /// `PassPriority` plus a mana ability, so there is nothing to respond with
+    /// and the full search is skipped. Fails on revert of the stack-agnostic
+    /// `only_pass_or_mana` arm: `owns_entire_stack` is false here and the stack
+    /// is non-empty, so both pre-existing arms return `None`.
+    #[test]
+    fn foreign_stack_pass_or_mana_only_passes_without_search() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        push_mana_ability(&mut state, source_id);
+        let ability_index = state.objects.get(&source_id).unwrap().abilities.len() - 1;
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    /// The same foreign stack, but a castable spell is available: the AI has a
+    /// real decision to make, so the fast path must decline and let the search
+    /// run.
+    #[test]
+    fn foreign_stack_with_castable_candidate_does_not_fast_pass() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        push_mana_ability(&mut state, source_id);
+        let ability_index = state.objects.get(&source_id).unwrap().abilities.len() - 1;
+        let spell = add_spell_to_hand(&mut state, PlayerId(0), "Castable Spell", 1);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    /// The degenerate case of the same arm: a foreign entry on the stack and
+    /// `PassPriority` as the only candidate. Also revert-failing.
+    #[test]
+    fn foreign_stack_pass_only_passes() {
+        let mut state = make_state();
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![GameAction::PassPriority];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
         );
     }
 
