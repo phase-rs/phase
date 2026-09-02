@@ -11,6 +11,7 @@ use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::combat_withdrawal::CombatWithdrawalPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::creature_type_choice::CreatureTypeChoicePolicy;
 use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
 use super::devotion::DevotionPolicy;
@@ -161,6 +162,9 @@ pub enum PolicyId {
     DiscardPayoff,
     /// CR 702.122a: cast a Vehicle when the board can actually crew it.
     VehicleDeployment,
+    /// CR 205.3m: pick a creature type the AI actually has members of, instead
+    /// of the alphabetically first option the engine offers.
+    CreatureTypeChoice,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -421,6 +425,7 @@ impl Default for PolicyRegistry {
             Box::new(super::draw_payoff::DrawPayoffPolicy),
             Box::new(super::discard_payoff::DiscardPayoffPolicy),
             Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
+            Box::new(CreatureTypeChoicePolicy),
         ];
         Self::from_policies(policies)
     }

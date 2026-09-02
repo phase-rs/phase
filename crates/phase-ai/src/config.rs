@@ -553,6 +553,20 @@ pub struct PolicyPenalties {
     /// you discard" engine (preference band, per engine).
     #[serde(default = "default_discard_payoff_bonus")]
     pub discard_payoff_bonus: f64,
+    /// CR 205.3m: card-equivalent value of ONE creature-type member the AI
+    /// already has on its battlefield, in its command zone, or in hand when the
+    /// engine asks it to choose a creature type. Half a card per member — a
+    /// lord/anthem creature-type choice pays off once per body it applies to.
+    /// Consumed by `CreatureTypeChoicePolicy`, which caps the counted members.
+    #[serde(default = "default_creature_type_presence_unit")]
+    pub creature_type_presence_unit: f64,
+    /// CR 205.3m: tiebreak toward the deck's detected dominant tribe when a
+    /// creature type is chosen. Deliberately STRICTLY less than
+    /// `creature_type_presence_unit`, so a type with one live member always
+    /// outranks the deck's nominal tribe — the dominant tribe only separates
+    /// options with equal presence. Consumed by `CreatureTypeChoicePolicy`.
+    #[serde(default = "default_creature_type_tribe_bonus")]
+    pub creature_type_tribe_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -633,6 +647,8 @@ impl Default for PolicyPenalties {
             cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
             discard_payoff_bonus: default_discard_payoff_bonus(),
+            creature_type_presence_unit: default_creature_type_presence_unit(),
+            creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
         }
     }
 }
@@ -642,6 +658,21 @@ impl Default for PolicyPenalties {
 /// `policy_penalties` section directly into this struct).
 fn default_graveyard_types_progress() -> f64 {
     2.5
+}
+
+/// CR 205.3m. Half a card per creature-type member. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_creature_type_presence_unit() -> f64 {
+    0.5
+}
+
+/// CR 205.3m. Strictly below `default_creature_type_presence_unit`, which is
+/// what makes the dominant tribe a tiebreak rather than an override. Shared by
+/// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
+fn default_creature_type_tribe_bonus() -> f64 {
+    0.25
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -1076,6 +1107,14 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "loop_shortcut_winning_declare_bonus",
         "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
+    ),
+    (
+        "creature_type_presence_unit",
+        "CreatureTypeChoicePolicy per-member census weight; no paired-seed calibration — the duel suite never raises a creature-type prompt, so ai-gate carries no gradient for it",
+    ),
+    (
+        "creature_type_tribe_bonus",
+        "CreatureTypeChoicePolicy dominant-tribe tiebreak; must stay strictly below creature_type_presence_unit, and no paired-seed calibration exists — the duel suite never raises a creature-type prompt",
     ),
 ];
 
