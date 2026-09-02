@@ -4431,10 +4431,13 @@ fn resolve_enters_with_condition(
 /// this rider is a sibling of the counters and of the `"enters tapped"` rider,
 /// not a separate ability.
 ///
-/// A corpus sweep over every printed `enters/enter with … counter` line finds
-/// this rider on exactly nine cards (Anavolver, Cetavolver, Faerie Squadron,
-/// Kavu Titan, Necravolver, Pouncing Kavu, Pouncing Wurm, Rakavolver,
-/// Voidpouncer), always gated on kicker.
+/// Corpus (verified against Scryfall, `oracle:"on it and with"`): 13 printed
+/// cards carry this rider slot, always gated on kicker — Anavolver, Benalish
+/// Lancer, Cetavolver, Degavolver, Duskwalker, Faerie Squadron, Kavu Titan,
+/// Necravolver, Pouncing Kavu, Pouncing Wurm, Prison Barricade, Rakavolver,
+/// Voidpouncer. They print 18 rider lines: 13 BARE keywords (this function's
+/// class) and 5 QUOTED abilities (below). 12 cards print at least one bare
+/// rider; 8 of them print ONLY bare riders and so are fully covered here.
 ///
 /// Scans at `" and with "` boundaries rather than anchoring, because the rider
 /// follows a counter clause of unbounded shape and may not be the first `" and "`
@@ -4444,40 +4447,68 @@ fn resolve_enters_with_condition(
 /// conjuncts ("…and a trample counter on it") out of this list — "a trample
 /// counter on it" is not a keyword.
 ///
-/// The sibling QUOTED-ability rider (`and with "Whenever this creature deals
-/// damage, you gain that much life."` — Anavolver's {B} half, Necravolver's {W}
-/// half, Rakavolver's {1}{W} half) is deliberately NOT handled here: it needs a
-/// granted-ability parse, not a keyword lookup. Those three lines keep their
-/// current counters-only behavior rather than being failed closed, since that
-/// would trade a partial parse for no parse at all. Tracked separately.
+/// Every rider is bounded by [`parse_enters_with_keyword_rider_candidate`], so a
+/// CHAINED "…and with X and with Y" line yields both X and Y. Bounding only at
+/// the sentence period would hand the first candidate "X and with Y", which the
+/// keyword parser rejects as a compound — reintroducing, for X, exactly the
+/// silent-keyword-drop bug this function exists to fix.
+///
+/// The sibling QUOTED-ability rider is deliberately NOT handled here: it needs a
+/// granted-ability parse, not a keyword lookup. Five lines across four cards —
+/// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
+/// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
+/// creature deals damage, you gain that much life."), and Prison Barricade
+/// ("This creature can attack as though it didn't have defender."). They keep
+/// their current counters-only behavior rather than being failed closed, since
+/// that would trade a partial parse for no parse at all. Tracked separately.
 fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::Keyword> {
     let mut riders = Vec::new();
     let mut remaining = text;
 
-    while let Ok((after_marker, _)) = preceded(
-        take_until::<_, _, OracleError<'_>>(" and with "),
-        tag::<_, _, OracleError<'_>>(" and with "),
+    while let Ok((after_marker, candidate)) = preceded(
+        (
+            take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
+            tag::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
+        ),
+        parse_enters_with_keyword_rider_candidate,
     )
     .parse(remaining)
     {
-        // The rider runs to the end of the sentence; trailing punctuation is not
-        // part of the keyword name.
-        let candidate = after_marker
-            .split('.')
-            .next()
-            .unwrap_or(after_marker)
-            .trim();
         if let Some(keyword) =
-            crate::parser::oracle_keyword::parse_granted_keyword_fragment(candidate)
+            crate::parser::oracle_keyword::parse_granted_keyword_fragment(candidate.trim())
         {
             if !riders.contains(&keyword) {
                 riders.push(keyword);
             }
         }
+        // Resume AT the bounding marker (not past it), so the next iteration's
+        // `take_until` finds it and the chained rider Y is reached.
         remaining = after_marker;
     }
 
     riders
+}
+
+/// The `" and with "` rider marker — both the scan anchor and one of the two
+/// candidate terminators, so the two can never disagree about where a rider ends.
+const ENTERS_WITH_KEYWORD_RIDER_MARKER: &str = " and with ";
+
+/// One rider's text, bounded at whichever terminator comes FIRST: the sentence
+/// period, or the next `" and with "` marker.
+///
+/// Both terminators are `peek`ed rather than consumed, so the scan loop resumes
+/// on input that still carries the marker its `take_until` needs. `rest` is the
+/// final alternative: a rider that ends the input terminates at neither.
+fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        terminated(
+            take_until(ENTERS_WITH_KEYWORD_RIDER_MARKER),
+            peek(tag(ENTERS_WITH_KEYWORD_RIDER_MARKER)),
+        ),
+        terminated(take_until("."), peek(tag("."))),
+        rest,
+    ))
+    .parse(input)
 }
 
 /// CR 611.2a: wrap `inner` so the entering permanent also gains `keywords` for
@@ -18297,10 +18328,18 @@ mod tests {
 
     #[test]
     fn kicked_enters_with_counter() {
-        // CR 702.33d: "If this creature was kicked, it enters with a +1/+1 counter on it."
+        // CR 702.33d: the UNQUALIFIED "was kicked" form (no "with its {cost}
+        // kicker"), which is what pins `kicker_cost: None` below.
+        //
+        // Synthetic name: verified against Scryfall, the only printed card whose
+        // line is "a +1/+1 counter on it and with flying" is Rakavolver's {U}
+        // half, and that one is COST-QUALIFIED, so it exercises the sibling
+        // `kicker_cost: Some(_)` path instead. Ana Battlemage, named here
+        // previously, prints no enters-with-counters line at all — it has two ETB
+        // triggers. Keeping the shape and dropping the false attribution.
         let def = parse_replacement_line(
             "If this creature was kicked, it enters with a +1/+1 counter on it and with flying.",
-            "Ana Battlemage",
+            "Synthetic Unqualified Kicker Rider",
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
@@ -18364,9 +18403,12 @@ mod tests {
     fn kicked_with_specific_cost_enters_with_counters() {
         // CR 702.33d: "If this creature was kicked with its {1}{R} kicker, it enters with
         // two +1/+1 counters on it and with first strike."
+        // Verified against Scryfall: this is CETAVOLVER's {1}{R} half. Necravolver
+        // kicks for {1}{G}/{W} and never prints {1}{R}; the name was mismatched to
+        // the text here before this test began asserting the rider.
         let def = parse_replacement_line(
             "If this creature was kicked with its {1}{R} kicker, it enters with two +1/+1 counters on it and with first strike.",
-            "Necravolver",
+            "Cetavolver",
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
@@ -18425,6 +18467,14 @@ mod tests {
                 "If this creature was kicked, it enters with two +1/+1 counters and a trample counter on it and with haste.",
                 Keyword::Haste,
             ),
+            // Duskwalker: the rider is followed by parenthesized REMINDER text,
+            // so the candidate must stop at the sentence period rather than
+            // swallowing "(It can't be blocked except by ...)" into the keyword.
+            (
+                "Duskwalker",
+                "If this creature was kicked, it enters with two +1/+1 counters on it and with fear.                  (It can't be blocked except by artifact creatures and/or black creatures.)",
+                Keyword::Fear,
+            ),
         ] {
             let def = parse_replacement_line(line, card)
                 .unwrap_or_else(|| panic!("{card}: kicker enters-with line must parse"));
@@ -18439,6 +18489,91 @@ mod tests {
                 "{card}: the counters must survive alongside the keyword grant"
             );
         }
+    }
+
+    /// CR 614.1c: a CHAINED rider — "…and with X and with Y" — must yield BOTH
+    /// keywords.
+    ///
+    /// This is the discriminating test for the candidate boundary. Bounding a
+    /// candidate only at the sentence period hands the first iteration
+    /// "flying and with trample", which `parse_granted_keyword_fragment` rejects
+    /// as a compound; the loop then advances and captures only "trample", so X is
+    /// silently dropped — the very bug class this parser exists to fix, resurfacing
+    /// one keyword deep. Bounding at the earlier of the period and the next
+    /// `" and with "` marker is what makes both survive.
+    ///
+    /// No printed card chains two BARE keyword riders today (all nine corpus cards
+    /// carry exactly one), so this asserts on the function's supported shape rather
+    /// than a card. `parse_enters_with_keyword_riders` returns a `Vec` and loops for
+    /// exactly this reason; a latent silent drop behind that signature is still a
+    /// defect.
+    #[test]
+    fn chained_enters_with_keyword_riders_keep_every_keyword() {
+        // Unit level: the scan itself, so a failure localizes to the boundary
+        // rather than to composition downstream.
+        assert_eq!(
+            parse_enters_with_keyword_riders(
+                "it enters with three +1/+1 counters on it and with flying and with trample."
+            ),
+            vec![Keyword::Flying, Keyword::Trample],
+            "both chained riders must be lifted, in printed order"
+        );
+
+        // Composed level: both grants reach the built replacement, and the
+        // counters still ride along beneath them.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with three +1/+1 counters on it and with flying and with trample.",
+            "Synthetic Chained Rider",
+        )
+        .expect("chained-rider line must parse");
+        let execute = def.execute.as_deref().expect("execute ability");
+        let granted = collect_granted_keywords(execute);
+        assert!(
+            granted.contains(&Keyword::Flying) && granted.contains(&Keyword::Trample),
+            "both chained riders must reach the execute chain, got {granted:?}"
+        );
+        assert!(
+            def.condition.is_some(),
+            "the kicker gate must still reach the condition slot"
+        );
+        assert!(
+            find_put_counter(execute).is_some(),
+            "the counters must survive beneath the chained grants"
+        );
+    }
+
+    /// Every `AddKeyword` granted anywhere in `ability`'s sub-ability chain.
+    fn collect_granted_keywords(ability: &AbilityDefinition) -> Vec<Keyword> {
+        let mut found = Vec::new();
+        let mut cursor = Some(ability);
+        while let Some(node) = cursor {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*node.effect
+            {
+                found.extend(static_abilities.iter().flat_map(|s| {
+                    s.modifications.iter().filter_map(|m| match m {
+                        ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+                        _ => None,
+                    })
+                }));
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        found
+    }
+
+    /// The first `PutCounter` in `ability`'s sub-ability chain, at whatever depth
+    /// the composed grants push it to.
+    fn find_put_counter(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        let mut cursor = Some(ability);
+        while let Some(node) = cursor {
+            if matches!(*node.effect, Effect::PutCounter { .. }) {
+                return Some(node);
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        None
     }
 
     /// The rider scan must not invent a grant. A `"<keyword> counter"` conjunct
