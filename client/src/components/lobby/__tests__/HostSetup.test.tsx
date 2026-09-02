@@ -455,9 +455,50 @@ describe("HostSetup", () => {
       aiSeats: [],
     });
 
-    await user.click(screen.getByRole("button", { name: "Delete custom format" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
 
     expect(useMultiplayerStore.getState().lastHostConfig).toBeNull();
     expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+  });
+
+  it("hides saved formats whose minimum exceeds the P2P ceiling", () => {
+    const saved = saveCustomFormat("Eight-seat format", {
+      rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 7,
+          max_players: 8,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+      label: "Eight-seat format",
+      short_label: "EIG",
+      description: "Seven to eight players",
+      reprint_policy: null,
+      printing_fidelity: "NotApplicable",
+    });
+
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+
+    expect(screen.queryByText(saved.name)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
   });
 });

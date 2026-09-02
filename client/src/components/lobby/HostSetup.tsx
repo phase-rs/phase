@@ -552,7 +552,11 @@ export function HostSetup({
     } ${extra}`;
   const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
   const activeSavedFormat = savedFormats.find((s) => s.id === savedCustomFormatId) ?? null;
-  const availableSavedFormats = savedFormats;
+  const availableSavedFormats = isP2P
+    ? savedFormats.filter(
+        (saved) => saved.def.rules.structural.min_players <= P2P_MAX_PEERS,
+      )
+    : savedFormats;
   // A custom format has no registry metadata, so its label/description come
   // from the engine-authored `CustomFormatDef` instead.
   const formatLabel = activeSavedFormat
