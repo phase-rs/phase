@@ -1068,6 +1068,17 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
+    it("ignores selection replacement while pick interaction is locked", () => {
+      useMultiplayerDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
+
+      useMultiplayerDraftStore.getState().selectCard("replacement");
+      expect(useMultiplayerDraftStore.getState().selectedCard).toBe("prior");
+
+      useMultiplayerDraftStore.setState({ pickInteractionLocked: false });
+      useMultiplayerDraftStore.getState().selectCard("replacement");
+      expect(useMultiplayerDraftStore.getState().selectedCard).toBe("replacement");
+    });
+
     it("autoPickCard submits from the visible pack without manual selection", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },

@@ -1037,7 +1037,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     });
   },
 
-  selectCard: (selectedCard) => set({ selectedCard }),
+  selectCard: (selectedCard) => {
+    if (get().pickInteractionLocked) return;
+    set({ selectedCard });
+  },
 
   addBasicLand: (name) => {
     const state = get();

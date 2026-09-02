@@ -347,6 +347,17 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().selectedCard).toBeNull();
   });
 
+  it("ignores_selection_replacement_while_pick_interaction_is_locked", () => {
+    useDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
+
+    useDraftStore.getState().selectCard("replacement");
+    expect(useDraftStore.getState().selectedCard).toBe("prior");
+
+    useDraftStore.setState({ pickInteractionLocked: false });
+    useDraftStore.getState().selectCard("replacement");
+    expect(useDraftStore.getState().selectedCard).toBe("replacement");
+  });
+
   it.each([
     ["unchanged", [], []],
     ["pre-existing", [card("requested")], [card("requested")]],

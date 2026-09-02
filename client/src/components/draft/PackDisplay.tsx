@@ -279,7 +279,7 @@ function PackCard({
         // The desktop drag controller captures the pointer on this shell. A
         // browser may consequently target its trailing click here instead of
         // the nested activation button; accept only that retargeted case.
-        if (!desktopLayout || event.target !== event.currentTarget) return;
+        if (locked || !desktopLayout || event.target !== event.currentTarget) return;
         if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
       }}
       onDoubleClick={(event) => {

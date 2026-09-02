@@ -1366,6 +1366,7 @@ export const useMultiplayerDraftStore = create<
   }),
 
   selectCard: (cardInstanceId) => {
+    if (get().pickInteractionLocked) return;
     set({ selectedCard: cardInstanceId });
   },
 

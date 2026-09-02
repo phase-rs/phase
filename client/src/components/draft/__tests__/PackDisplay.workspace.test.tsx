@@ -1050,6 +1050,33 @@ describe("PackDisplay local workspace controller", () => {
     expect(selectCard).toHaveBeenCalledWith("unknown");
   });
 
+  it("ignores_exact_shell_desktop_clicks_while_locked_before_consuming_compatibility_activation", () => {
+    const selectCard = vi.fn();
+    const localDrag = {
+      ...dragController,
+      consumeCompatibilityActivation: vi.fn(() => false),
+    };
+    const initial = controller({
+      interactionLocked: true,
+      selectCard,
+      dragController: localDrag,
+    });
+    const rendered = render(<PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 12, pointerType: "mouse" });
+
+    expect(localDrag.consumeCompatibilityActivation).not.toHaveBeenCalled();
+    expect(selectCard).not.toHaveBeenCalled();
+
+    rendered.rerender(<PackDisplay controller={{ ...initial, interactionLocked: false }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 12, pointerType: "mouse" });
+
+    expect(localDrag.consumeCompatibilityActivation).toHaveBeenCalledTimes(1);
+    expect(selectCard).toHaveBeenCalledTimes(1);
+    expect(selectCard).toHaveBeenCalledWith("unknown");
+  });
+
   it("allows_keyboard_selection_after_one_compatibility_click_without_an_in_card_confirmation", () => {
     let suppressCompatibility = true;
     const selectCard = vi.fn();
