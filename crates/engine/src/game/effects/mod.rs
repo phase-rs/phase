@@ -5918,7 +5918,7 @@ fn population_does_not_move(effect: &Effect) -> bool {
 /// through `sacrifice_permanent`; `CreateTokenCopyFromPool`/`CopyTokenOf` —
 /// both drain through the shared copy-token entry authority.
 ///
-/// SYNCHRONOUS round-2 movers (verified per variant; each emits `ZoneChanged`
+/// Synchronous movers (verified per variant; each emits `ZoneChanged`
 /// inside its `resolve`'s own event slice through the `zone_pipeline`
 /// primitives): `Draw` — `start_draw_sequence_with_replacement_applied`
 /// (draw.rs:259) delivers each unit via `resume_pending_draw_delivery` →
@@ -5994,7 +5994,7 @@ fn population_moves(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::Counter { .. }
         | Effect::CounterAll { .. }
-        // Synchronous round-2 movers (verified inventory above):
+        // Synchronous movers (verified inventory above):
         | Effect::Draw { .. }
         | Effect::Seek { .. }
         | Effect::Cascade
@@ -6019,8 +6019,8 @@ fn population_moves(effect: &Effect) -> bool {
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::CopyTokenOf { .. } => true,
         // NOT moving: interactive-window variants move in the answer-handler
-        // cycle; no ZoneChanged reaches the resolver-side harvest (disclosed
-        // flip vs the round-3 negation-based classification).
+        // cycle; no ZoneChanged reaches the resolver-side harvest that both
+        // mobility classifiers read.
         _ => false,
     }
 }
@@ -26896,7 +26896,7 @@ mod tests {
         );
     }
 
-    // ---- Typed moving/in-place classification battery (round-6 remediation) ----
+    // ---- Typed moving/in-place classification battery ----
 
     fn tap_leg() -> ResolvedAbility {
         ResolvedAbility::new(
@@ -26953,7 +26953,7 @@ mod tests {
         )
     }
 
-    /// A synchronous round-2 mover leg: Seek delivers its sought card
+    /// A synchronous mover leg: Seek delivers its sought card
     /// Library→Hand through `zone_pipeline::move_objects_simultaneously`
     /// inside `resolve`'s own event slice (seek.rs:102) — `population_moves`
     /// is true.
@@ -26982,7 +26982,7 @@ mod tests {
         node.sub_ability = Some(Box::new(leg));
     }
 
-    /// MED-2 congruence, matched pair A: a player-scoped chain whose detached
+    /// Scoped/unsplit congruence, matched pair A: a player-scoped chain whose detached
     /// remainder holds a MOVING producer (`exile → reader{TS}`) takes the SAME
     /// supersession verdict as its unsplit twin — vetoed. The stamp assertion
     /// pins the TYPED verdict: the moving walk (arm 1), not merely the wider
@@ -27045,7 +27045,7 @@ mod tests {
         );
     }
 
-    /// MED-2, matched pair B (the revert-failing row): a player-scoped chain
+    /// Scoped/unsplit congruence, matched pair B (the revert-failing row): a player-scoped chain
     /// whose detached remainder is a same-class IN-PLACE producer followed by
     /// a TERMINAL reader must PUBLISH exactly like its unsplit twin. The
     /// pre-typing leg 3 (`!= NoProducer`) vetoed exactly this shape — revert
@@ -27081,11 +27081,11 @@ mod tests {
         assert!(
             !transitive_publish_superseded(&scoped),
             "CR 608.2c congruence: a same-class in-place remainder must NOT veto — \
-             the MED-2 divergence is closed"
+             the scoped chain must publish like its unsplit equivalent"
         );
     }
 
-    /// R4-1 unsplit regression: the Kathril doc shape
+    /// Unsplit regression: the Kathril doc shape
     /// `tap → tap2 → exile → reader{TS}` — tap2 is TRANSPARENT under the
     /// own-consumption gate (its tracked-set reference lives in its SUBTREE,
     /// not its own effect), so the walk reaches the moving exile and the first
@@ -27099,12 +27099,12 @@ mod tests {
         append_test_leg(&mut chain, grant_leg());
         assert!(
             transitive_publish_superseded(&chain),
-            "R4-1: tap2 does not own-consume, so the walk must reach the moving exile \
+            "tap2 does not own-consume, so the walk must reach the moving exile \
              and veto the first tap (Kathril doc contract)"
         );
     }
 
-    /// R4-1 scoped twin: the detached tail `tap2 → exile → reader{TS}` stamps
+    /// Scoped twin: the detached tail `tap2 → exile → reader{TS}` stamps
     /// `HoldsMovingPublisher` through the corrected walk (arm 1) and the scoped
     /// head is vetoed — congruent with the unsplit twin above.
     #[test]
@@ -27129,18 +27129,17 @@ mod tests {
         );
     }
 
-    /// Round-2 remediation discriminator: a detached remainder shaped
+    /// Moving-remainder discriminator: a detached remainder shaped
     /// `in-place producer → SYNCHRONOUS MOVER → reader{TS}` must veto the
     /// in-place head through the production predicate
     /// (`transitive_publish_superseded`, leg 3). The mover is `Effect::Seek`
-    /// — one of the nine synchronous ZoneChanged emitters the round-2 review
-    /// added to `population_moves` (seek.rs:102, a synchronous
+    /// — one of the synchronous ZoneChanged emitters in `population_moves`'
+    /// inventory (seek.rs:102, a synchronous
     /// `zone_pipeline::move_objects_simultaneously` inside `resolve`).
     /// Revert Seek's classification and the tail stamps
     /// `HoldsInPlacePublisher` via arm 2 instead of `HoldsMovingPublisher`
-    /// via arm 1, leg 3 stops firing, and the head flips to publish — the
-    /// parent-commit veto behavior for this class, restored by the positive
-    /// classifier.
+    /// via arm 1, leg 3 stops firing, and the head flips to publish —
+    /// reintroducing the very CR 608.2c pollution this veto exists to prevent.
     #[test]
     fn detached_in_place_then_synchronous_mover_tail_vetoes_via_the_typed_stamp() {
         let mut tail = tap_leg();
@@ -27187,7 +27186,8 @@ mod tests {
     /// structural mirror of the integration fixture
     /// `nested_tracked_set_consumers_keep_the_tap_publish`): the walk's reader
     /// boundary fires at the FIRST reader, so the tap publish is NOT superseded
-    /// and both readers bind. Under the round-3 negation this was TRUE.
+    /// and both readers bind (the negation-based walk this replaces read the
+    /// reader as a moving producer and flipped this to TRUE).
     #[test]
     fn nested_reader_boundary_keeps_the_in_place_publish() {
         let mut chain = tap_leg();
@@ -27247,7 +27247,7 @@ mod tests {
     /// the generic-arm ZoneChanged emitters (Token, Incubate, Bounce, Conjure
     /// {Battlefield}, Amass, CastFromZone, Manifest), the destination-guarded
     /// Conjure arm, the interactive-window not-moving variants, and the
-    /// round-2 synchronous movers (Draw, Seek, Cascade, Discover, Ripple,
+    /// synchronous movers (Draw, Seek, Cascade, Discover, Ripple,
     /// Explore, ExploreAll, Cloak — resolver-source citations in
     /// `population_moves`' doc) plus the harvest-inert CollectEvidence row.
     /// Removing any variant from `population_moves`' positive list flips its

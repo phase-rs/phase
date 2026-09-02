@@ -355,13 +355,13 @@ fn grant_reader_binds_only_the_exiled_saga_not_tapped_lands() {
 
 /// Discriminator B (CR 608.2c, mass-move consumer): the same producer shape
 /// consumed by a hand-built `ChangeZoneAll { target: TrackedSet(0) }` — the
-/// brief's second sentinel-reading path (change_zone.rs resolves the sentinel
+/// second of the two sentinel-reading paths (change_zone.rs resolves the sentinel
 /// for the mass path too).
 ///
-/// The destination is Graveyard, NOT the plan's literal `Battlefield`: with
+/// The destination is Graveyard, NOT `Battlefield`: with
 /// destination == the polluted members' current zone, a same-zone mass move is
 /// a fully silent no-op (no event, no count inflation, no movement), so the
-/// plan's literal shape cannot fail pre-fix and does not discriminate. Moving
+/// Battlefield shape cannot fail pre-fix and does not discriminate. Moving
 /// to a zone OUTSIDE the polluted population makes the corruption observable
 /// while exercising the identical sentinel path. Exactly the Saga is moved;
 /// no land is eligible (pre-fix the polluted set puts the battlefield lands
@@ -656,7 +656,7 @@ fn nested_tracked_set_consumers_keep_the_tap_publish() {
         // Discriminating assertion: BOTH chained readers bound the tap
         // population — `grant_permission::resolve` pushes one permission per
         // resolve, so two chained grants stack additively to exactly 2 per
-        // tapped land (0 under the round-3 superseding walk, 1 under any
+        // tapped land (0 if the tap publish were superseded, 1 under any
         // single-reader mistake — only both readers binding yields 2).
         assert_eq!(
             state.objects[land].casting_permissions.len(),
