@@ -37,6 +37,13 @@ enum Mode {
     Single,
     Suite,
     CommanderSuite,
+    /// Head-to-head Commander between two named decks from a feed.
+    ///
+    /// `FormatConfig::commander()` declares `min_players: 2`, so a two-seat
+    /// Commander game is a legal configuration the engine already supports
+    /// (see the 2-player commander states in `mulligan.rs` / `visibility.rs`);
+    /// only this binary's Commander path previously hardcoded four seats.
+    CommanderDuel,
 }
 
 fn main() {
@@ -62,6 +69,10 @@ fn main() {
     let mut attribution = AttributionMode::Disabled;
     let mut harvest_output: Option<PathBuf> = None;
     let mut commander_feed = "feeds/mtggoldfish-commander.json".to_string();
+    let mut duel_p0: Option<String> = None;
+    let mut duel_p1: Option<String> = None;
+    let mut trace = false;
+    let mut game_timeout_secs: u64 = 300;
 
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -86,6 +97,16 @@ fn main() {
             }
             "--suite" => mode = Mode::Suite,
             "--commander-suite" => mode = Mode::CommanderSuite,
+            "--commander-1v1" => mode = Mode::CommanderDuel,
+            "--trace" => trace = true,
+            "--game-timeout" => {
+                game_timeout_secs = args_iter
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(game_timeout_secs);
+            }
+            "--p0" => duel_p0 = args_iter.next().cloned(),
+            "--p1" => duel_p1 = args_iter.next().cloned(),
             "--games" => suite_games = args_iter.next().and_then(|v| v.parse().ok()),
             "--output" => output = args_iter.next().map(PathBuf::from),
             "--suite-filter" => suite_filter = args_iter.next().cloned(),
@@ -168,6 +189,32 @@ fn main() {
                     candidate_difficulty: difficulty,
                     baseline_difficulty,
                     output,
+                },
+            );
+        }
+        Mode::CommanderDuel => {
+            let (Some(p0), Some(p1)) = (duel_p0, duel_p1) else {
+                eprintln!("--commander-1v1 requires --p0 NAME and --p1 NAME");
+                std::process::exit(2);
+            };
+            run_commander_duel(
+                &db,
+                CommanderDuelOptions {
+                    cards_root: &path,
+                    feed: &commander_feed,
+                    p0: &p0,
+                    p1: &p1,
+                    games: suite_games.unwrap_or(4),
+                    base_seed,
+                    difficulty,
+                    baseline_difficulty,
+                    output,
+                    trace: trace.then(|| TraceOptions {
+                        every: 2_000,
+                        ring: 40,
+                        stall_actions: 40_000,
+                        wall_budget: std::time::Duration::from_secs(game_timeout_secs),
+                    }),
                 },
             );
         }
@@ -347,7 +394,7 @@ struct CommanderSuiteOptions<'a> {
 }
 
 fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
-    let deck_lists = load_commander_decks(db, options.cards_root, options.feed);
+    let deck_lists = load_commander_decks(db, options.cards_root, options.feed, Some(4));
     if deck_lists.len() < 4 {
         eprintln!(
             "Commander suite needs at least 4 resolvable decks, found {}",
@@ -382,6 +429,8 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
                 candidate,
                 options.candidate_difficulty,
                 options.baseline_difficulty,
+                4,
+                None,
             );
             if result.winner == Some(candidate) {
                 wins += 1;
@@ -469,6 +518,13 @@ struct CommanderGameResult {
     turns: u32,
     candidate_survival_turn: u32,
     candidate_elimination_order: u8,
+    /// True only when the game reached `WaitingFor::GameOver`. False means the
+    /// driver loop gave up — the action cap was hit, or the AI produced no legal
+    /// action — which is a run that failed to complete rather than a draw, and
+    /// must be reported as such rather than folded into a 0-win result.
+    completed: bool,
+    /// Why an incomplete game stopped. `None` when `completed`.
+    stop_reason: Option<&'static str>,
 }
 
 fn run_commander_game(
@@ -477,28 +533,43 @@ fn run_commander_game(
     candidate: PlayerId,
     candidate_difficulty: AiDifficulty,
     baseline_difficulty: AiDifficulty,
+    players: u8,
+    trace: Option<&TraceOptions>,
 ) -> CommanderGameResult {
-    let mut state = GameState::new(FormatConfig::commander(), 4, seed);
+    let mut state = GameState::new(FormatConfig::commander(), players, seed);
     load_deck_into_state(&mut state, payload);
     engine::game::engine::start_game(&mut state);
 
-    let ai_players: HashSet<PlayerId> = (0..4).map(|seat| PlayerId(seat as u8)).collect();
+    let ai_players: HashSet<PlayerId> = (0..players).map(PlayerId).collect();
     let mut ai_configs: HashMap<PlayerId, _> = HashMap::new();
-    for seat in 0..4 {
-        let player = PlayerId(seat as u8);
+    for seat in 0..players {
+        let player = PlayerId(seat);
         let difficulty = if player == candidate {
             candidate_difficulty
         } else {
             baseline_difficulty
         };
+        // Player count is threaded into the AI config too: threat assessment and
+        // politics weighting differ between a pod and a duel, so a 1v1 run must
+        // not be configured as if three opponents were present.
         ai_configs.insert(
             player,
-            create_config_for_players(difficulty, Platform::Native, 4)
-                .into_measurement(seed.wrapping_add(seat as u64)),
+            create_config_for_players(difficulty, Platform::Native, players)
+                .into_measurement(seed.wrapping_add(u64::from(seat))),
         );
     }
 
     let mut total_actions = 0usize;
+    let mut stop_reason: Option<&'static str> = None;
+    // Hang diagnosis. A full action trace is useless at this scale (the cap is 200k
+    // actions), so instead: periodic progress showing whether the game is advancing at
+    // all, a wall-clock budget so a stuck game reports where it stopped instead of being
+    // killed from outside, and a ring buffer of recent actions dumped on a bad exit --
+    // a repeating cycle is visible immediately in the last few dozen actions.
+    let started = Instant::now();
+    let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut last_progress_turn = 0u32;
+    let mut actions_at_last_turn_change = 0usize;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
     let mut elimination_turns = [None; 4];
@@ -522,11 +593,67 @@ fn run_commander_game(
             &ai_session,
         );
         if results.is_empty() {
+            stop_reason = Some("no_legal_actions");
             break;
         }
+        if let Some(opts) = trace {
+            for r in &results {
+                if recent.len() == opts.ring {
+                    recent.pop_front();
+                }
+                recent.push_back(format!(
+                    "T{} P{} {:?}",
+                    state.turn_number, state.active_player.0, r.action
+                ));
+            }
+        }
         total_actions += results.len();
+
+        if state.turn_number != last_progress_turn {
+            last_progress_turn = state.turn_number;
+            actions_at_last_turn_change = total_actions;
+        }
+        if let Some(opts) = trace {
+            if total_actions / opts.every != (total_actions - results.len()) / opts.every {
+                eprintln!(
+                    "    [trace] turn {:>3}  actions {:>7}  {:.0}s  waiting_for {}",
+                    state.turn_number,
+                    total_actions,
+                    started.elapsed().as_secs_f64(),
+                    waiting_for_kind(&state.waiting_for),
+                );
+            }
+            // The turn number not moving while actions pile up is the signature of a loop,
+            // and it is what distinguishes a stuck game from a merely slow one.
+            if total_actions - actions_at_last_turn_change >= opts.stall_actions {
+                stop_reason = Some("stalled_same_turn");
+                break;
+            }
+            if started.elapsed() >= opts.wall_budget {
+                stop_reason = Some("wall_timeout");
+                break;
+            }
+        }
         if total_actions >= COMMANDER_MAX_TOTAL_ACTIONS {
+            stop_reason = Some("action_cap");
             break;
+        }
+    }
+
+    if let Some(opts) = trace {
+        if !matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            eprintln!(
+                "    [trace] STOPPED {:?} at turn {} after {} actions ({:.0}s); last {} actions:",
+                stop_reason.unwrap_or("unknown"),
+                state.turn_number,
+                total_actions,
+                started.elapsed().as_secs_f64(),
+                recent.len()
+            );
+            for line in &recent {
+                eprintln!("      {line}");
+            }
+            let _ = opts;
         }
     }
 
@@ -535,6 +662,7 @@ fn run_commander_game(
             elimination_turns[player.0 as usize] = Some(state.turn_number);
         }
     }
+    let completed = matches!(state.waiting_for, WaitingFor::GameOver { .. });
     let winner = match &state.waiting_for {
         WaitingFor::GameOver { winner } => *winner,
         _ => None,
@@ -550,6 +678,12 @@ fn run_commander_game(
 
     CommanderGameResult {
         winner,
+        completed,
+        stop_reason: if completed {
+            None
+        } else {
+            stop_reason.or(Some("unknown"))
+        },
         turns: state.turn_number,
         candidate_survival_turn,
         candidate_elimination_order,
@@ -560,6 +694,7 @@ fn load_commander_decks(
     db: &CardDatabase,
     cards_root: &std::path::Path,
     feed: &str,
+    max_decks: Option<usize>,
 ) -> Vec<PlayerDeckList> {
     let feed_path = cards_root.join(feed);
     let feed_file = std::fs::File::open(&feed_path).unwrap_or_else(|err| {
@@ -577,7 +712,7 @@ fn load_commander_decks(
 
     let mut deck_lists = Vec::new();
     for deck in decks_json {
-        if deck_lists.len() == 4 {
+        if max_decks.is_some_and(|max| deck_lists.len() == max) {
             break;
         }
         let deck_name = deck["name"].as_str().unwrap_or("<unnamed>");
@@ -619,6 +754,184 @@ fn load_commander_decks(
         });
     }
     deck_lists
+}
+
+/// Instrumentation for diagnosing games that do not terminate.
+struct TraceOptions {
+    /// Emit a progress line every this many actions.
+    every: usize,
+    /// Keep this many recent actions to dump when a game exits badly.
+    ring: usize,
+    /// Give up if this many actions pass without the turn number changing.
+    stall_actions: usize,
+    /// Give up after this much wall clock, so the game reports where it stopped.
+    wall_budget: std::time::Duration,
+}
+
+/// Human-readable discriminant for the state machine's current wait.
+///
+/// Debug-formats and keeps the variant name only: the payloads are large and the variant is
+/// the part that identifies a loop.
+fn waiting_for_kind(w: &WaitingFor) -> String {
+    let s = format!("{w:?}");
+    s.split(['{', '(', ' ']).next().unwrap_or("?").to_string()
+}
+
+struct CommanderDuelOptions<'a> {
+    cards_root: &'a std::path::Path,
+    feed: &'a str,
+    p0: &'a str,
+    p1: &'a str,
+    games: usize,
+    base_seed: u64,
+    difficulty: AiDifficulty,
+    baseline_difficulty: AiDifficulty,
+    output: Option<PathBuf>,
+    trace: Option<TraceOptions>,
+}
+
+/// Head-to-head Commander between two decks from a feed, identified by commander name.
+///
+/// Seats alternate every game. Commander's first-player advantage is large, and a short
+/// unbalanced sample mostly measures who was on the play, so an even `--games` gives each deck
+/// the play exactly half the time; an odd count is rejected rather than silently handing one
+/// deck an extra turn one.
+fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
+    if !options.games.is_multiple_of(2) {
+        eprintln!(
+            "--games must be even for a 1v1 run so both decks get the play equally (got {})",
+            options.games
+        );
+        std::process::exit(2);
+    }
+    let decks = load_commander_decks(db, options.cards_root, options.feed, None);
+    let find = |needle: &str| {
+        decks
+            .iter()
+            .find(|d| d.commander.first().is_some_and(|c| c == needle))
+            .cloned()
+    };
+    let (Some(deck0), Some(deck1)) = (find(options.p0), find(options.p1)) else {
+        let known: Vec<&str> = decks
+            .iter()
+            .filter_map(|d| d.commander.first().map(String::as_str))
+            .collect();
+        eprintln!(
+            "Could not resolve both decks ('{}', '{}') in {}. Known commanders: {:?}",
+            options.p0, options.p1, options.feed, known
+        );
+        std::process::exit(1);
+    };
+
+    let mut p0_wins = 0usize;
+    let mut p1_wins = 0usize;
+    let mut incomplete = 0usize;
+    let mut rows = Vec::new();
+
+    for game_idx in 0..options.games {
+        // Even games put deck0 on the play (seat 0); odd games swap the seats.
+        let deck0_first = game_idx.is_multiple_of(2);
+        let (player, opponent) = if deck0_first {
+            (deck0.clone(), deck1.clone())
+        } else {
+            (deck1.clone(), deck0.clone())
+        };
+        let deck_list = DeckList {
+            player,
+            opponent,
+            ai_decks: Vec::new(),
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(db, &deck_list);
+        let deck0_seat = PlayerId(u8::from(!deck0_first));
+        let seed = options.base_seed.wrapping_add(game_idx as u64);
+        if options.trace.is_some() {
+            eprintln!("  game {game_idx} (seed {seed}) starting...");
+        }
+        let result = run_commander_game(
+            &payload,
+            seed,
+            deck0_seat,
+            options.difficulty,
+            options.baseline_difficulty,
+            2,
+            options.trace.as_ref(),
+        );
+
+        let winner_label = if !result.completed {
+            incomplete += 1;
+            None
+        } else if result.winner == Some(deck0_seat) {
+            p0_wins += 1;
+            Some(options.p0)
+        } else if result.winner.is_some() {
+            p1_wins += 1;
+            Some(options.p1)
+        } else {
+            // Completed with no winner is a genuine draw, distinct from an incomplete run.
+            None
+        };
+        let on_play = if deck0_first { options.p0 } else { options.p1 };
+        rows.push(serde_json::json!({
+            "game": game_idx,
+            "seed": seed,
+            "on_the_play": on_play,
+            "winner": winner_label,
+            "completed": result.completed,
+            "stop_reason": result.stop_reason,
+            "turns": result.turns,
+        }));
+        eprintln!(
+            "  game {game_idx}: {} (turns={}, on_play={on_play}){}",
+            winner_label.unwrap_or(if result.completed {
+                "draw"
+            } else {
+                "INCOMPLETE"
+            }),
+            result.turns,
+            result
+                .stop_reason
+                .map(|r| format!(" [{r}]"))
+                .unwrap_or_default(),
+        );
+    }
+
+    let decided = p0_wins + p1_wins;
+    eprintln!(
+        "{} {}-{} {} ({} decided, {} incomplete of {})",
+        options.p0, p0_wins, p1_wins, options.p1, decided, incomplete, options.games
+    );
+
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "mode": "commander_duel",
+        "feed": options.feed,
+        "p0": options.p0,
+        "p1": options.p1,
+        "games": options.games,
+        "base_seed": options.base_seed,
+        "difficulty": format!("{:?}", options.difficulty),
+        "p0_wins": p0_wins,
+        "p1_wins": p1_wins,
+        "incomplete": incomplete,
+        "p0_win_rate": if decided > 0 {
+            rounded(p0_wins as f64 / decided as f64)
+        } else {
+            0.0
+        },
+        "games_detail": rows,
+    });
+    if let Some(path) = options.output {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap()) {
+            Ok(()) => eprintln!("Duel report written to {}", path.display()),
+            Err(e) => eprintln!("Failed to write {}: {e}", path.display()),
+        }
+    } else {
+        println!("{}", serde_json::to_string(&report).unwrap());
+    }
 }
 
 fn rounded(v: f64) -> f64 {
@@ -695,6 +1008,16 @@ fn print_usage() {
     eprintln!("                     them in the JSON + markdown output.");
     eprintln!("  --harvest PATH     Harvest per-turn eval features to JSONL at PATH");
     eprintln!("                     (Texel retrain corpus; forces sequential run).");
+    eprintln!();
+    eprintln!("Commander 1v1 mode:");
+    eprintln!("  --commander-1v1    Head-to-head Commander between two feed decks");
+    eprintln!("  --p0 NAME          Commander name of the first deck");
+    eprintln!("  --p1 NAME          Commander name of the second deck");
+    eprintln!("  --games N          Games to play (must be even; seats alternate)");
+    eprintln!("  --trace            Progress lines, stall/wall-clock cutoffs, and a dump of");
+    eprintln!("                     the last actions when a game fails to finish");
+    eprintln!("  --game-timeout S   Per-game wall budget under --trace (default 300)");
+    eprintln!("  --output PATH      Write JSON report to PATH (default: stdout)");
     eprintln!();
     eprintln!("Commander suite mode:");
     eprintln!("  --commander-suite  Run 4-player Commander candidate-seat rotations");
