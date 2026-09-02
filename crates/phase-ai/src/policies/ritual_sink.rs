@@ -43,20 +43,36 @@
 //!   card-locally.
 //! * Another ritual in hand is not counted as a sink: chaining rituals only
 //!   defers the same question, so it must not be the thing that answers it.
+//! * A commander in the command zone is a sink like a hand card: CR 903.8 lets
+//!   it be cast from there for its cost plus the tax, and that zone is not
+//!   `player.hand`, so the hand scan alone would veto the ordinary Commander
+//!   line of ritualing into the commander.
+//! * A mana-costed activated ability on our own board is a sink too — the
+//!   ritual buys an activation (an X sink, an equip, a Walking Ballista
+//!   counter) rather than a card. Mana abilities are never sinks (CR 605.1a:
+//!   they make mana, they do not spend it), and sorcery-speed activations
+//!   count only in our own main phase, mirroring the hand scan.
 //! * Storm/prowess payoffs on our own board (Aetherflux Reservoir, Guttersnipe,
 //!   magecraft, prowess) make the cast itself the payoff, independent of what
-//!   the mana buys. That is the last stand-down, and the only board walk.
+//!   the mana buys. That is the last stand-down.
 //!
 //! Perf: the card-local `is_ritual_parts` check and the output fold run first
 //! and exit every non-ritual `CastSpell` candidate before any state read beyond
 //! the candidate's own object. Only a confirmed, fixed-output ritual pays for
-//! `available_mana` (one battlefield count), then a hand scan, then — only if
-//! both fail — one battlefield walk. No `find_legal_targets`, no
-//! `feasible_mana_capacity`, no state clone.
+//! `available_mana` (one battlefield count), then a hand scan, then a
+//! command-zone scan (a handful of objects), then — only if all three fail —
+//! one battlefield walk that checks activation sinks and cast payoffs
+//! together. No `find_legal_targets`, no `feasible_mana_capacity`, no state
+//! clone.
 
+use engine::game::commander::commander_tax;
+use engine::game::game_object::GameObject;
 use engine::game::keywords::has_flash;
+use engine::game::mana_abilities::is_mana_ability;
 use engine::game::turn_control::turn_decision_maker;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ManaProduction};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ManaProduction,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -136,9 +152,17 @@ impl TacticalPolicy for RitualSinkPolicy {
             return neutral("ritual_sink_present");
         }
 
-        // 5. Own-battlefield payoff walk, last and only once 1–4 hold.
-        if has_cast_payoff(ctx.state, ctx.ai_player) {
-            return neutral("ritual_sink_cast_payoff");
+        // 5. CR 903.8: a commander in the command zone is castable from there
+        //    and is not in `player.hand`, so the hand scan cannot see it.
+        if command_zone_has_sink(ctx, reach) {
+            return neutral("ritual_sink_commander");
+        }
+
+        // 6. One own-battlefield walk, last and only once 1–5 hold: a
+        //    mana-costed activation the ritual could buy, or a payoff that
+        //    makes the cast itself the value.
+        if let Some(kind) = battlefield_sink(ctx, reach) {
+            return neutral(kind);
         }
 
         // CR 106.4: the mana empties at the end of this step or phase, so a
@@ -192,11 +216,7 @@ fn hand_has_sink(ctx: &PolicyContext<'_>, ritual_id: ObjectId, reach: u32) -> bo
     let Some(player) = ctx.state.players.get(ctx.ai_player.0 as usize) else {
         return false;
     };
-    let own_main_phase = turn_decision_maker(ctx.state) == ctx.ai_player
-        && matches!(
-            ctx.state.phase,
-            Phase::PreCombatMain | Phase::PostCombatMain
-        );
+    let main_phase = own_main_phase(ctx);
     player.hand.iter().any(|&oid| {
         if oid == ritual_id {
             return false;
@@ -210,31 +230,130 @@ fn hand_has_sink(ctx: &PolicyContext<'_>, ritual_id: ObjectId, reach: u32) -> bo
         if is_ritual_parts(&obj.card_types.core_types, &obj.abilities) {
             return false;
         }
-        if obj.mana_cost.mana_value() > reach {
-            return false;
-        }
-        obj.card_types.core_types.contains(&CoreType::Instant) || has_flash(obj) || own_main_phase
+        obj.mana_cost.mana_value() <= reach && castable_in_window(obj, main_phase)
     })
 }
 
-/// True when the AI controls a battlefield permanent that pays off the *cast*
-/// itself — prowess (CR 702.108a) or a caster-scoped spell-cast trigger
-/// (CR 601.2i), the Guttersnipe / Aetherflux / magecraft shapes. For those, the
-/// ritual's own cast is value even if the mana it makes is wasted.
-fn has_cast_payoff(state: &GameState, ai_player: PlayerId) -> bool {
-    state
+/// CR 307.1: whether this is a main phase of the AI's own turn — the window in
+/// which sorcery-speed casts and activations are legal.
+fn own_main_phase(ctx: &PolicyContext<'_>) -> bool {
+    turn_decision_maker(ctx.state) == ctx.ai_player
+        && matches!(
+            ctx.state.phase,
+            Phase::PreCombatMain | Phase::PostCombatMain
+        )
+}
+
+/// CR 304.1 + CR 702.8a: an instant, or a card with flash, is castable whenever
+/// the AI has priority. CR 307.1: everything else is sorcery-speed and needs
+/// `main_phase`.
+fn castable_in_window(obj: &GameObject, main_phase: bool) -> bool {
+    obj.card_types.core_types.contains(&CoreType::Instant) || has_flash(obj) || main_phase
+}
+
+/// True when a commander the AI owns sits in the command zone and could be cast
+/// from there with `reach` in this window. CR 903.8: the cast costs the
+/// commander's mana cost plus {2} for each previous cast from the command zone,
+/// so the tax is part of the price the ritual has to cover.
+fn command_zone_has_sink(ctx: &PolicyContext<'_>, reach: u32) -> bool {
+    let main_phase = own_main_phase(ctx);
+    ctx.state.command_zone.iter().any(|&id| {
+        let Some(obj) = ctx.state.objects.get(&id) else {
+            return false;
+        };
+        obj.owner == ctx.ai_player
+            && obj.is_commander
+            && !is_ritual_parts(&obj.card_types.core_types, &obj.abilities)
+            && obj
+                .mana_cost
+                .mana_value()
+                .saturating_add(commander_tax(ctx.state, id))
+                <= reach
+            && castable_in_window(obj, main_phase)
+    })
+}
+
+/// One walk over the AI's own battlefield permanents for either kind of sink,
+/// returning the reason kind of the first one found:
+///
+/// * `ritual_sink_activation` — a permanent with an activated ability whose
+///   mana cost the ritual could pay: the mana buys an activation rather than a
+///   card (an X sink, an equip, a Walking Ballista counter).
+/// * `ritual_sink_cast_payoff` — a permanent that pays off the *cast* itself:
+///   prowess (CR 702.108a) or a caster-scoped spell-cast trigger (CR 601.2i),
+///   the Guttersnipe / Aetherflux / magecraft shapes. For those, the ritual's
+///   own cast is value even if the mana it makes is wasted.
+fn battlefield_sink(ctx: &PolicyContext<'_>, reach: u32) -> Option<&'static str> {
+    let main_phase = own_main_phase(ctx);
+    ctx.state
         .battlefield
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .any(|obj| {
-            obj.controller == ai_player
-                && (has_prowess_parts(&obj.keywords)
-                    || is_cast_payoff_parts(
-                        obj.trigger_definitions
-                            .iter_unchecked()
-                            .map(|entry| &entry.definition),
-                    ))
+        .filter_map(|id| ctx.state.objects.get(id))
+        .filter(|obj| obj.controller == ctx.ai_player)
+        .find_map(|obj| {
+            if obj
+                .abilities
+                .iter()
+                .any(|ability| activation_is_sink(ability, reach, main_phase))
+            {
+                Some("ritual_sink_activation")
+            } else if has_prowess_parts(&obj.keywords)
+                || is_cast_payoff_parts(
+                    obj.trigger_definitions
+                        .iter_unchecked()
+                        .map(|entry| &entry.definition),
+                )
+            {
+                Some("ritual_sink_cast_payoff")
+            } else {
+                None
+            }
         })
+}
+
+/// True when `ability` is an activated ability the ritual's mana could pay for.
+///
+/// CR 605.1a: a mana ability is never a sink — it makes mana rather than
+/// spending it. CR 602.2: activating pays the ability's costs, so the mana
+/// component of the cost is what the ritual buys. CR 702.6a + CR 307.1: an
+/// "activate only as a sorcery" ability (equip is the common one) is legal only
+/// in the AI's own main phase, the same window the hand scan applies to
+/// sorcery-speed cards.
+fn activation_is_sink(ability: &AbilityDefinition, reach: u32, main_phase: bool) -> bool {
+    if ability.kind != AbilityKind::Activated || is_mana_ability(ability) {
+        return false;
+    }
+    let sorcery_speed = ability
+        .activation_restrictions
+        .iter()
+        .any(|restriction| matches!(restriction, ActivationRestriction::AsSorcery));
+    if sorcery_speed && !main_phase {
+        return false;
+    }
+    ability
+        .cost
+        .as_ref()
+        .and_then(activation_mana_value)
+        .is_some_and(|mana_value| mana_value >= 1 && mana_value <= reach)
+}
+
+/// Mana value of the mana component of an activation cost, or `None` when the
+/// cost has no mana component. A `Composite` cost sums its components (CR
+/// 601.2h: the total cost is paid as one), a `OneOf` cost takes its cheapest
+/// mana arm, and an X cost (`ManaDynamic`) absorbs any positive amount, so its
+/// cheapest useful activation is X=1. Every other cost shape (tap, sacrifice,
+/// life, discard, …) spends no mana and is not what a ritual buys.
+fn activation_mana_value(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::Mana { cost } => Some(cost.mana_value()),
+        AbilityCost::ManaDynamic { .. } => Some(1),
+        AbilityCost::Composite { costs } => {
+            let parts: Vec<u32> = costs.iter().filter_map(activation_mana_value).collect();
+            (!parts.is_empty()).then(|| parts.iter().sum())
+        }
+        AbilityCost::OneOf { costs } => costs.iter().filter_map(activation_mana_value).min(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +685,166 @@ mod tests {
     }
 
     /// A non-ritual cast is out of class before any board read.
+    /// An activated ability on the AI's own board at `generic` mana, optionally
+    /// sorcery-speed. `Effect::Proliferate` is a stand-in body: the policy reads
+    /// only the ability's kind, cost, and restrictions.
+    fn board_activation(
+        state: &mut GameState,
+        card_id: CardId,
+        generic: u32,
+        sorcery_speed: bool,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, AI, "Outlet".to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let mut ability = AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate);
+        ability.cost = Some(AbilityCost::Mana {
+            cost: generic_cost(generic),
+        });
+        if sorcery_speed {
+            ability
+                .activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+        }
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        id
+    }
+
+    /// The AI's commander in the command zone at `mana_value`, a creature.
+    fn commander_in_command_zone(state: &mut GameState, mana_value: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90),
+            AI,
+            "Commander".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = generic_cost(mana_value);
+        obj.is_commander = true;
+        id
+    }
+
+    /// CR 602.2: the ritual's mana buys an activation. A {2} outlet on the
+    /// AI's own board at the opponent's end step is a sink even with an empty
+    /// hand behind the ritual.
+    #[test]
+    fn activation_on_own_board_is_a_sink() {
+        let mut state = GameState::new_two_player(42);
+        opponent_end_step(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        board_activation(&mut state, CardId(20), 2, false);
+
+        assert_neutral(verdict(&state, ritual, CardId(1)), "ritual_sink_activation");
+    }
+
+    /// CR 702.6a + CR 307.1: an "activate only as a sorcery" outlet is not a
+    /// sink at the opponent's end step, but it is in the AI's own main phase.
+    #[test]
+    fn sorcery_speed_activation_is_a_sink_only_in_own_main_phase() {
+        let mut state = GameState::new_two_player(42);
+        opponent_end_step(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        board_activation(&mut state, CardId(20), 2, true);
+
+        assert_rejected(verdict(&state, ritual, CardId(1)), "ritual_no_sink");
+
+        own_main_phase(&mut state);
+        assert_neutral(verdict(&state, ritual, CardId(1)), "ritual_sink_activation");
+    }
+
+    /// An outlet the pool cannot reach is not a sink: {5} against a reach of 3.
+    #[test]
+    fn activation_out_of_reach_is_not_a_sink() {
+        let mut state = GameState::new_two_player(42);
+        opponent_end_step(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        board_activation(&mut state, CardId(20), 5, false);
+
+        assert_rejected(verdict(&state, ritual, CardId(1)), "ritual_no_sink");
+    }
+
+    /// CR 605.1a: a mana ability makes mana rather than spending it, so a
+    /// tap-for-mana permanent on the AI's board is not a sink.
+    #[test]
+    fn mana_ability_on_own_board_is_not_a_sink() {
+        let mut state = GameState::new_two_player(42);
+        opponent_end_step(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        let rock = create_object(
+            &mut state,
+            CardId(20),
+            AI,
+            "Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Black],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Tap);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+
+        assert_rejected(verdict(&state, ritual, CardId(1)), "ritual_no_sink");
+    }
+
+    /// CR 903.8: the commander is castable from the command zone, which the
+    /// hand scan cannot see. A {3} commander against a reach of 3 in the AI's
+    /// own main phase is the ordinary ritual-into-commander line.
+    #[test]
+    fn commander_in_command_zone_is_a_sink() {
+        let mut state = GameState::new_two_player(42);
+        own_main_phase(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        commander_in_command_zone(&mut state, 3);
+
+        assert_neutral(verdict(&state, ritual, CardId(1)), "ritual_sink_commander");
+    }
+
+    /// CR 903.8: the {2} tax per previous command-zone cast is part of the
+    /// price. One prior cast puts the same {3} commander at 5, past a reach of 3.
+    #[test]
+    fn commander_tax_can_put_the_commander_out_of_reach() {
+        let mut state = GameState::new_two_player(42);
+        own_main_phase(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        let commander = commander_in_command_zone(&mut state, 3);
+        state.commander_cast_count.insert(commander, 1);
+
+        assert_rejected(verdict(&state, ritual, CardId(1)), "ritual_no_sink");
+    }
+
+    /// A creature commander is sorcery-speed: not a sink at the opponent's end
+    /// step, mirroring the hand scan's CR 307.1 half.
+    #[test]
+    fn commander_is_not_a_sink_at_instant_speed() {
+        let mut state = GameState::new_two_player(42);
+        opponent_end_step(&mut state);
+        untapped_land(&mut state, CardId(10));
+        let ritual = dark_ritual(&mut state);
+        commander_in_command_zone(&mut state, 3);
+
+        assert_rejected(verdict(&state, ritual, CardId(1)), "ritual_no_sink");
+    }
+
     #[test]
     fn non_ritual_cast_is_na() {
         let mut state = GameState::new_two_player(42);
