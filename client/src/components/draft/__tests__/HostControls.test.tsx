@@ -273,6 +273,36 @@ describe("HostControls", () => {
     expect(draftState.leave).not.toHaveBeenCalled();
   });
 
+  it("renders a mapped deckbuilding end action only once", () => {
+    draftState.phase = "deckbuilding";
+    draftState.sideboardPrompt = null;
+    const endDraftAction = makeEndDraftAction();
+    const { rerender } = render(
+      <HostControls
+        draftTopActions={[endDraftAction]}
+        endDraftAction={endDraftAction}
+      />,
+    );
+
+    const endButtons = screen.getAllByRole("button", { name: "End Draft" });
+    expect(endButtons).toHaveLength(1);
+    fireEvent.click(endButtons[0]);
+    expect(endDraftAction.onClick).toHaveBeenCalledOnce();
+    expect(draftState.leave).not.toHaveBeenCalled();
+
+    const disabledEndDraftAction = {
+      ...endDraftAction,
+      disabled: true,
+    };
+    rerender(
+      <HostControls
+        draftTopActions={[disabledEndDraftAction]}
+        endDraftAction={disabledEndDraftAction}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "End Draft" })).toBeDisabled();
+  });
+
   it("forwards the page action disabled state in both presentations", () => {
     draftState.phase = "drafting";
     draftState.sideboardPrompt = null;

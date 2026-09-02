@@ -101,6 +101,9 @@ export function HostControls({
     "kicked",
     "hostLeft",
   ].includes(phase);
+  const hasDraftEndAction = draftTopActions.some(
+    (action) => action.id === "end-draft",
+  );
 
   if (
     draftTopActions.length === 0 &&
@@ -204,7 +207,7 @@ export function HostControls({
         </div>
       )}
 
-      {phase !== "drafting" && showEndDraft && (
+      {phase !== "drafting" && showEndDraft && !hasDraftEndAction && (
         <button
           onClick={endDraftAction.onClick}
           disabled={endDraftAction.disabled}
