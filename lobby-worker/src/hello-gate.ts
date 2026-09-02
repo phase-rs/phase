@@ -34,11 +34,11 @@ export interface ConnAttachment {
    * above. Mirrors `lobby_broker::ConnState::joined_tournaments`.
    *
    * **Codes only, never the `player_token`.** The token is the entrant's
-   * authority and is deliberately kept out of this list, because the list is
-   * never pruned and lands verbatim in durable Durable Object attachments that
-   * outlive the socket; a code carries no such risk, being already broadcast to
-   * every subscriber in each `TournamentListUpdate`. The non-authority framing
-   * on `organized_tournaments` applies here identically.
+   * authority and is deliberately kept out of this list. Membership survives
+   * the connection lifecycle, while the broker keeps only a bounded set of
+   * recent codes in the attachment. A code carries no such risk, being already
+   * broadcast to every subscriber in each `TournamentListUpdate`. The
+   * non-authority framing on `organized_tournaments` applies here identically.
    */
   joined_tournaments: string[];
 }
