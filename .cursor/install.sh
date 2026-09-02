@@ -58,7 +58,18 @@ TILT_VERSION="0.37.7"
 # step below instead of installing an unverified binary. scripts/check-tilt-pin.sh
 # statically asserts this version/digest/verify triple stays intact.
 TILT_SHA256="b695193fab68def8310cb971fa60bbe47ba0a782e24f54ebad287c13316a61b0"
-if ! command -v tilt >/dev/null 2>&1; then
+# Trust ONLY the pinned binary at this known path reporting the exact pinned
+# version — never a bare `command -v tilt`, which would accept a stale or
+# substituted tilt earlier on PATH and run it as the dev loop. environment.json
+# likewise invokes this absolute path, not `tilt` via PATH.
+TILT_BIN="/usr/local/bin/tilt"
+tilt_pinned() {
+  [ -x "$TILT_BIN" ] || return 1
+  local v
+  v="$("$TILT_BIN" version 2>/dev/null | head -1 | sed 's/^v//; s/,.*//')"
+  [ "$v" = "$TILT_VERSION" ]
+}
+if ! tilt_pinned; then
   echo "Installing tilt v$TILT_VERSION..."
   tmp="$(mktemp -d)"
   archive="$tmp/tilt.${TILT_VERSION}.linux.x86_64.tar.gz"
@@ -68,10 +79,12 @@ if ! command -v tilt >/dev/null 2>&1; then
     "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.x86_64.tar.gz"
   echo "${TILT_SHA256}  ${archive}" | sha256sum -c -
   tar -xzf "$archive" -C "$tmp" tilt
-  sudo install -m 0755 "$tmp/tilt" /usr/local/bin/tilt
+  sudo install -m 0755 "$tmp/tilt" "$TILT_BIN"
   rm -rf "$tmp"
+  # Fail closed if the freshly installed binary is not the pinned version.
+  tilt_pinned || { echo "ERROR: $TILT_BIN does not report v$TILT_VERSION after install" >&2; exit 1; }
 else
-  echo "tilt already installed: $(tilt version 2>/dev/null || echo present)."
+  echo "tilt v$TILT_VERSION already installed at $TILT_BIN."
 fi
 
 # --- Repo onboarding: fetch card data + Scryfall image sidecars, build the WASM

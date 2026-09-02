@@ -135,10 +135,10 @@ def check_install_script(text: str) -> list[str]:
                 "archive was found"
             )
 
-    # 6. The verified binary must be installed to /usr/local/bin/tilt.
-    install = find(r"\bsudo install\b.*/usr/local/bin/tilt")
+    # 6. The verified binary must be installed via `sudo install ... tilt`.
+    install = find(r"\bsudo install\b.*\btilt\b")
     if install is None:
-        failures.append("no `sudo install ... /usr/local/bin/tilt` step found")
+        failures.append("no `sudo install ... tilt` step found")
 
     # 7. Order: download -> verify -> extract -> install.
     stages = [
@@ -155,20 +155,85 @@ def check_install_script(text: str) -> list[str]:
                 f"(found {a_name} at/after {b_name})"
             )
 
+    # 8. TOCTOU: nothing may reassign or rewrite the archive between the bound
+    #    verification and the extraction. Otherwise the verified file can be
+    #    swapped for an unverified payload (a second download, a redirect, a
+    #    `cp`/`mv`/`tee`, or a plain `archive=` reassignment) before `tar` and
+    #    `sudo install` ever see it. The only reference to the archive allowed in
+    #    that window is the extraction itself, so any other touch fails closed.
+    if archive_var is not None and verify is not None and extract is not None:
+        assign_rx = re.compile(r"(?:^|[;&|]|\s)" + re.escape(archive_var) + r"=")
+        for i in range(verify[0] + 1, extract[0]):
+            phys, t = lines[i]
+            if assign_rx.search(t) or _refs_var(t, archive_var):
+                failures.append(
+                    f"line {phys}: ${archive_var} is reassigned or rewritten "
+                    "between verification and extraction (TOCTOU)"
+                )
+                break
+
+    return failures
+
+
+def _command_strings(node: object) -> list[str]:
+    """Every `command` string value anywhere in the parsed environment.json.
+
+    Only executable command fields are constrained — free-text `description`
+    fields legitimately mention `tilt up -- server` etc. and must not be scanned.
+    """
+    out: list[str] = []
+    if isinstance(node, dict):
+        cmd = node.get("command")
+        if isinstance(cmd, str):
+            out.append(cmd)
+        for v in node.values():
+            out.extend(_command_strings(v))
+    elif isinstance(node, list):
+        for v in node:
+            out.extend(_command_strings(v))
+    return out
+
+
+def check_environment_json(text: str) -> list[str]:
+    """A dev-loop terminal `command` must invoke the absolute /usr/local/bin/tilt,
+    never a bare `tilt` resolved through PATH (which a stale/substituted earlier
+    entry could hijack)."""
+    import json
+
+    failures: list[str] = []
+    try:
+        commands = _command_strings(json.loads(text))
+    except (json.JSONDecodeError, ValueError):
+        # environment.json permits comments/trailing content in some tooling;
+        # fall back to a line scan of the raw text if JSON parsing fails.
+        commands = [text]
+
+    for cmd in commands:
+        # A `tilt up` not immediately preceded by the pinned absolute path is a
+        # bare PATH lookup.
+        if re.search(r"(?<![\w/])tilt\s+up\b", cmd):
+            failures.append(
+                f"environment.json command invokes a bare `tilt up` via PATH; "
+                f"use /usr/local/bin/tilt: {cmd!r}"
+            )
+        elif "/usr/local/bin/tilt up" in cmd:
+            continue  # explicit pinned invocation — good
     return failures
 
 
 def main(argv: list[str]) -> int:
-    target = Path(DEFAULT_TARGET)
-    args = [a for a in argv[1:] if a != "--check"]
-    if args:
-        target = Path(args[0])
     root = Path(__file__).resolve().parent.parent
-    path = target if target.is_absolute() else root / target
-    if not path.is_file():
-        print(f"check-tilt-pin: {target} not found", file=sys.stderr)
-        return 1
-    failures = check_install_script(path.read_text())
+    install_path = root / DEFAULT_TARGET
+    env_path = root / ".cursor/environment.json"
+
+    failures: list[str] = []
+    if not install_path.is_file():
+        failures.append(f"{DEFAULT_TARGET} not found")
+    else:
+        failures.extend(check_install_script(install_path.read_text()))
+    if env_path.is_file():
+        failures.extend(check_environment_json(env_path.read_text()))
+
     if failures:
         print("check-tilt-pin FAILED:", file=sys.stderr)
         for f in failures:

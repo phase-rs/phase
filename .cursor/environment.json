@@ -5,7 +5,7 @@
   "terminals": [
     {
       "name": "tilt",
-      "command": "PATH=/usr/local/cargo/bin:$PATH tilt up --stream",
+      "command": "PATH=/usr/local/cargo/bin:$PATH /usr/local/bin/tilt up --stream",
       "description": "Canonical dev loop. Continuously builds the WASM engine bundles (wasm), regenerates card-data.json (card-data), serves the Vite frontend at http://localhost:5173 (frontend), and runs the deck-import lobby worker at http://localhost:8787 (lobby-worker). Read results with `tilt logs <resource> --tail 50` or `./scripts/tilt-wait.sh <resource>`; do not run cargo/pnpm builds directly. Start optional groups with `tilt up -- server test lint`."
     }
   ],

