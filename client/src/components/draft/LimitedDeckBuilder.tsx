@@ -26,7 +26,6 @@ import {
 } from "../../services/deckCompatibility";
 import type {
   DraftCardInstance,
-  DraftKind,
   DraftPlayerView,
   DraftPoolGroupKind,
 } from "../../adapter/draft-adapter";
@@ -75,23 +74,6 @@ const BASIC_LANDS = [
   { name: "Mountain", color: "R", colorClass: "bg-red-500" },
   { name: "Forest", color: "G", colorClass: "bg-green-500" },
 ] as const;
-
-/**
- * CR 903.13: the game format a completed draft of each kind builds decks for.
- * Exhaustive on purpose — a sixth `DraftKind` is a compile error here rather
- * than a silently-undesignated pod.
- *
- * This table holds NO rules. Whether the format uses a command zone, and what
- * its deck-size rule is, are read from `formatMetadata` — the registry
- * `formatRegistry.integration.test.ts` pins against `GameFormat::registry()`.
- */
-const DECK_FORMAT_FOR_KIND: Record<DraftKind, GameFormat | null> = {
-  Quick: null,
-  Premier: null,
-  Traditional: null,
-  Sealed: null,
-  CommanderDraft: "CommanderDraft",
-};
 
 const LAND_COLOR_CLASSES: Record<string, string> = {
   Plains: "bg-yellow-200",
@@ -286,12 +268,12 @@ function namesAreBacked(names: readonly string[], counts: ReadonlyMap<string, nu
 }
 
 function useCommanderDesignation({
-  designationRequired,
+  commandersRequired,
   deckFormat,
   deckEntries,
   draftSetCodes,
 }: {
-  designationRequired: boolean;
+  commandersRequired: number;
   deckFormat: GameFormat | null;
   deckEntries: DeckEntry[];
   draftSetCodes: readonly string[];
@@ -312,14 +294,14 @@ function useCommanderDesignation({
     return () => {
       requestGenerationRef.current += 1;
     };
-  }, [designationRequired, deckFormat]);
+  }, [commandersRequired, deckFormat]);
 
   useLayoutEffect(() => {
     deckCountsRef.current = deckCounts;
   }, [deckCounts]);
 
   useEffect(() => {
-    if (!designationRequired || !deckFormat) {
+    if (commandersRequired === 0 || !deckFormat) {
       setCommanderEligibleNames(null);
       setEligibilityFailed(false);
       return;
@@ -344,7 +326,7 @@ function useCommanderDesignation({
     return () => {
       cancelled = true;
     };
-  }, [designationRequired, deckFormat, deckEntries]);
+  }, [commandersRequired, deckFormat, deckEntries]);
 
   const isCommanderEligible = useCallback(
     (name: string) => commanderEligibleNames?.has(name) ?? false,
@@ -419,7 +401,7 @@ function useCommanderDesignation({
     isCommanderEligible,
     handleSetCommander,
     handleRemoveCommander,
-    designationSatisfied: !designationRequired || commanders.length > 0,
+    designationSatisfied: commanders.length >= commandersRequired,
   };
 }
 
@@ -523,7 +505,6 @@ interface WorkspaceDeckBuilderControllerBase {
 
 export type LocalDeckBuilderController = WorkspaceDeckBuilderControllerBase & {
   capabilities?: { kind: "editable-pool"; suggestions: boolean };
-  commanderDesignation?: "initial-pod";
   onAddBasicLand: (name: string) => void;
   onRemoveBasicLand: (name: string) => void;
   onAutoSuggestDeck?: () => void | Promise<void>;
@@ -533,7 +514,6 @@ export type LocalDeckBuilderController = WorkspaceDeckBuilderControllerBase & {
 export type WorkspaceDeckBuilderController = LocalDeckBuilderController
   | (WorkspaceDeckBuilderControllerBase & {
       capabilities: { kind: "fixed-pool" };
-      commanderDesignation?: never;
     });
 
 function isEditableWorkspaceController(
@@ -599,11 +579,10 @@ function ControlledDeckBuilder({
 
   // ── CR 903.3 commander designation ────────────────────────────────────
   // Every hook below stays ABOVE the `if (!view) return null` guard.
-  const deckFormat = view ? DECK_FORMAT_FOR_KIND[view.kind] : null;
+  const commandersRequired = view?.commanders_required ?? 0;
+  const deckFormat = commandersRequired > 0 ? "CommanderDraft" : null;
   const deckFormatConfig = deckFormat ? formatMetadata(deckFormat)?.default_config : undefined;
-  // CR 903.3: the command zone is what makes a designation necessary. Engine-
-  // mirrored, never a client-side list of "commander-ish" formats.
-  const designationRequired = deckFormatConfig?.command_zone ?? false;
+  const designationRequired = commandersRequired > 0;
   const draftSetCodes = useMemo(() => view?.draft_set_codes ?? [], [view?.draft_set_codes]);
   const fillers = useMemo(
     () => view?.grantable_commander_fillers ?? [],
@@ -735,7 +714,7 @@ function ControlledDeckBuilder({
     handleRemoveCommander,
     designationSatisfied,
   } = useCommanderDesignation({
-    designationRequired,
+    commandersRequired,
     deckFormat,
     deckEntries: commanderDeckEntries,
     draftSetCodes,
@@ -1115,10 +1094,10 @@ function WorkspaceDeckBuilder({
   ], [deckCards, deckVirtualBasics]);
   const deckNames = useMemo(() => projectDeckNames(workspace, pool), [workspace, pool]);
   const commanderDeckEntries = useMemo(() => countProjectedNames(deckNames), [deckNames]);
-  const commanderDesignationEnabled = controller.commanderDesignation === "initial-pod";
-  const deckFormat = commanderDesignationEnabled ? DECK_FORMAT_FOR_KIND[view.kind] : null;
+  const commandersRequired = view.commanders_required;
+  const deckFormat = commandersRequired > 0 ? "CommanderDraft" : null;
   const deckFormatConfig = deckFormat ? formatMetadata(deckFormat)?.default_config : undefined;
-  const designationRequired = commanderDesignationEnabled && (deckFormatConfig?.command_zone ?? false);
+  const designationRequired = commandersRequired > 0;
   const draftSetCodes = useMemo(() => view.draft_set_codes ?? [], [view.draft_set_codes]);
   const fillers = useMemo(
     () => view.grantable_commander_fillers ?? [],
@@ -1132,13 +1111,12 @@ function WorkspaceDeckBuilder({
     handleRemoveCommander,
     designationSatisfied,
   } = useCommanderDesignation({
-    designationRequired,
+    commandersRequired,
     deckFormat,
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft"
-    && controller.commanderDesignation === "initial-pod";
+  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft";
   const compatibility = useCommanderDraftCompatibility({
     active: commanderDraftCompatibilityActive,
     main: commanderDeckEntries,

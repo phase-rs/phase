@@ -1242,6 +1242,7 @@ const SECOND_PRISMATIC_PIPER = {
 const COMMANDER_VIEW: BuilderView = {
   ...TEST_VIEW,
   kind: "CommanderDraft",
+  commanders_required: 1,
   min_deck_size: 60,
   // CR 903.13f(3): the ENGINE-latched tokens. Every pool card below is printed
   // in "dmu", so an implementation reading a card's printing gets "dmu" here.
@@ -1457,7 +1458,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           workspace: fixture.workspace,
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
-          commanderDesignation: "initial-pod",
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
           onSubmitDeck: submitSpy,
@@ -1499,7 +1499,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           workspace: fixture.workspace,
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
-          commanderDesignation: "initial-pod",
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
           onSubmitDeck: submitSpy,
@@ -1518,13 +1517,18 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
   });
 
-  it("keeps workspace compatibility inactive without initial-pod designation", async () => {
+  it("keeps workspace compatibility inactive when the engine requires no commanders", async () => {
     const submitSpy = vi.fn();
     const fixture = workspaceDeckFixture();
     render(
       <LimitedDeckBuilder
         local={{
-          view: { ...COMMANDER_VIEW, min_deck_size: 1, pool: fixture.cards },
+          view: {
+            ...COMMANDER_VIEW,
+            commanders_required: 0,
+            min_deck_size: 1,
+            pool: fixture.cards,
+          },
           workspace: fixture.workspace,
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
@@ -1920,10 +1924,10 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   /**
-   * V6 — green tree: the four non-Commander `DraftKind`s render exactly as
-   * before, because `DECK_FORMAT_FOR_KIND` maps each to `null`. Reach-guarded
-   * by asserting the pool tile still renders, so a component that crashed
-   * could not satisfy the negative.
+  * V6 — green tree: a view whose engine-published commander requirement is
+  * zero renders without designation controls. Reach-guarded by asserting the
+  * pool tile still renders, so a component that crashed could not satisfy the
+  * negative.
    *
    * No CR is cited here on purpose. The repo's "four CR 905.1a kinds" idiom is
    * about cards-per-pick (CR 905.1a: "drafts one card"), which is not what this
@@ -2323,7 +2327,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           <button onClick={() => setDesignationEnabled(false)}>Suspend designation</button>
           <button onClick={() => setDesignationEnabled(true)}>Resume designation</button>
           <LimitedDeckBuilder
-            view={designationEnabled ? COMMANDER_VIEW : { ...COMMANDER_VIEW, kind: "Premier" }}
+            view={designationEnabled
+              ? COMMANDER_VIEW
+              : { ...COMMANDER_VIEW, commanders_required: 0 }}
             mainDeck={["Vehicle Commander", "Second Commander"]}
             landCounts={NO_LANDS}
             onAddToDeck={() => {}}
@@ -2365,6 +2371,8 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       const submitSpy = vi.fn();
       const view = {
         ...COMMANDER_VIEW,
+        kind: "Premier" as const,
+        commanders_required: 2,
         min_deck_size: 2,
         pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER],
       };
@@ -2385,7 +2393,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
               workspace,
               preferences: createDefaultDraftWorkspacePreferences(),
               interactionLocked: false,
-              commanderDesignation: "initial-pod",
               capabilities: { kind: "editable-pool", suggestions: false },
               onWorkspaceChange: setWorkspace,
               onPreferencesChange: () => {},
@@ -2405,6 +2412,12 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         </StrictMode>,
       );
       fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+      await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1));
+      const submitButton = responsiveLayout === "phone-portrait"
+        ? within(document.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]")!)
+          .getByRole("button", { name: "Submit Deck" })
+        : screen.getByRole("button", { name: "Submit Deck" });
+      expect(submitButton).toBeDisabled();
       fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
       await waitFor(() => expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(2));
       expect(enginePartnerCandidates).toHaveBeenCalledWith(
@@ -2413,10 +2426,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         ["CMM"],
       );
 
-      const submitButton = responsiveLayout === "phone-portrait"
-        ? within(document.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]")!)
-          .getByRole("button", { name: "Submit Deck" })
-        : screen.getByRole("button", { name: "Submit Deck" });
       await waitFor(() => expect(submitButton).not.toBeDisabled());
       fireEvent.click(submitButton);
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([
@@ -2453,7 +2462,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
               workspace,
               preferences: createDefaultDraftWorkspacePreferences(),
               interactionLocked: false,
-              commanderDesignation: "initial-pod",
               capabilities: { kind: "editable-pool", suggestions: false },
               onWorkspaceChange: () => {},
               onPreferencesChange: () => {},
@@ -2489,7 +2497,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           },
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
-          commanderDesignation: "initial-pod",
           capabilities: { kind: "editable-pool", suggestions: false },
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
@@ -2520,7 +2527,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           },
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
-          commanderDesignation: "initial-pod",
           capabilities: { kind: "editable-pool", suggestions: false },
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
@@ -2563,7 +2569,6 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       },
       preferences: createDefaultDraftWorkspacePreferences(),
       interactionLocked: false,
-      commanderDesignation: "initial-pod" as const,
       capabilities: { kind: "editable-pool" as const, suggestions: false },
       onWorkspaceChange: () => {},
       onPreferencesChange: () => {},

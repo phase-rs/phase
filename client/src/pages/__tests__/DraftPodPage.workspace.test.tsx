@@ -299,25 +299,31 @@ describe("DraftPodPage workspace", () => {
     expect(captured.deckbuilder?.capabilities).toEqual({ kind: "editable-pool", suggestions: false });
   });
 
-  it("enables designation only for initial Commander Pod deckbuilding", () => {
+  it("forwards the engine commander requirement independently of draft kind", () => {
     store.state.phase = "deckbuilding";
     const rendered = render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
 
-    expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
+    expect(captured.deckbuilder?.view.commanders_required).toBe(0);
 
     act(() => {
       store.state.view.kind = "Premier";
       store.state.view.commanders_required = 1;
     });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    expect(captured.deckbuilder?.commanderDesignation).toBe("initial-pod");
+    expect(captured.deckbuilder?.view).toMatchObject({
+      kind: "Premier",
+      commanders_required: 1,
+    });
 
     act(() => {
       store.state.view.kind = "CommanderDraft";
       store.state.view.commanders_required = 0;
     });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
+    expect(captured.deckbuilder?.view).toMatchObject({
+      kind: "CommanderDraft",
+      commanders_required: 0,
+    });
   });
 
   it("forwards explicit preview settings in match pool review", () => {
