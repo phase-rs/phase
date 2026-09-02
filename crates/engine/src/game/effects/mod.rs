@@ -5840,6 +5840,15 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
 /// (Atraxa's "from among the revealed cards"). Widening to them is the
 /// documented extension point: one line here plus a full-suite run under the
 /// measurement protocol in `transitive_publish_superseded`.
+///
+/// Harvest-inert (deliberately in NEITHER predicate — recorded per the
+/// forward-maintenance rule): `CollectEvidence` moves graveyard cards to
+/// exile, but only in the ANSWER-HANDLER cycle (`handle_choice` →
+/// `move_evidence_costs` → `zone_pipeline::move_object`,
+/// collect_evidence.rs:220); its `resolve` parks a player choice and emits
+/// `EffectResolved` only (collect_evidence.rs:139-146), so the resolver-side
+/// harvest — the sole signal both classifiers read — finds no zone-change
+/// event.
 fn population_does_not_move(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -5861,8 +5870,11 @@ fn population_does_not_move(effect: &Effect) -> bool {
 /// arm) would harvest? The positive twin of [`population_does_not_move`]: the
 /// two predicates are DISJOINT BY CONTRACT — tap/counter/damage read
 /// `PermanentTapped`/`CounterAdded`/`DamageDealt`, every moving class reads a
-/// zone-change or leave-zone event — and every `Effect` variant is classified
-/// in exactly ONE of them. Forward-maintenance rule: a future resolver that
+/// zone-change or leave-zone event — while every OTHER variant is deliberately
+/// NEUTRAL: it belongs to NEITHER predicate (event-less heads, in-place reveal
+/// harvests, interactive-window variants, harvest-inert movers — see the NOT
+/// moving list below), so absence from these lists classifies nothing.
+/// Forward-maintenance rule: a future resolver that
 /// routes a move through the `zones.rs`/`zone_pipeline` primitives MUST be
 /// classified in exactly ONE of the two predicates (added here, or proven
 /// harvest-inert in a comment beside [`population_does_not_move`]) — the
@@ -5906,13 +5918,37 @@ fn population_does_not_move(effect: &Effect) -> bool {
 /// through `sacrifice_permanent`; `CreateTokenCopyFromPool`/`CopyTokenOf` —
 /// both drain through the shared copy-token entry authority.
 ///
+/// SYNCHRONOUS round-2 movers (verified per variant; each emits `ZoneChanged`
+/// inside its `resolve`'s own event slice through the `zone_pipeline`
+/// primitives): `Draw` — `start_draw_sequence_with_replacement_applied`
+/// (draw.rs:259) delivers each unit via `resume_pending_draw_delivery` →
+/// `zone_pipeline::move_object` (draw.rs:677); empty-library and
+/// replaced-away draws deliver nothing (conservative at variant granularity,
+/// same as `Amass`); `Seek` — `move_objects_simultaneously` (seek.rs:102);
+/// `Cascade` — `move_objects_simultaneously_then` (cascade.rs:94/:248);
+/// `Discover` — synchronous exile loop `zone_pipeline::move_object`
+/// (discover.rs:61); `Ripple` — synchronous exile loop
+/// `zone_pipeline::move_object` (ripple.rs:71); `Explore` — the
+/// revealed-land Library→Hand batch `move_objects_simultaneously_then`
+/// (explore.rs:323; the nonland branch parks a DigChoice instead);
+/// `ExploreAll` — the same per-explorer batch via `resolve_all`;
+/// `Cloak` — the effect-owned Battlefield→Exile batch
+/// `move_objects_simultaneously_then` (cloak.rs:122).
+///
 /// NOT moving (measured exclusions, carried from
 /// [`population_does_not_move`]): the interactive-window variants
 /// `MadnessCast`, `MiracleCast`, `FreeCastFromZones`, `PutOnTopOrBottom`
 /// move in the ANSWER-HANDLER cycle, never inside the resolver's own event
 /// slice (the engine's manual re-publishes in `engine_resolution_choices`
 /// acknowledge this), so the generic arm's scan over the resolver's events
-/// finds nothing. Also neutral: reveal-only dispositions
+/// finds nothing. Harvest-inert for the same reason (per-variant evidence,
+/// classified NEITHER predicate): `CollectEvidence` — `resolve` parks a
+/// player choice and emits `EffectResolved` only (collect_evidence.rs:139-146);
+/// the exiles run in the answer-handler `handle_choice` →
+/// `move_evidence_costs` → `zone_pipeline::move_object`
+/// (collect_evidence.rs:220), so the resolver-side scan finds no
+/// `ZoneChanged`.
+/// Also neutral: reveal-only dispositions
 /// (`RevealUntil{RevealOnly}`, `Dig{reveal: true, keep_count: Some(0)}` —
 /// they harvest `CardsRevealed` in place), and the event-less heads
 /// (`PumpAll`/`GoadAll`/`GiveControl`/`GenericEffect`, plus
@@ -5958,6 +5994,15 @@ fn population_moves(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::Counter { .. }
         | Effect::CounterAll { .. }
+        // Synchronous round-2 movers (verified inventory above):
+        | Effect::Draw { .. }
+        | Effect::Seek { .. }
+        | Effect::Cascade
+        | Effect::Discover { .. }
+        | Effect::Ripple { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Cloak { .. } => true,
         // Generic-arm ZoneChanged emitters (verified inventory above):
         | Effect::Token { .. }
         | Effect::Incubate { .. }
@@ -26908,6 +26953,25 @@ mod tests {
         )
     }
 
+    /// A synchronous round-2 mover leg: Seek delivers its sought card
+    /// Library→Hand through `zone_pipeline::move_objects_simultaneously`
+    /// inside `resolve`'s own event slice (seek.rs:102) — `population_moves`
+    /// is true.
+    fn seek_leg() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Seek {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                from_top: None,
+                destination: Zone::Hand,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
     /// Append `leg` at the tail of `chain`'s sub_ability spine (the tests
     /// cannot call the crate-private `append_to_sub_chain`; same walk, inline).
     fn append_test_leg(chain: &mut ResolvedAbility, leg: ResolvedAbility) {
@@ -27065,6 +27129,60 @@ mod tests {
         );
     }
 
+    /// Round-2 remediation discriminator: a detached remainder shaped
+    /// `in-place producer → SYNCHRONOUS MOVER → reader{TS}` must veto the
+    /// in-place head through the production predicate
+    /// (`transitive_publish_superseded`, leg 3). The mover is `Effect::Seek`
+    /// — one of the nine synchronous ZoneChanged emitters the round-2 review
+    /// added to `population_moves` (seek.rs:102, a synchronous
+    /// `zone_pipeline::move_objects_simultaneously` inside `resolve`).
+    /// Revert Seek's classification and the tail stamps
+    /// `HoldsInPlacePublisher` via arm 2 instead of `HoldsMovingPublisher`
+    /// via arm 1, leg 3 stops firing, and the head flips to publish — the
+    /// parent-commit veto behavior for this class, restored by the positive
+    /// classifier.
+    #[test]
+    fn detached_in_place_then_synchronous_mover_tail_vetoes_via_the_typed_stamp() {
+        let mut tail = tap_leg();
+        append_test_leg(&mut tail, seek_leg());
+        append_test_leg(&mut tail, grant_leg());
+
+        // Stamp through the production classification point, not by hand.
+        assert_eq!(
+            detached_remainder_verdict(Some(&tail)),
+            DetachedRemainder::HoldsMovingPublisher,
+            "the synchronous mover (Seek — a verified ZoneChanged emitter in its \
+             resolver's own event slice) in publisher position must stamp the \
+             MOVING variant through arm 1"
+        );
+
+        let mut head = tap_leg();
+        head.detached_remainder = detached_remainder_verdict(Some(&tail));
+        assert!(
+            transitive_publish_superseded(&head),
+            "CR 608.2c nearest-antecedent veto (leg 3, HoldsMovingPublisher): an \
+             in-place head whose detached remainder is tap2 → Seek → reader{{TS}} \
+             is superseded by the synchronous mover"
+        );
+
+        // Non-vacuity twin: the mover REMOVED (tap2 → reader{TS}) stamps
+        // IN-PLACE and the head publishes — so the veto above is caused by
+        // Seek's moving classification, not by the class gate or the split.
+        let mut moverless_tail = tap_leg();
+        append_test_leg(&mut moverless_tail, grant_leg());
+        let mut head_without_mover = tap_leg();
+        head_without_mover.detached_remainder = detached_remainder_verdict(Some(&moverless_tail));
+        assert_eq!(
+            head_without_mover.detached_remainder,
+            DetachedRemainder::HoldsInPlacePublisher
+        );
+        assert!(
+            !transitive_publish_superseded(&head_without_mover),
+            "non-vacuity: without the mover the same-shape remainder stamps \
+             IN-PLACE and the head publishes"
+        );
+    }
+
     /// Flipped nested-reader semantics pinned at the predicate level (the
     /// structural mirror of the integration fixture
     /// `nested_tracked_set_consumers_keep_the_tap_publish`): the walk's reader
@@ -27128,8 +27246,12 @@ mod tests {
     /// true), and each representative pins its class — the moving list includes
     /// the generic-arm ZoneChanged emitters (Token, Incubate, Bounce, Conjure
     /// {Battlefield}, Amass, CastFromZone, Manifest), the destination-guarded
-    /// Conjure arm, and the interactive-window not-moving variants. Removing
-    /// any variant from `population_moves`' positive list flips its row red.
+    /// Conjure arm, the interactive-window not-moving variants, and the
+    /// round-2 synchronous movers (Draw, Seek, Cascade, Discover, Ripple,
+    /// Explore, ExploreAll, Cloak — resolver-source citations in
+    /// `population_moves`' doc) plus the harvest-inert CollectEvidence row.
+    /// Removing any variant from `population_moves`' positive list flips its
+    /// row red.
     #[test]
     fn population_mobility_classifiers_are_disjoint_and_representatives_are_pinned() {
         use crate::types::ability::{
@@ -27350,6 +27472,64 @@ mod tests {
                     target: TargetFilter::Any,
                     chooser: TargetFilter::Controller,
                 },
+                false,
+                false,
+            ),
+            (
+                "Draw",
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                true,
+                false,
+            ),
+            (
+                "Seek",
+                Effect::Seek {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    from_top: None,
+                    destination: Zone::Hand,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                },
+                true,
+                false,
+            ),
+            ("Cascade", Effect::Cascade, true, false),
+            (
+                "Discover",
+                Effect::Discover {
+                    mana_value_limit: QuantityExpr::Fixed { value: 4 },
+                    player: TargetFilter::Controller,
+                },
+                true,
+                false,
+            ),
+            ("Ripple", Effect::Ripple { count: 1 }, true, false),
+            ("Explore", Effect::Explore, true, false),
+            (
+                "ExploreAll",
+                Effect::ExploreAll {
+                    filter: TargetFilter::Any,
+                },
+                true,
+                false,
+            ),
+            (
+                "Cloak",
+                Effect::Cloak {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    object_source: None,
+                    enters_under: None,
+                },
+                true,
+                false,
+            ),
+            (
+                "CollectEvidence",
+                Effect::CollectEvidence { amount: 4 },
                 false,
                 false,
             ),
