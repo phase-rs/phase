@@ -128,6 +128,8 @@ interface DraftPodActions {
    *  pod size (`DraftProcedure.pod_size`) rather than re-deriving one in the client.
    *  The host may still override it with the pod-size selector before creating. */
   enterKind: (kind: DraftKind) => Promise<void>;
+  /** Enter from a URL intent, preserving the engine default across a competing setup refresh. */
+  enterKindForEntry: (kind: DraftKind) => Promise<void>;
   /** Toggle bot-fill on/off. */
   toggleBotFill: () => void;
   /** Set host display name. */
@@ -313,7 +315,6 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         kind,
         tournamentFormat: get().config.tournamentFormat,
       };
-      set({ pendingProcedureDefault: target });
       try {
         const procedure = await loadProcedure(target.kind, target.tournamentFormat);
         // A newer entry or refresh can target the same kind, so kind equality
@@ -331,6 +332,16 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         ) return;
         set({ configError: err instanceof Error ? err.message : String(err) });
       }
+    },
+
+    enterKindForEntry: async (kind) => {
+      const entering = get().enterKind(kind);
+      const target: ProcedureCacheKey = {
+        kind,
+        tournamentFormat: get().config.tournamentFormat,
+      };
+      set({ pendingProcedureDefault: target });
+      await entering;
     },
 
     refreshProcedure: async () => {

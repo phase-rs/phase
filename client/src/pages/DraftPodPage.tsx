@@ -1233,7 +1233,7 @@ export function DraftPodPage() {
   const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
-  const enterKind = useDraftPodStore((s) => s.enterKind);
+  const enterKindForEntry = useDraftPodStore((s) => s.enterKindForEntry);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -1413,8 +1413,8 @@ export function DraftPodPage() {
     // authority — a URL intent must never overwrite it.
     if (resumeRequested) return;
     if (!commanderDraftRequested) return;
-    void enterKind("CommanderDraft");
-  }, [commanderDraftRequested, enterKind, resumeRequested]);
+    void enterKindForEntry("CommanderDraft");
+  }, [commanderDraftRequested, enterKindForEntry, resumeRequested]);
 
   const handleLeave = useCallback(async () => {
     await leave(false);
