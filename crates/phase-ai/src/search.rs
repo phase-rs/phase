@@ -828,7 +828,7 @@ fn target_filter_interacts_with_stack(filter: &TargetFilter) -> bool {
     ) || filter.extract_zones().contains(&Zone::Stack)
 }
 
-fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
     ability_effect_is_temporary_combat_modifier(ability)
         && ability
             .sub_ability
