@@ -273,7 +273,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue({
       hostPeerId: "phase2-ABCDE", draftCode: "draft-xyz", roomCode: "ABCDE",
       draftToken: "opaque-token", submissionId: command.submissionId,
-      mainDeck: ["Island"], timestamp: Date.now(),
+      mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
     });
 
     const reconnect = privateGuest.handshakeOn({} as never, undefined, true);
@@ -304,6 +304,7 @@ describe("P2P draft guest handshake attempts", () => {
           draftToken: "old-token",
           submissionId: "old-submission",
           mainDeck: ["Island"],
+          commanders: [],
           timestamp: Date.now(),
         };
       }

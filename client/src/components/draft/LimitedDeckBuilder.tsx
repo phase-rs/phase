@@ -296,7 +296,6 @@ function useCommanderDesignation({
   const [eligibilityFailed, setEligibilityFailed] = useState(false);
   const commandersRef = useRef(commanders);
   const requestGenerationRef = useRef(0);
-  const mountedRef = useRef(true);
   const deckCounts = useMemo(
     () => new Map(deckEntries.map((entry) => [entry.name, entry.count])),
     [deckEntries],
@@ -305,12 +304,10 @@ function useCommanderDesignation({
   commandersRef.current = commanders;
 
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       requestGenerationRef.current += 1;
     };
-  }, []);
+  }, [designationRequired, deckFormat]);
 
   useLayoutEffect(() => {
     deckCountsRef.current = deckCounts;
@@ -365,8 +362,7 @@ function useCommanderDesignation({
         }
       }
       if (
-        !mountedRef.current
-        || generation !== requestGenerationRef.current
+        generation !== requestGenerationRef.current
         || !sameOrderedNames(commandersRef.current, premise)
       ) return;
 
@@ -456,7 +452,7 @@ interface WorkspaceDeckBuilderControllerBase {
   interactionLocked: boolean;
   onWorkspaceChange: (next: DraftWorkspaceState) => void;
   onPreferencesChange: (next: DraftWorkspacePreferences) => void;
-  onSubmitDeck: (commanders: string[]) => void | Promise<void>;
+  onSubmitDeck: (commanders?: string[]) => void | Promise<void>;
   onCardHover?: (info: CardHoverInfo | null) => void;
 }
 
@@ -1259,7 +1255,7 @@ function WorkspaceDeckBuilder({
             <LandRow
               name={granted.card_name}
               colorClass="bg-cyan-300"
-              count={commanderDeckEntries.find((entry) => entry.name === granted.card_name)?.count ?? 0}
+              count={deckVirtualBasics.filter((card) => card.name === granted.card_name).length}
               onDecrement={() => editableController.onRemoveBasicLand(granted.card_name)}
               onIncrement={() => editableController.onAddBasicLand(granted.card_name)}
             />
@@ -1504,7 +1500,9 @@ function WorkspaceDeckBuilder({
             <span data-mobile-deck-remaining className="truncate text-[9px] text-fg-muted">
               {deckValid
                 ? t("limitedDeck.readyToSubmit")
-                : t("limitedDeck.moreNeeded", { count: minDeckSize - deckNames.length })}
+                : deckNames.length < minDeckSize
+                  ? t("limitedDeck.moreNeeded", { count: minDeckSize - deckNames.length })
+                  : t("limitedDeck.commanderRequired")}
             </span>
           </div>
           {compactCommanderControls}

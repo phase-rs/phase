@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
+import type { DraftWorkspaceState } from "../workspace/types";
 import { createDefaultDraftWorkspacePreferences } from "../workspace/workspacePreferences";
 
 afterEach(cleanup);
@@ -1847,7 +1848,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
   });
 
-  it("ignores an in-flight pairing response after unmount", async () => {
+  it("invalidates an in-flight pairing response when designation is suspended and re-entered", async () => {
     engineEligible.mockImplementation(
       async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
     );
@@ -1857,19 +1858,28 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         resolvePairing = () => resolve(candidates);
       }),
     );
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const rendered = render(
-      <LimitedDeckBuilder
-        view={COMMANDER_VIEW}
-        mainDeck={["Vehicle Commander", "Second Commander"]}
-        landCounts={NO_LANDS}
-        onAddToDeck={() => {}}
-        onRemoveFromDeck={() => {}}
-        onSetLandCount={() => {}}
-        onSubmitDeck={() => {}}
-        showSuggestions={false}
-      />,
-    );
+
+    function LifecycleHarness() {
+      const [designationEnabled, setDesignationEnabled] = useState(true);
+      return (
+        <>
+          <button onClick={() => setDesignationEnabled(false)}>Suspend designation</button>
+          <button onClick={() => setDesignationEnabled(true)}>Resume designation</button>
+          <LimitedDeckBuilder
+            view={designationEnabled ? COMMANDER_VIEW : { ...COMMANDER_VIEW, kind: "Premier" }}
+            mainDeck={["Vehicle Commander", "Second Commander"]}
+            landCounts={NO_LANDS}
+            onAddToDeck={() => {}}
+            onRemoveFromDeck={() => {}}
+            onSetLandCount={() => {}}
+            onSubmitDeck={() => {}}
+            showSuggestions={false}
+          />
+        </>
+      );
+    }
+
+    render(<StrictMode><LifecycleHarness /></StrictMode>);
 
     fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
     await waitFor(() => expect(
@@ -1881,11 +1891,13 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     );
     fireEvent.click(secondCandidate);
     await waitFor(() => expect(enginePartnerCandidates).toHaveBeenCalledOnce());
-    rendered.unmount();
+    fireEvent.click(screen.getByRole("button", { name: "Suspend designation" }));
+    expect(screen.queryByText("Choose Commander")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume designation" }));
+    await commanderPanelScope().findByText("Vehicle Commander");
     await act(async () => resolvePairing());
 
-    expect(consoleError.mock.calls.flat().join(" ")).not.toMatch(/unmounted|state update/i);
-    consoleError.mockRestore();
+    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
   });
 
   it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
@@ -1901,7 +1913,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       };
 
       function WorkspaceHarness() {
-        const [workspace, setWorkspace] = useState({
+        const [workspace, setWorkspace] = useState<DraftWorkspaceState>({
           schemaVersion: 1 as const,
           placements: {
             "cmd-4": { zone: "deck" as const, row: 0 as const, column: 0, order: 0 },
@@ -2037,30 +2049,16 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(enginePartnerCandidates).not.toHaveBeenCalled();
   });
 
-  it("displays engine-granted filler controls without enforcing the grant cap in the client", () => {
-    const onAddBasicLand = vi.fn();
-    const onRemoveBasicLand = vi.fn();
+  it("shows the commander requirement on phone when deck size is satisfied", async () => {
+    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
     render(
       <LimitedDeckBuilder
         local={{
-          view: {
-            ...COMMANDER_VIEW,
-            min_deck_size: 2,
-            pool: [],
-            grantable_commander_fillers: [
-              { card_name: "The Prismatic Piper", max_copies: 2 },
-            ],
-          },
+          view: { ...COMMANDER_VIEW, min_deck_size: 1, pool: [PRISMATIC_PIPER] },
           workspace: {
             schemaVersion: 1,
-            placements: {
-              "piper-virtual-1": { zone: "deck", row: 0, column: 0, order: 0 },
-              "piper-virtual-2": { zone: "deck", row: 0, column: 0, order: 1 },
-            },
-            virtualBasics: [
-              { instanceId: "piper-virtual-1", name: "The Prismatic Piper" },
-              { instanceId: "piper-virtual-2", name: "The Prismatic Piper" },
-            ],
+            placements: { "cmd-4": { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
           },
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
@@ -2069,9 +2067,55 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
           onSubmitDeck: () => {},
-          onAddBasicLand,
-          onRemoveBasicLand,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
         }}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+
+    const status = document.querySelector<HTMLElement>("[data-mobile-deck-remaining]")!;
+    expect(status).toHaveTextContent("Designate a commander from your pool to submit.");
+    expect(status).not.toHaveTextContent("0 more needed");
+  });
+
+  it("counts only removable virtual copies in engine-granted filler controls", () => {
+    const onAddBasicLand = vi.fn();
+    const onRemoveBasicLand = vi.fn();
+    const makeController = (includeVirtual: boolean) => ({
+      view: {
+        ...COMMANDER_VIEW,
+        min_deck_size: 2,
+        pool: [PRISMATIC_PIPER],
+        grantable_commander_fillers: [
+          { card_name: "The Prismatic Piper", max_copies: 2 },
+        ],
+      },
+      workspace: {
+        schemaVersion: 1 as const,
+        placements: {
+          "cmd-4": { zone: "deck" as const, row: 0 as const, column: 0, order: 0 },
+          ...(includeVirtual
+            ? { "piper-virtual-1": { zone: "deck" as const, row: 0 as const, column: 0, order: 1 } }
+            : {}),
+        },
+        virtualBasics: includeVirtual
+          ? [{ instanceId: "piper-virtual-1", name: "The Prismatic Piper" }]
+          : [],
+      },
+      preferences: createDefaultDraftWorkspacePreferences(),
+      interactionLocked: false,
+      commanderDesignation: "initial-pod" as const,
+      capabilities: { kind: "editable-pool" as const, suggestions: false },
+      onWorkspaceChange: () => {},
+      onPreferencesChange: () => {},
+      onSubmitDeck: () => {},
+      onAddBasicLand,
+      onRemoveBasicLand,
+    });
+    const rendered = render(
+      <LimitedDeckBuilder
+        local={makeController(true)}
         responsiveLayout="desktop"
       />,
     );
@@ -2080,11 +2124,22 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       "Your pool also includes up to 2 × The Prismatic Piper, usable only as your commander.",
     )).toBeInTheDocument();
     const add = screen.getByRole("button", { name: "Add The Prismatic Piper" });
-    expect(add).not.toBeDisabled();
+    const remove = screen.getByRole("button", { name: "Remove The Prismatic Piper" });
+    expect(within(remove.parentElement!).getByText("1")).toBeInTheDocument();
+    expect(remove).not.toBeDisabled();
     fireEvent.click(add);
-    fireEvent.click(screen.getByRole("button", { name: "Remove The Prismatic Piper" }));
+    fireEvent.click(remove);
     expect(onAddBasicLand).toHaveBeenCalledWith("The Prismatic Piper");
     expect(onRemoveBasicLand).toHaveBeenCalledWith("The Prismatic Piper");
+
+    rendered.rerender(
+      <LimitedDeckBuilder local={makeController(false)} responsiveLayout="desktop" />,
+    );
+    const draftedOnlyRemove = screen.getByRole("button", { name: "Remove The Prismatic Piper" });
+    expect(within(draftedOnlyRemove.parentElement!).getByText("0")).toBeInTheDocument();
+    expect(draftedOnlyRemove).toBeDisabled();
+    fireEvent.click(draftedOnlyRemove);
+    expect(onRemoveBasicLand).toHaveBeenCalledTimes(1);
   });
 
   /**
