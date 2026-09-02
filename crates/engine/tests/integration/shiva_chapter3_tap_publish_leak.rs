@@ -525,13 +525,13 @@ fn all_untapped_board_does_not_pollute_return_candidates() {
 }
 
 /// Hostile fixture (iii): two same-class in-place publishers chained
-/// (`tap lands → tap creatures → grant{TrackedSet}`). Under the narrowed veto
-/// (MEASURED via Kathril, see `transitive_publish_superseded`'s doc), a
-/// same-class in-place sibling producer is NOT a superseding moving publisher,
-/// so both tap legs keep publishing and the grant binds the UNION the chain
-/// unification produces — the plan's original (iii) semantics, which also pins
-/// that the narrowing did not reintroduce forward-only suppression for
-/// same-verb chains (the Kathril #6321 class).
+/// (`tap lands → tap creatures → grant{TrackedSet}`). Both tap legs are
+/// TRANSPARENT to the supersession walk (in-place producers and neutral nodes
+/// are walked past — there is no moving producer and the walk's own-consumption
+/// reader boundary only fires at the grant), so both tap legs keep publishing
+/// and the grant binds the UNION the chain unification produces. This also
+/// pins that the own-consumption boundary did not reintroduce forward-only
+/// suppression for same-verb chains (the Kathril #6321 class).
 #[test]
 fn chained_tap_publishers_grant_binds_the_unified_union() {
     let execute = parse_effect_chain(TAP_LANDS_AND_CREATURES, AbilityKind::Spell);
@@ -587,9 +587,10 @@ fn chained_tap_publishers_grant_binds_the_unified_union() {
 }
 
 /// Hostile fixture (iv), terminal side: `tap → grant{TrackedSet}` — the grant
-/// is a TERMINAL consumer (its subtree contains no further tracked-set
-/// reference), so the tap leg is NOT in superseded publisher position and MUST
-/// keep publishing. Pins the R2-1 terminal-consumer guarantee behaviorally.
+/// is a TERMINAL consumer (no tracked-set-reading descendant), so the walk's
+/// own-consumption reader boundary fires there and the tap leg keeps its
+/// publish. Pins the terminal-consumer guarantee behaviorally — the nested
+/// twin below proves a reader with a reader descendant behaves the SAME way.
 #[test]
 fn terminal_tracked_set_consumer_keeps_the_tap_publish() {
     let execute = parse_effect_chain(TAP_LANDS, AbilityKind::Spell);
@@ -621,14 +622,16 @@ fn terminal_tracked_set_consumer_keeps_the_tap_publish() {
 }
 
 /// Hostile fixture (iv), nested side: `tap → grant{TrackedSet} →
-/// grant2{TrackedSet}` — the first consumer's own subtree references
-/// TrackedSet, so it IS in publisher position (`node_or_later_is_publisher_position`'s
-/// `node_or_later` disjunct) and the tap leg IS superseded: neither reader
-/// binds the tap population, even though both wanted it (the Motivated Pony
-/// loaded gun, carried verbatim into the veto's doc). Pins the R2-1
-/// chain-wide scope behaviorally.
+/// grant2{TrackedSet}` — the walk's own-consumption consumer boundary fires at
+/// the FIRST reader (a reader never creates a new antecedent), so the tap leg
+/// keeps its publish and BOTH readers bind the tap population. The Motivated
+/// Pony loaded gun is NOT inherited by the event-ful veto: it stays disclosed
+/// solely in `later_node_is_publisher_position`'s doc, which governs the
+/// event-less `is_sole_chain_producer` gate. The preserved counter-shape is
+/// the Shiva `tap → exile` veto — the exile is a MOVING producer found before
+/// any consumer boundary (see the primary repro and discriminator A).
 #[test]
-fn nested_tracked_set_consumer_supersedes_the_tap_publish() {
+fn nested_tracked_set_consumers_keep_the_tap_publish() {
     let execute = parse_effect_chain(TAP_LANDS, AbilityKind::Spell);
     let (scenario, lands) = build_scenario_with_untapped_lands(8);
     let mut runner = scenario.build();
@@ -642,7 +645,7 @@ fn nested_tracked_set_consumer_supersedes_the_tap_publish() {
 
     let state = runner.state();
     // Reach-guard: the tap leg ran (all eight lands transitioned and are
-    // tapped) — the veto was a publish-gate narrowing, not a dead tap leg.
+    // tapped) — the publish-gate semantics changed, not the leg itself.
     assert_eq!(
         tapped_object_ids(&events).len(),
         8,
@@ -650,12 +653,16 @@ fn nested_tracked_set_consumer_supersedes_the_tap_publish() {
     );
     for land in &lands {
         assert!(state.objects[land].tapped);
-        // Discriminating assertion: a nested consumer supersedes the publish —
-        // the tap population reaches NEITHER reader.
-        assert!(
-            state.objects[land].casting_permissions.is_empty(),
-            "with two chained tracked-set consumers the superseded tap leg's \
-             population must reach neither reader (CR 608.2c chain-wide scope)"
+        // Discriminating assertion: BOTH chained readers bound the tap
+        // population — `grant_permission::resolve` pushes one permission per
+        // resolve, so two chained grants stack additively to exactly 2 per
+        // tapped land (0 under the round-3 superseding walk, 1 under any
+        // single-reader mistake — only both readers binding yields 2).
+        assert_eq!(
+            state.objects[land].casting_permissions.len(),
+            2,
+            "nested tracked-set consumers keep the tap publish: every tapped land \
+             must receive BOTH grants (CR 608.2c reader-boundary contract)"
         );
     }
 }

@@ -4654,12 +4654,29 @@ fn split_player_scope_chain(
     (scoped, tail)
 }
 
-/// CR 608.2c: classify a detached chain remainder for the publish gate. The walk
-/// is the same one leg 2 uses, applied to the detached node itself.
+/// CR 608.2c: classify a detached chain remainder for the publish gates. The
+/// walks are the same ones the publish sites use, applied to the detached node
+/// itself.
+///
+/// Arm ORDER is load-bearing: the moving walk
+/// ([`node_or_later_is_moving_publisher_position`]) is a strict subset of the
+/// publisher-position walk ([`node_or_later_is_publisher_position`]), so the
+/// moving check must come first. Arm 1 uses the OWN-CONSUMPTION
+/// consumer-boundary moving walk and reuses the walk's own classifier
+/// ([`population_moves`]), so the split stamp and the unsplit walk share ONE
+/// authority and can never disagree by construction; a tail shaped
+/// `tap → exile → consumer` stamps `HoldsMovingPublisher`, not
+/// `HoldsInPlacePublisher` (the boundary gate is the node's OWN consumption,
+/// not its subtree). Arm 2 preserves `is_sole_chain_producer`'s documented
+/// chain-wide verdict byte-for-byte — its doc stays authoritative for the
+/// event-less class.
 fn detached_remainder_verdict(tail: Option<&ResolvedAbility>) -> DetachedRemainder {
     match tail {
+        Some(node) if node_or_later_is_moving_publisher_position(node) => {
+            DetachedRemainder::HoldsMovingPublisher
+        }
         Some(node) if node_or_later_is_publisher_position(node) => {
-            DetachedRemainder::HoldsPublisher
+            DetachedRemainder::HoldsInPlacePublisher
         }
         _ => DetachedRemainder::NoProducer,
     }
@@ -5837,6 +5854,132 @@ fn population_does_not_move(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c: does this producer's resolver synchronously emit
+/// `GameEvent::ZoneChanged` (or another leave-the-zone event) into its OWN
+/// resolution events — i.e. is its affected population the one the generic
+/// `_ =>` arm of `affected_objects_from_events` (or a dedicated zone-event
+/// arm) would harvest? The positive twin of [`population_does_not_move`]: the
+/// two predicates are DISJOINT BY CONTRACT — tap/counter/damage read
+/// `PermanentTapped`/`CounterAdded`/`DamageDealt`, every moving class reads a
+/// zone-change or leave-zone event — and every `Effect` variant is classified
+/// in exactly ONE of them. Forward-maintenance rule: a future resolver that
+/// routes a move through the `zones.rs`/`zone_pipeline` primitives MUST be
+/// classified in exactly ONE of the two predicates (added here, or proven
+/// harvest-inert in a comment beside [`population_does_not_move`]) — the
+/// `_ => false` catch-all below is a documented, inventoried default, not an
+/// implicit one.
+///
+/// COVERED KINDS (doc-comment exhaustiveness contract — `matches!` variant
+/// patterns are NOT compiler-checked, so the lists below are the inventory):
+///
+/// DEDICATED-ARM MOVING (one-for-one with the `affected_objects_from_events`
+/// harvest arms): `ChangeZone`/`ChangeZoneAll` (generic `ZoneChanged`),
+/// `Destroy`/`DestroyAll` (`CreatureDestroyed`), `Sacrifice`
+/// (`PermanentSacrificed`), `Discard`/`DiscardCard`
+/// (`ZoneChanged{Graveyard}`), `Mill` (destination-zone harvest),
+/// `Bounce`/`BounceAll` (`ZoneChanged{→Hand}`),
+/// `ExileTop`/`ExileFromTopUntil` (`Zone::Exile`), `Counter`/`CounterAll`
+/// (`SpellCountered` — the object leaves the stack, CR 701.6a), and
+/// `RevealUntil` with any disposition except `RevealOnly` (harvests
+/// `ZoneChanged` into `kept_destination`/`kept_destination_if`).
+///
+/// GENERIC-ARM MOVING (no dedicated harvest arm; the resolver emits
+/// `ZoneChanged` through the shared `zones.rs`/`zone_pipeline` entry
+/// authorities, verified per variant): `Token` — every produced token emits
+/// `ZoneChanged{None→Battlefield}` via `record_and_emit_entry_from_no_zone`
+/// (token.rs, the shared entry authority); `Incubate` — same shared
+/// authority; `Conjure { destination: Battlefield }` — routes through that
+/// authority, and the arm is DESTINATION-GUARDED because a
+/// library/hand/graveyard/exile-destination Conjure emits only
+/// `ObjectConjured`; `Amass` — the no-Army branch creates the Army token
+/// through the shared token authority (conservative at variant granularity:
+/// the with-Army branch is counter-only); `Bounce` — `zone_pipeline::
+/// move_object`; `CastFromZone` — casts synchronously during resolution, so
+/// the `ZoneChanged{→Stack}` lands inside `resolve()`'s own event slice;
+/// `Manifest` — all branches via `morph::manifest_card`; `ManifestDread` —
+/// classified on its synchronous count==1 path (the count==2 path moves in
+/// the answer handler, the harvest-faithful class below);
+/// `ExileFaceDownPile`, `PutAtLibraryPosition`, `ReturnAsAura` —
+/// `move_objects_simultaneously_then`; `ExileHaunting` — `zone_pipeline::
+/// move_object`; `HeistExile` — its face-down finalizer;
+/// `ChooseAndSacrificeRest` — the unchosen-sacrifice paths run synchronously
+/// through `sacrifice_permanent`; `CreateTokenCopyFromPool`/`CopyTokenOf` —
+/// both drain through the shared copy-token entry authority.
+///
+/// NOT moving (measured exclusions, carried from
+/// [`population_does_not_move`]): the interactive-window variants
+/// `MadnessCast`, `MiracleCast`, `FreeCastFromZones`, `PutOnTopOrBottom`
+/// move in the ANSWER-HANDLER cycle, never inside the resolver's own event
+/// slice (the engine's manual re-publishes in `engine_resolution_choices`
+/// acknowledge this), so the generic arm's scan over the resolver's events
+/// finds nothing. Also neutral: reveal-only dispositions
+/// (`RevealUntil{RevealOnly}`, `Dig{reveal: true, keep_count: Some(0)}` —
+/// they harvest `CardsRevealed` in place), and the event-less heads
+/// (`PumpAll`/`GoadAll`/`GiveControl`/`GenericEffect`, plus
+/// `GainControl`/`GainControlAll`), which publish through their own
+/// filter/event arms, not a zone harvest.
+fn population_moves(effect: &Effect) -> bool {
+    match effect {
+        // Reveal-only dispositions harvest CardsRevealed (in place).
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        } => false,
+        // RevealUntil with a landing destination harvests ZoneChanged.
+        Effect::RevealUntil { .. } => true,
+        // Reveal-only Digs harvest CardsRevealed; other Digs hit the generic
+        // ZoneChanged arm.
+        Effect::Dig {
+            reveal: true,
+            keep_count: Some(0),
+            ..
+        } => false,
+        Effect::Dig { .. } => true,
+        // Conjure emits ZoneChanged ONLY for a battlefield destination
+        // (conjure.rs routes only that destination through the shared entry
+        // authority); other destinations emit ObjectConjured only.
+        Effect::Conjure {
+            destination: Zone::Battlefield,
+            ..
+        } => true,
+        // Dedicated zone-change/leave-zone harvest arms, one-for-one with
+        // `affected_objects_from_events`.
+        Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Destroy { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::Discard { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        // Generic-arm ZoneChanged emitters (verified inventory above):
+        | Effect::Token { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HeistExile
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CopyTokenOf { .. } => true,
+        // NOT moving: interactive-window variants move in the answer-handler
+        // cycle; no ZoneChanged reaches the resolver-side harvest (disclosed
+        // flip vs the round-3 negation-based classification).
+        _ => false,
+    }
+}
+
 /// CR 608.2c nearest-antecedent: the event-ful companion of
 /// [`is_sole_chain_producer`]'s legs 2+3. An in-place-population producer
 /// (see [`population_does_not_move`]) whose chain is followed by another
@@ -5850,64 +5993,70 @@ fn population_does_not_move(effect: &Effect) -> bool {
 /// changes (Suspend Aggression's two exiles) are ONE antecedent and must
 /// unify (`compound_zone_change_chain_unifies_tracked_set`).
 ///
-/// Scope of the supersession verdict (MEASURED, then narrowed — see below).
-/// A leg followed ONLY by TERMINAL consumers is never superseded — "terminal"
-/// means the consumer's subtree contains no further `TrackedSet` reference
-/// ([`ability_or_branch_references_tracked_set`]; Urge to Feed, Najeela, and
-/// the Sanar Vivid `Exile → PutCounterAll → caused_by` merge row all keep
-/// publishing — structurally guaranteed). A later node whose OWN subtree
-/// contains a further tracked-set reference IS in publisher position
-/// ([`node_or_later_is_publisher_position`]'s `node_or_later` disjunct) and
-/// supersedes — but ONLY when that later node is itself a MOVING
-/// (zone-change-class) producer: same-class in-place producers chained ahead
-/// of the consumer keep BACKWARD-MERGING, because the consumer's "… this way"
-/// aggregates over the whole same-verb instruction group.
+/// Scope of the supersession verdict — the OWN-CONSUMPTION CONSUMER-BOUNDARY
+/// walk ([`node_or_later_is_moving_publisher_position`]). A leg followed by
+/// TERMINAL consumers keeps its publish ("terminal" = the consumer's subtree
+/// contains no further `TrackedSet` reference; Urge to Feed, Najeela, and the
+/// Sanar Vivid `Exile → PutCounterAll → caused_by` merge row all keep
+/// publishing — structurally guaranteed) AND a leg followed by NESTED
+/// tracked-set consumers (a reader with a tracked-set-reading descendant)
+/// ALSO keeps its publish: a reader never creates a new antecedent, so BOTH
+/// readers of `tap → grant{TS} → grant2{TS}` bind the tap population. Only an
+/// intervening MOVING (zone-change-harvest, see [`population_moves`])
+/// producer found before any own-consumption consumer boundary supersedes.
+/// In-place producers and neutral nodes are TRANSPARENT and walked past
+/// (same-class aggregation). The Motivated Pony loaded gun is NOT inherited
+/// here: it remains disclosed solely in
+/// [`later_node_is_publisher_position`]'s doc, which governs the event-less
+/// `is_sole_chain_producer` gate and is deliberately unchanged.
 ///
-/// The narrowing is corpus-forced, exactly per the veto's measurement protocol:
-/// Kathril, Aspect Warper (#6321 class) — "put a [keyword] counter on any
-/// creature you control if … Repeat this process for … Then put a +1/+1
-/// counter on Kathril for each counter put on a creature this way" — needs
-/// every `PutCounter` leg to publish into the set its SIBLING legs and the
-/// tail read. Under the un-narrowed chain-wide walk each leg's later sibling
-/// leg is in publisher position (its subtree reaches the tail's TrackedSetSize)
-/// and the veto declined every leg whose own gate was false, leaving the tail
-/// counting 0
+/// The transparency of in-place producers is corpus-forced, exactly per this
+/// veto's measurement protocol: Kathril, Aspect Warper (#6321 class) — "put a
+/// [keyword] counter on any creature you control if … Repeat this process for
+/// … Then put a +1/+1 counter on Kathril for each counter put on a creature
+/// this way" — needs every `PutCounter` leg to publish into the set its
+/// SIBLING legs and the tail read. Under a chain-wide walk each leg's later
+/// sibling leg is in publisher position (its subtree reaches the tail's
+/// TrackedSetSize) and the veto declined every leg whose own gate was false,
+/// leaving the tail counting 0
 /// (`kathril_reaches_matching_counter_and_tail_past_false_earlier_gates` red).
 /// The distinguishing rule is CR 608.2c's nearest antecedent read on the VERB:
 /// a later producer of a DIFFERENT (zone-moving) harvest class is the
 /// antecedent a later zone-provenance "it" names (Shiva: tap → exile → "return
 /// it"), while a later producer of the SAME in-place class is part of the very
-/// action the "this way" counts. The walk therefore continues PAST a non-moving
-/// publisher node and only fires on a moving one: `tap → tap2 → exile →
-/// consumer` still vetoes the first tap (the exile is found deeper), while
-/// `tap → tap2 → consumer` keeps the full union (no moving producer
-/// intervenes). A later CONSUMER (e.g. `consumer{TrackedSet} →
-/// consumer2{TrackedSet}`) is not an in-place producer, so it still supersedes
-/// — the Motivated Pony LOADED GUN disclosed in
-/// [`later_node_is_publisher_position`]'s doc carries over in that shape.
+/// action the "this way" counts. The walk therefore continues PAST a
+/// non-moving node — including past a same-class producer chained ahead of a
+/// deeper moving one (`tap → tap2 → exile → consumer` still vetoes the first
+/// tap, the own-consumption boundary being tap2's node, not its subtree) — and
+/// only fires on a moving one, and it STOPS at the first node that
+/// OWN-consumes the tracked set (`tap → grant{TS} → grant2{TS}` keeps the
+/// publish; both readers bind).
 ///
 /// `repeat_for: TrackedSetSize` consumers are not publisher positions (they
 /// publish nothing), so Seasoned Pyromancer (#740) is unaffected.
 ///
-/// The [`ResolvedAbility::detached_remainder`] leg-3 term is deliberately
-/// UNNARROWED: the splitter's stamp carries no moving/in-place detail, so a
-/// player-scope template whose remainder is a same-class in-place producer
-/// would be vetoed where its non-scoped twin publishes. No corpus row
-/// exercises that shape today; if one appears, refine the stamp, not this
-/// gate.
+/// Leg 3 (the [`ResolvedAbility::detached_remainder`] term) is TYPED: the
+/// splitter stamps the same moving/in-place classification the unsplit walk
+/// uses (`DetachedRemainder::HoldsMovingPublisher` /
+/// `DetachedRemainder::HoldsInPlacePublisher`, computed once at split time by
+/// `detached_remainder_verdict` over the same walks), so a player-scoped chain
+/// takes the SAME supersession decision as its unsplit equivalent. The
+/// previously disclosed UNNARROWED gap — a player-scope template whose
+/// remainder is a same-class in-place producer, vetoed where the unsplit
+/// chain publishes — is CLOSED by this typing, not deferred.
 fn transitive_publish_superseded(producer: &ResolvedAbility) -> bool {
     population_does_not_move(&producer.effect)
         && (later_node_is_moving_publisher_position(producer)
-            || producer.detached_remainder != DetachedRemainder::NoProducer)
+            || producer.detached_remainder == DetachedRemainder::HoldsMovingPublisher)
 }
 
-/// CR 608.2c: the narrowed later-node term of
-/// [`transitive_publish_superseded`] — like
-/// [`later_node_is_publisher_position`], but only a later node that is BOTH in
-/// publisher position AND a MOVING (non-in-place, see
-/// [`population_does_not_move`]) producer supersedes. Walks past non-moving
-/// publisher nodes so a moving producer anywhere later still fires; stops at a
-/// mode boundary exactly like its sibling.
+/// CR 608.2c: the later-node term of [`transitive_publish_superseded`] — like
+/// [`later_node_is_publisher_position`], but only a MOVING (zone-change
+/// harvest, see [`population_moves`]) producer in publisher position
+/// supersedes, and the walk STOPS at the first node that OWN-consumes the
+/// tracked set (a reader boundary; see
+/// [`node_or_later_is_moving_publisher_position`]). Stops at a mode boundary
+/// exactly like its sibling.
 fn later_node_is_moving_publisher_position(ability: &ResolvedAbility) -> bool {
     ability
         .sub_ability
@@ -5915,40 +6064,78 @@ fn later_node_is_moving_publisher_position(ability: &ResolvedAbility) -> bool {
         .is_some_and(node_or_later_is_moving_publisher_position)
 }
 
+/// CR 608.2c + CR 700.2: is THIS node, or any strictly-later node of its
+/// chain, a MOVING producer in publisher position? The walk STOPS at the
+/// first node that OWN-consumes the tracked set —
+/// [`node_consumes_tracked_set`], NOT the branch-inclusive
+/// [`ability_or_branch_references_tracked_set`] wrapper, else
+/// `tap → tap2 → exile → consumer` dies at tap2 (whose tracked-set reference
+/// lives in its SUBTREE, not its own effect) and the first tap is never
+/// vetoed. Only a MOVING producer found before any such boundary supersedes;
+/// in-place producers and neutral nodes are transparent.
+///
+/// The firing branch is evaluated at EVERY non-mode-boundary node BEFORE the
+/// boundary test, so a non-own-consuming moving producer whose consumer is a
+/// descendant is classified (the exile leg in Shiva; the Token leg in the
+/// generic-arm class). An own-consuming MOVING node (a `ChangeZoneAll {
+/// TrackedSet }` mass-move consumer) supersedes itself — correct: it IS the
+/// later zone-change antecedent. Stops at a mode boundary exactly like its
+/// sibling.
 fn node_or_later_is_moving_publisher_position(node: &ResolvedAbility) -> bool {
     if crosses_modal_boundary(node) {
         return false;
     }
-    (next_sub_needs_tracked_set(node) && !population_does_not_move(&node.effect))
-        || node
-            .sub_ability
-            .as_deref()
-            .is_some_and(node_or_later_is_moving_publisher_position)
+    // Firing branch at EVERY non-mode-boundary node: a MOVING producer in
+    // publisher position supersedes — whether or not it own-consumes the set
+    // and whether or not the tracked set is referenced only deeper in its
+    // subtree.
+    if next_sub_needs_tracked_set(node) && population_moves(&node.effect) {
+        return true;
+    }
+    // Reader boundary: own-consuming NON-moving reader (the moving case was
+    // already caught by the firing branch above). A reader having a reader
+    // descendant does not create a new antecedent.
+    if node_consumes_tracked_set(node) {
+        return false;
+    }
+    // Transparent (in-place producer or neutral node): keep walking.
+    node.sub_ability
+        .as_deref()
+        .is_some_and(node_or_later_is_moving_publisher_position)
         || node
             .else_ability
             .as_deref()
             .is_some_and(node_or_later_is_moving_publisher_position)
 }
 
-fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
-    let consumes = matches!(
-        &ability.effect,
+/// CR 608.2c: does THIS node's OWN effect (not its continuation branches)
+/// consume the chain's tracked set? The supersession walk's consumer
+/// boundary — OWN consumption only; the branch-inclusive tail lives in
+/// [`ability_or_branch_references_tracked_set`], which composes this helper
+/// with its two [`branch_references_tracked_set`] terms (byte-identical
+/// semantics for every existing caller).
+///
+/// CR 608.2c: `repeat_for` is a loop-count quantity on the ResolvedAbility,
+/// not inside Effect — e.g. "for each nonland card discarded this way, create
+/// a token" uses `repeat_for: TrackedSetSize`. Without this check, the
+/// forced-discard path (no WaitingFor pause) never publishes the tracked set,
+/// so the downstream token loop sees size 0 and creates no tokens (Seasoned
+/// Pyromancer bug #740).
+fn node_consumes_tracked_set(node: &ResolvedAbility) -> bool {
+    matches!(
+        &node.effect,
         Effect::CreateDelayedTrigger {
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect)
-        // CR 608.2c: `repeat_for` is a loop-count quantity on the
-        // ResolvedAbility, not inside Effect — e.g. "for each nonland card
-        // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
-        // Without this check, the forced-discard path (no WaitingFor pause)
-        // never publishes the tracked set, so the downstream token loop sees
-        // size 0 and creates no tokens (Seasoned Pyromancer bug #740).
-        || ability
+    ) || effect_references_tracked_set(&node.effect)
+        || node
             .repeat_for
             .as_ref()
-            .is_some_and(quantity_expr_references_tracked_set);
+            .is_some_and(quantity_expr_references_tracked_set)
+}
 
+fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
     // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
     // mode has more than one node: `append_to_sub_chain` hangs the next mode's
@@ -5966,7 +6153,7 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
     // at the highest index of its card. That corpus is a generated artifact and
     // its consumer side may be undercounted relative to this branch's parser;
     // regenerate `card-data.json` to close it.
-    consumes
+    node_consumes_tracked_set(ability)
         || branch_references_tracked_set(ability.sub_ability.as_deref())
         || branch_references_tracked_set(ability.else_ability.as_deref())
 }
@@ -26631,8 +26818,9 @@ mod tests {
         );
         assert_eq!(
             scoped.detached_remainder,
-            DetachedRemainder::HoldsPublisher,
-            "the splitter must record that the detached remainder still holds a producer"
+            DetachedRemainder::HoldsInPlacePublisher,
+            "the splitter must record that the detached remainder still holds a producer \
+             (its tail is a SetTapState — an IN-PLACE publisher position)"
         );
         assert!(
             !is_sole_chain_producer(&state, &scoped),
@@ -26661,6 +26849,541 @@ mod tests {
             "non-vacuity: with nothing consuming downstream the head DOES publish, so the \
              veto above is caused by the publisher position and not by the split itself"
         );
+    }
+
+    // ---- Typed moving/in-place classification battery (round-6 remediation) ----
+
+    fn tap_leg() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Any,
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// A tracked-set READER (GrantCastingPermission binds the set's members
+    /// without moving them — `population_moves` is false).
+    fn grant_leg() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: crate::types::ability::CastingPermission::WarpExile {
+                    castable_after_turn: 1,
+                },
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                grantee: crate::types::ability::PermissionGrantee::AbilityController,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn exile_leg() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// Append `leg` at the tail of `chain`'s sub_ability spine (the tests
+    /// cannot call the crate-private `append_to_sub_chain`; same walk, inline).
+    fn append_test_leg(chain: &mut ResolvedAbility, leg: ResolvedAbility) {
+        let mut node = chain;
+        while node.sub_ability.is_some() {
+            node = node.sub_ability.as_mut().unwrap().as_mut();
+        }
+        node.sub_ability = Some(Box::new(leg));
+    }
+
+    /// MED-2 congruence, matched pair A: a player-scoped chain whose detached
+    /// remainder holds a MOVING producer (`exile → reader{TS}`) takes the SAME
+    /// supersession verdict as its unsplit twin — vetoed. The stamp assertion
+    /// pins the TYPED verdict: the moving walk (arm 1), not merely the wider
+    /// publisher-position walk, classifies the tail. Paired non-vacuity twin
+    /// proves the veto is leg 3's stamp, not the class gate alone.
+    #[test]
+    fn scoped_split_with_a_moving_remainder_supersedes_like_the_unsplit_chain() {
+        let build = |player_scope: Option<PlayerFilter>| {
+            let mut head = tap_leg();
+            head.player_scope = player_scope;
+            append_test_leg(&mut head, exile_leg());
+            append_test_leg(&mut head, grant_leg());
+            head
+        };
+
+        // Unsplit twin: the own-consumption boundary walk finds the moving
+        // exile before any reader boundary → superseded (positive reach-guard
+        // for the veto below).
+        let unsplit = build(None);
+        assert!(
+            transitive_publish_superseded(&unsplit),
+            "unsplit tap → exile → reader is superseded by the moving exile (CR 608.2c)"
+        );
+
+        let (scoped, tail) =
+            split_player_scope_chain(&build(Some(PlayerFilter::All)), &PlayerFilter::All);
+        assert!(
+            tail.is_some(),
+            "precondition: the SetTapState → ChangeZone continuation must detach, \
+             else this test proves nothing about the detached case"
+        );
+        assert_eq!(
+            scoped.detached_remainder,
+            DetachedRemainder::HoldsMovingPublisher,
+            "the splitter must classify the moving exile through the corrected \
+             own-consumption walk"
+        );
+        assert!(
+            transitive_publish_superseded(&scoped),
+            "CR 608.2c congruence: the scoped chain is superseded exactly like its \
+             unsplit twin"
+        );
+
+        // Non-vacuity twin: same head class, inert remainder (an untap leg that
+        // consumes nothing downstream) — both legs false, the head publishes.
+        let mut inert_head = tap_leg();
+        inert_head.player_scope = Some(PlayerFilter::All);
+        append_test_leg(&mut inert_head, tap_leg());
+        let (scoped_inert, tail_inert) = split_player_scope_chain(&inert_head, &PlayerFilter::All);
+        assert!(tail_inert.is_some(), "precondition: same detachment");
+        assert_eq!(
+            scoped_inert.detached_remainder,
+            DetachedRemainder::NoProducer
+        );
+        assert!(
+            !transitive_publish_superseded(&scoped_inert),
+            "non-vacuity: with no producer in the detached remainder the head DOES \
+             publish, so the veto above is caused by the moving stamp and not by \
+             the split or the class gate"
+        );
+    }
+
+    /// MED-2, matched pair B (the revert-failing row): a player-scoped chain
+    /// whose detached remainder is a same-class IN-PLACE producer followed by
+    /// a TERMINAL reader must PUBLISH exactly like its unsplit twin. The
+    /// pre-typing leg 3 (`!= NoProducer`) vetoed exactly this shape — revert
+    /// the typed leg 3 and this row flips red while the moving pair stays
+    /// green.
+    #[test]
+    fn scoped_split_with_an_in_place_remainder_publishes_like_the_unsplit_chain() {
+        let build = |player_scope: Option<PlayerFilter>| {
+            let mut head = tap_leg();
+            head.player_scope = player_scope;
+            append_test_leg(&mut head, tap_leg());
+            append_test_leg(&mut head, grant_leg());
+            head
+        };
+
+        // Unsplit twin (positive reach-guard): same-class chain, no moving
+        // producer, reader boundary at the grant → the tap publish survives.
+        let unsplit = build(None);
+        assert!(
+            !transitive_publish_superseded(&unsplit),
+            "unsplit tap → tap2 → terminal reader keeps the tap publish (no moving \
+             producer; the walk stops at the reader boundary)"
+        );
+
+        let (scoped, tail) =
+            split_player_scope_chain(&build(Some(PlayerFilter::All)), &PlayerFilter::All);
+        assert!(tail.is_some(), "precondition: same detachment");
+        assert_eq!(
+            scoped.detached_remainder,
+            DetachedRemainder::HoldsInPlacePublisher,
+            "the in-place tap2 in publisher position must stamp the IN-PLACE variant"
+        );
+        assert!(
+            !transitive_publish_superseded(&scoped),
+            "CR 608.2c congruence: a same-class in-place remainder must NOT veto — \
+             the MED-2 divergence is closed"
+        );
+    }
+
+    /// R4-1 unsplit regression: the Kathril doc shape
+    /// `tap → tap2 → exile → reader{TS}` — tap2 is TRANSPARENT under the
+    /// own-consumption gate (its tracked-set reference lives in its SUBTREE,
+    /// not its own effect), so the walk reaches the moving exile and the first
+    /// tap IS vetoed. Under a branch-inclusive (subtree) boundary gate the walk
+    /// dies at tap2 and this row flips false.
+    #[test]
+    fn own_consumption_boundary_walks_past_a_transparent_in_place_producer_to_the_moving_exile() {
+        let mut chain = tap_leg();
+        append_test_leg(&mut chain, tap_leg());
+        append_test_leg(&mut chain, exile_leg());
+        append_test_leg(&mut chain, grant_leg());
+        assert!(
+            transitive_publish_superseded(&chain),
+            "R4-1: tap2 does not own-consume, so the walk must reach the moving exile \
+             and veto the first tap (Kathril doc contract)"
+        );
+    }
+
+    /// R4-1 scoped twin: the detached tail `tap2 → exile → reader{TS}` stamps
+    /// `HoldsMovingPublisher` through the corrected walk (arm 1) and the scoped
+    /// head is vetoed — congruent with the unsplit twin above.
+    #[test]
+    fn scoped_split_with_transparent_in_place_then_moving_tail_stamps_the_moving_variant() {
+        let mut head = tap_leg();
+        head.player_scope = Some(PlayerFilter::All);
+        append_test_leg(&mut head, tap_leg());
+        append_test_leg(&mut head, exile_leg());
+        append_test_leg(&mut head, grant_leg());
+
+        let (scoped, tail) = split_player_scope_chain(&head, &PlayerFilter::All);
+        assert!(tail.is_some(), "precondition: same detachment");
+        assert_eq!(
+            scoped.detached_remainder,
+            DetachedRemainder::HoldsMovingPublisher,
+            "arm 1 must run the own-consumption walk: tap2 is transparent, the exile \
+             is a moving producer found before any reader boundary"
+        );
+        assert!(
+            transitive_publish_superseded(&scoped),
+            "the moving stamp fires veto leg 3 on the scoped head"
+        );
+    }
+
+    /// Flipped nested-reader semantics pinned at the predicate level (the
+    /// structural mirror of the integration fixture
+    /// `nested_tracked_set_consumers_keep_the_tap_publish`): the walk's reader
+    /// boundary fires at the FIRST reader, so the tap publish is NOT superseded
+    /// and both readers bind. Under the round-3 negation this was TRUE.
+    #[test]
+    fn nested_reader_boundary_keeps_the_in_place_publish() {
+        let mut chain = tap_leg();
+        append_test_leg(&mut chain, grant_leg());
+        append_test_leg(&mut chain, grant_leg());
+        assert!(
+            !transitive_publish_superseded(&chain),
+            "a reader never creates a new antecedent: both chained readers keep the \
+             tap publish (CR 608.2c)"
+        );
+    }
+
+    /// Reader-tail stamp units (congruence table rows 3-4): a TERMINAL reader
+    /// tail stamps `NoProducer` (no sub, no else — arm 2 is false), a NESTED
+    /// reader tail stamps `HoldsInPlacePublisher` (the reader's subtree reaches
+    /// the second reader's own consumption). Both feed the veto on an in-place
+    /// head, where the class gate passes, and NEITHER fires it — publish both
+    /// ways, via different stamps.
+    #[test]
+    fn reader_tails_stamp_no_producer_when_terminal_and_in_place_when_nested() {
+        let terminal = grant_leg();
+        assert_eq!(
+            detached_remainder_verdict(Some(&terminal)),
+            DetachedRemainder::NoProducer,
+            "a terminal reader is not a publisher position (nothing downstream)"
+        );
+
+        let mut nested = grant_leg();
+        append_test_leg(&mut nested, grant_leg());
+        assert_eq!(
+            detached_remainder_verdict(Some(&nested)),
+            DetachedRemainder::HoldsInPlacePublisher,
+            "the nested reader's subtree reaches the second reader's own consumption"
+        );
+
+        // Both stamps ride veto leg 3 on an IN-PLACE head (class gate true) and
+        // must stay publish-side (non-vacuous: the class gate alone cannot
+        // produce these rows' verdict).
+        let mut head_t = tap_leg();
+        head_t.detached_remainder = detached_remainder_verdict(Some(&terminal));
+        assert!(
+            !transitive_publish_superseded(&head_t),
+            "publish: a terminal reader tail's NoProducer stamp fires nothing"
+        );
+        let mut head_n = tap_leg();
+        head_n.detached_remainder = detached_remainder_verdict(Some(&nested));
+        assert!(
+            !transitive_publish_superseded(&head_n),
+            "publish: a NESTED reader tail's IN-PLACE stamp never fires the event-ful \
+             veto"
+        );
+    }
+
+    /// Disjointness + classification-representation unit: the two mobility
+    /// classifiers answer disjointly for every representative (no row has both
+    /// true), and each representative pins its class — the moving list includes
+    /// the generic-arm ZoneChanged emitters (Token, Incubate, Bounce, Conjure
+    /// {Battlefield}, Amass, CastFromZone, Manifest), the destination-guarded
+    /// Conjure arm, and the interactive-window not-moving variants. Removing
+    /// any variant from `population_moves`' positive list flips its row red.
+    #[test]
+    fn population_mobility_classifiers_are_disjoint_and_representatives_are_pinned() {
+        use crate::types::ability::{
+            BounceSelection, ConjureCard, ConjureSource, DigRestOrder, DigSource,
+            SpellStackToGraveyardReplacement,
+        };
+        use crate::types::counter::CounterType;
+
+        let conjure = |destination| Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: "Conjured".to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        };
+        let reveal_until = |disposition| Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: disposition,
+            kept_destination: Zone::Exile,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+            kept_destination_if: None,
+        };
+
+        // (name, effect, population_moves, population_does_not_move)
+        let rows: Vec<(&str, Effect, bool, bool)> = vec![
+            ("ChangeZone", exile_leg().effect, true, false),
+            ("SetTapState", tap_leg().effect, false, true),
+            (
+                "PutCounter",
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+                false,
+                true,
+            ),
+            (
+                "DealDamage",
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+                false,
+                true,
+            ),
+            (
+                "Counter",
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_rider: None,
+                    countered_spell_zone: None,
+                },
+                true,
+                false,
+            ),
+            (
+                "Dig{reveal-only}",
+                Effect::Dig {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    destination: None,
+                    keep_count: Some(0),
+                    keep_count_expr: None,
+                    up_to: false,
+                    filter: TargetFilter::Any,
+                    rest_destination: None,
+                    rest_order: DigRestOrder::Preserve,
+                    reveal: true,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    source: DigSource::Library,
+                },
+                false,
+                false,
+            ),
+            (
+                "RevealUntil{RevealOnly}",
+                reveal_until(RevealUntilDisposition::RevealOnly),
+                false,
+                false,
+            ),
+            (
+                "RevealUntil{KeepEach}",
+                reveal_until(RevealUntilDisposition::KeepEach),
+                true,
+                false,
+            ),
+            (
+                "Token",
+                Effect::Token {
+                    name: "Treasure".to_string(),
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(0),
+                    types: vec![],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+                true,
+                false,
+            ),
+            (
+                "Incubate",
+                Effect::Incubate {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                true,
+                false,
+            ),
+            (
+                "Bounce",
+                Effect::Bounce {
+                    target: TargetFilter::Any,
+                    destination: None,
+                    selection: BounceSelection::Targeted,
+                },
+                true,
+                false,
+            ),
+            (
+                "Conjure{Battlefield}",
+                conjure(Zone::Battlefield),
+                true,
+                false,
+            ),
+            ("Conjure{Library}", conjure(Zone::Library), false, false),
+            (
+                "Manifest",
+                Effect::Manifest {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    object_source: None,
+                    profile: None,
+                    enters_under: None,
+                },
+                true,
+                false,
+            ),
+            (
+                "Amass",
+                Effect::Amass {
+                    subtype: "Zombie".to_string(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                true,
+                false,
+            ),
+            (
+                "CastFromZone",
+                Effect::CastFromZone {
+                    target: TargetFilter::Any,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::ResolutionWindow {
+                        bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
+                    },
+                    mana_spend_permission: None,
+                },
+                true,
+                false,
+            ),
+            (
+                "MadnessCast",
+                Effect::MadnessCast {
+                    cost: ManaCost::default(),
+                },
+                false,
+                false,
+            ),
+            (
+                "MiracleCast",
+                Effect::MiracleCast {
+                    cost: ManaCost::default(),
+                },
+                false,
+                false,
+            ),
+            (
+                "FreeCastFromZones",
+                Effect::FreeCastFromZones {
+                    count: Some(1),
+                    max_total_mv: None,
+                    filter: TargetFilter::Any,
+                    zones: vec![Zone::Graveyard],
+                    graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
+                },
+                false,
+                false,
+            ),
+            (
+                "PutOnTopOrBottom",
+                Effect::PutOnTopOrBottom {
+                    target: TargetFilter::Any,
+                    chooser: TargetFilter::Controller,
+                },
+                false,
+                false,
+            ),
+        ];
+
+        for (name, effect, moves, stays) in &rows {
+            assert_eq!(
+                population_moves(effect),
+                *moves,
+                "population_moves({name}) pins the mobility classification"
+            );
+            assert_eq!(
+                population_does_not_move(effect),
+                *stays,
+                "population_does_not_move({name}) pins the in-place classification"
+            );
+            assert!(
+                !(population_moves(effect) && population_does_not_move(effect)),
+                "the two classifiers are DISJOINT BY CONTRACT — {name} violated it"
+            );
+        }
+    }
+
+    /// Serde hardening control: the pre-enrichment stamp string deserializes to
+    /// the conservative-publish default instead of erroring (the verdict is
+    /// resolution-transient; no save/load path round-trips it across builds).
+    #[test]
+    fn legacy_detached_remainder_string_deserializes_to_no_producer() {
+        let legacy: DetachedRemainder = serde_json::from_str("\"HoldsPublisher\"")
+            .expect("a legacy stamp string must not fail deserialization");
+        assert_eq!(legacy, DetachedRemainder::NoProducer);
+        let round = serde_json::to_string(&DetachedRemainder::HoldsMovingPublisher)
+            .expect("the stamp must serialize");
+        assert_eq!(round, "\"HoldsMovingPublisher\"");
     }
 
     /// CR 608.2c (maintainer review, #7484): the event-less `GenericEffect`

@@ -27816,16 +27816,42 @@ pub enum ParentTargetMissingReason {
 /// the wrong population. The verdict is purely structural, so it is computed
 /// once at split time and carried on the template rather than re-derived.
 ///
-/// SOLE WRITERS: `split_player_scope_chain`, `split_multi_target_player_chain`.
+/// SOLE WRITERS: `split_player_scope_chain`, `split_multi_target_player_chain`,
+/// both through `detached_remainder_verdict`. SOLE READER VERDICTS:
+/// `is_sole_chain_producer` leg 3 vetoes on ANY non-`NoProducer` variant (the
+/// event-less gate's chain-wide verdict is unchanged by the split), while
+/// `transitive_publish_superseded` leg 3 vetoes ONLY on `HoldsMovingPublisher`
+/// — a same-class in-place remainder must publish exactly like the unsplit
+/// chain (CR 608.2c congruence). Serde compat: the verdict is
+/// resolution-transient (written only at split time, read only while the same
+/// chain resolves — no save/load, replay, or test path round-trips it across
+/// builds), so a legacy string this build does not know — e.g. the
+/// pre-enrichment `"HoldsPublisher"` — deserializes to the `NoProducer` default
+/// (conservative-publish) instead of erroring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DetachedRemainder {
-    /// Nothing was detached, or the detached remainder holds no producer in
-    /// publisher position. The template's own walk is the whole truth.
+    /// The detached remainder holds a publisher position whose population
+    /// STAYS IN PLACE (tap/counter/damage class — see
+    /// `effects::population_does_not_move`). `is_sole_chain_producer` leg 3
+    /// vetoes on this variant (the event-less gate's chain-wide verdict is
+    /// unchanged); the event-ful veto (`transitive_publish_superseded`) does
+    /// NOT — a same-class in-place remainder must publish exactly like the
+    /// unsplit chain.
+    HoldsInPlacePublisher,
+    /// The detached remainder holds a MOVING (zone-change-harvest) producer
+    /// in publisher position before any own-consumption consumer boundary —
+    /// the same verdict `effects::population_moves` drives in the unsplit
+    /// walk. Both gates veto.
+    HoldsMovingPublisher,
+    /// Nothing was detached, or the detached remainder holds no node that
+    /// binds the tracked set. The template's own walk is the whole truth.
+    /// LAST variant so serde's catch-all applies (serde requires
+    /// `#[serde(other)]` on the last variant): a legacy-state string this
+    /// build does not know deserializes here (conservative-publish; see the
+    /// sole-writer doc).
     #[default]
+    #[serde(other)]
     NoProducer,
-    /// The detached remainder holds a node in publisher position, so this node
-    /// is NOT the sole producer of its pre-split chain and must not publish.
-    HoldsPublisher,
 }
 
 /// CR 701.3a + CR 608.2d: The three semantic roles of an [`Effect::Attach`]
