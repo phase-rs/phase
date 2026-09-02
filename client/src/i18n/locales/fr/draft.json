@@ -336,6 +336,7 @@
     "moreNeeded": "{{count}} de plus requise(s)",
     "commanderRequired": "Désignez un commandant depuis votre réserve pour valider.",
     "commanderUnavailable": "La désignation du commandant est indisponible pour le moment — la base de données des cartes n'a pas pu être chargée.",
+    "compatibilityUnavailable": "La compatibilité du deck est indisponible pour le moment — réessayez avant de le soumettre.",
     "grantedFiller": "Votre réserve comprend également jusqu'à {{maximum}} × {{name}}, utilisable uniquement comme commandant."
   },
   "landing": {

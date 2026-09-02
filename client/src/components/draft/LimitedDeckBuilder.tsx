@@ -19,6 +19,11 @@ import { CommanderPanel } from "../deck-builder/CommanderPanel";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
+import type { ParsedDeck } from "../../services/deckParser";
+import {
+  evaluateDeckCompatibility,
+  type DeckCompatibilityResult,
+} from "../../services/deckCompatibility";
 import type {
   DraftCardInstance,
   DraftKind,
@@ -418,6 +423,66 @@ function useCommanderDesignation({
   };
 }
 
+type CommanderDraftCompatibilityState =
+  | { key: string; status: "pending" }
+  | { key: string; status: "resolved"; result: DeckCompatibilityResult }
+  | { key: string; status: "error" };
+
+function useCommanderDraftCompatibility({
+  active,
+  main,
+  commanders,
+}: {
+  active: boolean;
+  main: DeckEntry[];
+  commanders: string[];
+}) {
+  const request = useMemo<ParsedDeck>(() => ({
+    main,
+    sideboard: [],
+    commander: commanders,
+  }), [main, commanders]);
+  const key = useMemo(() => JSON.stringify({
+    format: "CommanderDraft",
+    main,
+    sideboard: [],
+    commander: commanders,
+    planarDeck: [],
+    schemeDeck: [],
+    signatureSpell: [],
+    companion: null,
+  }), [main, commanders]);
+  const [state, setState] = useState<CommanderDraftCompatibilityState | null>(null);
+  const generationRef = useRef(0);
+
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    if (!active) {
+      setState(null);
+      return;
+    }
+
+    setState({ key, status: "pending" });
+    evaluateDeckCompatibility(request, { selectedFormat: "CommanderDraft" })
+      .then((result) => {
+        if (generation === generationRef.current) {
+          setState({ key, status: "resolved", result });
+        }
+      })
+      .catch(() => {
+        if (generation === generationRef.current) setState({ key, status: "error" });
+      });
+  }, [active, key, request]);
+
+  const currentState = state?.key === key ? state : null;
+  const result = currentState?.status === "resolved" ? currentState.result : null;
+  return {
+    compatible: !active || result?.selected_format_compatible === true,
+    reasons: result?.selected_format_reasons ?? [],
+    unavailable: active && currentState?.status === "error",
+  };
+}
+
 // ── Main component ──────────────────────────────────────────────────────
 
 interface LimitedDeckBuilderProps {
@@ -675,7 +740,21 @@ function ControlledDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const { cardDataCache } = useDeckCardData(commanders);
+  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft" && designationRequired;
+  const compatibility = useCommanderDraftCompatibility({
+    active: commanderDraftCompatibilityActive,
+    main: commanderDeckEntries,
+    commanders,
+  });
+  const { cardDataCache } = useDeckCardData(
+    commanderDeckEntries.map((entry) => entry.name),
+  );
+  const colorValues = commanderDeckEntries.flatMap((entry) => {
+    const card = cardDataCache.get(entry.name);
+    return card
+      ? Array.from({ length: entry.count }, () => card.color_identity?.join("") ?? "")
+      : [];
+  });
 
   const totalCards = mainDeck.length + totalLands;
   const minDeckSize = view?.min_deck_size ?? 40;
@@ -711,7 +790,9 @@ function ControlledDeckBuilder({
   // updater that re-checks `prev.length === 1` against live state, so
   // concurrent in-flight partner queries cannot stack designations. Every other
   // `setCommanders` writer here only shrinks the list.
-  const deckValid = totalCards >= minDeckSize && designationSatisfied;
+  const deckValid = totalCards >= minDeckSize
+    && designationSatisfied
+    && compatibility.compatible;
   const displayedSubmissionError = submissionError ?? localSubmissionError;
 
   useEffect(() => {
@@ -917,7 +998,13 @@ function ControlledDeckBuilder({
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 onCardHover={setHoveredCard}
+                formatValidationReasons={compatibility.reasons}
               />
+              {compatibility.unavailable && (
+                <p role="alert" className="text-xs text-amber-300/80">
+                  {t("limitedDeck.compatibilityUnavailable")}
+                </p>
+              )}
               {!designationSatisfied && (
                 <p className="text-xs text-white/55">{t("limitedDeck.commanderRequired")}</p>
               )}
@@ -926,7 +1013,7 @@ function ControlledDeckBuilder({
 
           {/* Mana curve */}
           <section>
-            <ManaCurve pool={pool} cards={mainDeck} />
+            <ManaCurve pool={pool} cards={mainDeck} colorValues={colorValues} />
           </section>
 
           {/* Actions */}
@@ -1050,14 +1137,31 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const { cardDataCache } = useDeckCardData(commanders);
+  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft"
+    && controller.commanderDesignation === "initial-pod";
+  const compatibility = useCommanderDraftCompatibility({
+    active: commanderDraftCompatibilityActive,
+    main: commanderDeckEntries,
+    commanders,
+  });
+  const { cardDataCache } = useDeckCardData(
+    commanderDeckEntries.map((entry) => entry.name),
+  );
+  const colorValues = commanderDeckEntries.flatMap((entry) => {
+    const card = cardDataCache.get(entry.name);
+    return card
+      ? Array.from({ length: entry.count }, () => card.color_identity?.join("") ?? "")
+      : [];
+  });
   const totalLands = useMemo(
     () => deckCards.filter((card) => /\bland\b/i.test(card.type_line)).length
       + deckVirtualBasics.filter((card) => BASIC_LAND_NAMES.has(card.name)).length,
     [deckCards, deckVirtualBasics],
   );
   const minDeckSize = view.min_deck_size ?? 40;
-  const deckValid = deckNames.length >= minDeckSize && designationSatisfied;
+  const deckValid = deckNames.length >= minDeckSize
+    && designationSatisfied
+    && compatibility.compatible;
   const phoneLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
   const tabletLayout = responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape";
   const tabletLandscapeLayout = responsiveLayout === "tablet-landscape";
@@ -1272,7 +1376,13 @@ function WorkspaceDeckBuilder({
         onSetCommander={handleSetCommander}
         onRemoveCommander={handleRemoveCommander}
         onCardHover={handleHover}
+        formatValidationReasons={compatibility.reasons}
       />
+      {compatibility.unavailable && (
+        <p role="alert" className="text-xs text-amber-300/80">
+          {t("limitedDeck.compatibilityUnavailable")}
+        </p>
+      )}
       {!designationSatisfied && (
         <p className="text-xs text-white/55">{t("limitedDeck.commanderRequired")}</p>
       )}
@@ -1353,7 +1463,12 @@ function WorkspaceDeckBuilder({
                   className="grid grid-cols-[minmax(0,45fr)_minmax(0,15fr)_minmax(0,20fr)_minmax(0,20fr)] gap-2"
                 >
                   <div data-tablet-landscape-builder-slot="curve" className="min-w-0">
-                    <ManaCurve pool={pool} cards={spellNames} presentation="compact" />
+                    <ManaCurve
+                      pool={pool}
+                      cards={spellNames}
+                      colorValues={colorValues}
+                      presentation="compact"
+                    />
                   </div>
                   <div
                     data-tablet-landscape-builder-slot="average"
@@ -1400,7 +1515,7 @@ function WorkspaceDeckBuilder({
               <>
                 <div data-tablet-builder-summary className="grid grid-cols-4 gap-3 overflow-hidden">
                   <section className="col-span-3 min-w-0">
-                    <ManaCurve pool={pool} cards={spellNames} />
+                    <ManaCurve pool={pool} cards={spellNames} colorValues={colorValues} />
                   </section>
                   <section className="col-span-1 flex min-w-0 items-center justify-center">
                     <AverageManaCost cards={deckCards} />
@@ -1442,14 +1557,34 @@ function WorkspaceDeckBuilder({
           </aside>
         </>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col gap-6 xl:flex-row">
+        <div
+          data-responsive-workspace-layout
+          className="flex min-h-0 flex-1 flex-col gap-6 xl:flex-row"
+        >
           {/* Primary board: exact-instance deck/sideboard placement authority. */}
           <div className="flex min-h-0 w-full min-w-0 flex-[7] flex-col overflow-hidden">
             {workspaceBoard}
           </div>
 
-          {/* Right column: deck analysis, suggestions and submission. */}
-          <div className={`${phoneLayout ? "hidden" : "flex"} w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto`}>
+          {phoneLayout && (
+            <aside
+              data-mobile-builder-analysis
+              className="shrink-0 space-y-3 border-t border-white/10 pt-3"
+            >
+              <ManaCurve
+                pool={pool}
+                cards={spellNames}
+                colorValues={colorValues}
+                presentation="compact"
+              />
+            </aside>
+          )}
+
+          {!phoneLayout && (
+          <div
+            data-desktop-builder-analysis
+            className="flex w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto"
+          >
             {commanderControls}
             {suggestionsEnabled && editableController?.onAutoSuggestDeck && (
               <section>
@@ -1464,7 +1599,7 @@ function WorkspaceDeckBuilder({
             )}
 
             <section>
-              <ManaCurve pool={pool} cards={spellNames} />
+              <ManaCurve pool={pool} cards={spellNames} colorValues={colorValues} />
             </section>
 
             <section className="flex flex-col gap-4">
@@ -1488,6 +1623,7 @@ function WorkspaceDeckBuilder({
               {submissionAlert}
             </section>
           </div>
+          )}
         </div>
       )}
       {phoneLayout && (

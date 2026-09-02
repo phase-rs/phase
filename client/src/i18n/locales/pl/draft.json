@@ -336,6 +336,7 @@
     "moreNeeded": "potrzeba jeszcze {{count}}",
     "commanderRequired": "Wyznacz dowódcę ze swojej puli, aby przesłać talię.",
     "commanderUnavailable": "Wyznaczanie dowódcy jest w tej chwili niedostępne — nie udało się wczytać bazy kart.",
+    "compatibilityUnavailable": "Sprawdzanie zgodności talii jest teraz niedostępne — spróbuj ponownie przed zatwierdzeniem.",
     "grantedFiller": "Twoja pula zawiera także do {{maximum}} × {{name}}, do użycia wyłącznie jako dowódca."
   },
   "landing": {

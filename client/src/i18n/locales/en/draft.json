@@ -344,6 +344,7 @@
     "moreNeeded": "{{count}} more needed",
     "commanderRequired": "Designate a commander from your pool to submit.",
     "commanderUnavailable": "Commander designation is unavailable right now — the card database could not be loaded.",
+    "compatibilityUnavailable": "Deck compatibility is unavailable right now — try again before submitting.",
     "grantedFiller": "Your pool also includes up to {{maximum}} × {{name}}, usable only as your commander."
   },
   "landing": {

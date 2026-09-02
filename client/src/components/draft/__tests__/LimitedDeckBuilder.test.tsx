@@ -8,6 +8,38 @@ import { createDefaultDraftWorkspacePreferences } from "../workspace/workspacePr
 
 afterEach(cleanup);
 
+const compatibilityHarness = vi.hoisted(() => ({
+  evaluate: vi.fn(),
+  cardDataCache: new Map<string, { name: string; cmc: number; color_identity: string[] }>(),
+  colorCaptures: [] as string[][],
+}));
+
+const compatibleResult = () => ({
+  standard: { compatible: true, reasons: [] },
+  commander: { compatible: true, reasons: [] },
+  bo3_ready: true,
+  unknown_cards: [],
+  selected_format_compatible: true,
+  selected_format_reasons: [],
+  color_identity: [],
+});
+
+compatibilityHarness.evaluate.mockImplementation(async () => compatibleResult());
+
+vi.mock("../../../services/deckCompatibility", () => ({
+  evaluateDeckCompatibility: (...args: unknown[]) => compatibilityHarness.evaluate(...args),
+}));
+
+vi.mock("../../deck-builder/ColorDistribution", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../deck-builder/ColorDistribution")>();
+  return {
+    ColorDistribution: (props: { colorValues: string[]; presentation?: "default" | "compact" }) => {
+      compatibilityHarness.colorCaptures.push([...props.colorValues]);
+      return <actual.ColorDistribution {...props} />;
+    },
+  };
+});
+
 vi.mock("../../../stores/draftStore", () => ({
   useDraftStore: (selector: (state: Record<string, unknown>) => unknown) =>
     selector({
@@ -143,12 +175,9 @@ vi.mock("../../../services/engineRuntime", async (importOriginal) => {
   };
 });
 
-// The colour-identity pips are not what these rows assert, and the real hook
-// would reach Scryfall. A stable empty cache keeps the render deterministic.
-const EMPTY_CARD_DATA_CACHE = new Map();
 vi.mock("../../../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({
-    cardDataCache: EMPTY_CARD_DATA_CACHE,
+    cardDataCache: compatibilityHarness.cardDataCache,
     cacheCards: () => {},
   }),
 }));
@@ -243,6 +272,10 @@ describe("LimitedDeckBuilder", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    compatibilityHarness.evaluate.mockClear();
+    compatibilityHarness.evaluate.mockImplementation(async () => compatibleResult());
+    compatibilityHarness.cardDataCache.clear();
+    compatibilityHarness.colorCaptures.length = 0;
   });
 
   it("updates mana curve when a card is added from pool", () => {
@@ -650,9 +683,18 @@ describe("LimitedDeckBuilder", () => {
       expect(container.querySelector("[data-tablet-landscape-builder-dock]")).not.toBeInTheDocument();
       expect(container.querySelector("[data-tablet-landscape-builder-row]")).not.toBeInTheDocument();
       expect(container.querySelector("[data-tablet-landscape-builder-slot]")).not.toBeInTheDocument();
-      expect(container.querySelector("[data-mana-curve-presentation='compact']")).not.toBeInTheDocument();
-      for (const curve of container.querySelectorAll("[data-mana-curve-presentation]")) {
-        expect(curve).toHaveAttribute("data-mana-curve-presentation", "default");
+      if (responsiveLayout.startsWith("phone")) {
+        const mobileAnalysis = container.querySelector<HTMLElement>("[data-mobile-builder-analysis]")!;
+        expect(mobileAnalysis.querySelector("[data-mana-curve-presentation='compact']"))
+          .toBeInTheDocument();
+        expect(container.querySelector("[data-desktop-builder-analysis]"))
+          .not.toBeInTheDocument();
+      } else {
+        expect(container.querySelector("[data-mana-curve-presentation='compact']"))
+          .not.toBeInTheDocument();
+        for (const curve of container.querySelectorAll("[data-mana-curve-presentation]")) {
+          expect(curve).toHaveAttribute("data-mana-curve-presentation", "default");
+        }
       }
     },
   );
@@ -1245,11 +1287,425 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     engineEligible.mockResolvedValue(false);
     enginePartnerCandidates.mockReset();
     enginePartnerCandidates.mockResolvedValue([]);
+    compatibilityHarness.evaluate.mockClear();
+    compatibilityHarness.evaluate.mockImplementation(async () => compatibleResult());
+    compatibilityHarness.cardDataCache.clear();
+    compatibilityHarness.colorCaptures.length = 0;
   });
 
   function onlyVehicleIsEligible() {
     engineEligible.mockImplementation(async (name: string) => name === "Vehicle Commander");
   }
+
+  it("preserves controlled duplicates in Commander Draft compatibility and renders raw reasons", async () => {
+    onlyVehicleIsEligible();
+    const submitSpy = vi.fn();
+    const reason = "Cards outside commander's color identity: Wind Drake";
+    compatibilityHarness.evaluate.mockImplementation(async () => ({
+      ...compatibleResult(),
+      selected_format_compatible: false,
+      selected_format_reasons: [reason],
+    }));
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={submitSpy}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      {
+        main: [
+          { name: "Wind Drake", count: 59 },
+          { name: "Vehicle Commander", count: 1 },
+        ],
+        sideboard: [],
+        commander: ["Vehicle Commander"],
+      },
+      { selectedFormat: "CommanderDraft" },
+    ));
+
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("enables controlled submission only for the current strict-true engine result", async () => {
+    onlyVehicleIsEligible();
+    const submitSpy = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={submitSpy}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
+  });
+
+  it.each(["Quick", "Sealed", "Premier", "Traditional"] as const)(
+    "keeps %s compatibility inactive and submission neutral",
+    async (kind) => {
+      const submitSpy = vi.fn();
+      render(
+        <LimitedDeckBuilder
+          view={{ ...TEST_VIEW, kind, min_deck_size: 1 }}
+          mainDeck={["Wind Drake"]}
+          landCounts={NO_LANDS}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={submitSpy}
+          showSuggestions={false}
+        />,
+      );
+
+      const submit = screen.getByRole("button", { name: "Submit Deck" });
+      expect(submit).not.toBeDisabled();
+      fireEvent.click(submit);
+      await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
+      expect(compatibilityHarness.evaluate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, undefined])(
+    "fails closed when controlled compatibility is %s",
+    async (selectedFormatCompatible) => {
+      onlyVehicleIsEligible();
+      compatibilityHarness.evaluate.mockImplementation(async () => {
+        const result = compatibleResult();
+        if (selectedFormatCompatible === null) {
+          return { ...result, selected_format_compatible: null };
+        }
+        const { selected_format_compatible: _omitted, ...withoutField } = result;
+        return withoutField;
+      });
+      render(
+        <LimitedDeckBuilder
+          view={COMMANDER_VIEW}
+          mainDeck={SIXTY_CARD_DECK}
+          landCounts={NO_LANDS}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+      await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+    },
+  );
+
+  function workspaceDeckFixture() {
+    const cards = [
+      ...Array.from({ length: 59 }, (_, index) => ({
+        ...TEST_VIEW.pool[0],
+        instance_id: `wind-${index}`,
+      })),
+      VEHICLE_COMMANDER,
+    ];
+    return {
+      cards,
+      workspace: {
+        schemaVersion: 1 as const,
+        placements: Object.fromEntries(cards.map((card, index) => [
+          card.instance_id,
+          { zone: "deck" as const, row: 0 as const, column: 0, order: index },
+        ])),
+        virtualBasics: [],
+      },
+    };
+  }
+
+  it("preserves workspace instances in compatibility and renders the raw named reason", async () => {
+    onlyVehicleIsEligible();
+    const submitSpy = vi.fn();
+    const reason = "Cards outside commander's color identity: Wind Drake";
+    compatibilityHarness.evaluate.mockImplementation(async () => ({
+      ...compatibleResult(),
+      selected_format_compatible: false,
+      selected_format_reasons: [reason],
+    }));
+    const fixture = workspaceDeckFixture();
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          commanderDesignation: "initial-pod",
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submitSpy,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      {
+        main: [
+          { name: "Wind Drake", count: 59 },
+          { name: "Vehicle Commander", count: 1 },
+        ],
+        sideboard: [],
+        commander: ["Vehicle Commander"],
+      },
+      { selectedFormat: "CommanderDraft" },
+    ));
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    const submits = within(container).getAllByRole("button", { name: "Submit Deck" });
+    expect(submits.every((button) => button.hasAttribute("disabled"))).toBe(true);
+    submits.forEach((button) => fireEvent.click(button));
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("enables active workspace submission only after a strict-true result", async () => {
+    onlyVehicleIsEligible();
+    const submitSpy = vi.fn();
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          commanderDesignation: "initial-pod",
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submitSpy,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
+  });
+
+  it("keeps workspace compatibility inactive without initial-pod designation", async () => {
+    const submitSpy = vi.fn();
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, min_deck_size: 1, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submitSpy,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
+    expect(compatibilityHarness.evaluate).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "rejects a stale compatibility %s after the controlled deck key changes",
+    async (settlement) => {
+    onlyVehicleIsEligible();
+    let settleOld!: () => void;
+    compatibilityHarness.evaluate.mockImplementation((deck: { main: Array<{ count: number }> }) => {
+      if (deck.main[0]?.count === 59) {
+        return new Promise((resolve, reject) => {
+          settleOld = settlement === "resolve"
+            ? () => resolve(compatibleResult())
+            : () => reject(new Error("Stale failure"));
+        });
+      }
+      return Promise.resolve({
+        ...compatibleResult(),
+        selected_format_compatible: false,
+        selected_format_reasons: ["Current rejection"],
+      });
+    });
+
+    function CompatibilityLifecycleHarness() {
+      const [windCopies, setWindCopies] = useState(59);
+      return (
+        <>
+          <button onClick={() => setWindCopies(60)}>Change deck</button>
+          <LimitedDeckBuilder
+            view={COMMANDER_VIEW}
+            mainDeck={[
+              ...Array.from({ length: windCopies }, () => "Wind Drake"),
+              "Vehicle Commander",
+            ]}
+            landCounts={NO_LANDS}
+            onAddToDeck={() => {}}
+            onRemoveFromDeck={() => {}}
+            onSetLandCount={() => {}}
+            onSubmitDeck={() => {}}
+            showSuggestions={false}
+          />
+        </>
+      );
+    }
+
+    render(<StrictMode><CompatibilityLifecycleHarness /></StrictMode>);
+    fireEvent.click(await screen.findByRole("button", { name: "Vehicle Commander" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change deck" }));
+    expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+    expect(await screen.findByText("Current rejection")).toBeInTheDocument();
+    await act(async () => settleOld());
+    expect(screen.getByText("Current rejection")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Deck" })).toBeDisabled();
+    },
+  );
+
+  it("projects controlled COLORS per cached copy and keeps Wastes colorless", () => {
+    const azorius = { ...TEST_VIEW.pool[0], instance_id: "azorius", name: "Azorius Pair" };
+    const red = { ...TEST_VIEW.pool[0], instance_id: "red", name: "Red Card" };
+    const uncached = { ...TEST_VIEW.pool[0], instance_id: "uncached", name: "Uncached Card" };
+    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["W", "U"] });
+    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["R"] });
+    compatibilityHarness.cardDataCache.set("Wastes", { name: "Wastes", cmc: 0, color_identity: [] });
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, pool: [azorius, red, uncached], addable_cards: ["Wastes"] }}
+        mainDeck={["Azorius Pair", "Azorius Pair", "Red Card", "Uncached Card"]}
+        landCounts={{ Wastes: 1 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(compatibilityHarness.colorCaptures.some(
+      (capture) => JSON.stringify([...capture].sort()) === JSON.stringify(["", "R", "WU", "WU"]),
+    )).toBe(true);
+    expect(screen.getByText("W 40%")).toBeInTheDocument();
+    expect(screen.getByText("U 40%")).toBeInTheDocument();
+    expect(screen.getByText("R 20%")).toBeInTheDocument();
+  });
+
+  it.each(["phone-portrait", "phone-landscape", "tablet-landscape", "desktop"] as const)(
+    "projects workspace COLORS per instance with ordered ownership in %s",
+    (responsiveLayout) => {
+    const azoriusCards = [0, 1].map((index) => ({
+      ...TEST_VIEW.pool[0], instance_id: `azorius-${index}`, name: "Azorius Pair",
+    }));
+    const red = { ...TEST_VIEW.pool[0], instance_id: "red", name: "Red Card" };
+    const uncached = { ...TEST_VIEW.pool[0], instance_id: "uncached", name: "Uncached Card" };
+    const pool = [...azoriusCards, red, uncached];
+    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["W", "U"] });
+    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["R"] });
+    compatibilityHarness.cardDataCache.set("Wastes", { name: "Wastes", cmc: 0, color_identity: [] });
+    const placements = Object.fromEntries(pool.map((card, index) => [
+      card.instance_id,
+      { zone: "deck" as const, row: 0 as const, column: 0, order: index },
+    ]));
+    placements.wastes = { zone: "deck", row: 0, column: 0, order: 4 };
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool, min_deck_size: 1 },
+          workspace: {
+            schemaVersion: 1,
+            placements,
+            virtualBasics: [{ instanceId: "wastes", name: "Wastes" }],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout={responsiveLayout}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(compatibilityHarness.colorCaptures.some(
+      (capture) => JSON.stringify([...capture].sort()) === JSON.stringify(["", "R", "WU", "WU"]),
+    )).toBe(true);
+    const layout = container.querySelector<HTMLElement>("[data-responsive-builder-layout]")!;
+    const phone = responsiveLayout.startsWith("phone");
+    const tablet = responsiveLayout === "tablet-landscape";
+    const responsive = tablet
+      ? layout
+      : layout.querySelector<HTMLElement>("[data-responsive-workspace-layout]")!;
+    const analysis = tablet
+      ? responsive.querySelector<HTMLElement>("[data-mana-curve]")!
+      : responsive.querySelector<HTMLElement>(
+        phone ? "[data-mobile-builder-analysis]" : "[data-desktop-builder-analysis]",
+      )!;
+    const curve = tablet
+      ? analysis
+      : analysis.querySelector<HTMLElement>("[data-mana-curve]")!;
+    const colors = analysis.querySelector<HTMLElement>("[data-color-distribution]")!;
+    expect(container.querySelectorAll("[data-mana-curve]")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-color-distribution]")).toHaveLength(1);
+    if (phone) {
+      expect(container.querySelector("[data-desktop-builder-analysis]")).toBeNull();
+    } else {
+      expect(container.querySelector("[data-mobile-builder-analysis]")).toBeNull();
+      if (tablet) {
+        expect(container.querySelector("[data-desktop-builder-analysis]")).toBeNull();
+      }
+    }
+    expect(responsive.compareDocumentPosition(analysis) & Node.DOCUMENT_POSITION_CONTAINED_BY).not.toBe(0);
+    expect(curve.compareDocumentPosition(colors) & Node.DOCUMENT_POSITION_CONTAINED_BY).not.toBe(0);
+    const dock = container.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]");
+    if (phone) {
+      expect(responsive.compareDocumentPosition(dock!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    } else {
+      expect(dock).toBeNull();
+    }
+    expect(colors).toHaveTextContent("W 40%");
+    expect(colors).toHaveTextContent("U 40%");
+    expect(colors).toHaveTextContent("R 20%");
+    },
+  );
 
   /**
    * V1 — CR 903.3: submission is blocked until a commander is designated, even
@@ -1960,6 +2416,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         ? within(document.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]")!)
           .getByRole("button", { name: "Submit Deck" })
         : screen.getByRole("button", { name: "Submit Deck" });
+      await waitFor(() => expect(submitButton).not.toBeDisabled());
       fireEvent.click(submitButton);
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([
         "The Prismatic Piper",

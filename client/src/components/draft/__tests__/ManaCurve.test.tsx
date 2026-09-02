@@ -25,6 +25,16 @@ const POOL: DraftCardInstance[] = [
     cmc: 3,
     type_line: "Creature",
   },
+  {
+    instance_id: "land",
+    name: "Red Land",
+    set_code: "tst",
+    collector_number: "3",
+    rarity: "common" as const,
+    colors: [],
+    cmc: 0,
+    type_line: "Land",
+  },
 ];
 
 function meterSemantics(curve: HTMLElement) {
@@ -40,8 +50,8 @@ describe("ManaCurve", () => {
   it("keeps all seven meter semantics in the compact presentation", () => {
     const { container } = render(
       <>
-        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} />
-        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} presentation="compact" />
+        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} colorValues={["U", "R"]} />
+        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} colorValues={["U", "R"]} presentation="compact" />
       </>,
     );
 
@@ -55,8 +65,8 @@ describe("ManaCurve", () => {
   it("uses explicit compact geometry while retaining the full curve labels", () => {
     const { container } = render(
       <>
-        <ManaCurve pool={[...POOL]} cards={["One Drop"]} />
-        <ManaCurve pool={[...POOL]} cards={["One Drop"]} presentation="compact" />
+        <ManaCurve pool={[...POOL]} cards={["One Drop"]} colorValues={["U"]} />
+        <ManaCurve pool={[...POOL]} cards={["One Drop"]} colorValues={["U"]} presentation="compact" />
       </>,
     );
 
@@ -74,5 +84,22 @@ describe("ManaCurve", () => {
       .toEqual(["0", "1", "2", "3", "4", "5", "6+"]);
     expect(compactCurve.querySelector("[data-mana-curve-meter='1'] [data-mana-curve-count]"))
       .toHaveTextContent("1");
+  });
+
+  it("keeps spell-only mana values independent from land-inclusive colors", () => {
+    const { container } = render(
+      <ManaCurve
+        pool={POOL}
+        cards={["One Drop", "Red Land"]}
+        colorValues={["U", "R"]}
+      />,
+    );
+
+    expect(container.querySelector("[data-mana-curve-meter='0']"))
+      .toHaveAttribute("aria-valuenow", "0");
+    expect(container.querySelector("[data-mana-curve-meter='1']"))
+      .toHaveAttribute("aria-valuenow", "1");
+    expect(container.querySelector("[data-color-distribution]")).toHaveTextContent("U 50%");
+    expect(container.querySelector("[data-color-distribution]")).toHaveTextContent("R 50%");
   });
 });

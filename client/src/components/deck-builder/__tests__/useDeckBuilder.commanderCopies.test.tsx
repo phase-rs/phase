@@ -5,6 +5,7 @@ import type { GameFormat } from "../../../adapter/types";
 
 const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
+const cardDataCache = new Map<string, { name: string; cmc: number; color_identity: string[] }>();
 
 vi.mock("../../../services/engineRuntime", () => ({
   isCardCommanderEligibleForFormat: vi.fn(async (name: string) => eligible.has(name)),
@@ -17,7 +18,7 @@ vi.mock("../../../services/engineRuntime", () => ({
 }));
 
 vi.mock("../../../hooks/useDeckCardData", () => ({
-  useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
+  useDeckCardData: () => ({ cardDataCache, cacheCards: vi.fn() }),
 }));
 
 vi.mock("../../../hooks/useBracketEstimate", () => ({
@@ -90,6 +91,7 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     eligible.add(OTHER);
     partnerCandidates.mockReset();
     partnerCandidates.mockResolvedValue([]);
+    cardDataCache.clear();
     localStorage.clear();
   });
 
@@ -178,5 +180,40 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.deck.main.filter((e) => e.name === LEGEND)).toHaveLength(1);
     expect(mainCount(result, LEGEND)).toBe(3);
     expect(result.current.commanders).toEqual([]);
+  });
+
+  it("projects one color identity entry per cached physical copy", async () => {
+    cardDataCache.set("Azorius Pair", {
+      name: "Azorius Pair",
+      cmc: 2,
+      color_identity: ["W", "U"],
+    });
+    cardDataCache.set("Red Card", {
+      name: "Red Card",
+      cmc: 1,
+      color_identity: ["R"],
+    });
+    cardDataCache.set("Wastes", {
+      name: "Wastes",
+      cmc: 0,
+      color_identity: [],
+    });
+    const { result } = setup();
+
+    act(() => {
+      result.current.handleImport({
+        main: [
+          { name: "Azorius Pair", count: 2 },
+          { name: "Red Card", count: 1 },
+          { name: "Wastes", count: 1 },
+          { name: "Uncached Card", count: 1 },
+        ],
+        sideboard: [],
+      });
+    });
+
+    await waitFor(() => {
+      expect([...result.current.colorValues].sort()).toEqual(["", "R", "WU", "WU"]);
+    });
   });
 });

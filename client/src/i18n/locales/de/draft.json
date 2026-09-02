@@ -336,6 +336,7 @@
     "moreNeeded": "{{count}} weitere benötigt",
     "commanderRequired": "Bestimme einen Kommandeur aus deinem Pool, um abzugeben.",
     "commanderUnavailable": "Die Kommandeur-Bestimmung ist derzeit nicht verfügbar — die Kartendatenbank konnte nicht geladen werden.",
+    "compatibilityUnavailable": "Die Deckkompatibilität ist derzeit nicht verfügbar — versuche es vor dem Einreichen erneut.",
     "grantedFiller": "Dein Pool enthält außerdem bis zu {{maximum}} × {{name}}, nur als Kommandeur verwendbar."
   },
   "landing": {
