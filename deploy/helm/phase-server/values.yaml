@@ -159,6 +159,15 @@ traefik:
         burst: 10
     headers:
       stsSeconds: 31536000
+    # gzip/br/zstd response compression (Traefik picks by Accept-Encoding).
+    # Applied to every routed path EXCEPT /ws (see
+    # phase-server.commonMiddlewares / phase-server.middlewareRefs in
+    # _helpers.tpl): a WebSocket upgrade's 101 response carries no body to
+    # compress, so this mirrors the split crates/phase-server/src/main.rs
+    # makes for CompressionLayer, keeping /ws off both layers' compression
+    # for the same reason.
+    compress:
+      minResponseBodyBytes: 1024
     # Middleware names (namespace-name@kubernetescrd) appended to all routes.
     extra: []
 

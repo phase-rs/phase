@@ -12,6 +12,7 @@ describe("preferencesStore", () => {
         hudLayout: "inline",
         followActiveOpponent: false,
         logDefaultState: "closed",
+        logDockSide: "right",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
         animationSpeedMultiplier: 1.0,
@@ -41,6 +42,7 @@ describe("preferencesStore", () => {
     expect(state.hudLayout).toBe("inline");
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
+    expect(usePreferencesStore.getInitialState().logDockSide).toBe("right");
     expect(state.boardBackground).toBe("auto-wubrg");
     // Read the store's real initialization snapshot (the getInitialState idiom
     // used below): the shared beforeEach writes its own defaults snapshot, so a
@@ -133,6 +135,21 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().logDefaultState).toBe("open");
+  });
+
+  it("persists the game-log dock side and reset restores the right dock", () => {
+    act(() => {
+      usePreferencesStore.getState().setLogDockSide("left");
+    });
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("left");
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.logDockSide).toBe("left");
+
+    act(() => {
+      usePreferencesStore.getState().resetAllPreferences();
+    });
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
   });
 
   it("setBoardBackground updates board background", () => {
@@ -297,7 +314,7 @@ describe("preferencesStore", () => {
   it("normalizes a current-version persisted locale before consumers can use it", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { language: "pt-BR" }, version: 32 }),
+      JSON.stringify({ state: { language: "pt-BR" }, version: 33 }),
     );
 
     act(() => usePreferencesStore.persist.rehydrate());
@@ -308,7 +325,7 @@ describe("preferencesStore", () => {
   it("falls back from an unsupported current-version persisted locale", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { language: "zh-Hans" }, version: 32 }),
+      JSON.stringify({ state: { language: "zh-Hans" }, version: 33 }),
     );
 
     act(() => usePreferencesStore.persist.rehydrate());
@@ -316,6 +333,31 @@ describe("preferencesStore", () => {
     expect(["en", "es", "fr", "de", "it", "pt", "pl"]).toContain(
       usePreferencesStore.getState().language,
     );
+  });
+
+  it("migrates pre-log-dock preferences to the prior right dock", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { logDockSide: "left" }, version: 32 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
+  });
+
+  it.each([undefined, "middle", 7])("resets an invalid current log-dock value (%j) to right", (logDockSide) => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: logDockSide === undefined ? {} : { logDockSide },
+        version: 33,
+      }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("right");
   });
 
   it("migrates v1 enum animationSpeed='instant' to multiplier 0", () => {

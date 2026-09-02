@@ -5,7 +5,6 @@ use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
 use crate::game::effects::prepare;
-use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::types::ability::{
@@ -4126,30 +4125,30 @@ pub(crate) fn priority_actions_with_probe(
         }
 
         if is_main_phase && stack_empty && is_active {
+            // CR 709.5e: the unlockable doors come from `room::eligible_doors`,
+            // the same authority the human offer reads
+            // (`room::priority_unlock_room_door_announcements`). Enumerating
+            // them here by hand answered differently for a permanent that is a
+            // COPY of a Room: its own `back_face` is empty, so the right door —
+            // which `room::effective_room_halves` reads off the COPIED halves
+            // (CR 709.5b + CR 707.2) — never appeared, and a bot could never
+            // unlock it.
             for &obj_id in &state.battlefield {
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
-                if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room")
-                {
+                if obj.controller != player {
                     continue;
                 }
-                let unlocks = obj.room_unlocks.unwrap_or_default();
-                if !unlocks.left_unlocked {
+                for (_, door) in crate::game::room::eligible_doors(
+                    state,
+                    obj_id,
+                    crate::types::ability::DoorLockOp::Unlock,
+                ) {
                     actions.push(candidate(
                         GameAction::UnlockRoomDoor {
                             object_id: obj_id,
-                            door: RoomDoor::Left,
-                        },
-                        TacticalClass::Ability,
-                        Some(player),
-                    ));
-                }
-                if obj.back_face.is_some() && !unlocks.right_unlocked {
-                    actions.push(candidate(
-                        GameAction::UnlockRoomDoor {
-                            object_id: obj_id,
-                            door: RoomDoor::Right,
+                            door,
                         },
                         TacticalClass::Ability,
                         Some(player),
@@ -5809,6 +5808,7 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
 

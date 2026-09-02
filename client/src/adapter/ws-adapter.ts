@@ -32,6 +32,7 @@ import {
   commitFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
+import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -202,6 +203,30 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 55 — DerivedViews.room_half_identities publishes both halves of every
+ *      battlefield Room in printed order, resolved through the COPIED halves
+ *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *      offer names the half and shows its unlock cost (CR 709.5e) from this
+ *      map; an enter-as-copy recipient carries neither on its own printed
+ *      card. Serde-additive, but the client renders the map directly, so an
+ *      older server would silently label every door "Tap for Mana" again. The
+ *      full handshake refuses stale peers. Lobby messages are unchanged.
+ * 54 — CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
+ *      Chaos client sends candidate set codes only; the Full server resolves
+ *      and persists the private seat-by-round assignment matrix. The full
+ *      handshake refuses stale peers. Lobby messages are unchanged.
+ * 53 — DraftPlayerView.launch_capability publishes the engine-authorized
+ *      post-draft multiplayer launch. The client renders this procedure-owned
+ *      capability instead of inferring it from DraftKind; an older server
+ *      would omit it and silently hide a completed Commander pod's launch.
+ *      The full-game handshake refuses that capability mismatch. Lobby
+ *      messages are unchanged.
+ * 52 — DerivedViews.storm_count publishes the engine-owned number of copies a
+ *      current Storm trigger will create, or a newly cast Storm spell would
+ *      create. The field is serde-additive, but this client renders that
+ *      scalar directly rather than deriving Storm from raw state; a v51 host
+ *      would silently omit the HUD status. The full-game handshake refuses
+ *      that capability mismatch. Lobby messages are unchanged.
  * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
  *      gained duration and source_id, ExileWithAltCost gained source_id beside
  *      the duration it already had (additive, serde
@@ -363,12 +388,12 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 51;
+export const PROTOCOL_VERSION = 55;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
- * Planechase changed the wire message surface in a non-backward-compatible way,
- * so this release only accepts the current protocol.
+ * Engine-owned presentation fields may parse when absent but still need an
+ * exact full-game match when the client no longer derives a raw-state fallback.
  */
 export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
 
@@ -441,6 +466,8 @@ export interface ServerInfo {
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+  /** Optional binary JSON envelopes understood by this server. */
+  wireFormats?: WireFormat[];
 }
 
 /**

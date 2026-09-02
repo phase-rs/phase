@@ -6537,6 +6537,130 @@ fn rebind_bare_x_mana_value(prop: FilterProp, after: &str) -> (FilterProp, &str)
     )
 }
 
+/// CR 608.2k + CR 601.2c: Rebind a compound-target slot's default
+/// `ObjectScope::CostPaidObject` referent to `ObjectScope::Target`.
+///
+/// The relative-referent suffix parsers default an unqualified or demonstrative
+/// possessive to `ObjectScope::CostPaidObject`, correct for the single-referent
+/// trigger/cost class that dominates the grammar (CR 608.2k: "an ability's
+/// effect refers to a specific untargeted object previously referred to by that
+/// ability's cost or trigger condition") — 27 corpus cards. In a COMPOUND
+/// two-object-target phrase there is no cost-paid object and no usable trigger
+/// referent; English attaches the relative clause to the immediately preceding
+/// target phrase, whose antecedent is the ability's OTHER declared object target.
+///
+/// ENGINE CONVENTION, NOT A CR RULE: `ObjectScope::Target` denotes the FIRST
+/// object target. Authority = the four sites that implement it
+/// (`quantity::object_id_for_scope`, `quantity::resolve_object_mana_value`,
+/// `filter::parent_target_shared_quality_values`,
+/// `ability_utils::attach_host_enchant_filter`).
+///
+/// Like `rebind_anaphoric_object_scope`, this retargets WHICH object, never
+/// WHICH characteristic — so it applies uniformly to mana value (Puca's
+/// Mischief), power/toughness (Spawnbroker), counters and colour counts.
+///
+/// CALLER CONTRACT: invoke only on the non-first slot of a compound phrase whose
+/// FIRST slot surfaces a declared object target. `try_parse_exchange_control_
+/// targets` enforces this by mirroring `collect_target_slots`' ExchangeControl
+/// skip (`ability_utils.rs:2667`): a `TargetFilter::SelfRef` slot A surfaces no
+/// target, so there would be no first object target to bind to.
+pub(crate) fn rebind_compound_slot_referent_to_prior_target(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                rebind_compound_slot_referent_in_prop(prop);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for filter in filters {
+                rebind_compound_slot_referent_to_prior_target(filter);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_compound_slot_referent_to_prior_target(filter);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
+    match prop {
+        // CR 202.3 / CR 122.1 / CR 208.1: the quantity-carrying leaves whose
+        // threshold may hold a `QuantityRef` with an `ObjectScope`.
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => {
+            rebind_compound_slot_referent_in_quantity(value);
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_compound_slot_referent_to_prior_target(target);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_compound_slot_referent_to_prior_target(reference),
+        FilterProp::AnyOf { props } => {
+            for prop in props {
+                rebind_compound_slot_referent_in_prop(prop);
+            }
+        }
+        FilterProp::Not { prop } => rebind_compound_slot_referent_in_prop(prop),
+        _ => {}
+    }
+}
+
+/// Rewrite `scope: CostPaidObject` to `scope: Target` on every
+/// `QuantityRef` leaf that carries an `ObjectScope`, recursing through every
+/// `QuantityExpr` composition arm. Matches `quantity_expr_contains_scope`'s
+/// (`quantity.rs:834-865`) arm set exactly, so detection and rewrite cannot
+/// drift.
+fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
+    fn rebind_ref(qty: &mut QuantityRef) {
+        let scope = match qty {
+            QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+            | QuantityRef::CountersOn { scope, .. } => scope,
+            _ => return,
+        };
+        if *scope == ObjectScope::CostPaidObject {
+            *scope = ObjectScope::Target;
+        }
+    }
+    match expr {
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => rebind_ref(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            rebind_compound_slot_referent_in_quantity(inner);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for expr in exprs {
+                rebind_compound_slot_referent_in_quantity(expr);
+            }
+        }
+        QuantityExpr::UpTo { max } => rebind_compound_slot_referent_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => {
+            rebind_compound_slot_referent_in_quantity(exponent);
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_compound_slot_referent_in_quantity(left);
+            rebind_compound_slot_referent_in_quantity(right);
+        }
+    }
+}
+
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, comparator) = nom::sequence::preceded(

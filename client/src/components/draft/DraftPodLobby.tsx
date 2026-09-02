@@ -148,7 +148,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const config = useDraftPodStore((s) => s.config);
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const cubeForm = useDraftPodStore((s) => s.cubeForm);
-  const minPodSize = useDraftPodStore((s) => s.minPodSize);
+  const allowedPodSizes = useDraftPodStore((s) => s.allowedPodSizes);
 
   // `lobby.draftKind` interpolates the kind into a sentence, so a raw enum reads
   // "CommanderDraft Draft" once Commander is selectable. `draftKindLabels` is the
@@ -164,15 +164,12 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
   const isHost = role === "host";
   const filledSeats = seats.filter((s) => s.display_name).length;
-  // CR 903.13a + CR 800.1: the seat floor is the KIND's, published by the
-  // engine's procedure table and cached in the store. No `?? 2` fallback — a
-  // fallback would reinstate the kind-blind literal this deletes. `null`
-  // disables the button, which is the honest state before the engine answers,
-  // and the reducer refuses a below-floor pod regardless. `botFillEnabled`
-  // keeps its short-circuit: bot-fill pads the pod to `procedure.pod_size`,
-  // which is above every kind's floor.
+  // The engine publishes the exact legal seat counts for this procedure and
+  // tournament format. No client-side floor or fallback: `null` disables the
+  // button until the engine answers, while bot fill remains an explicit path
+  // that pads the pod before draft creation.
   const canStart =
-    isHost && (botFillEnabled || (minPodSize !== null && filledSeats >= minPodSize));
+    isHost && (botFillEnabled || (allowedPodSizes?.includes(filledSeats) ?? false));
 
   // Build a full 8-seat grid (pad with empty seats if the adapter
   // hasn't sent all seats yet)

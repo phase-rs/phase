@@ -19,6 +19,7 @@ import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, Enduring
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
+import { StormCounter } from "./StormCounter.tsx";
 
 export function PlayerHud() {
   const { t } = useTranslation("game");
@@ -39,6 +40,7 @@ export function PlayerHud() {
   );
   const matchScore = useGameStore((s) => s.gameState?.match_score ?? null);
   const showMatchScore = useGameStore((s) => s.gameState?.match_config?.match_type === "Bo3");
+  const stormCount = useGameStore((s) => s.gameState?.derived?.storm_count ?? 0);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const isMobile = useIsMobile();
@@ -89,6 +91,7 @@ export function PlayerHud() {
         trailing={
           <>
             <EnchantmentsBadge playerId={playerId} />
+            <StormCounter count={stormCount} />
             {showMatchScore && matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}

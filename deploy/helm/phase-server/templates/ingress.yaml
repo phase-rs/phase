@@ -10,16 +10,21 @@
      router and cert-manager turns into a Certificate with no dnsNames — a silent
      misconfiguration, so fail rendering instead. */}}
 {{- $host := required "ingress.host is required when ingress.enabled is true (it is the hostname the router matches and the certificate is issued for)." .Values.ingress.host }}
-{{- $common := include "phase-server.commonMiddlewares" . }}
+{{- $common := include "phase-server.commonMiddlewares" (dict "ctx" . "excludeCompress" false) }}
+{{- /* /ws gets every other common middleware but skips compress — see
+     `phase-server.commonMiddlewares` for why. */}}
+{{- $wsMw := include "phase-server.commonMiddlewares" (dict "ctx" . "excludeCompress" true) }}
 {{- $backupMw := $common }}
 {{- if .Values.traefik.middlewares.enabled }}
 {{- $backupMw = printf "%s,%s,%s" (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-ratelimit")) (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-buffering")) $common }}
 {{- end }}
-{{- /* One Ingress per middleware set: /ws (+/health) and the backup API. Only the
-     first carries the cert-manager annotation so ingress-shim manages one
+{{- /* One Ingress per middleware set: /health, /ws (its own set so compress
+     can be excluded from it alone), and the backup API. Only the first
+     carries the cert-manager annotation so ingress-shim manages one
      Certificate for the shared secret. */}}
 {{- range $i, $route := list
-      (dict "suffix" "" "paths" (list "/ws" "/health") "mw" $common)
+      (dict "suffix" "" "paths" (list "/health") "mw" $common)
+      (dict "suffix" "-ws" "paths" (list "/ws") "mw" $wsMw)
       (dict "suffix" "-backup" "paths" (list "/p2p-draft-backup") "mw" $backupMw) }}
 ---
 apiVersion: networking.k8s.io/v1

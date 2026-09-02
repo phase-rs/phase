@@ -38,6 +38,11 @@ type AdmissionHost = PersistenceHost & {
   seatTokens: Map<number, string>;
 };
 
+type BackupHost = {
+  draftCode: string;
+  uploadBackupSnapshot: (snapshot: unknown) => Promise<void>;
+};
+
 function recoveredHost(hostDisplayName: string): P2PDraftHost {
   return new P2PDraftHost(
     { id: hostDisplayName } as never,
@@ -70,6 +75,109 @@ function ephemeralHost(hostDisplayName: string): P2PDraftHost {
 describe("P2PDraftHost persistence disposal", () => {
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("redacts canonical Chaos DraftSource assignments before public backup upload", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const host = new P2PDraftHost(
+        { id: "host-peer" } as never,
+        () => () => {},
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
+        "Premier",
+        8,
+        "Host",
+        "Swiss",
+        "Casual",
+        undefined,
+        undefined,
+        undefined,
+        "https://phase.example",
+      );
+      const privateHost = host as unknown as BackupHost;
+      privateHost.draftCode = "ABC123";
+      const snapshot = {
+        draftSessionJson: JSON.stringify({
+          config: {
+            source: {
+              type: "Set",
+              data: {
+                candidate_codes: ["TST", "ALT"],
+                assignments: [["TST", "ALT"], ["ALT", "TST"]],
+              },
+            },
+          },
+        }),
+      };
+
+      await privateHost.uploadBackupSnapshot(snapshot);
+
+      const [, requestInit] = fetchMock.mock.calls[0]!;
+      const request = JSON.parse(requestInit?.body as string);
+      const publicSnapshot = JSON.parse(request.snapshot_json);
+      const publicSession = JSON.parse(publicSnapshot.draftSessionJson);
+      expect(publicSession.config.source).toEqual({
+        type: "Set",
+        data: { candidate_codes: ["TST", "ALT"] },
+      });
+      expect(JSON.parse(snapshot.draftSessionJson).config.source.data.assignments).toEqual([
+        ["TST", "ALT"],
+        ["ALT", "TST"],
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uploads a canonical Cube DraftSource unchanged", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const host = new P2PDraftHost(
+        { id: "host-peer" } as never,
+        () => () => {},
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
+        "Premier",
+        8,
+        "Host",
+        "Swiss",
+        "Casual",
+        undefined,
+        undefined,
+        undefined,
+        "https://phase.example",
+      );
+      const privateHost = host as unknown as BackupHost;
+      privateHost.draftCode = "ABC123";
+      const snapshot = {
+        draftSessionJson: JSON.stringify({
+          config: {
+            source: {
+              type: "Cube",
+              data: { id: "my-cube", name: "My Cube" },
+            },
+          },
+        }),
+      };
+
+      await privateHost.uploadBackupSnapshot(snapshot);
+
+      const [, requestInit] = fetchMock.mock.calls[0]!;
+      const request = JSON.parse(requestInit?.body as string);
+      const publicSnapshot = JSON.parse(request.snapshot_json);
+      const publicSession = JSON.parse(publicSnapshot.draftSessionJson);
+      expect(publicSession.config.source).toEqual({
+        type: "Cube",
+        data: { id: "my-cube", name: "My Cube" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("fences a disposed recovery's queued save before a newer recovery can persist", async () => {

@@ -30,6 +30,9 @@ import init, {
   load_card_database,
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
+  evaluateDeckFormatGate,
+  customFormatFromLobbyConfig,
+  formatConfigForCustomRules,
   apply_seat_mutation,
   project_seat_view,
   export_game_state_json,
@@ -103,6 +106,9 @@ type EngineRequest =
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
+  | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
+  | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
@@ -236,6 +242,34 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         }
         const data = evaluate_deck_compatibility_js(msg.request);
         result(msg.id, data);
+        break;
+      }
+
+      // The ENFORCING sibling of `evaluateDeckCompatibility`: always returns a
+      // definite `{ compatible, reasons }`, never a tri-state. Used by the P2P
+      // host's per-guest deck-kick gate, which must not inherit the UI-hint
+      // path's "no opinion" answer for Custom formats.
+      case "evaluateDeckFormatGate": {
+        if (!cardDbLoaded) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        result(msg.id, evaluateDeckFormatGate(msg.request));
+        break;
+      }
+
+      // Custom-format save/select. Neither call touches the card database —
+      // they are pure format-schema conversions — so neither gates on it.
+      case "customFormatFromLobbyConfig": {
+        result(msg.id, customFormatFromLobbyConfig(msg.name, msg.formatConfig));
+        break;
+      }
+
+      case "formatConfigForCustomRules": {
+        result(msg.id, formatConfigForCustomRules(msg.customRules));
         break;
       }
 

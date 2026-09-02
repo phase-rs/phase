@@ -374,6 +374,43 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("uses available width for single-color choices and dispatches the selected color", () => {
+    setWaitingFor({
+      type: "ChooseManaColor",
+      data: {
+        player: 0,
+        choice: {
+          type: "SingleColor",
+          data: { options: ["White", "Blue", "Black", "Red", "Green", "Colorless"] },
+        },
+        context: { type: "ManaAbility", data: {} },
+      },
+    });
+
+    render(<CardChoiceModal />);
+
+    const dialog = screen
+      .getByRole("heading", { name: "Choose Mana Color" })
+      .closest(".card-scale-reset")?.parentElement;
+    expect(dialog).toHaveClass("w-full", "lg:w-fit", "max-w-md");
+
+    const green = screen.getByRole("button", { name: "Green" });
+    expect(green.parentElement).toHaveClass(
+      "w-full",
+      "flex-wrap",
+      "lg:w-fit",
+      "lg:flex-nowrap",
+    );
+
+    fireEvent.click(green);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseManaColor",
+      data: { choice: { type: "SingleColor", data: "Green" }, count: 1 },
+    });
+  });
+
   it("suppresses battlefield return choices for board-native selection", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({

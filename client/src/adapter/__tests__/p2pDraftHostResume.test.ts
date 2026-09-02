@@ -44,6 +44,7 @@ function viewFor(
   return {
     status,
     kind: "Premier",
+    launch_capability: "None",
     current_pack_number: 3,
     pick_number: 14,
     pass_direction: "Left",

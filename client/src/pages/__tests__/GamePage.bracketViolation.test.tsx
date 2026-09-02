@@ -258,6 +258,18 @@ vi.mock("../../components/modal/CardDataMissingModal", () => ({
   CardDataMissingModal: () => null,
 }));
 
+// This is the leaf of the production ability-choice path. Keeping the mock at
+// the rendering boundary lets the test exercise GamePage's module-private
+// AbilityChoiceModal and observe the actual labels it supplies without pulling
+// card-art loading into a label-wiring test.
+vi.mock("../../components/modal/ChoiceModal", () => ({
+  ChoiceModal: ({ options }: { options: Array<{ id: string; label: string }> }) => (
+    <div data-testid="ability-choice-options">
+      {options.map((option) => <button key={option.id} type="button">{option.label}</button>)}
+    </div>
+  ),
+}));
+
 vi.mock("../../stores/draftStore", () => ({
   useDraftStore: vi.fn(() => ({
     phase: "idle",
@@ -369,6 +381,7 @@ beforeEach(() => {
   storeOverrides.gameState = null;
   storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
+  useUiStore.setState({ pendingAbilityChoice: null });
   mockIsMobile.mockReturnValue(false);
   usePreferencesStore.setState({
     multiplayerBoardLayout: "focused",
@@ -558,6 +571,47 @@ describe("GamePage — P2P pause resume control", () => {
     act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
 
     expect(screen.queryByRole("button", { name: "Resume game" })).toBeNull();
+  });
+});
+
+describe("GamePage — Room unlock labels", () => {
+  it("passes copied Room half identities into its private ability-choice consumer", () => {
+    const roomCopy = gameObjectFactory
+      .enchantment()
+      .onBattlefield()
+      .withId(8294)
+      .named("")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(roomCopy)
+      .priority(0)
+      .build({
+        derived: {
+          room_half_identities: {
+            [String(roomCopy.id)]: {
+              left: { name: "Greenhouse", mana_cost: { type: "Cost", generic: 2, shards: ["Green"] } },
+              right: { name: "Rickety Gazebo", mana_cost: { type: "Cost", generic: 3, shards: ["Green"] } },
+            },
+          },
+        },
+      });
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: roomCopy.id,
+        actions: [
+          { type: "UnlockRoomDoor", data: { object_id: roomCopy.id, door: "Left" } },
+          { type: "UnlockRoomDoor", data: { object_id: roomCopy.id, door: "Right" } },
+        ],
+      },
+    });
+
+    renderGamePage();
+
+    expect(screen.getByRole("button", { name: "Unlock Greenhouse ({2}{G})" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock Rickety Gazebo ({3}{G})" })).toBeInTheDocument();
   });
 });
 

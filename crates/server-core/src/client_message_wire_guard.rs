@@ -40,7 +40,7 @@ use crate::game_reconnect_guard::guard_game_reconnect;
 use crate::interaction_payload_guard::guard_interaction_submission_payload;
 use crate::legacy_deck_guard::guard_legacy_deck;
 use crate::legacy_join_guard::guard_legacy_join_game;
-use crate::protocol::{ClientMessage, ServerMessage, ServerMode};
+use crate::protocol::{resolve_draft_source_intent_ref, ClientMessage, ServerMessage, ServerMode};
 use crate::seat_mutation_wire_guard::guard_seat_mutation;
 use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
@@ -228,20 +228,28 @@ pub fn guard_client_message_before_dispatch(
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
+            source,
             set_codes,
             password,
             timer_seconds,
             pod_size,
             kind,
+            tournament_format,
             ..
-        } => guard_create_draft_with_settings(
-            display_name,
-            set_codes,
-            password,
-            *timer_seconds,
-            *pod_size,
-            *kind,
-        ),
+        } => {
+            // Normalize the new tagged object and legacy root spelling before
+            // validating any candidate token or touching a pool map.
+            let intent = resolve_draft_source_intent_ref(source.as_ref(), set_codes.as_ref())?;
+            guard_create_draft_with_settings(
+                display_name,
+                intent.set_codes(),
+                password,
+                *timer_seconds,
+                *pod_size,
+                *kind,
+                *tournament_format,
+            )
+        }
         ClientMessage::JoinDraftWithPassword {
             draft_code,
             display_name,

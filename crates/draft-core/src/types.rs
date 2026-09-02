@@ -35,6 +35,8 @@ pub enum SpectatorVisibility {
     #[default]
     Public,
     /// All pools and current packs visible. Host must explicitly enable for Casual pods.
+    /// Chaos sources still redact them because an ordinary spectator socket is
+    /// not an authenticated host export.
     Omniscient,
 }
 
@@ -73,7 +75,7 @@ pub enum DraftKind {
 /// This is the axis the `kind == DraftKind::Sealed` equality tests were really
 /// testing. Consumers match on it exhaustively, so a new kind must *declare*
 /// which shape it uses instead of silently falling into an `else` branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PackDistribution {
     /// Packs are opened one at a time and passed around the pod.
     /// CR 905.1a describes this shape (one card per step, pass the remainder).
@@ -89,8 +91,8 @@ pub enum PackDistribution {
 /// and one `kind != DraftKind::Quick` blacklist at the `CreateDraft` wire.
 /// Those spellings agreed on the four kinds that existed when they were
 /// written and disagree on any fifth, so the axis is named here instead.
-/// Not serialized: `DraftProcedure` is computed from `kind`, never stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not persisted: `DraftProcedure` is computed from `kind`, never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PostDraftPlay {
     /// The draft session ends at `DraftStatus::Complete`; play is arranged
     /// outside it. CR 903.13a: Commander Draft is "a draft ... followed by a
@@ -100,6 +102,19 @@ pub enum PostDraftPlay {
     /// Tournament structure is MTR policy, not Comprehensive Rules — there is
     /// deliberately no CR citation on this variant.
     TournamentPairings,
+}
+
+/// What game, if any, a completed draft procedure authorizes the host to launch.
+///
+/// This is deliberately a typed capability instead of a `DraftKind` check at a
+/// display boundary. `PostDraftPlay::CompleteImmediately` alone is too broad:
+/// Quick Draft also completes immediately but has no multiplayer pod game. The
+/// procedure's commander-designation axis distinguishes the multiplayer
+/// Commander launch without teaching UI code which kind happens to own it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftLaunchCapability {
+    None,
+    CommanderMultiplayer,
 }
 
 /// How a player chooses cards for one draft pick step.
@@ -131,6 +146,13 @@ pub struct DraftProcedure {
     pub human_seats: u8,
     /// Smallest pod a client may request for this kind.
     pub min_pod_size: u8,
+    /// Smallest local cube pod for this kind. This is not a remote contract.
+    pub local_cube_min_pod_size: u8,
+    /// Largest pod a client may request for this kind.
+    pub max_pod_size: u8,
+    /// Largest pod a local cube event may create for this kind. This is not
+    /// exported to remote hosts or accepted by public/server preflight.
+    pub local_cube_max_pod_size: u8,
     /// Packs each seat consumes over the whole event.
     pub packs_per_player: u8,
     /// Cards taken per pick step. The per-kind value is this table's, never a
@@ -161,6 +183,70 @@ pub struct DraftProcedure {
 }
 
 impl DraftProcedure {
+    /// The engine-authorized game launch for a completed draft procedure.
+    ///
+    /// This joins two procedure axes rather than exposing a `DraftKind` check
+    /// to a transport or display consumer. A procedure that completes
+    /// immediately but does not designate commanders is a local draft, not a
+    /// multiplayer pod game.
+    pub fn launch_capability(self) -> DraftLaunchCapability {
+        match (self.post_draft_play, self.commanders_required) {
+            (PostDraftPlay::CompleteImmediately, 1..) => {
+                DraftLaunchCapability::CommanderMultiplayer
+            }
+            (PostDraftPlay::CompleteImmediately | PostDraftPlay::TournamentPairings, 0) => {
+                DraftLaunchCapability::None
+            }
+            (PostDraftPlay::TournamentPairings, 1..) => DraftLaunchCapability::None,
+        }
+    }
+
+    /// The engine-owned allowed seat range for this procedure and tournament
+    /// shape. Tournament pairings require a full bracket for single
+    /// elimination; procedures that complete immediately retain their normal
+    /// range even if the host selected that presentation value.
+    pub fn allowed_pod_size_range(
+        self,
+        tournament_format: TournamentFormat,
+    ) -> std::ops::RangeInclusive<u8> {
+        if self.post_draft_play == PostDraftPlay::TournamentPairings
+            && tournament_format == TournamentFormat::SingleElimination
+        {
+            self.max_pod_size..=self.max_pod_size
+        } else {
+            self.min_pod_size..=self.max_pod_size
+        }
+    }
+
+    /// The complete engine-owned selectable seat set for this procedure and
+    /// tournament format. The reducer validates the same range; this only
+    /// transports that authority to the display layer.
+    pub fn allowed_pod_sizes(self, tournament_format: TournamentFormat) -> Vec<u8> {
+        self.allowed_pod_size_range(tournament_format).collect()
+    }
+
+    /// Whether `pod_size` is legal for this complete engine procedure.
+    pub fn allows_pod_size(self, tournament_format: TournamentFormat, pod_size: u8) -> bool {
+        self.allowed_pod_size_range(tournament_format)
+            .contains(&pod_size)
+    }
+
+    /// Local cube events retain their procedure-owned local ceiling without
+    /// expanding the public/remote pod-size contract.
+    pub fn allows_local_cube_pod_size(
+        self,
+        tournament_format: TournamentFormat,
+        pod_size: u8,
+    ) -> bool {
+        if self.post_draft_play == PostDraftPlay::TournamentPairings
+            && tournament_format == TournamentFormat::SingleElimination
+        {
+            pod_size == self.max_pod_size
+        } else {
+            (self.local_cube_min_pod_size..=self.local_cube_max_pod_size).contains(&pod_size)
+        }
+    }
+
     /// CR 903.13b: how many pick steps a pack of `cards_per_pack` contains for
     /// this kind. `pick_number` counts STEPS, not cards, so this is the
     /// denominator a progress display can actually reach. Rounds up: an odd
@@ -229,7 +315,12 @@ impl DraftKind {
             DraftKind::Quick => DraftProcedure {
                 pod_size: 8,
                 human_seats: 1,
-                min_pod_size: 1,
+                min_pod_size: 2,
+                local_cube_min_pod_size: 1,
+                max_pod_size: 8,
+                // Quick Draft also backs the local cube entry point, which
+                // intentionally supports large bot-filled pods.
+                local_cube_max_pod_size: u8::MAX,
                 packs_per_player: 3,
                 cards_per_pick: 1,
                 pick_selection_mode: PickSelectionMode::Direct,
@@ -249,6 +340,9 @@ impl DraftKind {
                 pod_size: 8,
                 human_seats: 8,
                 min_pod_size: 2,
+                local_cube_min_pod_size: 2,
+                max_pod_size: 8,
+                local_cube_max_pod_size: 8,
                 packs_per_player: 3,
                 cards_per_pick: 1,
                 pick_selection_mode: PickSelectionMode::Direct,
@@ -265,6 +359,9 @@ impl DraftKind {
                 pod_size: 8,
                 human_seats: 8,
                 min_pod_size: 2,
+                local_cube_min_pod_size: 2,
+                max_pod_size: 8,
+                local_cube_max_pod_size: 8,
                 packs_per_player: 3,
                 cards_per_pick: 1,
                 pick_selection_mode: PickSelectionMode::Direct,
@@ -281,6 +378,9 @@ impl DraftKind {
                 pod_size: 8,
                 human_seats: 8,
                 min_pod_size: 2,
+                local_cube_min_pod_size: 2,
+                max_pod_size: 8,
+                local_cube_max_pod_size: 8,
                 packs_per_player: 6,
                 cards_per_pick: 1,
                 pick_selection_mode: PickSelectionMode::Direct,
@@ -310,6 +410,9 @@ impl DraftKind {
                 // client's requested pod is rejected, not the table default:
                 // the 4-player pod is `pod_size` above.
                 min_pod_size: 3,
+                local_cube_min_pod_size: 3,
+                max_pod_size: 8,
+                local_cube_max_pod_size: 8,
                 // CR 903.13b: three draft rounds.
                 packs_per_player: 3,
                 // CR 903.13b: "drafts two cards".
@@ -382,20 +485,173 @@ pub fn entry_for_pack<T>(sequence: &[T], pack_number: u8) -> Option<&T> {
     sequence.get(usize::from(pack_number).min(sequence.len().checked_sub(1)?))
 }
 
+/// The way a set-backed draft assigns its boosters to seats and rounds.
+///
+/// `UniformByRound` preserves the original block-draft model: every seat gets
+/// the same set in a round and a short sequence repeats its final entry.
+/// `Chaos` records the host-created result for every `(seat, round)` pair, not
+/// merely the candidate pool. That makes a resumed draft replay the exact
+/// boosters it originally assigned rather than re-rolling them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum SetLayout {
+    /// One set per round for the entire pod.
+    UniformByRound {
+        #[serde(alias = "code", deserialize_with = "deserialize_set_codes")]
+        codes: Vec<String>,
+    },
+    /// Persisted Chaos assignments. The outer vector is seat order; each inner
+    /// vector is pack-round order and must be exactly `pack_count` long.
+    Chaos {
+        candidate_codes: Vec<String>,
+        assignments: Vec<Vec<String>>,
+    },
+}
+
+/// Strict wire forms used solely while deserializing [`SetLayout`]. An
+/// untagged enum normally accepts unknown fields, which lets a redacted Chaos
+/// source containing both `candidate_codes` and `codes` silently become a
+/// Uniform layout. These structs make the two persisted layouts disjoint.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SetLayoutWire {
+    Uniform(UniformByRoundLayout),
+    Chaos(ChaosLayout),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniformByRoundLayout {
+    #[serde(alias = "code", deserialize_with = "deserialize_set_codes")]
+    codes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChaosLayout {
+    candidate_codes: Vec<String>,
+    assignments: Vec<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for SetLayout {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match SetLayoutWire::deserialize(deserializer)? {
+            SetLayoutWire::Uniform(UniformByRoundLayout { codes }) => {
+                Ok(Self::UniformByRound { codes })
+            }
+            SetLayoutWire::Chaos(ChaosLayout {
+                candidate_codes,
+                assignments,
+            }) => Ok(Self::Chaos {
+                candidate_codes,
+                assignments,
+            }),
+        }
+    }
+}
+
+impl SetLayout {
+    /// Codes actually assigned to boosters, deduplicated in first-appearance
+    /// order. Candidate codes that the deterministic Chaos draw did not select
+    /// are deliberately absent: a later rules consumer must learn what the
+    /// draft contained from assignments, never from what it could have drawn.
+    pub fn actual_set_codes(&self) -> Vec<&str> {
+        match self {
+            SetLayout::UniformByRound { codes } => distinct_set_codes(codes.iter()),
+            SetLayout::Chaos { assignments, .. } => {
+                distinct_set_codes(assignments.iter().flatten())
+            }
+        }
+    }
+
+    /// The set assigned to this seat's booster. Uniform layouts retain their
+    /// repeat-final shorthand; Chaos assignments are intentionally exact and
+    /// never repeat past their stored dimensions.
+    pub fn set_code_for_seat_and_pack(&self, seat: u8, pack_number: u8) -> Option<&str> {
+        match self {
+            SetLayout::UniformByRound { codes } => {
+                entry_for_pack(codes, pack_number).map(String::as_str)
+            }
+            SetLayout::Chaos { assignments, .. } => assignments
+                .get(usize::from(seat))
+                .and_then(|rounds| rounds.get(usize::from(pack_number)))
+                .map(String::as_str),
+        }
+    }
+
+    /// Check persisted dimensions and that Chaos cannot name a pool it was not
+    /// configured to select. Pool-data and pack-size validation belongs at the
+    /// source boundary; this protects stored session shape independently.
+    pub fn validate_for_draft(&self, seat_count: u8, pack_count: u8) -> Result<(), String> {
+        match self {
+            SetLayout::UniformByRound { codes } => {
+                if codes.is_empty() {
+                    return Err("a draft must name at least one set".to_string());
+                }
+                Ok(())
+            }
+            SetLayout::Chaos {
+                candidate_codes,
+                assignments,
+            } => {
+                if candidate_codes.is_empty() {
+                    return Err("a Chaos draft must name at least one candidate set".to_string());
+                }
+                if assignments.len() != usize::from(seat_count) {
+                    return Err(format!(
+                        "Chaos assignments must contain {seat_count} seats, got {}",
+                        assignments.len()
+                    ));
+                }
+                for (seat, rounds) in assignments.iter().enumerate() {
+                    if rounds.len() != usize::from(pack_count) {
+                        return Err(format!(
+                            "Chaos assignments for seat {seat} must contain {pack_count} rounds, got {}",
+                            rounds.len()
+                        ));
+                    }
+                    for code in rounds {
+                        if !candidate_codes
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(code))
+                        {
+                            return Err(format!(
+                                "Chaos assignment '{code}' for seat {seat} is not a candidate set"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Preserve the first spelling of every case-insensitively distinct set code.
+/// Both Uniform and Chaos source layouts need this same assignment-aware union.
+fn distinct_set_codes<'a>(codes: impl Iterator<Item = &'a String>) -> Vec<&'a str> {
+    let mut distinct = Vec::new();
+    for code in codes {
+        if !distinct
+            .iter()
+            .any(|held: &&str| held.eq_ignore_ascii_case(code))
+        {
+            distinct.push(code.as_str());
+        }
+    }
+    distinct
+}
+
 /// Origin of the draft card pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DraftSource {
-    /// The set filling each booster, in pack order. One entry per pack the
-    /// session opens; duplicates are allowed, so a block draft names each of
-    /// its sets once and a chaos draft may repeat one. A sequence shorter than
-    /// the pack count repeats its last entry ([`entry_for_pack`]), which is how
-    /// a single-set draft stays a one-element sequence — and how snapshots
-    /// written before multi-set drafts existed (`{"code": "blb"}`) restore with
-    /// their original meaning.
     Set {
-        #[serde(alias = "code", deserialize_with = "deserialize_set_codes")]
-        codes: Vec<String>,
+        #[serde(flatten)]
+        layout: SetLayout,
     },
     Cube {
         id: String,
@@ -433,7 +689,9 @@ impl DraftSource {
     /// A set-backed source whose every booster comes from one set.
     pub fn single_set(code: impl Into<String>) -> Self {
         DraftSource::Set {
-            codes: vec![code.into()],
+            layout: SetLayout::UniformByRound {
+                codes: vec![code.into()],
+            },
         }
     }
 
@@ -443,15 +701,27 @@ impl DraftSource {
     /// whole source; per-pack identity lives in [`DraftSource::set_code_for_pack`].
     pub fn set_code(&self) -> String {
         match self {
-            DraftSource::Set { codes } => {
-                let mut distinct: Vec<&str> = Vec::with_capacity(codes.len());
-                for code in codes {
-                    if !distinct.contains(&code.as_str()) {
-                        distinct.push(code);
-                    }
-                }
-                distinct.join("+")
-            }
+            DraftSource::Set { layout } => layout.actual_set_codes().join("+"),
+            DraftSource::Cube { id, .. } => id.clone(),
+        }
+    }
+
+    /// All set codes that actually fill this draft's boosters. Chaos layouts
+    /// return the assignment union, excluding merely selectable candidate sets.
+    pub fn actual_set_codes(&self) -> Vec<&str> {
+        match self {
+            DraftSource::Set { layout } => layout.actual_set_codes(),
+            DraftSource::Cube { .. } => Vec::new(),
+        }
+    }
+
+    /// The set filling a particular seat's booster.
+    pub fn set_code_for_seat_and_pack(&self, seat: u8, pack_number: u8) -> String {
+        match self {
+            DraftSource::Set { layout } => layout
+                .set_code_for_seat_and_pack(seat, pack_number)
+                .unwrap_or_default()
+                .to_string(),
             DraftSource::Cube { id, .. } => id.clone(),
         }
     }
@@ -459,12 +729,7 @@ impl DraftSource {
     /// The set filling booster `pack_number`. Cube sources have no per-pack
     /// set, so every pack reports the cube id.
     pub fn set_code_for_pack(&self, pack_number: u8) -> String {
-        match self {
-            DraftSource::Set { codes } => entry_for_pack(codes, pack_number)
-                .cloned()
-                .unwrap_or_default(),
-            DraftSource::Cube { id, .. } => id.clone(),
-        }
+        self.set_code_for_seat_and_pack(0, pack_number)
     }
 }
 
@@ -1037,6 +1302,13 @@ pub struct DraftSession {
     pub pass_direction: PassDirection,
     pub packs_by_seat: Vec<Vec<DraftPack>>,
     pub current_pack: Vec<Option<DraftPack>>,
+    /// The seat that opened each currently held booster. Packs pass between
+    /// seats, while Chaos set assignments belong to the opening seat and pack
+    /// round, so this provenance travels with the pack rather than its holder.
+    /// Empty legacy snapshots deserialize as `None` origins and therefore omit
+    /// the optional Chaos pack label rather than guessing one.
+    #[serde(default)]
+    pub current_pack_origins: Vec<Option<u8>>,
     pub pools: Vec<Vec<DraftCardInstance>>,
     pub submitted_decks: HashMap<PlayerId, DraftDeckSubmission>,
     pub match_records: HashMap<PlayerId, DraftMatchRecord>,
@@ -1239,9 +1511,10 @@ mod tests {
         assert_eq!(DraftKind::Traditional.procedure().packs_per_player, 3);
         assert_eq!(DraftKind::Sealed.procedure().packs_per_player, 6);
 
-        // The values `draft_wire_guard`'s `if kind == Quick { 1 } else { 2 }`
-        // produced.
-        assert_eq!(DraftKind::Quick.procedure().min_pod_size, 1);
+        // Public and remote pods share a 2-seat floor; local Quick Cube keeps
+        // its distinct procedure-owned one-seat capability.
+        assert_eq!(DraftKind::Quick.procedure().min_pod_size, 2);
+        assert_eq!(DraftKind::Quick.procedure().local_cube_min_pod_size, 1);
         assert_eq!(DraftKind::Premier.procedure().min_pod_size, 2);
         assert_eq!(DraftKind::Traditional.procedure().min_pod_size, 2);
         assert_eq!(DraftKind::Sealed.procedure().min_pod_size, 2);
@@ -1283,6 +1556,7 @@ mod tests {
         // delivers the multiplayer game the format is defined as. This is the
         // wire rejection floor, NOT the 4-seat product default above.
         assert_eq!(procedure.min_pod_size, 3);
+        assert_eq!(procedure.max_pod_size, 8);
 
         // CR 903.13b.
         assert_eq!(procedure.packs_per_player, 3);
@@ -1304,6 +1578,48 @@ mod tests {
             procedure.post_draft_play,
             PostDraftPlay::CompleteImmediately
         );
+    }
+
+    #[test]
+    fn procedure_owns_allowed_pod_size_policy_for_every_kind() {
+        for kind in DraftKind::ALL {
+            let procedure = kind.procedure();
+            assert!(
+                procedure.allows_pod_size(TournamentFormat::Swiss, procedure.min_pod_size),
+                "Swiss accepts the procedure floor for {kind:?}"
+            );
+            assert!(
+                procedure.allows_pod_size(TournamentFormat::Swiss, procedure.max_pod_size),
+                "Swiss accepts the procedure ceiling for {kind:?}"
+            );
+            if procedure.max_pod_size < u8::MAX {
+                assert!(
+                    !procedure
+                        .allows_pod_size(TournamentFormat::Swiss, procedure.max_pod_size + 1,),
+                    "Swiss rejects above the procedure ceiling for {kind:?}"
+                );
+            }
+        }
+
+        for kind in [
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
+            let procedure = kind.procedure();
+            assert!(
+                !procedure.allows_pod_size(TournamentFormat::SingleElimination, 7),
+                "tournament pairings require the full bracket for {kind:?}"
+            );
+            assert!(
+                procedure.allows_pod_size(TournamentFormat::SingleElimination, 8),
+                "tournament pairings admit the full bracket for {kind:?}"
+            );
+        }
+
+        let commander = DraftKind::CommanderDraft.procedure();
+        assert!(commander.allows_pod_size(TournamentFormat::SingleElimination, 3));
+        assert!(commander.allows_pod_size(TournamentFormat::SingleElimination, 8));
     }
 
     /// [`MAX_CARDS_PER_PICK`] is derived from the procedure table, not chosen.
@@ -1524,9 +1840,64 @@ mod tests {
     }
 
     #[test]
+    fn set_source_restores_both_legacy_code_spellings() {
+        for json in [
+            r#"{"type":"Set","data":{"code":"blb"}}"#,
+            r#"{"type":"Set","data":{"codes":["blb"]}}"#,
+        ] {
+            let source: DraftSource = serde_json::from_str(json).unwrap();
+            assert_eq!(source, DraftSource::single_set("blb"));
+        }
+    }
+
+    #[test]
+    fn set_layout_rejects_hybrid_and_unknown_shapes() {
+        for json in [
+            r#"{"type":"Set","data":{"candidate_codes":["TST"],"codes":["TST"]}}"#,
+            r#"{"type":"Set","data":{"codes":["TST"],"unexpected":true}}"#,
+            r#"{"type":"Set","data":{"candidate_codes":["TST"]}}"#,
+        ] {
+            assert!(serde_json::from_str::<DraftSource>(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn cube_source_serde_is_unchanged() {
+        let source = DraftSource::Cube {
+            id: "my-cube".to_string(),
+            name: "My Cube".to_string(),
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(serde_json::from_str::<DraftSource>(&json).unwrap(), source);
+    }
+
+    #[test]
+    fn chaos_uses_actual_assignment_union_not_unselected_candidates() {
+        let source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+                assignments: vec![
+                    vec!["BBB".to_string(), "BBB".to_string()],
+                    vec!["bbb".to_string(), "BBB".to_string()],
+                ],
+            },
+        };
+
+        assert_eq!(source.actual_set_codes(), vec!["BBB"]);
+        assert_eq!(source.set_code(), "BBB");
+        assert_eq!(source.set_code_for_seat_and_pack(1, 0), "bbb");
+        assert_eq!(
+            serde_json::from_str::<DraftSource>(&serde_json::to_string(&source).unwrap()).unwrap(),
+            source
+        );
+    }
+
+    #[test]
     fn a_pack_sequence_source_reports_the_set_filling_each_pack() {
         let source = DraftSource::Set {
-            codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+            },
         };
 
         assert_eq!(source.set_code_for_pack(0), "ISD");
@@ -1539,12 +1910,14 @@ mod tests {
     #[test]
     fn a_multi_set_source_label_lists_its_distinct_sets_in_pack_order() {
         let source = DraftSource::Set {
-            codes: vec![
-                "ISD".to_string(),
-                "DKA".to_string(),
-                "ISD".to_string(),
-                "AVR".to_string(),
-            ],
+            layout: SetLayout::UniformByRound {
+                codes: vec![
+                    "ISD".to_string(),
+                    "DKA".to_string(),
+                    "ISD".to_string(),
+                    "AVR".to_string(),
+                ],
+            },
         };
 
         assert_eq!(source.set_code(), "ISD+DKA+AVR");
@@ -1554,9 +1927,15 @@ mod tests {
     #[test]
     fn serde_roundtrip_multi_set_source() {
         let source = DraftSource::Set {
-            codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+            },
         };
         let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"Set","data":{"codes":["ISD","DKA","ISD"]}}"#
+        );
         let back: DraftSource = serde_json::from_str(&json).unwrap();
         assert_eq!(source, back);
     }

@@ -4,6 +4,7 @@ mod draft_pools;
 mod logging;
 mod metrics;
 mod persistence;
+mod wire;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -41,7 +42,7 @@ use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
 };
-use rand::Rng;
+use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
@@ -66,9 +67,9 @@ use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
-    build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
-    LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
-    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerMessage,
+    ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
+    MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
@@ -84,6 +85,7 @@ use server_core::takeback::RewindOption;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use url::Url;
@@ -190,6 +192,33 @@ fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, St
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
     GameSession::from_persisted(persisted, db.as_ref())
+}
+
+/// Admit a persisted draft row only when its SQLite key names the enclosed
+/// session, then prepare its post-admission startup data.
+///
+/// The persisted wrapper and core session validate each other in `server-core`,
+/// but the database row key is a separate authority used by startup lookups and
+/// lobby registration. Validate it before admission so a corrupt row cannot
+/// leave the manager indexed under one code and the caller looking up another.
+fn restore_persisted_draft_session(
+    row_draft_code: &str,
+    persisted: server_core::persist::PersistedDraftSession,
+    drafts: &mut DraftSessionManager,
+) -> Result<(Option<RegisterGameRequest>, Option<u32>), String> {
+    if persisted.draft_code != row_draft_code {
+        return Err("persisted draft code does not match its database row".to_string());
+    }
+    drafts.restore_persisted_session(persisted)?;
+    let restored = drafts
+        .sessions
+        .get(row_draft_code)
+        .ok_or_else(|| "admitted persisted draft session is missing".to_string())?;
+    let restored_snapshot = restored.to_persisted();
+    Ok((
+        server_core::persist::restored_draft_lobby_register_request(&restored_snapshot),
+        restored.timer_remaining_ms,
+    ))
 }
 
 /// The startup restore owner keeps a session private until this handoff has
@@ -967,7 +996,10 @@ struct SocketIdentity {
 struct ClientHelloInfo {
     client_version: String,
     build_commit: String,
+    wire_format: Option<WireFormat>,
 }
+
+const MAX_ADVERTISED_WIRE_FORMATS: usize = 8;
 
 /// Outcome of evaluating the handshake gate against an incoming message.
 /// Extracted into a pure function so the gate's invariants can be unit-tested
@@ -1056,6 +1088,7 @@ fn classify_hello_gate(
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
             },
         ) => {
             // The `server` field on RejectProtocol surfaces the version this
@@ -1065,12 +1098,19 @@ fn classify_hello_gate(
                 acceptance.reject(*protocol_version, *lobby_protocol_version)
             {
                 HelloGateOutcome::RejectProtocol { client, server }
+            } else if wire_formats.len() > MAX_ADVERTISED_WIRE_FORMATS {
+                HelloGateOutcome::RejectInvalidHello(
+                    "ClientHello advertises too many wire formats".to_string(),
+                )
             } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
                 HelloGateOutcome::RejectInvalidHello(reason)
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
                     build_commit: build_commit.clone(),
+                    wire_format: wire_formats
+                        .contains(&WireFormat::GzipEnvelopeV1)
+                        .then_some(WireFormat::GzipEnvelopeV1),
                 })
             }
         }
@@ -1193,25 +1233,18 @@ fn guard_full_create_game_settings_inbound(
     Ok(pc)
 }
 
-/// Whether the single-elimination seat rule applies to a requested pod.
+/// Whether the engine procedure permits this pod's requested seat count.
 ///
-/// A single named authority so the `CreateDraftWithSettings` handler and its
-/// test read the SAME predicate — a test that re-states the rule inline would
-/// stay green after the handler's rule changed, which is no evidence at all.
-///
-/// CR 903.13a: a Commander Draft pod plays one multiplayer game, not a bracket,
-/// so the seat requirement does not reach it — its `post_draft_play` is
-/// `CompleteImmediately`, and the kind is read through the procedure table
-/// rather than compared by name. The rule is a property of running tournament
-/// pairings, not of any particular kind.
-fn single_elimination_seat_rule_applies(
+/// The socket preflight deliberately delegates the full range and
+/// tournament-pairing bracket policy to `DraftProcedure`; this boundary only
+/// reports that policy before resolving pool data.
+fn draft_pod_size_is_allowed(
     kind: draft_core::types::DraftKind,
     tournament_format: draft_core::types::TournamentFormat,
     pod_size: u8,
 ) -> bool {
-    kind.procedure().post_draft_play == draft_core::types::PostDraftPlay::TournamentPairings
-        && tournament_format == draft_core::types::TournamentFormat::SingleElimination
-        && pod_size != 8
+    kind.procedure()
+        .allows_pod_size(tournament_format, pod_size)
 }
 
 /// Returns `Some(reason)` if `action` cannot legitimately come from a client
@@ -2024,23 +2057,21 @@ async fn serve() {
                 for (draft_code, json) in &persisted_drafts {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
-                        Ok(ps) => {
-                            let register_req =
-                                server_core::persist::restored_draft_lobby_register_request(&ps);
-                            let timer_ms = ps.timer_remaining_ms;
-                            if let Err(error) = dsm.restore_persisted_session(ps) {
+                        Ok(ps) => match restore_persisted_draft_session(draft_code, ps, &mut dsm) {
+                            Ok((register_req, timer_ms)) => {
+                                if let Some(req) = register_req {
+                                    lob.register_game(draft_code, req, &SysEnv);
+                                }
+                                if let Some(ms) = timer_ms {
+                                    info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
+                                }
+                                restored_drafts += 1;
+                            }
+                            Err(error) => {
                                 warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
                                 let _ = game_db.delete_draft_session(draft_code);
-                                continue;
                             }
-                            if let Some(req) = register_req {
-                                lob.register_game(draft_code, req, &SysEnv);
-                            }
-                            if let Some(ms) = timer_ms {
-                                info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
-                            }
-                            restored_drafts += 1;
-                        }
+                        },
                         Err(e) => {
                             warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
                             let _ = game_db.delete_draft_session(draft_code);
@@ -2314,17 +2345,6 @@ async fn serve() {
         info!(public_url = %url, "advertising public URL for join-code sharing");
     }
 
-    // Public, client-facing HTTP surface. `/p2p-draft-backup*` is part of the
-    // normal P2P draft flow; only the administrative `/admin/*` routes are gated.
-    let mut app = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/health", get(health))
-        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
-        .route(
-            "/p2p-draft-backup/{code}",
-            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        );
-
     // Administrative endpoints are destructive and information-disclosing, and
     // reachable through the same reverse proxy as `/ws` (see deploy nginx).
     // Mount them only when PHASE_ADMIN_TOKEN is set; otherwise absent (404).
@@ -2332,9 +2352,6 @@ async fn serve() {
     match admin_token.as_deref() {
         Some(_) => info!("admin HTTP endpoints enabled (bearer-token authenticated)"),
         None => info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)"),
-    }
-    if let Some(token) = admin_token.as_deref().filter(|t| !t.is_empty()) {
-        app = mount_admin_routes(app, token);
     }
 
     let app_state = AppState {
@@ -2355,7 +2372,11 @@ async fn serve() {
         allowed_origin: cli.allowed_origin.clone(),
     };
 
-    let app = app.layer(cors).with_state(app_state.clone());
+    // `/p2p-draft-backup*` is part of the normal P2P draft flow; only the
+    // administrative `/admin/*` routes are gated. `build_router` keeps `/ws`
+    // out from under `CompressionLayer` (see its doc comment) while every
+    // other public and admin response gets compressed.
+    let app = build_router(app_state.clone(), cors, admin_token.as_deref());
 
     // Rejected before anything binds. Left alone this surfaces later as "address
     // in use" on one of the two listeners, which reads like a stale process
@@ -2779,6 +2800,65 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
+mod restored_draft_startup_tests {
+    use super::restore_persisted_draft_session;
+    use draft_core::types::{
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
+        TournamentFormat,
+    };
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::persist::{PersistedDraftSession, PersistedLobbyMeta};
+
+    fn uniform_lobby_snapshot() -> PersistedDraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let mut drafts = DraftSessionManager::new();
+        let (draft_code, _, _) = drafts.create_draft(config, "Alice".to_string());
+        drafts.sessions.get_mut(&draft_code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        drafts.sessions[&draft_code].to_persisted()
+    }
+
+    #[test]
+    fn persisted_draft_row_key_must_match_before_admission_or_lobby_registration() {
+        let snapshot = uniform_lobby_snapshot();
+        let mut restored = DraftSessionManager::new();
+
+        let rejected_registration =
+            match restore_persisted_draft_session("WRONG1", snapshot.clone(), &mut restored) {
+                Ok((registration, _)) => registration,
+                Err(_) => None,
+            };
+        assert!(rejected_registration.is_none());
+        assert!(restored.sessions.is_empty());
+
+        let (registration, _) =
+            restore_persisted_draft_session(&snapshot.draft_code, snapshot.clone(), &mut restored)
+                .expect("a valid Uniform snapshot restores under its own row key");
+        assert!(registration.is_some());
+        assert!(restored.sessions.contains_key(&snapshot.draft_code));
+    }
+}
+
+#[cfg(test)]
 mod restored_full_startup_tests {
     use std::sync::Arc;
 
@@ -2917,6 +2997,38 @@ fn admin_token_from_env() -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+/// Assembles the public HTTP/WS surface. `/ws` is kept on its own sub-router,
+/// deliberately outside `CompressionLayer`: the WebSocket upgrade response
+/// (`101 Switching Protocols`) carries no body to compress, and axum's
+/// upgrade takes the connection over via `hyper`'s `OnUpgrade` extension
+/// rather than through the response body a compressing layer would wrap —
+/// keeping the layer off that route entirely removes any dependence on that
+/// implementation detail continuing to hold across axum/tower-http upgrades.
+/// Every other route (health check, the P2P draft backup API, and — when
+/// `admin_token` is set — the bearer-guarded `/admin/*` routes) is served
+/// through gzip `CompressionLayer` so JSON/text responses shrink whenever the
+/// client advertises `Accept-Encoding: gzip`.
+fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>) -> Router {
+    let ws_router: Router<AppState> = Router::new().route("/ws", get(ws_handler));
+
+    let mut http_router: Router<AppState> = Router::new()
+        .route("/health", get(health))
+        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+        .route(
+            "/p2p-draft-backup/{code}",
+            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+        );
+    if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+        http_router = mount_admin_routes(http_router, token);
+    }
+    let http_router = http_router.layer(CompressionLayer::new());
+
+    ws_router
+        .merge(http_router)
+        .layer(cors)
+        .with_state(app_state)
 }
 
 /// Mount bearer-guarded `/admin/*` routes on a router that will receive `AppState`.
@@ -3148,6 +3260,47 @@ struct ConnectionSlot {
     armed: bool,
 }
 
+/// Per-connection WebSocket writer. Once the text handshake negotiates a wire
+/// format, every later JSON text send passes through the same envelope path —
+/// including direct errors as well as queued broadcasts.
+struct NegotiatedSocket {
+    inner: WebSocket,
+    wire_format: Option<WireFormat>,
+}
+
+impl NegotiatedSocket {
+    fn new(inner: WebSocket) -> Self {
+        Self {
+            inner,
+            wire_format: None,
+        }
+    }
+
+    fn set_wire_format(&mut self, wire_format: Option<WireFormat>) {
+        self.wire_format = wire_format;
+    }
+
+    fn uses_gzip_envelope(&self) -> bool {
+        self.wire_format == Some(WireFormat::GzipEnvelopeV1)
+    }
+
+    async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
+        let message = match message {
+            Message::Text(json) => {
+                wire::encode_json_message(json.to_string(), self.uses_gzip_envelope())
+                    .await
+                    .map_err(axum::Error::new)?
+            }
+            other => other,
+        };
+        self.inner.send(message).await
+    }
+
+    async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        self.inner.recv().await
+    }
+}
+
 impl ConnectionSlot {
     fn new(player_count: SharedPlayerCount) -> Self {
         Self {
@@ -3171,7 +3324,7 @@ impl Drop for ConnectionSlot {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     state: SharedState,
     draft_state: SharedDraftState,
     draft_pools: SharedDraftPools,
@@ -3189,6 +3342,7 @@ async fn handle_socket(
     online_count: u32,
     slot: ConnectionSlot,
 ) {
+    let mut socket = NegotiatedSocket::new(socket);
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
     // The slot was reserved before the upgrade; from here the two `fetch_sub`
@@ -3231,6 +3385,7 @@ async fn handle_socket(
         mode,
         lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         public_url,
+        wire_formats: vec![WireFormat::GzipEnvelopeV1],
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
@@ -3245,25 +3400,32 @@ async fn handle_socket(
             biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    if socket.send(Message::text(json)).await.is_err() {
-                        break;
-                    }
+                    if socket.send(Message::text(json)).await.is_err() { break; }
                 }
             }
 
             result = socket.recv() => {
                 match result {
                     Some(Ok(msg)) => {
-                        let text = match msg {
-                            Message::Text(t) => t.to_string(),
-                            Message::Close(_) => break,
-                            _ => continue,
-                        };
-
                         if !rate_limiter.check() {
                             debug!("rate limit exceeded, dropping message");
                             continue;
                         }
+
+                        let text = match msg {
+                            Message::Text(t) => t.to_string(),
+                            Message::Binary(bytes) if socket.uses_gzip_envelope() => {
+                                match wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES).await {
+                                    Ok(text) => text,
+                                    Err(error) => {
+                                        warn!(%error, "failed to decode client binary envelope");
+                                        continue;
+                                    }
+                                }
+                            }
+                            Message::Close(_) => break,
+                            _ => continue,
+                        };
 
                         let client_msg: ClientMessage = match serde_json::from_str(&text) {
                             Ok(m) => m,
@@ -3444,6 +3606,9 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             // LobbyOnly brokers run no server-side game, so there is no
             // game-server URL to advertise for a `<code>@<host>` share string.
             public_url: None,
+            // Socket negotiation uses the canonical ServerHello sent directly
+            // by handle_socket; broker-originated hellos are only projections.
+            wire_formats: Vec::new(),
         },
         L::GameCreated {
             game_code,
@@ -3539,6 +3704,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             build_commit,
             protocol_version,
             lobby_protocol_version,
+            wire_formats: _,
         } => L::ClientHello {
             client_version: client_version.clone(),
             build_commit: build_commit.clone(),
@@ -4727,7 +4893,7 @@ async fn broadcast_game_started(
     broadcast_ai_failure(connections, game_code, ai_failure).await;
 }
 
-async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Result<(), ()> {
+async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) -> Result<(), ()> {
     if identity.player_id != Some(PlayerId(0)) {
         let msg = ServerMessage::error("Only the host can modify seats.".to_string());
         if let Ok(json) = serde_json::to_string(&msg) {
@@ -4752,7 +4918,7 @@ fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) ->
 async fn reject_joining_current_game(
     identity: &SocketIdentity,
     target_game_code: &str,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
 ) -> Result<(), ()> {
     if !is_joining_current_game(identity, target_game_code) {
         return Ok(());
@@ -4772,23 +4938,37 @@ async fn draft_pack_generator_for_start(
 ) -> Result<draft_core::pack_generator::PackGenerator, String> {
     // The SOURCE, not `config.set_code`. `set_code` is the whole-source display
     // label, which a multi-set pod joins into `"ISD+DKA+AVR"` — a string no pool
-    // map can key on. The per-pack sequence lives on `DraftSource::Set`, and it
-    // is what decides which set fills each booster.
-    let set_codes = {
+    // map can key on. The persisted core source is the single authority for
+    // both Uniform and Chaos rebuilds; Chaos assignments were resolved once at
+    // admission and are never drawn again here.
+    let (source, pod_size, pack_count) = {
         let mgr = draft_state.lock().await;
         let session = mgr
             .sessions
             .get(draft_code)
             .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
-        match &session.config.source {
-            draft_core::types::DraftSource::Set { codes } => codes.clone(),
-            draft_core::types::DraftSource::Cube { .. } => {
-                return Err("Server-hosted drafts require a set pool".to_string());
-            }
-        }
+        (
+            session.config.source.clone(),
+            session.config.pod_size,
+            session.config.pack_count,
+        )
     };
 
-    draft_pools.generator_for_sequence(&set_codes)
+    match source {
+        draft_core::types::DraftSource::Set {
+            layout: draft_core::types::SetLayout::UniformByRound { codes },
+        } => draft_pools.generator_for_sequence(&codes),
+        draft_core::types::DraftSource::Set {
+            layout:
+                draft_core::types::SetLayout::Chaos {
+                    candidate_codes,
+                    assignments,
+                },
+        } => draft_pools.generator_for_chaos(&candidate_codes, &assignments, pod_size, pack_count),
+        draft_core::types::DraftSource::Cube { .. } => {
+            Err("Server-hosted drafts require a set pool".to_string())
+        }
+    }
 }
 
 /// Per-AI-result fan-out for a batch of `run_ai` results.
@@ -5215,7 +5395,7 @@ impl GameSubmission {
 #[allow(clippy::too_many_arguments)]
 async fn handle_full_game_submission(
     submission: GameSubmission,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     db: &SharedDb,
     draft_state: &SharedDraftState,
@@ -5846,7 +6026,7 @@ async fn handle_resolve_all(
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
     draft_pools: &SharedDraftPools,
@@ -5876,6 +6056,7 @@ async fn handle_client_message(
                 commit = %info.build_commit,
                 "ClientHello accepted"
             );
+            socket.set_wire_format(info.wire_format);
             identity.client_hello = Some(info);
             return;
         }
@@ -8933,6 +9114,7 @@ async fn handle_client_message(
 
         ClientMessage::CreateDraftWithSettings {
             display_name,
+            source,
             set_codes,
             kind,
             public,
@@ -8942,9 +9124,20 @@ async fn handle_client_message(
             pod_policy,
             pod_size,
         } => {
+            let source_intent = match resolve_draft_source_intent(source, set_codes) {
+                Ok(intent) => intent,
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+            let source_codes = source_intent.set_codes();
             info!(
                 display_name = %display_name,
-                set_codes = ?set_codes,
+                source = ?source_intent,
                 kind = ?kind,
                 public,
                 pod_size,
@@ -8953,11 +9146,12 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_create_draft_with_settings(
                 &display_name,
-                &set_codes,
+                source_codes,
                 &password,
                 timer_seconds,
                 pod_size,
                 kind,
+                tournament_format,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
@@ -8966,51 +9160,70 @@ async fn handle_client_message(
                 return;
             }
 
-            // Resolve the WHOLE sequence up front: a pod whose second pack
-            // names a set with no pool data must be refused at creation, not
-            // discovered when that booster fails to open mid-draft. The
-            // generator this proves out is rebuilt at StartDraft from the same
-            // source, so the two can never disagree.
-            //
-            // A sequence SHORTER than the kind's pack count repeats its last
-            // entry (`entry_for_pack`), which is how a single-set pod stays a
-            // one-element sequence; a LONGER one names boosters the event never
-            // opens, so it is the host's error rather than a silent truncation.
             let procedure = kind.procedure();
-            if set_codes.len() > usize::from(procedure.packs_per_player) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: format!(
-                        "{kind:?} opens {} packs, but {} sets were named",
-                        procedure.packs_per_player,
-                        set_codes.len()
-                    ),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-            //
-            // Booster size follows pack 1's set, matching the single-player
-            // boundary (`ResolvedSetSelection`); per-pack sizes are recorded on
-            // the session from the packs the generator produces.
-            let resolved = draft_pools
-                .generator_for_sequence(&set_codes)
-                .and_then(|_| {
-                    let first = set_codes
-                        .first()
-                        .ok_or_else(|| "A pod must name at least one set".to_string())?;
-                    draft_pools
-                        .pool_for_set(first)
-                        .and_then(|pool| pool.cards_per_pack())
-                        .ok_or_else(|| {
-                            format!(
-                                "Set {first} has no single MTGJSON pack size across its booster variants"
-                            )
+            let resolved_source = match source_intent {
+                // A Uniform sequence names the booster set for each round. A
+                // short sequence retains its legacy repeat-final shorthand;
+                // a longer one would silently name boosters that never open.
+                server_core::protocol::DraftSourceIntent::Uniform { set_codes } => {
+                    if set_codes.len() > usize::from(procedure.packs_per_player) {
+                        Err(format!(
+                            "{kind:?} opens {} packs, but {} sets were named",
+                            procedure.packs_per_player,
+                            set_codes.len()
+                        ))
+                    } else {
+                        draft_pools.generator_for_sequence(&set_codes).and_then(|_| {
+                            let first = set_codes
+                                .first()
+                                .ok_or_else(|| "A pod must name at least one set".to_string())?;
+                            draft_pools
+                                .pool_for_set(first)
+                                .and_then(|pool| pool.cards_per_pack())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Set {first} has no single MTGJSON pack size across its booster variants"
+                                    )
+                                })
+                                .map(|cards_per_pack| {
+                                    (
+                                        draft_core::types::DraftSource::Set {
+                                            layout: draft_core::types::SetLayout::UniformByRound {
+                                                codes: set_codes,
+                                            },
+                                        },
+                                        cards_per_pack,
+                                    )
+                                })
                         })
-                });
-            let cards_per_pack = match resolved {
-                Ok(cards_per_pack) => cards_per_pack,
+                    }
+                }
+                // The OS entropy draw is made once at admission. The persisted
+                // core layout holds the result, so reconnect/start never reroll
+                // a pod and a client never transmits assignments.
+                server_core::protocol::DraftSourceIntent::Chaos { candidate_codes } => {
+                    let seed = rand::rngs::OsRng.try_next_u64().map_err(|error| {
+                        format!("Unable to seed Chaos draft assignments: {error}")
+                    });
+                    seed.and_then(|seed| {
+                        draft_pools
+                            .resolve_chaos_layout(
+                                &candidate_codes,
+                                pod_size,
+                                procedure.packs_per_player,
+                                seed,
+                            )
+                            .map(|(layout, cards_per_pack)| {
+                                (
+                                    draft_core::types::DraftSource::Set { layout },
+                                    cards_per_pack,
+                                )
+                            })
+                    })
+                }
+            };
+            let (source, cards_per_pack) = match resolved_source {
+                Ok(resolved) => resolved,
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
@@ -9020,24 +9233,9 @@ async fn handle_client_message(
                 }
             };
 
-            // CR 903.13a: a Commander Draft pod plays one multiplayer game, not
-            // a bracket, so the single-elimination seat requirement does not
-            // apply to it. Was `kind != DraftKind::Quick`, which is TRUE for
-            // the fifth kind and would reject a legitimate 4-seat pod that the
-            // reducer accepts — the wire and the reducer disagreeing about the
-            // same kind in opposite directions.
-            //
-            // The predicate itself is covered by
-            // `single_elimination_seat_rule_skips_commander_draft` below, which
-            // asserts it over the procedure table: it must NOT fire for
-            // CommanderDraft (whose `post_draft_play` is `CompleteImmediately`)
-            // and MUST fire for Traditional at a 4-seat SE pod. The live socket
-            // path around it remains uncovered — reaching it needs a real
-            // connection and a created pod — so what is verified here is the
-            // typed comparison, not the frame handling.
-            if single_elimination_seat_rule_applies(kind, tournament_format, pod_size) {
+            if !draft_pod_size_is_allowed(kind, tournament_format, pod_size) {
                 let msg = ServerMessage::DraftActionRejected {
-                    reason: "Single-elimination draft events require exactly 8 seats".to_string(),
+                    reason: "Pod size is not allowed by the draft procedure".to_string(),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -9045,12 +9243,11 @@ async fn handle_client_message(
                 return;
             }
 
-            let source = draft_core::types::DraftSource::Set { codes: set_codes };
-            // One label naming the whole source, deduped in first-appearance
-            // order by the engine ("ISD+DKA+AVR"). The lobby listing and the
-            // session share it, so a listing can never describe a pod the
-            // session does not.
+            // The session label names only the resolved core source. The lobby
+            // row uses `lobby_set_label` below so a Chaos listing advertises
+            // candidate intent without leaking the assignment union.
             let set_label = source.set_code();
+            let lobby_set_label = server_core::persist::draft_lobby_source_label(&source);
             let config = draft_core::types::DraftConfig {
                 set_code: set_label.clone(),
                 source,
@@ -9123,7 +9320,7 @@ async fn handle_client_message(
                         room_name: None,
                         host_peer_id: String::new(),
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code: set_label,
+                            set_code: lobby_set_label,
                             draft_kind: format!("{kind:?}"),
                             cube_name: None,
                         }),
@@ -10517,8 +10714,8 @@ mod full_socket_authority_tests {
 mod draft_socket_authority_tests {
     use super::*;
     use draft_core::types::{
-        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
-        TournamentFormat,
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SetLayout,
+        SpectatorVisibility, TournamentFormat,
     };
 
     fn empty_identity() -> SocketIdentity {
@@ -10572,7 +10769,8 @@ mod draft_socket_authority_tests {
         [
             ClientMessage::CreateDraftWithSettings {
                 display_name: "Alice".to_string(),
-                set_codes: vec!["TST".to_string()],
+                source: None,
+                set_codes: Some(vec!["TST".to_string()]),
                 kind: DraftKind::Premier,
                 public: false,
                 password: None,
@@ -10587,6 +10785,37 @@ mod draft_socket_authority_tests {
                 password: None,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn server_rebuilds_a_persisted_chaos_source_at_draft_start() {
+        let (draft_state, _connections, draft_code, _player_token) = test_draft();
+        {
+            let mut manager = draft_state.lock().await;
+            let draft = manager
+                .sessions
+                .get_mut(&draft_code)
+                .expect("test draft exists");
+            draft.config.source = DraftSource::Set {
+                layout: SetLayout::Chaos {
+                    candidate_codes: vec!["TST".to_string()],
+                    assignments: vec![vec!["TST".to_string(); 3]; 8],
+                },
+            };
+        }
+
+        let result = draft_pack_generator_for_start(
+            &draft_state,
+            &Arc::new(draft_pools::DraftPools::default()),
+            &draft_code,
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("the empty test pool must fail after reaching Chaos generator construction");
+        };
+
+        assert_eq!(error, "No draft pool data for set: TST");
     }
 
     #[test]
@@ -11111,42 +11340,36 @@ mod live_spectator_tests {
 }
 
 #[cfg(test)]
-mod single_elimination_seat_rule_tests {
-    use super::single_elimination_seat_rule_applies;
+mod draft_pod_size_policy_tests {
+    use super::draft_pod_size_is_allowed;
     use draft_core::types::{DraftKind, TournamentFormat};
 
-    /// CR 903.13a: a Commander pod plays one multiplayer game rather than a
-    /// bracket, so the 8-seat single-elimination requirement must not reject
-    /// its 4-seat product default.
-    ///
-    /// REVERT-PROBE: restore the old `kind != DraftKind::Quick` form of the
-    /// rule — which is TRUE for the fifth kind — and this reds.
+    /// Commander completes outside tournament pairings, so its normal 3-seat
+    /// floor remains valid even when this transport value is selected.
     #[test]
-    fn single_elimination_seat_rule_skips_commander_draft() {
-        assert!(!single_elimination_seat_rule_applies(
+    fn procedure_keeps_commander_single_elimination_at_its_normal_range() {
+        assert!(draft_pod_size_is_allowed(
             DraftKind::CommanderDraft,
             TournamentFormat::SingleElimination,
-            4
+            3
         ));
     }
 
-    /// The paired positive reach-guard: the rule still fires for a kind that
-    /// DOES run tournament pairings, so the negative above cannot pass merely
-    /// because the predicate never fires for anything.
+    /// The paired positive reach-guard: a procedure that does run tournament
+    /// pairings still requires the full single-elimination bracket.
     #[test]
-    fn single_elimination_seat_rule_fires_for_traditional_four_seat_pod() {
-        assert!(single_elimination_seat_rule_applies(
+    fn procedure_requires_the_full_pairing_bracket() {
+        assert!(!draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             4
         ));
-        // ...and not at the legal 8-seat size, nor under Swiss.
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             8
         ));
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::Swiss,
             4
@@ -11362,6 +11585,50 @@ mod issue_4548_full_create_tests {
         }
     }
 
+    async fn recv_enveloped_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let frame = socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame");
+        let WsMessage::Binary(bytes) = frame else {
+            panic!("expected binary server message, got {frame:?}");
+        };
+        let json = wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES)
+            .await
+            .expect("decode server envelope");
+        serde_json::from_str(&json).expect("server message")
+    }
+
+    fn test_client_hello(wire_formats: Vec<WireFormat>) -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats,
+        }
+    }
+
+    async fn send_test_message<S>(
+        socket: &mut WebSocketStream<S>,
+        message: &ClientMessage,
+        enveloped: bool,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let json = serde_json::to_vec(message).expect("client message json");
+        let frame = if enveloped {
+            WsMessage::Binary([vec![0x00], json].concat().into())
+        } else {
+            WsMessage::Text(String::from_utf8(json).expect("client message utf8").into())
+        };
+        socket.send(frame).await.expect("send client message");
+    }
+
     #[tokio::test]
     async fn full_mode_create_sends_slots_after_game_created() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -11380,6 +11647,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11439,6 +11707,104 @@ mod issue_4548_full_create_tests {
     }
 
     #[tokio::test]
+    async fn negotiated_gzip_envelope_accepts_and_returns_binary_frames() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            let server_hello = recv_server_message(&mut socket).await;
+            assert!(matches!(
+                server_hello,
+                ServerMessage::ServerHello { wire_formats, .. }
+                    if wire_formats.contains(&WireFormat::GzipEnvelopeV1)
+            ));
+
+            send_test_message(
+                &mut socket,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
+            assert!(matches!(
+                recv_enveloped_server_message(&mut socket).await,
+                ServerMessage::LobbyUpdate { .. }
+            ));
+            for _ in 0..RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Binary(vec![0x01, 1, 2, 3].into()))
+                    .await
+                    .expect("send malformed gzip");
+            }
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 7 }, true).await;
+            let pong = tokio::time::timeout(Duration::from_millis(100), async {
+                loop {
+                    if matches!(
+                        recv_enveloped_server_message(&mut socket).await,
+                        ServerMessage::Pong { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(pong.is_err());
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "binary envelope roundtrip timed out");
+    }
+
+    #[tokio::test]
+    async fn lobby_broadcast_uses_each_clients_negotiated_frame_format() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut compressed, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect compressed client");
+            recv_server_message(&mut compressed).await;
+            let (mut legacy, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect legacy client");
+            recv_server_message(&mut legacy).await;
+
+            send_test_message(
+                &mut compressed,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut legacy, &test_client_hello(Vec::new()), false).await;
+            send_test_message(&mut compressed, &ClientMessage::SubscribeLobby, true).await;
+            send_test_message(&mut legacy, &ClientMessage::SubscribeLobby, false).await;
+
+            for _ in 0..2 {
+                recv_enveloped_server_message(&mut compressed).await;
+                recv_server_message(&mut legacy).await;
+            }
+
+            let (_trigger, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect broadcast trigger");
+            while !matches!(
+                recv_enveloped_server_message(&mut compressed).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+            while !matches!(
+                recv_server_message(&mut legacy).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "mixed-version lobby broadcast timed out");
+    }
+
+    #[tokio::test]
     async fn full_mode_create_rejects_format_invalid_host_deck() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -11456,6 +11822,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11522,6 +11889,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11654,6 +12022,7 @@ mod game_submission_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(
@@ -12188,6 +12557,7 @@ mod game_submission_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -12268,7 +12638,8 @@ mod mode_gate_tests {
             },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -12351,6 +12722,7 @@ mod mode_gate_tests {
                 build_commit: "abc".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
@@ -12411,7 +12783,8 @@ mod mode_gate_tests {
             ClientMessage::Ping { timestamp: 0 },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -12745,6 +13118,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12753,6 +13127,30 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                wire_format: None,
+            })
+        );
+    }
+
+    #[test]
+    fn negotiates_gzip_envelope_from_client_hello_capability() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            },
+            hello_acceptance(ServerMode::Full),
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::Accept(ClientHelloInfo {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                wire_format: Some(WireFormat::GzipEnvelopeV1),
             })
         );
     }
@@ -12773,6 +13171,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12797,6 +13196,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12817,6 +13217,7 @@ mod handshake_tests {
                 // Far outside LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION.
                 protocol_version: PROTOCOL_VERSION.saturating_sub(9),
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12837,6 +13238,7 @@ mod handshake_tests {
                 build_commit: "future12".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION + 5),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12858,6 +13260,7 @@ mod handshake_tests {
                 build_commit: "ancient1".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(below),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12883,6 +13286,7 @@ mod handshake_tests {
                 build_commit: "old1234".into(),
                 protocol_version: previous,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12907,6 +13311,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12930,6 +13335,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12953,6 +13359,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12970,6 +13377,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13020,6 +13428,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13615,13 +14024,230 @@ mod admin_auth_tests {
 }
 
 #[cfg(test)]
+mod compression_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use lobby_broker::Broker;
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+    use tower_http::cors::CorsLayer;
+    use url::Url;
+
+    use super::{build_router, draft_pools, persistence, AppState, ServerContext, ServerMode};
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
+        let game_db = Arc::new(
+            persistence::GameDb::open(&game_db_path, persistence::SessionRetention::Multiplayer)
+                .expect("game db"),
+        );
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            context: ServerContext::default(),
+            public_url: None,
+            allowed_origin: None,
+        }
+    }
+
+    async fn spawn_compressed_test_server(
+        temp_dir: &tempfile::TempDir,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app_state = test_app_state(temp_dir);
+        let app = build_router(app_state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("{addr}"), handle)
+    }
+
+    /// Issues a raw `GET` (no client library in the way of the exact bytes on
+    /// the wire) and splits the response into its lowercased header block and
+    /// raw body, the same way the admin-auth tests above talk to the server.
+    /// A compressed response has no length known up front, so axum sends it
+    /// `Transfer-Encoding: chunked`; this unwraps that framing so callers see
+    /// the same payload bytes a real client's HTTP stack would hand them.
+    async fn raw_http_get(
+        addr: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> (String, Vec<u8>) {
+        let url = Url::parse(&format!("http://{addr}{path}")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n");
+        for (name, value) in extra_headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.expect("read");
+        let split_at = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("header/body separator");
+        let headers = String::from_utf8_lossy(&buf[..split_at]).to_ascii_lowercase();
+        let raw_body = &buf[split_at + 4..];
+        let body = if headers.contains("transfer-encoding: chunked") {
+            dechunk(raw_body)
+        } else {
+            raw_body.to_vec()
+        };
+        (headers, body)
+    }
+
+    /// Minimal HTTP/1.1 chunked-transfer-coding decoder (RFC 9112 §7.1) —
+    /// just enough to reassemble a `raw_http_get` body for assertions, not a
+    /// general-purpose client.
+    fn dechunk(mut body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") {
+            let size_line = std::str::from_utf8(&body[..line_end]).unwrap_or("0");
+            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+            body = &body[line_end + 2..];
+            if size == 0 || body.len() < size {
+                break;
+            }
+            out.extend_from_slice(&body[..size]);
+            body = &body[size..];
+            body = body.strip_prefix(b"\r\n".as_slice()).unwrap_or(body);
+        }
+        out
+    }
+
+    /// `CompressionLayer`'s default predicate skips bodies below a minimum
+    /// size (compressing a couple of bytes would grow, not shrink, the
+    /// response once gzip's own framing overhead is counted) — so `/health`'s
+    /// two-byte `"ok"` body is *correctly* left alone even with the layer
+    /// present and `Accept-Encoding: gzip` on the request. This test pins
+    /// that expectation; `large_json_response_is_gzip_compressed_when_accepted`
+    /// below exercises the case the layer exists for.
+    #[tokio::test]
+    async fn health_response_is_uncompressed_regardless_of_accept_encoding() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+
+        let (headers, body) = raw_http_get(&addr, "/health", &[("Accept-Encoding", "gzip")]).await;
+
+        assert!(
+            !headers.contains("content-encoding"),
+            "did not expect a Content-Encoding header on a response this small, got:\n{headers}"
+        );
+        assert_eq!(body, b"ok");
+
+        server.abort();
+    }
+
+    /// Exercises `CompressionLayer` against a response large enough to clear
+    /// the default minimum-size predicate: a P2P draft backup snapshot, the
+    /// same JSON API surface the issue's audit called out as uncompressed at
+    /// origin.
+    #[tokio::test]
+    async fn large_json_response_is_gzip_compressed_when_accepted() {
+        const DRAFT_CODE: &str = "GZIP01";
+        const HOST_PEER: &str = "peer-compression-test";
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        // A highly compressible payload comfortably over the predicate's
+        // minimum size, matching the redactor's "JSON object" requirement.
+        let padding = "a".repeat(4096);
+        let snapshot_json = format!(r#"{{"status":"Drafting","padding":"{padding}"}}"#);
+        app_state
+            .game_db
+            .save_p2p_backup(DRAFT_CODE, HOST_PEER, &snapshot_json)
+            .expect("seed backup");
+        let uncompressed_len = snapshot_json.len();
+
+        let app = build_router(app_state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        let addr = format!("{addr}");
+
+        let (headers, body) = raw_http_get(
+            &addr,
+            &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}"),
+            &[("Accept-Encoding", "gzip")],
+        )
+        .await;
+
+        assert!(
+            headers.contains("content-encoding: gzip"),
+            "expected a gzip Content-Encoding header, got:\n{headers}"
+        );
+        assert_eq!(
+            body.get(..2),
+            Some([0x1f, 0x8b].as_slice()),
+            "response body does not start with the gzip magic bytes"
+        );
+        assert!(
+            body.len() < uncompressed_len,
+            "gzip body ({} bytes) should be smaller than the uncompressed JSON it wraps ({} bytes)",
+            body.len(),
+            uncompressed_len
+        );
+
+        server.abort();
+    }
+
+    /// Guards the exact regression this fix must not introduce — a
+    /// `CompressionLayer` applied broadly enough to wrap the `/ws` upgrade
+    /// response. `build_router` keeps `/ws` on its own uncompressed
+    /// sub-router; this asserts the handshake still completes when served
+    /// from the very `Router` that also carries compression.
+    #[tokio::test]
+    async fn ws_upgrade_still_succeeds_through_the_compressed_router() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+
+        let connected = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await;
+        assert!(
+            connected.is_ok(),
+            "WebSocket upgrade failed through the compressed router: {:?}",
+            connected.err()
+        );
+
+        server.abort();
+    }
+}
+
+#[cfg(test)]
 mod p2p_backup_delete_tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use axum::routing::{get, post};
-    use axum::Router;
+    use axum::{Json, Router};
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
@@ -13761,6 +14387,90 @@ mod p2p_backup_delete_tests {
             StatusCode::OK,
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn public_backup_store_and_get_redact_chaos_assignments() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let nested = serde_json::json!({
+            "config": {
+                "source": {
+                    "type": "Set",
+                    "data": {
+                        "candidate_codes": ["TST", "ALT"],
+                        "assignments": [["TST", "ALT"], ["ALT", "TST"]]
+                    }
+                }
+            }
+        });
+        let snapshot = serde_json::json!({ "draftSessionJson": nested.to_string() }).to_string();
+
+        let stored = admin::p2p_backup_store(
+            State(app_state.clone()),
+            Json(admin::P2pBackupRequest {
+                draft_code: DRAFT_CODE.to_string(),
+                host_peer_id: HOST_PEER.to_string(),
+                snapshot_json: snapshot,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), StatusCode::OK);
+
+        let (_, stored_snapshot, _) = app_state
+            .game_db
+            .load_p2p_backup(DRAFT_CODE)
+            .expect("load")
+            .expect("stored backup");
+        let stored_value: serde_json::Value =
+            serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
+        let stored_session: serde_json::Value = serde_json::from_str(
+            stored_value["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        let stored_source = &stored_session["config"]["source"];
+        assert_eq!(stored_source["type"], "Set");
+        let stored_layout = &stored_source["data"];
+        assert!(stored_layout.get("assignments").is_none());
+        assert_eq!(
+            stored_layout["candidate_codes"],
+            serde_json::json!(["TST", "ALT"])
+        );
+
+        let response = admin::p2p_backup_get(
+            State(app_state),
+            Path(DRAFT_CODE.to_string()),
+            Query(admin::P2pBackupGetQuery {
+                host_peer_id: HOST_PEER.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let public_response: serde_json::Value =
+            serde_json::from_slice(&body).expect("response JSON");
+        let public_snapshot: serde_json::Value = serde_json::from_str(
+            public_response["snapshot_json"]
+                .as_str()
+                .expect("snapshot JSON string"),
+        )
+        .expect("snapshot JSON");
+        let public_session: serde_json::Value = serde_json::from_str(
+            public_snapshot["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        assert_eq!(public_session["config"]["source"]["type"], "Set");
+        assert!(public_session["config"]["source"]["data"]
+            .get("assignments")
+            .is_none());
     }
 
     #[tokio::test]
@@ -14164,6 +14874,7 @@ mod metrics_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(

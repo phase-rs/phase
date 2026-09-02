@@ -2164,6 +2164,31 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
 /// your graveyard onto the battlefield tapped." Without this rewrite, "it"
 /// resolves to `TriggeringSource` (Silvan Reveler itself, already on the
 /// battlefield), so the land never leaves the graveyard.
+///
+/// SCOPE — narrowed to `Effect::ChangeZone`'s own `target` field only (#8250
+/// review): `TargetFilter::ParentTarget` is not exclusive to "no antecedent
+/// reached the parser" — it is also the standing representation for "this
+/// ability's own separately-declared target" wherever that target is chosen
+/// once for the whole ability chain per CR 601.2c/603.3d (a fresh "target
+/// player or planeswalker"/"target creature or planeswalker" nested inside a
+/// discard/sacrifice-this-way rider carries `ParentTarget` on ITS OWN
+/// `DealDamage.target` field for exactly that reason). Cragganwick Cremator
+/// ("...this creature deals damage equal to that card's power to target
+/// player or planeswalker") and Narset of the Ancient Way's -2 ("...Narset
+/// deals damage equal to that card's mana value to target creature or
+/// planeswalker") both parse to `DealDamage { target: ParentTarget, .. }`
+/// under the very same `ZoneChangedThisWay { destination: None, .. }` gate as
+/// Silvan Reveler's `ChangeZone` — confirmed against `parse_effect_chain`'s
+/// output before this pass runs. A blanket `each_target_filter_mut` walk over
+/// `sub.effect` cannot distinguish "the bare moved-object pronoun" from "this
+/// effect's own freshly-chosen target that merely happens to reuse the
+/// `ParentTarget` sentinel", and previously rewrote both, redirecting
+/// Cragganwick's and Narset's damage to the discarded/exiled card instead of
+/// the chosen recipient. Only `Effect::ChangeZone` — the effect class that
+/// literally moves the referenced object, matching "put it"/"return it"/
+/// "exile it" phrasing (CR 400.7 moved-object identity) — is targeted here;
+/// a `DealDamage` (or any other effect) sibling in the same gated rider is
+/// left untouched, preserving its own independently-resolved target.
 pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut AbilityDefinition) {
     let parent_is_discard_or_sacrifice = matches!(
         *def.effect,
@@ -2178,6 +2203,11 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
                     ..
                 })
             ) {
+                // Narrow to `ChangeZone`'s own target field — see the SCOPE
+                // note above. Do NOT widen to `each_target_filter_mut`: that
+                // walker also visits `DealDamage`/`Discard`/`Mill`/etc.
+                // targets that may independently and correctly carry
+                // `ParentTarget` for their own declared target.
                 if let Effect::ChangeZone { target, .. } = sub.effect.as_mut() {
                     if *target == TargetFilter::ParentTarget {
                         *target = TargetFilter::LastZoneChanged;

@@ -54,7 +54,7 @@ export function create_multiplayer_draft(pool_input_json: string, seats_json: st
  * reads these; it never re-derives them (CLAUDE.md: the frontend is a display
  * layer, not a logic layer).
  */
-export function draft_procedure(kind: number): any;
+export function draft_procedure(kind: number, tournament_format: string): any;
 
 /**
  * Serialize the full DraftSession to JSON for host persistence.

@@ -220,7 +220,17 @@
     "back": "Wstecz",
     "opening": "Otwieranie…",
     "hostP2PGame": "Hostuj grę P2P",
-    "hostGame": "Hostuj grę"
+    "hostGame": "Hostuj grę",
+    "savedFormats": "Zapisane formaty niestandardowe",
+    "saveAsCustomFormat": "Zapisz format",
+    "customFormatNamePlaceholder": "Nazwij ten format",
+    "useCustomFormat": "Użyj",
+    "customFormatInUse": "W użyciu",
+    "deleteCustomFormat": "Usuń",
+    "loadingCustomFormat": "Wczytywanie formatu…",
+    "noSavedCustomFormats": "Brak zapisanych formatów niestandardowych.",
+    "customFormatResolveFailed": "Nie udało się wczytać zapisanego formatu.",
+    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",

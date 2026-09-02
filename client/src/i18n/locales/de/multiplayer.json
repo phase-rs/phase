@@ -220,7 +220,17 @@
     "back": "Zurück",
     "opening": "Wird geöffnet…",
     "hostP2PGame": "P2P-Spiel hosten",
-    "hostGame": "Spiel hosten"
+    "hostGame": "Spiel hosten",
+    "savedFormats": "Gespeicherte eigene Formate",
+    "saveAsCustomFormat": "Format speichern",
+    "customFormatNamePlaceholder": "Format benennen",
+    "useCustomFormat": "Verwenden",
+    "customFormatInUse": "In Verwendung",
+    "deleteCustomFormat": "Löschen",
+    "loadingCustomFormat": "Format wird geladen…",
+    "noSavedCustomFormats": "Noch keine eigenen Formate gespeichert.",
+    "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
+    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",

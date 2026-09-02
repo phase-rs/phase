@@ -124,6 +124,25 @@ describe("ChooseXValueUI", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "ChooseX", data: { value: 3 } });
   });
 
+  it("sets X to its maximum and dispatches the exact ChooseX action", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const waitingFor = chooseXWaitingFor(5);
+
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+      dispatch,
+    });
+
+    render(<ChooseXValueUI />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Set X to maximum" }));
+    expect(screen.getByLabelText("Enter X value")).toHaveValue("5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm X = 5" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "ChooseX", data: { value: 5 } });
+  });
+
   // DELIBERATE BEHAVIOUR CHANGE (binding ruling D2). This test previously asserted the
   // COERCION this change removes: "99" under max=5 committed 5, and "0" under min=2
   // committed 2 — values the caster never chose. Three shipped assertions flip here: the

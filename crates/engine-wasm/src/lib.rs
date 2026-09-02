@@ -26,7 +26,7 @@ use engine::game::preview::{
 };
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::draft_set_concessions_for;
+use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_format_gate};
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -38,6 +38,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::DebugAction;
+use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
@@ -1109,6 +1110,77 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
         let result = evaluate_deck_compatibility(db, &request);
         Ok(to_js(&result))
     })
+}
+
+/// Always-definite deck/format gate for callers that ENFORCE rather than hint.
+///
+/// Returns `{ compatible: boolean, reasons: string[] }` — never a tri-state.
+/// Backed by `evaluate_deck_format_gate`, a thin wrapper over the same
+/// authoritative `validate_deck_for_format` the real game-creation boundary
+/// runs, so a host's admission decision cannot disagree with the engine's own.
+///
+/// Its one intended caller is the P2P host's per-guest deck check
+/// (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
+/// guest whose deck is illegal for the room's format. UI-hint callers must keep
+/// using `evaluate_deck_compatibility_js`: that one deliberately answers "no
+/// opinion" (`selected_format_compatible: null`) for a Custom format, which is
+/// the honest answer for a legality chip and an unacceptable one for a kick.
+#[wasm_bindgen(js_name = evaluateDeckFormatGate)]
+pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&evaluate_deck_format_gate(db, &request)))
+    })
+}
+
+/// Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
+/// custom-format DEFINITION (`CustomFormatDef`), which the client persists
+/// locally. Never produces an active config — `formatConfigForCustomRules`
+/// below is the reverse direction, applied when a player later selects a saved
+/// definition.
+///
+/// Fallible, and the engine's own rejection message is surfaced verbatim: a
+/// format whose `deck_loading.rs` behavior grants an auxiliary deck or
+/// component keyed on the literal format (Planechase's shared planar deck,
+/// Archenemy's scheme deck, Momir's game-start emblem) has no representation in
+/// `StructuralRules` and would be silently lost, as would an already-`Custom`
+/// source's own legality rules. An empty name is rejected too. The frontend
+/// must not re-derive any of these conditions — it displays what the engine
+/// says.
+#[wasm_bindgen(js_name = customFormatFromLobbyConfig)]
+pub fn custom_format_from_lobby_config(
+    name: String,
+    format_config: JsValue,
+) -> Result<JsValue, JsValue> {
+    let format_config: FormatConfig = serde_wasm_bindgen::from_value(format_config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid FormatConfig: {e}")))?;
+    let def = CustomFormatDef::from_lobby_config(name, &format_config)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(to_js(&def))
+}
+
+/// The single authoritative `CustomFormatRules -> FormatConfig` resolver,
+/// exposed for the lobby's "select a saved custom format" action. Total and
+/// infallible: a `CustomFormatRules` carries every structural field the config
+/// needs, so there is no unresolvable input.
+///
+/// The frontend must call this rather than assembling a `FormatConfig` from the
+/// saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
+/// with this exact function and demands equality, so any hand-built config
+/// would be rejected at the next boundary it crossed.
+#[wasm_bindgen(js_name = formatConfigForCustomRules)]
+pub fn format_config_for_custom_rules(custom_rules: JsValue) -> Result<JsValue, JsValue> {
+    let rules: CustomFormatRules = serde_wasm_bindgen::from_value(custom_rules)
+        .map_err(|e| JsValue::from_str(&format!("Invalid CustomFormatRules: {e}")))?;
+    Ok(to_js(&FormatConfig::for_custom_rules(&rules)))
 }
 
 /// Returns the engine-authored Oathbreaker signature-spell selection policy.

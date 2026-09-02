@@ -44,6 +44,16 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
+  name: {{ $fullname }}-compress
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  compress:
+    minResponseBodyBytes: {{ int64 $mw.compress.minResponseBodyBytes }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
   name: {{ $fullname }}-backup-ratelimit
   labels:
     {{- include "phase-server.labels" . | nindent 4 }}

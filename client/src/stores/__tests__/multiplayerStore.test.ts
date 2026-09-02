@@ -437,6 +437,7 @@ describe("multiplayerStore", () => {
         commander_damage_threshold: 19,
         allow_debug_actions: true,
       },
+      savedCustomFormatId: null,
       playerCount: 2,
       matchType: "Bo3",
       loopDetection: { type: "Interactive" },
@@ -449,6 +450,162 @@ describe("multiplayerStore", () => {
 
   it("drops unknown persisted format names instead of indexing inherited object keys", () => {
     expect(normalizeRememberedHostConfig({ format: "toString" })).toBeNull();
+  });
+
+  // ── Custom-format rehydration ────────────────────────────────────────
+  //
+  // Before the Custom branch existed, `isKnownFormat` was false for every
+  // "Custom:<id>" string and this function returned null for the ENTIRE
+  // remembered config — player count, AI seats, privacy, all of it — whenever
+  // the player's last hosted game used a custom format. That is silent data
+  // loss, and these tests are what fail if the branch is reverted.
+
+  /** The `FormatConfig` the engine's resolver derives from `savedRules()`. */
+  function customFormatConfigFixture() {
+    return {
+      format: "Custom:0",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: { type: "Minimum", data: 60 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Limited", data: 15 },
+      default_deck_copy_limit: { type: "UpTo", data: 4 },
+      allow_debug_actions: false,
+      custom_rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 2,
+          max_players: 4,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+    };
+  }
+
+  function seedSavedCustomFormat(id: string): void {
+    localStorage.setItem(
+      "phase-custom-formats",
+      JSON.stringify([
+        {
+          id,
+          name: "House Rules",
+          savedAt: 1,
+          def: {
+            rules: customFormatConfigFixture().custom_rules,
+            label: "House Rules",
+            short_label: "HOU",
+            description: "60-card minimum, 2–4 players, 20 life",
+            reprint_policy: null,
+            printing_fidelity: "NotApplicable",
+          },
+        },
+      ]),
+    );
+  }
+
+  function persistedCustomHostConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      format: "Custom:0",
+      formatConfig: customFormatConfigFixture(),
+      savedCustomFormatId: "saved-1",
+      playerCount: 3,
+      matchType: "Bo1",
+      loopDetection: { type: "Off" },
+      isPublic: false,
+      startWhenFull: false,
+      ranked: false,
+      aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null }],
+      ...overrides,
+    };
+  }
+
+  it("rehydrates a remembered custom-format config instead of discarding it", () => {
+    seedSavedCustomFormat("saved-1");
+
+    const normalized = normalizeRememberedHostConfig(persistedCustomHostConfig());
+
+    // The assertion that flips if the Custom branch is removed: this was `null`.
+    expect(normalized).not.toBeNull();
+    expect(normalized?.format).toBe("Custom:0");
+    expect(normalized?.savedCustomFormatId).toBe("saved-1");
+    expect(normalized?.formatConfig).toEqual(customFormatConfigFixture());
+    // ...and the format-independent tail ran, so nothing else was lost either.
+    expect(normalized?.playerCount).toBe(3);
+    expect(normalized?.isPublic).toBe(false);
+    expect(normalized?.aiSeats).toEqual([
+      { seatIndex: 1, difficulty: "Hard", deckName: null },
+    ]);
+  });
+
+  it("clamps a remembered custom-format player count to the format's own seats", () => {
+    seedSavedCustomFormat("saved-1");
+    // The shared tail must clamp against the CUSTOM config's max_players (4),
+    // not a registry default that does not exist for this format.
+    expect(
+      normalizeRememberedHostConfig(persistedCustomHostConfig({ playerCount: 9 }))?.playerCount,
+    ).toBe(4);
+  });
+
+  it("drops a remembered custom format whose saved definition was deleted", () => {
+    // Nothing seeded: the definition is gone (deleted, or another device).
+    expect(normalizeRememberedHostConfig(persistedCustomHostConfig())).toBeNull();
+  });
+
+  it("drops a remembered custom format with no saved-definition id to resolve", () => {
+    seedSavedCustomFormat("saved-1");
+    expect(
+      normalizeRememberedHostConfig(persistedCustomHostConfig({ savedCustomFormatId: null })),
+    ).toBeNull();
+  });
+
+  it("drops a remembered custom format whose stored config fails the shape check", () => {
+    seedSavedCustomFormat("saved-1");
+    const { deck_size: _dropped, ...missingDeckSize } = customFormatConfigFixture();
+    expect(
+      normalizeRememberedHostConfig(
+        persistedCustomHostConfig({ formatConfig: missingDeckSize }),
+      ),
+    ).toBeNull();
+  });
+
+  it("drops a remembered custom format whose config contradicts its own rules id", () => {
+    seedSavedCustomFormat("saved-1");
+    // `format: "Custom:7"` with `custom_rules.id: 0` is exactly what the
+    // engine's `validate_custom_rules_consistency` rejects; the client mirror
+    // must not accept it either.
+    expect(
+      normalizeRememberedHostConfig(
+        persistedCustomHostConfig({
+          format: "Custom:7",
+          formatConfig: { ...customFormatConfigFixture(), format: "Custom:7" },
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("migrates v4 persisted settings before a stale format shape reaches hosting", () => {
@@ -473,6 +630,7 @@ describe("multiplayerStore", () => {
       lastHostConfig: {
         format: "Commander",
         formatConfig: FORMAT_DEFAULTS.Commander,
+        savedCustomFormatId: null,
         playerCount: 2,
         matchType: "Bo1",
         loopDetection: { type: "Off" },

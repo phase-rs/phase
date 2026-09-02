@@ -70,15 +70,28 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-%s-%s@kubernetescrd" .ctx.Release.Namespace (include "phase-server.fullname" .ctx) .suffix -}}
 {{- end -}}
 
-{{/* Middlewares applied to every public route */}}
+{{/* Middlewares applied to every public route, in Traefik's Ingress
+     *annotation* syntax (<ns>-<name>@kubernetescrd).
+
+     Takes dict "ctx" $ "excludeCompress" true|false. Pass true for the /ws
+     route: this mirrors the split `build_router` makes in
+     crates/phase-server/src/main.rs, which keeps `CompressionLayer` off
+     `/ws`'s sub-router because a WebSocket upgrade's 101 response carries no
+     body for it to compress. Traefik's compress middleware is documented to
+     no-op on such a response too, but running it there is still pure
+     overhead (buffering/negotiation work with nothing to show for it), so
+     both layers of this stack make the same exclusion for the same reason. */}}
 {{- define "phase-server.commonMiddlewares" -}}
 {{- $list := list -}}
-{{- if .Values.traefik.middlewares.enabled -}}
-{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" . "suffix" "ratelimit")) -}}
-{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" . "suffix" "inflight")) -}}
-{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" . "suffix" "headers")) -}}
+{{- if .ctx.Values.traefik.middlewares.enabled -}}
+{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" .ctx "suffix" "ratelimit")) -}}
+{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" .ctx "suffix" "inflight")) -}}
+{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" .ctx "suffix" "headers")) -}}
+{{- if not .excludeCompress -}}
+{{- $list = append $list (include "phase-server.crdRef" (dict "ctx" .ctx "suffix" "compress")) -}}
 {{- end -}}
-{{- $list = concat $list (default (list) .Values.traefik.middlewares.extra) -}}
+{{- end -}}
+{{- $list = concat $list (default (list) .ctx.Values.traefik.middlewares.extra) -}}
 {{- join "," $list -}}
 {{- end -}}
 
@@ -162,15 +175,21 @@ traefik.ingress.kubernetes.io/router.tls.options: {{ include "phase-server.crdRe
      the Traefik install. A bad reference does not fail loudly: Traefik drops the
      whole route, so the host simply stops answering.
 
-     Same namespace as the IngressRoute, so `namespace:` is left off. */}}
+     Same namespace as the IngressRoute, so `namespace:` is left off.
+
+     Takes dict "ctx" $ "excludeCompress" true|false — see
+     `phase-server.commonMiddlewares` for why the /ws route passes true. */}}
 {{- define "phase-server.middlewareRefs" -}}
-{{- $fullname := include "phase-server.fullname" . -}}
-{{- if .Values.traefik.middlewares.enabled }}
+{{- $fullname := include "phase-server.fullname" .ctx -}}
+{{- if .ctx.Values.traefik.middlewares.enabled }}
 - name: {{ $fullname }}-ratelimit
 - name: {{ $fullname }}-inflight
 - name: {{ $fullname }}-headers
+{{- if not .excludeCompress }}
+- name: {{ $fullname }}-compress
 {{- end }}
-{{- range .Values.scaleOut.extraMiddlewareRefs }}
+{{- end }}
+{{- range .ctx.Values.scaleOut.extraMiddlewareRefs }}
 - name: {{ .name }}
   {{- with .namespace }}
   namespace: {{ . }}

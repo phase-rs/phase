@@ -18,6 +18,7 @@
 import type {
   DraftPlayerView,
   DraftRarityGroupKind,
+  DraftSourceView,
   SeatPublicView,
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
@@ -141,8 +142,12 @@ import type {
  *       pack's cards or remaining-card count. The independently released
  *       `active_pack_count` contract had also claimed v23, so v24 explicitly
  *       rejects a v23 first contact rather than conflating the two shapes.
+ *  25 — player views carry `launch_capability`, the engine-authorized
+ *       post-draft multiplayer launch. A v24 peer lacks this procedure-owned
+ *       capability and would otherwise infer from `DraftKind` or hide the
+ *       launch entirely, so the exact first-contact gate refuses the pairing.
  */
-export const DRAFT_PROTOCOL_VERSION = 24 as const;
+export const DRAFT_PROTOCOL_VERSION = 25 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -819,18 +824,92 @@ function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined 
   };
 }
 
+/**
+ * Accept only the redacted source view shape. In particular this projection
+ * never spreads a host-provided Chaos layout, because doing so would make an
+ * `assignments` matrix observable to a guest even if no UI rendered it.
+ */
+function normalizeDraftSourceView(raw: unknown): DraftSourceView | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") throw new Error("Invalid draft message: malformed source view");
+  const source = raw as Record<string, unknown>;
+  if (source.type === "Cube") {
+    if (typeof source.data !== "object" || source.data === null) {
+      throw new Error("Invalid draft message: malformed cube source view");
+    }
+    const data = source.data as Record<string, unknown>;
+    if (typeof data.id !== "string" || typeof data.name !== "string") {
+      throw new Error("Invalid draft message: malformed cube source view");
+    }
+    return { type: "Cube", data: { id: data.id, name: data.name } };
+  }
+  if (source.type !== "Set" || typeof source.data !== "object" || source.data === null) {
+    throw new Error("Invalid draft message: malformed set source view");
+  }
+  const data = source.data as Record<string, unknown>;
+  if (typeof data.layout !== "object" || data.layout === null) {
+    throw new Error("Invalid draft message: malformed set layout view");
+  }
+  const layout = data.layout as Record<string, unknown>;
+  if (typeof layout.UniformByRound === "object" && layout.UniformByRound !== null) {
+    const uniform = layout.UniformByRound as Record<string, unknown>;
+    if (!Array.isArray(uniform.codes) || !uniform.codes.every((code) => typeof code === "string")) {
+      throw new Error("Invalid draft message: malformed uniform source view");
+    }
+    return { type: "Set", data: { layout: { UniformByRound: { codes: [...uniform.codes] } } } };
+  }
+  if (typeof layout.Chaos !== "object" || layout.Chaos === null) {
+    throw new Error("Invalid draft message: malformed Chaos source view");
+  }
+  const chaos = layout.Chaos as Record<string, unknown>;
+  const optionalString = (value: unknown): string | null => {
+    if (value === null) return null;
+    if (typeof value === "string") return value;
+    throw new Error("Invalid draft message: malformed Chaos source view");
+  };
+  const optionalStringArray = (value: unknown): string[] | null => {
+    if (value === null) return null;
+    if (Array.isArray(value) && value.every((code) => typeof code === "string")) return [...value];
+    throw new Error("Invalid draft message: malformed Chaos source view");
+  };
+  if (!Array.isArray(chaos.candidate_codes) || !chaos.candidate_codes.every((code) => typeof code === "string")) {
+    throw new Error("Invalid draft message: malformed Chaos source view");
+  }
+  return {
+    type: "Set",
+    data: {
+      layout: {
+        Chaos: {
+          candidate_codes: [...chaos.candidate_codes],
+          current_pack_code: optionalString(chaos.current_pack_code),
+          completed_own_pack_codes: optionalStringArray(chaos.completed_own_pack_codes),
+          actual_set_codes: optionalStringArray(chaos.actual_set_codes),
+        },
+      },
+    },
+  };
+}
+
 function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
   if (raw === undefined) {
-    return { draft_effects: [], seats: [] } as unknown as DraftPlayerView;
+    throw new Error("Invalid draft message: launch_capability must be a known capability");
   }
   if (typeof raw !== "object" || raw === null) {
     throw new Error("Invalid draft message: malformed player view");
   }
   const view = raw as Record<string, unknown>;
+  if (
+    view.launch_capability !== "None"
+    && view.launch_capability !== "CommanderMultiplayer"
+  ) {
+    throw new Error("Invalid draft message: launch_capability must be a known capability");
+  }
   const pool_groups = normalizePoolGroups(view.pool_groups);
+  const source = normalizeDraftSourceView(view.source);
   return {
     ...view,
     ...(pool_groups !== undefined ? { pool_groups } : {}),
+    ...(source !== undefined ? { source } : {}),
     draft_effects: normalizeArrayField(view, "draft_effects"),
     seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
   } as unknown as DraftPlayerView;
