@@ -249,7 +249,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     }));
 
     renderAt("/draft-pod");
-    await user.click(screen.getByRole("button", { name: "Host a Pod" }));
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
 
     if (kind === "CommanderDraft") {
       await user.click(screen.getByRole("radio", { name: "Commander" }));
@@ -306,7 +306,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
 
     const user = userEvent.setup();
     renderAt("/draft-pod");
-    await user.click(screen.getByRole("button", { name: "Host a Pod" }));
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
     await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual([2, 3, 4, 5, 6, 7, 8]));
 
     await user.click(screen.getByRole("radio", { name: "Commander" }));

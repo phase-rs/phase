@@ -3100,6 +3100,7 @@ function ManaSingleColorChoiceModal({
               transition={{ delay: 0.05 + index * 0.05, duration: 0.25 }}
               whileHover={{ scale: 1.1 }}
               onClick={() => setSelected(isSelected ? null : color)}
+              aria-label={color}
             >
               <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="lg" />
             </motion.button>

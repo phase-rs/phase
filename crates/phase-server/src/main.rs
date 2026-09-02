@@ -10714,13 +10714,16 @@ mod draft_socket_authority_tests {
             };
         }
 
-        let error = draft_pack_generator_for_start(
+        let result = draft_pack_generator_for_start(
             &draft_state,
             &Arc::new(draft_pools::DraftPools::default()),
             &draft_code,
         )
-        .await
-        .expect_err("the empty test pool must fail after reaching Chaos generator construction");
+        .await;
+
+        let Err(error) = result else {
+            panic!("the empty test pool must fail after reaching Chaos generator construction");
+        };
 
         assert_eq!(error, "No draft pool data for set: TST");
     }

@@ -1240,9 +1240,11 @@ export function DraftPodPage() {
   const entryGeneration = useRef(0);
   const retryController = useRef<AbortController | null>(null);
   const entry = searchParams.get("entry");
+  const commanderDraftRequested = searchParams.get("kind") === COMMANDER_DRAFT_ENTRY;
+  const resumeRequested = searchParams.get("resume") === "1";
   const entryMode = entry === "host" || entry === "guest" || entry === "auto"
     ? entry
-    : searchParams.get("resume") === "1" ? "host" : "auto";
+    : resumeRequested ? "host" : "auto";
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -1409,10 +1411,10 @@ export function DraftPodPage() {
   useEffect(() => {
     // A resumed pod's kind comes from its persisted session, which is the higher
     // authority — a URL intent must never overwrite it.
-    if (searchParams.get("resume") === "1") return;
-    if (searchParams.get("kind") !== COMMANDER_DRAFT_ENTRY) return;
+    if (resumeRequested) return;
+    if (!commanderDraftRequested) return;
     void enterKind("CommanderDraft");
-  }, [enterKind, searchParams]);
+  }, [commanderDraftRequested, enterKind, resumeRequested]);
 
   const handleLeave = useCallback(async () => {
     await leave(false);

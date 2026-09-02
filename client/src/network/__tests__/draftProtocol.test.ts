@@ -793,7 +793,7 @@ describe("draftProtocol", () => {
           commanders: ["Kenrith, the Returned King"],
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
-        draft_deck_submit_ack: { submissionId: "submission-1", view: {} },
+        draft_deck_submit_ack: { submissionId: "submission-1", view: validDraftView },
       };
       const msg = validateDraftMessage(
         msgType === "draft_workspace_update"

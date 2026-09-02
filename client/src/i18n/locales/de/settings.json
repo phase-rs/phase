@@ -27,6 +27,7 @@
     "skipLowUsePriorityWindows": "Prioritätsfenster mit geringer Nutzung überspringen (experimentell)",
     "skipLowUsePriorityWindowsDescription": "Überspringe automatisch deine eigenen Prioritätsfenster bei leerem Stapel während des Versorgungssegments, Ziehsegments und Endsegments. Phasenstopps und Volle Kontrolle halten weiterhin an.",
     "logDefault": "Protokoll-Standard",
+    "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
     "spellPaymentOptions": { "auto": "Automatisch", "autoExceptSacrificialMana": "Vor dem Opfern fragen", "manual": "Manuell" },
@@ -59,6 +60,10 @@
     "logDefaultOptions": {
       "open": "Offen",
       "closed": "Geschlossen"
+    },
+    "logDockSideOptions": {
+      "left": "Links",
+      "right": "Rechts"
     }
   },
   "visual": {

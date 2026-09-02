@@ -953,19 +953,21 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_fillers: visible_chaos_concessions(session)
-            .then(|| session_concessions(session).fillers)
-            .unwrap_or_default(),
+        grantable_commander_fillers: if visible_chaos_concessions(session) {
+            session_concessions(session).fillers
+        } else {
+            Vec::new()
+        },
         // CR 903.13f(3): the same latch, published for the engine's partner
         // query. Owned strings because the view is owned.
-        draft_set_codes: visible_chaos_concessions(session)
-            .then(|| {
-                concession_set_codes(session)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        draft_set_codes: if visible_chaos_concessions(session) {
+            concession_set_codes(session)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        },
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
