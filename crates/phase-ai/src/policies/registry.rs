@@ -168,6 +168,10 @@ pub enum PolicyId {
     /// CR 205.3m: pick a creature type the AI actually has members of, instead
     /// of the alphabetically first option the engine offers.
     CreatureTypeChoice,
+    /// CR 700.3a: every eligible object goes in exactly one pile; split them
+    /// into two piles of equal value, since the adversary chooses which pile
+    /// the AI ends up with.
+    PilePartition,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -430,6 +434,7 @@ impl Default for PolicyRegistry {
             Box::new(super::discard_payoff::DiscardPayoffPolicy),
             Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
             Box::new(CreatureTypeChoicePolicy),
+            Box::new(super::pile_partition::PilePartitionPolicy),
         ];
         Self::from_policies(policies)
     }

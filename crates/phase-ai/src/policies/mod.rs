@@ -44,6 +44,7 @@ mod mill_targeting;
 pub mod mulligan;
 mod payment_selection;
 mod payoff;
+mod pile_partition;
 mod planeswalker_loyalty;
 mod plus_one_counters;
 mod poison;

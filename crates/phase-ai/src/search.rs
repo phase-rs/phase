@@ -2296,15 +2296,21 @@ pub fn fallback_action(
             Some(GameAction::ChooseKeptPermanents { kept })
         }
 
-        // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
-        // object goes to derived pile B) is the simplest legal partition, and
-        // pile A is the default choice for the chooser. Tactical AI override
-        // happens through legal_actions; this is the safety net.
+        // CR 700.3 + CR 700.3a: Pile-separation fallbacks. The partition is the
+        // same weight-balanced split `balanced_pile_partition` emits into the
+        // candidate set, so the fallback answer is always a contract member —
+        // and, because the subject and the chooser are adversaries, the
+        // balanced split is also the safest one to hand over blind. Pile A is
+        // the default choice for the chooser. Tactical AI override happens
+        // through legal_actions; this is the safety net.
         WaitingFor::SeparatePilesChooseOpponent { candidates, .. } => candidates
             .first()
             .map(|&opp| GameAction::ChoosePileOpponent { opponent: opp }),
-        WaitingFor::SeparatePilesPartition { .. } => {
-            Some(GameAction::SubmitPilePartition { pile_a: Vec::new() })
+        WaitingFor::SeparatePilesPartition { eligible, .. } => {
+            let eligible: Vec<ObjectId> = eligible.iter().copied().collect();
+            Some(GameAction::SubmitPilePartition {
+                pile_a: engine::ai_support::balanced_pile_partition(state, &eligible),
+            })
         }
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
@@ -12379,6 +12385,57 @@ mod tests {
                 cards: vec![creature]
             }),
             "the fallback sacrifice escape must use the land-aware authority"
+        );
+    }
+
+    /// CR 700.3 + CR 700.3a: the subject partitions and the *chooser* picks, and
+    /// the two are adversaries by construction — so the empty pile-A vector the
+    /// fallback used to hand over is the worst legal answer, not the simplest.
+    /// The fallback now answers with the same weight-balanced split
+    /// `ai_support::balanced_pile_partition` puts in the candidate set, which is
+    /// also what keeps the answer a contract member.
+    #[test]
+    fn fallback_partition_is_balanced() {
+        let mut state = GameState::new_two_player(42);
+        let eligible: Vec<ObjectId> = [5u32, 4, 3, 2, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| {
+                let id = create_object(
+                    &mut state,
+                    CardId(600 + index as u64),
+                    PlayerId(0),
+                    format!("Pile Card {index}"),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+                    shards: Vec::new(),
+                    generic: mana_value,
+                };
+                id
+            })
+            .collect();
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: PlayerId(0),
+            eligible: eligible.iter().copied().collect(),
+            remaining_subjects: engine::im::Vector::new(),
+            completed: engine::im::Vector::new(),
+            chooser: PlayerId(1),
+            chosen_pile_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Proliferate,
+            )),
+            unchosen_pile_effect: None,
+            source_id: eligible[0],
+            pile_source: engine::types::ability::PileSource::Battlefield,
+        };
+
+        assert_eq!(
+            fallback_action_default(&state),
+            Some(GameAction::SubmitPilePartition {
+                pile_a: vec![eligible[0], eligible[3], eligible[4]],
+            }),
+            "MVs 5,4,3,2,1 balance as 5+2+1 against 4+3"
         );
     }
 

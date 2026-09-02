@@ -1,4 +1,5 @@
 use std::cell::OnceCell;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::game::casting;
@@ -1790,11 +1791,13 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 700.3 + CR 700.3a: AI partition candidates. Full powerset is
-        // exponential, so we cap at three heuristics: all-in-A (chooser
-        // sees an empty pile B), all-in-B (chooser sees a full pile A),
-        // and an even split. These exercise the runtime path; deeper
-        // tactical partitioning is a deferred AI-improvement axis.
+        // CR 700.3 + CR 700.3a: AI partition candidates. The full powerset is
+        // exponential, so the set is four heuristics: all-in-A (chooser sees an
+        // empty pile B), all-in-B (chooser sees a full pile A), a
+        // count-balanced half split, and the value-balanced split from
+        // [`balanced_pile_partition`]. The tactical layer re-prices these with
+        // real card values (`phase-ai`'s `policies::pile_partition`), which is
+        // what actually separates a 5-0 from a 3-2.
         WaitingFor::SeparatePilesPartition {
             player, eligible, ..
         } => {
@@ -1806,6 +1809,12 @@ pub fn candidate_actions_broad_with_probe(
                 let mid = elig.len() / 2;
                 variants.push(elig[..mid].to_vec());
             }
+            variants.push(balanced_pile_partition(state, &elig));
+            // The decision contract matches `SubmitPilePartition` by exact
+            // vector equality, so two equal vectors would be two identical
+            // contract entries. Dedupe by value, keeping emission order.
+            let mut seen: HashSet<Vec<ObjectId>> = HashSet::new();
+            variants.retain(|variant| seen.insert(variant.clone()));
             variants
                 .into_iter()
                 .map(|pile_a| {
@@ -5806,6 +5815,64 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     result
 }
 
+/// CR 700.3 + CR 700.3a: a weight-balanced two-pile partition of `eligible`,
+/// returned as pile A (pile B is derived by the handler as `eligible \ pile_a`,
+/// and CR 700.3a puts every eligible object in exactly one pile).
+///
+/// The greedy longest-processing-time heuristic: walk the objects heaviest
+/// first and put each into the pile that is currently lighter. Ties: equal pile
+/// weight goes to the pile with FEWER objects, and a still-equal tie goes to A.
+/// The count tiebreak is load-bearing, not cosmetic — an all-zero-weight pool
+/// (a board of tokens) would otherwise pile everything into A.
+///
+/// Weight is mana value. `ai_support` lives in the engine and cannot reach
+/// `phase-ai`'s card evaluation, so this is the engine-local proxy; it only has
+/// to make a *balanced* vector exist in the candidate set. `PilePartitionPolicy`
+/// re-prices the emitted candidates with real card values and picks between
+/// them.
+///
+/// Pile A comes back in `eligible` order rather than in weight order, so the
+/// vector is canonical: the decision contract matches
+/// `GameAction::SubmitPilePartition` by exact vector equality, and a partition
+/// that coincides with another heuristic's must compare equal to it.
+pub fn balanced_pile_partition(state: &GameState, eligible: &[ObjectId]) -> Vec<ObjectId> {
+    let weight = |id: &ObjectId| -> u32 {
+        state
+            .objects
+            .get(id)
+            .map_or(0, |obj| obj.mana_cost.mana_value())
+    };
+
+    let mut heaviest_first: Vec<ObjectId> = eligible.to_vec();
+    heaviest_first.sort_by_key(|id| Reverse(weight(id)));
+
+    let mut pile_a: HashSet<ObjectId> = HashSet::new();
+    let (mut weight_a, mut weight_b) = (0u32, 0u32);
+    let (mut count_a, mut count_b) = (0usize, 0usize);
+    for id in heaviest_first {
+        let object_weight = weight(&id);
+        let to_pile_a = match weight_a.cmp(&weight_b) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => count_a <= count_b,
+        };
+        if to_pile_a {
+            pile_a.insert(id);
+            weight_a += object_weight;
+            count_a += 1;
+        } else {
+            weight_b += object_weight;
+            count_b += 1;
+        }
+    }
+
+    eligible
+        .iter()
+        .copied()
+        .filter(|id| pile_a.contains(id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::game::game_object::RoomDoor;
@@ -5826,6 +5893,108 @@ mod tests {
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
+
+    /// A pile card whose mana value is `generic` — the weight
+    /// [`balanced_pile_partition`] reads.
+    fn pile_card(state: &mut GameState, index: u64, generic: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(600 + index),
+            PlayerId(0),
+            format!("Pile Card {index}"),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = match generic {
+            0 => ManaCost::NoCost,
+            generic => ManaCost::Cost {
+                shards: Vec::new(),
+                generic,
+            },
+        };
+        id
+    }
+
+    /// Prompt `state` with a partition over `eligible` and collect every
+    /// `pile_a` vector the candidate set offers.
+    fn partition_candidates(state: &mut GameState, eligible: &[ObjectId]) -> Vec<Vec<ObjectId>> {
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: PlayerId(0),
+            eligible: eligible.iter().copied().collect(),
+            remaining_subjects: im::Vector::new(),
+            completed: im::Vector::new(),
+            chooser: PlayerId(1),
+            chosen_pile_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Proliferate,
+            )),
+            unchosen_pile_effect: None,
+            source_id: ObjectId(1),
+            pile_source: crate::types::ability::PileSource::Battlefield,
+        };
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::SubmitPilePartition { pile_a } => Some(pile_a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 700.3a: the candidate set must offer a weight-balanced partition
+    /// alongside the three legacy shapes, deterministically, and never the same
+    /// vector twice (the decision contract matches these by exact equality).
+    #[test]
+    fn balanced_partition_candidate_present_and_deterministic() {
+        let mut state = GameState::new_two_player(42);
+        // MVs 5,4,3,2,1. LPT deals 5→A, 4→B, 3→B, 2→A; the last card meets a
+        // 7/7 weight tie on equal counts and goes to A. A = 8, B = 7.
+        let skewed: Vec<ObjectId> = [5, 4, 3, 2, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| pile_card(&mut state, index as u64, mana_value))
+            .collect();
+        let balanced = balanced_pile_partition(&state, &skewed);
+        assert_eq!(balanced, vec![skewed[0], skewed[3], skewed[4]]);
+
+        let vectors = partition_candidates(&mut state, &skewed);
+        assert!(vectors.contains(&balanced), "balanced split emitted");
+        assert!(vectors.contains(&Vec::new()), "all-in-B still emitted");
+        assert!(vectors.contains(&skewed), "all-in-A still emitted");
+        assert!(
+            vectors.contains(&skewed[..2].to_vec()),
+            "count-balanced half split still emitted"
+        );
+        assert!(
+            vectors
+                .iter()
+                .enumerate()
+                .all(|(index, pile_a)| !vectors[..index].contains(pile_a)),
+            "no duplicate partition vectors"
+        );
+
+        // One card outweighs every other combined: it is pile A by itself.
+        let mut state = GameState::new_two_player(42);
+        let lopsided: Vec<ObjectId> = [6, 1, 1, 1, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| pile_card(&mut state, index as u64, mana_value))
+            .collect();
+        assert_eq!(
+            balanced_pile_partition(&state, &lopsided),
+            vec![lopsided[0]]
+        );
+
+        // Five zero-cost tokens: every weight comparison ties, so the
+        // object-count tiebreak alternates strictly by list order.
+        let mut state = GameState::new_two_player(42);
+        let tokens: Vec<ObjectId> = (0..5)
+            .map(|index| pile_card(&mut state, index, 0))
+            .collect();
+        assert_eq!(
+            balanced_pile_partition(&state, &tokens),
+            vec![tokens[0], tokens[2], tokens[4]]
+        );
+    }
 
     #[test]
     fn choose_objects_candidates_respect_bounds_and_distinctness() {
