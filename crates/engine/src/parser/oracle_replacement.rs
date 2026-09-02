@@ -11141,6 +11141,8 @@ fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClause
         // `layers.rs` and the CR 611.2b `ReplacementCondition` gate end them, and
         // stamping any turn window here would cut them short.
         Some(Duration::UntilHostLeavesPlay)
+        | Some(Duration::WhileControllingHost)
+        | Some(Duration::WhileHostOnBattlefield)
         | Some(Duration::ForAsLongAs { .. })
         | Some(Duration::UntilSourceExilesAnotherCard)
         | Some(Duration::UntilOpponentBecomesMonarch) => StatedClauseExpiry::Durable,

@@ -103,7 +103,27 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
         return target;
     }
     match &ctx.subject {
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+        // CR 608.2c + CR 701.21a: `CostPaidObject` here is the gated
+        // "If you do," Sacrifice-antecedent anchor (see
+        // `oracle_effect::if_you_do_object_anchor`'s `Effect::Sacrifice` arm)
+        // — a resolution-time referent, NOT a trigger-subject CATEGORY for
+        // `resolve_it_pronoun` to refine via `TriggeringSource`. Excluded
+        // here alongside `SelfRef`/`Any` so a BARE "it"/"them" pronoun keeps
+        // its pre-existing `ParentTarget`-source-fallback binding: Bloodcrazed
+        // Socialite's "you may sacrifice a Blood token. If you do, IT gets
+        // +2/+2" needs "it" to stay the attacking creature (the ability's
+        // source), not the sacrificed token, which no longer exists to
+        // receive a boost (CR 111.7). Only the DEMONSTRATIVE noun-phrase
+        // family ("that card"/"that creature"/...) binds to `CostPaidObject`
+        // directly, in `parse_target_with_syntax`'s "that " branch below
+        // (Heart-Shaped Herb, issue #8077) — this arm must not widen that to
+        // bare pronouns.
+        Some(subject)
+            if !matches!(
+                subject,
+                TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+            ) =>
+        {
             resolve_it_pronoun(ctx)
         }
         _ => TargetFilter::ParentTarget,
@@ -820,6 +840,18 @@ pub fn parse_target_with_syntax<'a>(
                 parse_definite_parent_reference(lower.as_str(), &ctx.declared_target_slots)
             {
                 return (slot_filter, &text[lower.len() - slot_rest.len()..], syntax);
+            }
+            // CR 608.2c + CR 701.21a: a gated "If you do," clause whose
+            // antecedent is a resolution-time choice with no target concept
+            // of its own (`Effect::Sacrifice`) seeds `ctx.subject` with
+            // `TargetFilter::CostPaidObject` via `if_you_do_object_anchor`
+            // (oracle_effect/mod.rs) — mirrors `resolve_pronoun_target`'s own
+            // `ctx.subject` consultation for the bare-pronoun arms above.
+            // Every other `ctx.subject` state (None/SelfRef/Any/typed trigger
+            // subject/…) is unaffected and keeps the historical `ParentTarget`
+            // binding (Heart-Shaped Herb, issue #8077).
+            if matches!(ctx.subject, Some(TargetFilter::CostPaidObject)) {
+                return (TargetFilter::CostPaidObject, rem, syntax);
             }
             return (TargetFilter::ParentTarget, rem, syntax);
         }

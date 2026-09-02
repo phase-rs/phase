@@ -3804,7 +3804,7 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect(
+        let tce_id = state.add_transient_continuous_effect_with_bindings(
             source,
             PlayerId(0),
             Duration::ForAsLongAs {
@@ -3820,10 +3820,19 @@ mod tests {
                 token_image_ref: None,
             }],
             None,
+            crate::types::game_state::TransientContinuousEffectBindings {
+                affected_recipient: Some(
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(
+                        &state.objects[&source],
+                    ),
+                ),
+                duration_subject: Some(
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(
+                        &state.objects[&target],
+                    ),
+                ),
+            },
         );
-        // CR 611.2b: the duration tracks the copy TARGET's tap state, not the
-        // source's — the same binding the layer engine uses.
-        state.set_transient_duration_subject(tce_id, target);
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,

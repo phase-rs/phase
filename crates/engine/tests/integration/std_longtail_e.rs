@@ -2759,12 +2759,16 @@ fn shipped_retained_type_duration_classes_follow_the_governing_animation() {
         &["Creature"],
         &["Human", "Druid"],
     );
+    // CR 611.2b + CR 702.26f: "for as long as Awakener Druid remains on the
+    // battlefield" is the presence-bound state reading — a phase-out of the
+    // Druid ends the animation, so it carries `WhileHostOnBattlefield`, not
+    // the "until ~ leaves the battlefield" event deadline.
     assert_retained_type_duration(
         &awakener,
         "Awakener Druid",
         CoreType::Land,
         None,
-        Duration::UntilHostLeavesPlay,
+        Duration::WhileHostOnBattlefield,
     );
 
     let hedge = parse(

@@ -3,7 +3,7 @@ use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::statics::StaticMode;
 
@@ -76,15 +76,18 @@ pub fn resolve(
         }
 
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&obj_id]);
-        let effect_id = state.add_transient_continuous_effect(
+        state.add_transient_continuous_effect_with_bindings(
             ability.source_id,
             ability.controller,
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::AddStaticMode { mode: mode.clone() }],
             None,
+            TransientContinuousEffectBindings {
+                affected_recipient: Some(recipient),
+                duration_subject: None,
+            },
         );
-        state.set_transient_affected_recipient(effect_id, recipient);
     }
 
     events.push(GameEvent::EffectResolved {

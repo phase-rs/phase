@@ -202,17 +202,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 51 — FormatConfig.custom_rules became LIVE on the wire. The field has
- *      existed in the schema since the custom-format work began, but no frame
- *      could carry content in it: no shipped UI could populate it and the
- *      engine rejected every externally-supplied Custom payload for want of a
- *      resolver. This phase lands the resolver and the saved-format lobby UI
- *      that produces one, so a real CustomFormatRules now travels
- *      GameState.format_config the same way default_deck_copy_limit did at
- *      50: a CAPABILITY bump, not a parse bump — the field is serde-optional
- *      and skipped when absent, so a peer missing it still deserializes
- *      cleanly, it simply cannot host or join a Custom-format room. Lobby
- *      carriers move too, see LOBBY_PROTOCOL_VERSION 4 below.
+ * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ *      gained duration and source_id, ExileWithAltCost gained source_id beside
+ *      the duration it already had (additive, serde
+ *      defaults), and Duration gained the WhileControllingHost and
+ *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
+ *      one-way parse break — a v50 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
+ *      degrading.
  * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *      and the deck-compatibility admission path now both read, replacing
@@ -396,18 +393,11 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
- * 4 — FormatConfig.custom_rules became LIVE on the wire. The field has existed
- *     in the schema since the custom-format work began, but no frame could
- *     carry content in it: no shipped UI could populate it and the engine
- *     rejected every externally-supplied Custom payload for want of a
- *     resolver. Phase 1c lands the resolver and the saved-format lobby UI, so
- *     a real CustomFormatRules now travels the same three carriers as 2 and 3:
- *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Like 3 and unlike 2
- *     this is a CAPABILITY bump — the field is serde-optional and skipped when
- *     absent, so every frame a v3 peer can send still deserializes unchanged —
- *     so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below does NOT move. A v3 broker
- *     simply cannot host or join a Custom-format room, which is a capability
- *     that peer never had, not a broken session for built-in formats.
+ * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
+ *     and five LobbyServerMessage variants. Purely ADDITIVE, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
+ *     existing variant changed shape, so nothing this client already parses
+ *     can break against a version-2 broker.
  * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
  *     above for the full entry). Same three carriers as 2:
  *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Unlike 2, this is a

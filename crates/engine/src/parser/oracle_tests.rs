@@ -13170,6 +13170,24 @@ fn heart_shaped_herb_activated_ability_grants_monarch_as_continuation() {
         "gated sub must remain the battlefield return, got {:?}",
         change_zone.effect,
     );
+    // CR 608.2c + CR 701.21a (issue #8077): "that card" must bind to the
+    // creature the optional Sacrifice EFFECT just chose (CostPaidObject —
+    // resolved via `effect_context_object`/`cost_paid_object` at runtime),
+    // never to `ParentTarget` (which has no chosen target to inherit here and
+    // silently defaults to the ability's OWN source, Heart-Shaped Herb
+    // itself, at resolution).
+    assert!(
+        matches!(
+            *change_zone.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::CostPaidObject,
+                ..
+            }
+        ),
+        "return target must bind to the sacrificed creature (CostPaidObject), not ParentTarget \
+         (which returns the ability's own source instead) — got {:?}",
+        change_zone.effect,
+    );
     assert_eq!(
         change_zone.condition,
         Some(AbilityCondition::EffectOutcome {
@@ -13206,6 +13224,73 @@ fn heart_shaped_herb_activated_ability_grants_monarch_as_continuation() {
     assert!(
         !monarch_chain_has_unimplemented(&def),
         "no clause may fail closed to Unimplemented"
+    );
+}
+
+/// CR 608.2c: Chipper Chopper and Riveting Rigger have the same optional typed-sacrifice
+/// continuation: "If you do, put two +1/+1 counters on this creature". The
+/// sacrifice introduces a resolution-local object, but this-creature must
+/// remain the triggered ability's source rather than that sacrificed artifact.
+#[test]
+fn optional_artifact_sacrifice_keeps_counter_recipient_on_source() {
+    let def = parse_effect_chain(
+        "You may sacrifice another artifact. If you do, put two +1/+1 counters on this creature and it assembles a Contraption.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(*def.effect, Effect::Sacrifice { .. }),
+        "the optional sacrifice must remain the head effect, got {:?}",
+        def.effect,
+    );
+    let counters = def
+        .sub_ability
+        .as_deref()
+        .expect("the successful sacrifice must continue to the counter effect");
+    assert!(
+        matches!(
+            *counters.effect,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "the counter recipient must stay the source creature, got {:?}",
+        counters.effect,
+    );
+}
+
+/// CR 608.2c: Bloodcrazed Socialite's bare "it" is the attacking source, not the Blood
+/// token sacrificed by the preceding optional effect. This guards the
+/// `CostPaidObject` anchor from leaking into the bare-pronoun grammar.
+#[test]
+fn optional_blood_sacrifice_keeps_bare_pronoun_on_source() {
+    let def = parse_effect_chain(
+        "You may sacrifice a Blood token. If you do, it gets +2/+2 until end of turn.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(*def.effect, Effect::Sacrifice { .. }),
+        "the optional sacrifice must remain the head effect, got {:?}",
+        def.effect,
+    );
+    let pump = def
+        .sub_ability
+        .as_deref()
+        .expect("the successful sacrifice must continue to the pump effect");
+    assert!(
+        matches!(
+            *pump.effect,
+            Effect::Pump {
+                target: TargetFilter::SelfRef,
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+            }
+        ),
+        "the pump recipient must stay the source creature, got {:?}",
+        pump.effect,
     );
 }
 
@@ -26204,6 +26289,265 @@ fn unbound_delayed_graveyard_sweep_stays_honestly_unimplemented() {
     }
 }
 
+/// Carrier-coverage fixture for `demote_unenforceable_replacement_lifetimes`.
+///
+/// The wildcard-free `match`es in that pass guarantee no `Effect` or
+/// `ContinuousModification` variant is left UNMATCHED — a new variant is a
+/// compile error. They cannot guarantee that a matched variant is actually
+/// DESCENDED, because a nested struct field is field access, not a match arm
+/// (`types::ability_visit`'s module doc makes exactly this point about its own
+/// walk, and answers it with fixtures like
+/// `game::printed_cards::tests::walker_covers_every_nested_carrier`). This is
+/// that fixture for this pass.
+///
+/// It plants one refused rider in sixteen carriers — the ability-node chain
+/// links, the two `FlipCoin` payloads, `ChooseOneOf`, a trigger, a granted
+/// ability, a replacement payload, the four cost slots (CR 602.1a activation
+/// cost, CR 118.12 `unless_pay` on both an ability and a trigger, and
+/// `ReplacementMode::MayCost`) and the two decline branches — and asserts every
+/// one of the sixteen is demoted. Those positions are what the corpus census,
+/// the first version's misses and the revert probes identified; the walk
+/// descends more carriers than the fixture pins. The first version of this pass walked only `sub_ability` /
+/// `else_ability` and silently missed `mode_abilities` and `FlipCoin`'s
+/// win/lose payloads — two of the three positions a full-corpus census then
+/// found live `AddTargetReplacement` nodes at. Those two are the reason this
+/// fixture exists; the rest are here so the next omission is caught the first
+/// time.
+///
+/// Revert-probe: deleting one of those recursion lines drops the count below
+/// `CARRIERS` and reds the assertion, which prints the whole tree so the
+/// surviving rider is visible in it. (Measured: dropping the `mode_abilities`
+/// recursion gives 15 of 16; dropping the `def.cost` line gives 15 of 16 — that
+/// second probe turned NO test red before the cost slots were planted here.)
+#[test]
+fn demote_net_reaches_every_ability_carrier() {
+    use crate::types::ability::{
+        AbilityKind, ContinuousModification, Duration, Effect, ReplacementDefinition,
+        StaticDefinition, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::replacements::ReplacementEvent;
+
+    /// One refused node: a bare untap rider under the PRESENCE wording, which
+    /// `replacement_install_is_refused` rejects (CR 611.2a).
+    fn refused() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Untap)),
+                target: TargetFilter::Any,
+            },
+        );
+        def.duration = Some(Duration::WhileHostOnBattlefield);
+        def
+    }
+
+    fn holder(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    }
+
+    // An empty parse is the cheapest honest empty tree — no `Default` derive
+    // exists on `ParsedAbilities`, and adding one for a fixture would widen the
+    // public surface.
+    let mut parsed = parse_oracle_text("", "Carrier Fixture", &[], &[], &[]);
+
+    // 1 — a bare top-level ability.
+    parsed.abilities.push(refused());
+
+    // 2, 3, 4 — the ability-node chain links.
+    let mut chain = holder(Effect::Unimplemented {
+        name: "carrier".to_string(),
+        description: None,
+    });
+    chain.sub_ability = Some(Box::new(refused()));
+    chain.else_ability = Some(Box::new(refused()));
+    chain.mode_abilities.push(refused());
+    parsed.abilities.push(chain);
+
+    // 5, 6 — FlipCoin's two payloads.
+    parsed.abilities.push(holder(Effect::FlipCoin {
+        win_effect: Some(Box::new(refused())),
+        lose_effect: Some(Box::new(refused())),
+        flipper: TargetFilter::Controller,
+    }));
+
+    // 7 — ChooseOneOf's branches.
+    parsed.abilities.push(holder(Effect::ChooseOneOf {
+        chooser: crate::types::ability::PlayerFilter::Controller,
+        branches: vec![refused()],
+    }));
+
+    // 8 — a trigger's payload.
+    let mut trigger = TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks);
+    trigger.execute = Some(Box::new(refused()));
+    parsed.triggers.push(trigger);
+
+    // 9 — a granted ability inside a static's modification.
+    let mut static_def = StaticDefinition::new(crate::types::statics::StaticMode::Continuous);
+    static_def
+        .modifications
+        .push(ContinuousModification::GrantAbility {
+            definition: Box::new(refused()),
+        });
+    parsed.statics.push(static_def);
+
+    // 10 — a replacement's payload.
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved);
+    replacement.execute = Some(Box::new(refused()));
+    parsed.replacements.push(replacement);
+
+    // 11-14 — the COST axis. CR 602.1a's activation cost and CR 118.12's
+    // "unless … pays" cost both hold an `AbilityCost`, and `AbilityCost::EffectCost`
+    // carries a full `Effect` — which is how a nested ability chain reaches a
+    // cost (Mijo, the Bull prints one today). `types::ability_visit` descends all
+    // four; a revert probe that dropped the `def.cost` line alone turned NO test
+    // red before these four existed.
+    fn refused_cost() -> crate::types::ability::AbilityCost {
+        crate::types::ability::AbilityCost::EffectCost {
+            effect: Box::new(Effect::FlipCoin {
+                win_effect: Some(Box::new(refused())),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            }),
+        }
+    }
+    fn refused_unless_pay() -> crate::types::ability::UnlessPayModifier {
+        crate::types::ability::UnlessPayModifier {
+            cost: refused_cost(),
+            payer: TargetFilter::Controller,
+        }
+    }
+
+    // 11 — an ability's own activation cost.
+    let mut costed = holder(Effect::Unimplemented {
+        name: "cost carrier".to_string(),
+        description: None,
+    });
+    costed.cost = Some(refused_cost());
+    // 12 — that same ability's "unless … pays" cost.
+    costed.unless_pay = Some(refused_unless_pay());
+    parsed.abilities.push(costed);
+
+    // 13 — a trigger's "unless … pays" cost.
+    let mut unless_trigger = TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks);
+    unless_trigger.unless_pay = Some(refused_unless_pay());
+    parsed.triggers.push(unless_trigger);
+
+    // 14, 15 — `ReplacementMode::MayCost`'s cost AND its decline branch.
+    let mut may_cost = ReplacementDefinition::new(ReplacementEvent::Moved);
+    may_cost.mode = crate::types::ability::ReplacementMode::MayCost {
+        cost: refused_cost(),
+        decline: Some(Box::new(refused())),
+    };
+    parsed.replacements.push(may_cost);
+
+    // 16 — `ReplacementMode::Optional`'s decline branch.
+    let mut optional = ReplacementDefinition::new(ReplacementEvent::Moved);
+    optional.mode = crate::types::ability::ReplacementMode::Optional {
+        decline: Some(Box::new(refused())),
+    };
+    parsed.replacements.push(optional);
+
+    const CARRIERS: usize = 16;
+
+    demote_unenforceable_replacement_lifetimes(&mut parsed);
+
+    let serialized = serde_json::to_string(&parsed).unwrap();
+    let demoted = serialized
+        .matches("unenforceable_replacement_lifetime")
+        .count();
+    assert_eq!(
+        demoted, CARRIERS,
+        "every planted carrier must be demoted; {demoted} of {CARRIERS} were. \
+         A carrier the walk does not descend leaves its rider installed with a \
+         lifetime the engine cannot end (CR 611.2a). Tree: {serialized}"
+    );
+    assert!(
+        !serialized.contains("AddTargetReplacement"),
+        "no refused rider may survive anywhere in the tree"
+    );
+}
+
+/// CR 611.2a + CR 611.2b: an untap rider whose stated host lifetime the install
+/// seam cannot enforce must fail the LINE, not resolve into nothing.
+///
+/// This is the production-pipeline half of the refusal: Oracle text in, parsed
+/// abilities out. The engine half — that the resolver raises a hard
+/// `EffectError` if such a shape reaches it anyway — is
+/// `game::effects::tap_untap::tests::host_duration_on_non_untap_replacement_fails_closed`.
+///
+/// The three wordings are NOT interchangeable. Only "for as long as you control
+/// ~" is enforceable here, by `ReplacementCondition::ControllerControlsSource`,
+/// which ends on a control change. "for as long as ~ remains on the
+/// battlefield" and "until ~ leaves the battlefield" both SURVIVE a control
+/// change while the source stays on the battlefield, so that gate would end
+/// them early — shorter than printed, which CR 611.2a forbids exactly as much
+/// as longer.
+///
+/// The two unsupported cases are Spider-Woman's PRINTED text with its duration
+/// clause swapped, and nothing else. That construction is the finding: no
+/// printed card carries those two wordings on this path today, but the grammar
+/// lowers them to it, so the corpus being clean is an accident of printing
+/// rather than a guard. The first case is the real printed text and pins that
+/// this net did not simply swallow the class.
+#[test]
+fn unenforceable_untap_rider_lifetime_stays_honestly_unimplemented() {
+    const PRINTED: &str = "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. That creature can't become untapped for as long as you control Spider-Woman.";
+    const PRESENCE: &str = "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. That creature can't become untapped for as long as Spider-Woman remains on the battlefield.";
+    const EVENT_DEADLINE: &str = "Flash\nWhen Spider-Woman enters, tap target creature an opponent controls. That creature can't become untapped until Spider-Woman leaves the battlefield.";
+
+    const KEY: &str = "unenforceable_replacement_lifetime";
+
+    // The enforceable wording keeps its typed replacement …
+    let printed = parse_oracle_text(PRINTED, "Spider-Woman, Secret Agent", &[], &[], &[]);
+    assert!(
+        !unimplemented_keys(&printed).iter().any(|k| k == KEY),
+        "the CONTROL wording is enforceable and must survive the net; keys={:?}",
+        unimplemented_keys(&printed),
+    );
+    // … and it is genuinely still the replacement path, not a silently
+    // reshaped one — otherwise the negative above could pass vacuously.
+    assert!(
+        serde_json::to_string(&printed)
+            .unwrap()
+            .contains("AddTargetReplacement"),
+        "the CONTROL wording must still lower to AddTargetReplacement"
+    );
+
+    // The PRINTED member of the same class, on the prevention seam rather than
+    // the rider seam: Old Fat Spider Can't See Me chapter II states the presence
+    // wording on a `PreventDamage` clause. Before the refusal it resolved
+    // successfully and installed nothing, while the card reported as supported.
+    let saga = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter. \
+         Sacrifice after IV.)\nI — Target creature you control gains hexproof for \
+         as long as this Saga remains on the battlefield.\nII — Prevent all damage \
+         that would be dealt by up to one target creature for as long as this Saga \
+         remains on the battlefield.\nIII, IV — Draw a card.",
+        "Old Fat Spider Can't See Me",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    assert!(
+        unimplemented_keys(&saga).iter().any(|k| k == KEY),
+        "the printed prevention member of this class must lower to an honest \
+         `{KEY}` marker; keys={:?}",
+        unimplemented_keys(&saga),
+    );
+
+    // … while the two unenforceable wordings fail the line honestly.
+    for (label, text) in [("presence", PRESENCE), ("event deadline", EVENT_DEADLINE)] {
+        let parsed = parse_oracle_text(text, "Spider-Woman, Secret Agent", &[], &[], &[]);
+        assert!(
+            unimplemented_keys(&parsed).iter().any(|k| k == KEY),
+            "the {label} wording has no enforceable lifetime at this seam and must \
+             lower to an honest `{KEY}` marker instead of an installed-then-dropped \
+             replacement; keys={:?}",
+            unimplemented_keys(&parsed),
+        );
+    }
+}
+
 /// The honesty net is narrow: a delayed recall/sweep that DOES bind its objects
 /// must be left alone. Both negatives carry a positive reach-guard — each card
 /// parses with zero `Unimplemented` of any kind — so neither assertion can pass
@@ -27636,6 +27980,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         .abilities
         .push(carrier(Effect::GrantCastingPermission {
             permission: CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost: crate::types::mana::ManaCost::default(),
                 cost_provenance: Default::default(),
                 cast_transformed: false,

@@ -1587,10 +1587,11 @@ pub fn execute_untap_with_choices(
             );
         }
     }
-    // CR 514.2 + CR 611.2a/b: Expire `PlayFromExile` permissions granted to
-    // the active player with `UntilYourNextTurn` duration (impulse draws that
-    // last "until your next turn").
-    super::layers::prune_until_next_turn_casting_permissions(state, active);
+    // CR 500.4 + CR 514.2: the untap-step seam for casting permissions — arms
+    // "until the end of your next turn" grants and expires both untap-step
+    // shapes ("until your next turn" and "until [its controller's] next untap
+    // step"). See `layers::prune_untap_step_casting_permissions`.
+    super::layers::prune_untap_step_casting_permissions(state, active);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| {
             !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)

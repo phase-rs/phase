@@ -36,6 +36,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "phase-server.logsImage" -}}
+{{- $img := .Values.logging.server.image -}}
+{{- if $img.digest -}}
+{{- printf "%s:%s@%s" $img.repository $img.tag $img.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $img.repository $img.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/* PUBLIC_URL is what the server advertises to clients, so it is never
      guessed. Deriving it from ingress.host is only sound when that host is
      actually serving: with the ingress off it yields the values.yaml
@@ -96,7 +105,9 @@ traefik.ingress.kubernetes.io/router.tls.options: {{ include "phase-server.crdRe
 
 {{/* Pod annotations: the operator's own, plus the prometheus.io/* trio when
      metrics.annotations is set (for scrapers that discover by annotation
-     rather than by PodMonitor/ServiceMonitor). */}}
+     rather than by PodMonitor/ServiceMonitor), plus a checksum of the logs
+     sidecar's ConfigMap so editing it (e.g. logging.server.port) rolls the
+     pod — Kubernetes does not restart pods on ConfigMap changes on its own. */}}
 {{- define "phase-server.podAnnotations" -}}
 {{- $annotations := default (dict) .Values.podAnnotations -}}
 {{- if and .Values.metrics.enabled .Values.metrics.annotations -}}
@@ -105,9 +116,41 @@ traefik.ingress.kubernetes.io/router.tls.options: {{ include "phase-server.crdRe
       "prometheus.io/port" (printf "%v" .Values.metrics.port)
       "prometheus.io/path" .Values.metrics.path) $annotations -}}
 {{- end -}}
+{{- if .Values.logging.enabled -}}
+{{- $annotations = merge (dict
+      "checksum/logs-config" (include (print $.Template.BasePath "/logs-configmap.yaml") . | sha256sum)) $annotations -}}
+{{- end -}}
 {{- with $annotations }}
 {{- toYaml . }}
 {{- end }}
+{{- end -}}
+
+{{/* `logging.dir` as a path relative to PHASE_DATA_DIR, i.e. the
+     `subPath:` the `logs` sidecar mounts from the shared `data` volume.
+     Enforced (not just documented) because there is no other writable
+     volume for logs to land on — a value outside PHASE_DATA_DIR would mount
+     an empty, unrelated subtree into the sidecar and it would serve nothing.
+
+     Must be a STRICT, traversal-free descendant, not the PVC root itself:
+     `logging.dir: /var/lib/phase-server/` string-prefix-matches but trims to
+     an empty subPath, which mounts the *entire* volume — games.db and its
+     WAL included — into the read-only autoindexed sidecar. A `.` or `..`
+     path segment is rejected for the same reason: the check below is a
+     string prefix, not a filesystem walk, so `/var/lib/phase-server/../etc`
+     would otherwise also match, and kubelet's subPath join treats a bare
+     `.` segment as the volume root too (`logging.dir:
+     /var/lib/phase-server/.` trims to subPath `"."`, exactly as exposed as
+     the empty-subPath case this guard exists for). */}}
+{{- define "phase-server.logSubPath" -}}
+{{- $prefix := "/var/lib/phase-server/" -}}
+{{- if not (hasPrefix $prefix .Values.logging.dir) -}}
+{{- fail (printf "logging.dir %q must be a subdirectory of %s (the data PVC mount point) so the logs sidecar can mount it from the same volume." .Values.logging.dir $prefix) -}}
+{{- end -}}
+{{- $sub := trimPrefix $prefix .Values.logging.dir -}}
+{{- if or (eq $sub "") (regexMatch "(^|/)\\.{1,2}($|/)" $sub) -}}
+{{- fail (printf "logging.dir %q must be a strict, traversal-free descendant of %s -- the PVC root itself (or a path containing '..') would mount the whole data volume, games.db included, into the read-only autoindexed logs sidecar, not just logs." .Values.logging.dir $prefix) -}}
+{{- end -}}
+{{- $sub -}}
 {{- end -}}
 
 {{/* Middleware references for an IngressRoute.
@@ -245,6 +288,10 @@ containers:
         value: {{ .Values.server.corsOrigin | quote }}
       - name: PHASE_LOG_JSON
         value: {{ .Values.server.logJson | quote }}
+      {{- if .Values.logging.enabled }}
+      - name: PHASE_LOG_DIR
+        value: {{ .Values.logging.dir | quote }}
+      {{- end }}
       - name: RUST_LOG
         value: {{ .Values.server.rustLog | quote }}
       {{- if $scaleOut }}
@@ -324,8 +371,41 @@ containers:
     volumeMounts:
       - name: data
         mountPath: /var/lib/phase-server
-{{- if not $scaleOut }}
+  {{- if .Values.logging.enabled }}
+  - name: logs
+    image: {{ include "phase-server.logsImage" . }}
+    imagePullPolicy: {{ .Values.image.pullPolicy }}
+    # Read-only static file server for `logging.dir`, diagnosis only — never
+    # write access, and only the logs subtree of `data` (not games.db).
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: {{ .Values.logging.server.runAsUser }}
+      runAsGroup: {{ .Values.logging.server.runAsGroup }}
+      capabilities:
+        drop: ["ALL"]
+    ports:
+      - name: logs
+        containerPort: {{ .Values.logging.server.port }}
+        protocol: TCP
+    resources:
+      {{- toYaml .Values.logging.server.resources | nindent 6 }}
+    volumeMounts:
+      - name: data
+        mountPath: {{ .Values.logging.dir }}
+        subPath: {{ include "phase-server.logSubPath" . }}
+        readOnly: true
+      - name: logs-conf
+        mountPath: /etc/nginx/nginx.conf
+        subPath: nginx.conf
+        readOnly: true
+      - name: logs-tmp
+        mountPath: /tmp
+  {{- end }}
+{{- if or (not $scaleOut) .Values.logging.enabled }}
 volumes:
+{{- if not $scaleOut }}
   - name: data
     {{- if .Values.persistence.enabled }}
     persistentVolumeClaim:
@@ -333,6 +413,14 @@ volumes:
     {{- else }}
     emptyDir: {}
     {{- end }}
+{{- end }}
+{{- if .Values.logging.enabled }}
+  - name: logs-conf
+    configMap:
+      name: {{ include "phase-server.fullname" . }}-logs-conf
+  - name: logs-tmp
+    emptyDir: {}
+{{- end }}
 {{- end }}
 {{- with .Values.nodeSelector }}
 nodeSelector:

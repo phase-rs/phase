@@ -184,6 +184,10 @@ describe("openPhaseSocket", () => {
     ws.deliverMessage(
       helloFrame({
         mode: "LobbyOnly",
+        // Measured against the FLOOR, not against this client's own version:
+        // an additive bump moves LOBBY_PROTOCOL_VERSION without moving
+        // MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL, so `version - 1` is not
+        // necessarily below the floor at all.
         lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );
@@ -255,6 +259,8 @@ describe("openPhaseSocket", () => {
       helloFrame({
         protocol_version: PROTOCOL_VERSION,
         mode: "Full",
+        // See above: below the floor, which is not the same as one below the
+        // client's own lobby version.
         lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
       }),
     );

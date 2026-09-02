@@ -176,11 +176,13 @@ jobs:
 
       - name: Build binaries launched by integration tests
         # `CARGO_BIN_EXE_*` embeds target/debug paths. Nextest's archive does
-        # not preserve those launcher paths, so share the two binaries the
-        # integration tests execute directly with every shard.
+        # not preserve those launcher paths, so share the binaries the
+        # integration tests execute directly with every shard. This list and the
+        # two below must cover every such binary;
+        # `crates/phase-ai/tests/gate_cli.rs` reds when they fall behind.
         run: |
           cargo build -p probe-pin
-          cargo build -p phase-ai --bin ai-commander
+          cargo build -p phase-ai --bin ai-commander --bin ai-duel
 
       - name: Upload test archive
         uses: actions/upload-artifact@v4
@@ -197,6 +199,7 @@ jobs:
           path: |
             target/debug/probe-pin
             target/debug/ai-commander
+            target/debug/ai-duel
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
@@ -241,7 +244,7 @@ jobs:
 
       - name: Restore test runtime binary permissions
         # Actions artifacts preserve file contents but not executable bits.
-        run: chmod +x target/debug/probe-pin target/debug/ai-commander
+        run: chmod +x target/debug/probe-pin target/debug/ai-commander target/debug/ai-duel
 
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and

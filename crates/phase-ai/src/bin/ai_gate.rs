@@ -11,7 +11,9 @@ use std::process::Command;
 
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
-use phase_ai::duel_suite::compare::{compare, load_report, print_markdown, CompareOptions};
+use phase_ai::duel_suite::compare::{
+    compare, emit_gate_verdict, load_report, print_markdown, render_error_markdown, CompareOptions,
+};
 use phase_ai::duel_suite::run::{run_suite, SuiteOptions, SuiteReport};
 
 const DEFAULT_BASELINE: &str = "crates/phase-ai/baselines/suite-baseline.json";
@@ -94,21 +96,27 @@ fn main() {
     let baseline = match load_report(&args.baseline) {
         Ok(report) => report,
         Err(err) => {
+            // Same reasoning as the compare refusal below: the nightly posts stdout, so a
+            // read failure that spoke only to stderr produced a red job whose issue body was
+            // the suite table and no statement of what went wrong. This is also the only
+            // caller that can reach `render_error_markdown`'s I/O arm — `compare` does no
+            // I/O, so before this the arm existed and was unreachable.
             eprintln!("failed to load baseline {}: {err}", args.baseline.display());
+            print!("{}", render_error_markdown(&err));
             std::process::exit(2);
         }
     };
 
-    let report = match compare(&baseline, &current, &CompareOptions) {
-        Ok(report) => report,
-        Err(err) => {
-            eprintln!("compare failed: {err}");
-            std::process::exit(2);
-        }
-    };
-    print_markdown(&report);
-    if report.any_fail() {
-        std::process::exit(1);
+    // stdout carries the report body — the nightly redirects it into the file it posts as a
+    // drift issue — so a refusal has to be printed there too, not only to stderr. `gate_verdict`
+    // owns both halves so the pair is testable; `main` prints and exits.
+    let comparison = compare(&baseline, &current, &CompareOptions);
+    if let Err(err) = &comparison {
+        eprintln!("compare failed: {err}");
+    }
+    let code = emit_gate_verdict(&comparison);
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 

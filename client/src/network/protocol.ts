@@ -95,16 +95,23 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  38 — FormatConfig.custom_rules became LIVE on the wire. The field has
- *       existed in the schema since the custom-format work began, but no
- *       frame could carry content in it: no shipped UI could populate it and
- *       the engine rejected every externally-supplied Custom payload for want
- *       of a resolver. This phase lands the resolver and the saved-format
- *       lobby UI that produces one. game_setup and reconnect_ack both carry
- *       the full GameState, so this P2P track is broken by the same change as
- *       the full-game PROTOCOL_VERSION track (see
- *       crates/lobby-broker/src/protocol.rs entry 51) and must bump in
- *       lockstep with it.
+ *  38 — Casting permissions gained a typed lifetime. Two parts, with different
+ *       compatibility consequences:
+ *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
+ *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+ *           `duration` it already carried. `source_id` is the granting
+ *           permanent whose presence bounds the stated lifetime. Additive
+ *           behind serde defaults, like entry 34's `prepared_copy_source`.
+ *       (b) `Duration` gained the `WhileControllingHost` ("for as long as
+ *           you control ~") and `WhileHostOnBattlefield` ("for as long as ~
+ *           remains on the battlefield") variants (CR 611.2b). Each new tag
+ *           is a PARSE BREAK in the v38 -> v37 direction, in the same shape
+ *           as the full-game bump at entry 46 (new tag emitted, old peer
+ *           cannot parse it; the break runs ONE way, unlike entry 32's
+ *           two-way break): a v37 peer deserializing a snapshot that contains
+ *           either new tag fails on an unknown variant. There is no serde
+ *           default that can rescue it, which is why the handshake must
+ *           refuse the pairing rather than degrade.
  *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *       and the deck-compatibility admission path now both read. The field

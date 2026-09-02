@@ -22,6 +22,12 @@ spec:
       targetPort: metrics
       protocol: TCP
     {{- end }}
+    {{- if .Values.logging.enabled }}
+    - name: logs
+      port: {{ .Values.logging.server.port }}
+      targetPort: logs
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "phase-server.selectorLabels" . | nindent 4 }}
 {{- range $i := until (int .Values.scaleOut.replicaMax) }}
@@ -44,6 +50,12 @@ spec:
       port: {{ $.Values.service.port }}
       targetPort: http
       protocol: TCP
+    {{- if $.Values.logging.enabled }}
+    - name: logs
+      port: {{ $.Values.logging.server.port }}
+      targetPort: logs
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "phase-server.selectorLabels" $ | nindent 4 }}
     statefulset.kubernetes.io/pod-name: {{ $fullname }}-{{ $i }}

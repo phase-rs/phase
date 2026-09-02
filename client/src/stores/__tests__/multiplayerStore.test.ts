@@ -228,7 +228,11 @@ describe("multiplayerStore", () => {
         server("LobbyOnly", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION + 5),
       ),
     ).toBe(true);
-    // The floor still bites.
+    // The floor still bites — and "below the floor" is measured from the floor
+    // itself, not from this client's own version: an additive lobby bump moves
+    // LOBBY_PROTOCOL_VERSION while MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays
+    // put, so `LOBBY_PROTOCOL_VERSION - 1` can be a perfectly acceptable
+    // broker.
     expect(
       isServerCompatible(
         server("LobbyOnly", PROTOCOL_VERSION, MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1),

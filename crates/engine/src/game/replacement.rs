@@ -8875,8 +8875,37 @@ fn apply_single_replacement(
                 }
                 // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
                 if let Some(zone) = modifiers.redirect_zone {
-                    if let ProposedEvent::ZoneChange { ref mut to, .. } = new_event {
+                    if let ProposedEvent::ZoneChange {
+                        ref mut to,
+                        ref mut cause,
+                        ..
+                    } = new_event
+                    {
                         *to = zone;
+                        // CR 607.2b: the redirecting replacement's own source is
+                        // the "exiled with [this object]" linked-ability
+                        // authority for whatever this event ultimately
+                        // delivers to. Stamp it unconditionally (last-applied-
+                        // wins, mirroring `controller_override` above) so
+                        // `zone_pipeline::apply_zone_delivery_tail`'s exile-link
+                        // attribution (`cause.or(source_id)`) sees the correct
+                        // object even when the caller (SBA-driven death,
+                        // `Effect::Destroy`, `Effect::Sacrifice`) has no
+                        // `ResolvedAbility` of its own to compute this from.
+                        //
+                        // `cause` has one other reader: the parked CR 616.1
+                        // ordering-choice resume path
+                        // (`engine_replacement.rs`'s
+                        // `handle_replacement_choice_inner`) forwards it as
+                        // `DeliveryCtx.source_id`, which — for a
+                        // redirect that lands on the battlefield — drives the CR
+                        // 603.6a `entered_via_ability_source` anti-recursion
+                        // stamp. That is the correct authority there too: the
+                        // ability that actually delivered the object onto the
+                        // battlefield is the WINNING replacement candidate,
+                        // i.e. this same `rid.source`, not the pre-redirect
+                        // event's original (often unrelated or absent) cause.
+                        *cause = Some(rid.source);
                     }
                 }
                 if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =

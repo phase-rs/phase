@@ -926,6 +926,30 @@ struct SocketIdentity {
     lobby_host_game: Option<String>,
     seat_reservations: Vec<(String, String)>,
     lobby_reservations: Vec<(String, String)>,
+    /// Tournament codes this socket created, mirroring
+    /// `ConnState::organized_tournaments`.
+    ///
+    /// Threaded rather than defaulted on every broker call: the broker appends
+    /// to its `ConnState` view, and without a home here that append would be
+    /// discarded the instant the view drops — a field that looks populated in
+    /// the core and is permanently empty in the native shell. Explicitly NOT
+    /// an authority (the `organizer_token` is), and deliberately not cleared
+    /// on disconnect.
+    ///
+    /// Growth is bounded by the core, not here: the broker is the only writer
+    /// (`absorb_conn_state` copies back whatever it produced), and it appends
+    /// through `push_conn_tournament`, which holds the list at
+    /// `lobby_broker::broker::MAX_CONN_TOURNAMENT_ENTRIES`. The shell must not
+    /// add a second, independently-drifting bound.
+    lobby_organized_tournaments: Vec<String>,
+    /// Tournament codes this socket joined, mirroring
+    /// `ConnState::joined_tournaments`. Same threading rationale as
+    /// [`SocketIdentity::lobby_organized_tournaments`].
+    ///
+    /// Codes only. The core deliberately does not retain the `player_token`
+    /// here, precisely because this per-socket identity is where such a
+    /// secret would be held long past the operation that minted it.
+    lobby_joined_tournaments: Vec<String>,
     /// Set when this socket is participating in a draft session.
     draft_code: Option<String>,
     draft_seat: Option<usize>,
@@ -1118,6 +1142,22 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. } => None,
 
+        // Tournament messages — allowed in BOTH modes, unlike the
+        // lobby-only-exclusive pair below. A tournament is an event record
+        // the broker owns outright: it runs no server-side game session (so
+        // there is nothing for Full mode to be missing), and it is not a
+        // P2P-host bookkeeping message that only makes sense when the server
+        // is not running the game (so there is nothing for Full mode to
+        // refuse). Both shells hold the same `TournamentManager`, so gating
+        // by mode here would refuse a capability the server demonstrably has.
+        ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => None,
+
         // Draft messages — Full-only (draft sessions are server-hosted).
         ClientMessage::CreateDraftWithSettings { .. }
         | ClientMessage::JoinDraftWithPassword { .. }
@@ -1240,6 +1280,8 @@ impl SocketIdentity {
             subscribed: self.lobby_subscribed,
             host_game: self.lobby_host_game.clone(),
             reservations: self.lobby_reservations.clone(),
+            organized_tournaments: self.lobby_organized_tournaments.clone(),
+            joined_tournaments: self.lobby_joined_tournaments.clone(),
         }
     }
 
@@ -1250,6 +1292,8 @@ impl SocketIdentity {
         self.lobby_subscribed = conn.subscribed;
         self.lobby_host_game = conn.host_game;
         self.lobby_reservations = conn.reservations;
+        self.lobby_organized_tournaments = conn.organized_tournaments;
+        self.lobby_joined_tournaments = conn.joined_tournaments;
     }
 
     /// The Full-game seat claimed by this socket. A complete triple is required
@@ -1307,7 +1351,20 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
         | ClientMessage::UpdateLobbyMetadata { .. }
-        | ClientMessage::UnregisterLobby { .. } => FullSocketAuthority::Independent,
+        | ClientMessage::UnregisterLobby { .. }
+        // Tournaments use no Full-game seat at all: authority is the
+        // `organizer_token`/`player_token` in the payload, checked by the
+        // broker against the stored value, and a tournament entrant is not a
+        // seat in a running game. `Independent` is what lets an organizer act
+        // from a socket that is also mid-game, or from a fresh one after a
+        // reconnect — the property the token model exists to provide.
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => FullSocketAuthority::Independent,
 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -2115,7 +2172,20 @@ async fn serve() {
                         _ => None,
                     })
                     .collect();
-                info!(count = expired_lobby.len(), "expiring stale lobby games");
+                // `expired_lobby` is deliberately lobby-filtered: it drives the
+                // Full-mode session/db cleanup below, and a tournament has no
+                // server-run session to retire. But `reap_outbounds` now also
+                // carries tournament lifecycle events, so reporting only the
+                // lobby count would print a misleading `count=0` for a sweep
+                // that reaped tournaments and nothing else. Both counts are
+                // named explicitly rather than summed — they are different
+                // kinds of expiry with different cleanup, and a single total
+                // would hide which one actually fired.
+                let tournament_events = reap_outbounds.len() - expired_lobby.len();
+                info!(
+                    lobby_games = expired_lobby.len(),
+                    tournament_events, "expiring stale lobby entries"
+                );
                 let mut mgr = bg_state.lock().await;
                 for game_code in &expired_lobby {
                     if mgr
@@ -2582,6 +2652,130 @@ mod lifecycle_tests {
         assert!(!conns.contains_key("EXPIRED"));
         assert!(conns.contains_key("ACTIVE"));
     }
+
+    // -- Tournament reaper fan-out -----------------------------------------
+
+    use lobby_broker::{
+        Broker, BrokerEnv, ConnState, LobbyClientMessage, LobbyServerMessage, Outbound,
+    };
+    use server_core::protocol::{BracketShape, MatchArity, ScoringPolicy};
+    use std::cell::Cell;
+
+    /// Settable-clock `BrokerEnv`. `SysEnv` reads the real wall clock, and the
+    /// tournament lifecycle windows are fixed multi-day constants, so the
+    /// production env cannot reach an expiry inside a test.
+    struct FakeEnv {
+        now: Cell<u64>,
+        token: Cell<u64>,
+        code: Cell<u64>,
+    }
+    impl BrokerEnv for FakeEnv {
+        fn now_ms(&self) -> u64 {
+            self.now.get()
+        }
+        fn new_token(&self) -> String {
+            let n = self.token.get();
+            self.token.set(n + 1);
+            format!("token-{n}")
+        }
+        fn new_game_code(&self) -> String {
+            let n = self.code.get();
+            self.code.set(n + 1);
+            format!("CODE{n:02}")
+        }
+    }
+
+    /// Verification Matrix row 10. `Broker::reap_expired` returning the right
+    /// outbounds is necessary but NOT sufficient — the shell's reap block also
+    /// has to forward them. This drives the block's two real steps in the same
+    /// order the production code does:
+    ///
+    ///   1. the `expired_lobby` `filter_map`, which is lobby-only by design
+    ///      (a tournament has no Full-mode session to retire), and
+    ///   2. the fan-out loop, which iterates the FULL `reap_outbounds` rather
+    ///      than the filtered list — the reason tournaments reach subscribers
+    ///      with no new code in the loop.
+    ///
+    /// If step 2 were ever narrowed to `expired_lobby`, a subscribed client
+    /// would receive nothing when a tournament it is watching expires, while
+    /// every broker-level test kept passing.
+    #[tokio::test]
+    async fn the_reaper_fans_tournament_expiry_out_to_subscribed_clients() {
+        let env = FakeEnv {
+            now: Cell::new(1_000_000),
+            token: Cell::new(0),
+            code: Cell::new(0),
+        };
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let created = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        let tour_code = match &created[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated { code, .. }) => code.clone(),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        };
+
+        // Past the registration window, so the sweep reaps it.
+        env.now
+            .set(env.now.get() + (lobby_broker::REGISTRATION_TIMEOUT_SECS + 1) * 1000);
+        let reap_outbounds = broker.reap_expired(300, &env);
+        assert!(!reap_outbounds.is_empty());
+
+        // Step 1, verbatim from the reap block.
+        let expired_lobby: Vec<String> = reap_outbounds
+            .iter()
+            .filter_map(|ob| match ob {
+                Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code }) => {
+                    Some(game_code.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            expired_lobby.is_empty(),
+            "a tournament must not be mistaken for a lobby game needing session cleanup"
+        );
+
+        // Step 2, verbatim: one subscribed client, and the fan-out loop.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for ob in reap_outbounds {
+            if let Outbound::ToSubscribers(msg) = ob {
+                let server_msg = super::to_server_message(msg);
+                let _ = tx.send(server_msg);
+            }
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+
+        assert!(
+            received.iter().any(|m| matches!(
+                m,
+                server_core::protocol::ServerMessage::TournamentRemoved { code } if *code == tour_code
+            )),
+            "a subscribed client must be told the tournament is gone: {received:?}"
+        );
+        assert!(
+            received.iter().any(|m| matches!(
+                m,
+                server_core::protocol::ServerMessage::TournamentListUpdate { .. }
+            )),
+            "...and receive the refreshed list: {received:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3014,6 +3208,8 @@ async fn handle_socket(
         lobby_host_game: None,
         seat_reservations: Vec::new(),
         lobby_reservations: Vec::new(),
+        lobby_organized_tournaments: Vec::new(),
+        lobby_joined_tournaments: Vec::new(),
         draft_code: None,
         draft_seat: None,
         draft_token: None,
@@ -3301,6 +3497,32 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             filled_seats,
             reservation_token,
         },
+        // Tournament variants. `view`/`tournaments` move rather than clone —
+        // the view types are re-exported from `lobby_broker::protocol`, so
+        // both enums name the same struct and this stays a pure re-tag.
+        L::TournamentCreated {
+            code,
+            organizer_token,
+            view,
+        } => ServerMessage::TournamentCreated {
+            code,
+            organizer_token,
+            view,
+        },
+        L::TournamentJoined {
+            code,
+            player_token,
+            view,
+        } => ServerMessage::TournamentJoined {
+            code,
+            player_token,
+            view,
+        },
+        L::TournamentUpdate { code, view } => ServerMessage::TournamentUpdate { code, view },
+        L::TournamentRemoved { code } => ServerMessage::TournamentRemoved { code },
+        L::TournamentListUpdate { tournaments } => {
+            ServerMessage::TournamentListUpdate { tournaments }
+        }
     }
 }
 
@@ -3397,6 +3619,68 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
         },
         ClientMessage::UnregisterLobby { game_code } => L::UnregisterLobby {
             game_code: game_code.clone(),
+        },
+        // Tournament variants. NOTE the asymmetry with `to_server_message`:
+        // that function is wildcard-free, so a forgotten arm there is a
+        // compile error. THIS function ends in `_ => return None`, because
+        // most `ClientMessage` variants are legitimately non-lobby — so a
+        // forgotten arm here is NOT a compile error. It silently returns
+        // `None`, which `dispatch_broker` reads as "not a lobby message" and
+        // simply does not dispatch, leaving the client's request answered by
+        // nothing at all. `tournament_variants_survive_the_canonical_lobby_roundtrip`
+        // asserts `.is_some()` for every one of these seven precisely because
+        // the compiler cannot.
+        ClientMessage::CreateTournament {
+            name,
+            arity,
+            scoring,
+            bracket,
+            total_rounds,
+        } => L::CreateTournament {
+            name: name.clone(),
+            arity: *arity,
+            scoring: *scoring,
+            bracket: *bracket,
+            total_rounds: *total_rounds,
+        },
+        ClientMessage::JoinTournament {
+            code,
+            player_key,
+            display_name,
+        } => L::JoinTournament {
+            code: code.clone(),
+            player_key: player_key.clone(),
+            display_name: display_name.clone(),
+        },
+        ClientMessage::GetTournament { code } => L::GetTournament { code: code.clone() },
+        ClientMessage::StartTournamentRound {
+            code,
+            organizer_token,
+        } => L::StartTournamentRound {
+            code: code.clone(),
+            organizer_token: organizer_token.clone(),
+        },
+        ClientMessage::ReportMatchResult {
+            code,
+            pairing_id,
+            player_token,
+            outcome,
+        } => L::ReportMatchResult {
+            code: code.clone(),
+            pairing_id: *pairing_id,
+            player_token: player_token.clone(),
+            outcome: outcome.clone(),
+        },
+        ClientMessage::DropFromTournament { code, player_token } => L::DropFromTournament {
+            code: code.clone(),
+            player_token: player_token.clone(),
+        },
+        ClientMessage::EndTournament {
+            code,
+            organizer_token,
+        } => L::EndTournament {
+            code: code.clone(),
+            organizer_token: organizer_token.clone(),
         },
         _ => return None,
     })
@@ -4835,7 +5119,18 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         | ClientMessage::JoinDraftWithPassword { .. }
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
-        | ClientMessage::SpectateDraft { .. } => None,
+        | ClientMessage::SpectateDraft { .. }
+        // No correlated `*Failed` frame: a tournament request that fails is
+        // answered by the broker's own `Error` outbound, carrying the
+        // manager's reason verbatim. `ActionFailed` is for the game-action
+        // promise a client is awaiting, which none of these is.
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => None,
     }
 }
 
@@ -9260,6 +9555,29 @@ async fn handle_client_message(
             )
             .await;
         }
+
+        // Every tournament variant routes straight to the broker, which owns
+        // the whole surface: token authority, the `TournamentManager` call,
+        // and outbound assembly. Mode-agnostic, matching `reject_if_disabled`
+        // — there is no Full-mode alternative path for any of them, so unlike
+        // `CreateGameWithSettings` these need no per-mode branch here.
+        ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => {
+            dispatch_broker(
+                &client_msg,
+                lobby,
+                lobby_subscribers,
+                player_count,
+                tx,
+                identity,
+            )
+            .await;
+        }
     }
 }
 
@@ -9504,6 +9822,8 @@ mod state_transport_derived_tests {
                 lobby_host_game: None,
                 seat_reservations: Vec::new(),
                 lobby_reservations: Vec::new(),
+                lobby_organized_tournaments: Vec::new(),
+                lobby_joined_tournaments: Vec::new(),
                 draft_code: None,
                 draft_seat: None,
                 draft_token: None,
@@ -9603,6 +9923,8 @@ mod state_transport_derived_tests {
                 lobby_host_game: None,
                 seat_reservations: Vec::new(),
                 lobby_reservations: Vec::new(),
+                lobby_organized_tournaments: Vec::new(),
+                lobby_joined_tournaments: Vec::new(),
                 draft_code: None,
                 draft_seat: None,
                 draft_token: None,
@@ -9773,6 +10095,8 @@ mod full_socket_authority_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -10208,6 +10532,8 @@ mod draft_socket_authority_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -12140,6 +12466,236 @@ mod mode_gate_tests {
         assert!(to_lobby_client_message(&interaction_frame()).is_none());
         assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
     }
+
+    // -- Tournament projection ---------------------------------------------
+
+    use server_core::protocol::{
+        BracketShape, MatchArity, PairingOutcome, PairingView, PlayerSummary, PodOutcome,
+        ScoringPolicy, TournamentStatus, TournamentSummary, TournamentView,
+    };
+
+    fn tournament_client_frames() -> Vec<ClientMessage> {
+        vec![
+            ClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::COMMANDER_POD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD),
+                bracket: BracketShape::Swiss,
+                total_rounds: Some(4),
+            },
+            ClientMessage::JoinTournament {
+                code: "TOUR01".into(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            ClientMessage::GetTournament {
+                code: "TOUR01".into(),
+            },
+            ClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+            },
+            ClientMessage::ReportMatchResult {
+                code: "TOUR01".into(),
+                pairing_id: 7,
+                player_token: "player-tok".into(),
+                outcome: PodOutcome::Decisive {
+                    winner: "key-a".into(),
+                    game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 1u8)]
+                        .into_iter()
+                        .collect(),
+                },
+            },
+            ClientMessage::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+            },
+            ClientMessage::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+            },
+        ]
+    }
+
+    fn sample_view() -> TournamentView {
+        let alice = PlayerSummary {
+            player_key: "key-a".into(),
+            display_name: "Alice".into(),
+            dropped: false,
+        };
+        let bob = PlayerSummary {
+            player_key: "key-b".into(),
+            display_name: "Bob".into(),
+            dropped: true,
+        };
+        TournamentView {
+            summary: TournamentSummary {
+                code: "TOUR01".into(),
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                bracket: BracketShape::Swiss,
+                status: TournamentStatus::InProgress,
+                player_count: 1,
+                current_round: 1,
+                total_rounds: 3,
+                created_at: 1_000,
+            },
+            players: vec![alice.clone(), bob.clone()],
+            // Every `PairingOutcome` shape, so the round-trip cannot pass by
+            // collapsing a variant to a default.
+            pairings: vec![
+                PairingView {
+                    id: 0,
+                    round: 1,
+                    players: vec![alice.clone()],
+                    outcome: Some(PairingOutcome::Bye),
+                },
+                PairingView {
+                    id: 1,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Forfeit {
+                        winner: "key-a".into(),
+                    }),
+                },
+                PairingView {
+                    id: 2,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                        winner: "key-a".into(),
+                        game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 0u8)]
+                            .into_iter()
+                            .collect(),
+                    })),
+                },
+                PairingView {
+                    id: 3,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Reported(PodOutcome::Draw)),
+                },
+                PairingView {
+                    id: 4,
+                    round: 2,
+                    players: vec![alice, bob],
+                    outcome: None,
+                },
+            ],
+            standings: Vec::new(),
+        }
+    }
+
+    /// Verification Matrix row 9. The `.is_some()` assertion is the whole
+    /// point: `to_lobby_client_message` ends in `_ => return None`, so a
+    /// forgotten arm is NOT a compile error — it silently drops the frame.
+    /// A test that only compared fields inside an `if let Some(..)` would pass
+    /// VACUOUSLY against exactly that bug, which is why every frame is
+    /// unwrapped up front and the count is asserted.
+    #[test]
+    fn tournament_variants_survive_the_canonical_lobby_roundtrip() {
+        let frames = tournament_client_frames();
+        assert_eq!(frames.len(), 7, "every new client variant is covered");
+
+        for msg in &frames {
+            let projected = to_lobby_client_message(msg).unwrap_or_else(|| {
+                panic!(
+                    "{msg:?} projected to None — its arm is missing from to_lobby_client_message"
+                )
+            });
+
+            // The two enums are wire-compatible by construction, so equality
+            // of the serialized forms is the strongest available check
+            // (neither enum is `PartialEq`: both carry `DeckData`).
+            assert_eq!(
+                serde_json::to_string(&projected).expect("projected serializes"),
+                serde_json::to_string(msg).expect("canonical serializes"),
+                "field dropped or renamed across the projection for {msg:?}"
+            );
+        }
+    }
+
+    /// The server direction. `to_server_message` is wildcard-free, so a
+    /// missing arm is a compile error — this covers the remaining risk, a
+    /// field mistyped or dropped inside an arm that does exist.
+    #[test]
+    fn tournament_server_variants_survive_the_canonical_lobby_roundtrip() {
+        let view = sample_view();
+        let messages = vec![
+            lobby_broker::LobbyServerMessage::TournamentCreated {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentJoined {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentUpdate {
+                code: "TOUR01".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentRemoved {
+                code: "TOUR01".into(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentListUpdate {
+                tournaments: vec![view.summary.clone()],
+            },
+        ];
+        assert_eq!(messages.len(), 5, "every new server variant is covered");
+
+        for msg in messages {
+            let expected = serde_json::to_string(&msg).expect("lobby form serializes");
+            let converted = to_server_message(msg);
+            assert_eq!(
+                serde_json::to_string(&converted).expect("canonical form serializes"),
+                expected
+            );
+        }
+    }
+
+    /// Regression guard: the pre-existing arms of both conversions are
+    /// unaffected by the tournament additions.
+    #[test]
+    fn pre_existing_lobby_projections_are_unaffected() {
+        assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::UnsubscribeLobby).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::Ping { timestamp: 1 }).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::UnregisterLobby {
+            game_code: "GAME01".into()
+        })
+        .is_some());
+        assert!(to_lobby_client_message(&ClientMessage::Concede).is_none());
+    }
+
+    /// Tournaments are mode-agnostic: unlike `UpdateLobbyMetadata`/
+    /// `UnregisterLobby` (LobbyOnly-exclusive) and `Action` (Full-only), every
+    /// tournament variant is accepted in BOTH modes. Both halves are asserted
+    /// so a wholesale `None` in `reject_if_disabled` cannot satisfy this.
+    #[test]
+    fn tournament_variants_are_accepted_in_both_server_modes() {
+        for msg in tournament_client_frames() {
+            assert!(
+                reject_if_disabled(&msg, ServerMode::Full).is_none(),
+                "{msg:?} was refused in Full mode"
+            );
+            assert!(
+                reject_if_disabled(&msg, ServerMode::LobbyOnly).is_none(),
+                "{msg:?} was refused in LobbyOnly mode"
+            );
+        }
+        // Contrast, so the test above is not passing because the gate is a
+        // wholesale `None`.
+        assert!(reject_if_disabled(&ClientMessage::Concede, ServerMode::LobbyOnly).is_some());
+        assert!(reject_if_disabled(
+            &ClientMessage::UnregisterLobby {
+                game_code: "GAME01".into()
+            },
+            ServerMode::Full
+        )
+        .is_some());
+    }
 }
 
 #[cfg(test)]
@@ -12160,6 +12716,8 @@ mod handshake_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -12645,6 +13203,123 @@ mod handshake_tests {
             Some((DraftStatus::Drafting, 2, 13)),
             Some((DraftStatus::Deckbuilding, 2, 13)),
         ));
+    }
+
+    /// The `ConnState` round-trip through the shell's own identity store.
+    ///
+    /// The broker appends to its transient `ConnState` view; without this
+    /// threading those appends would be discarded the instant the view drops,
+    /// leaving both fields permanently empty in the native shell while the
+    /// WASM shell (which round-trips `ConnState` through the WebSocket
+    /// attachment) populated them correctly. That divergence is a silent
+    /// no-op no broker-level test can catch, because at the broker layer the
+    /// append demonstrably works.
+    #[test]
+    fn tournament_conn_state_survives_the_socket_identity_round_trip() {
+        let mut identity = empty_identity();
+        assert!(identity.to_conn_state().organized_tournaments.is_empty());
+        assert!(identity.to_conn_state().joined_tournaments.is_empty());
+
+        let mut conn = identity.to_conn_state();
+        conn.organized_tournaments.push("TOUR01".to_string());
+        conn.joined_tournaments.push("TOUR02".to_string());
+        identity.absorb_conn_state(conn);
+
+        // Absorbed into the shell...
+        assert_eq!(identity.lobby_organized_tournaments, vec!["TOUR01"]);
+        assert_eq!(identity.lobby_joined_tournaments, vec!["TOUR02"]);
+        // ...and projected back out on the NEXT broker call, which is the half
+        // that would be missing if `to_conn_state` defaulted these fields.
+        let next = identity.to_conn_state();
+        assert_eq!(next.organized_tournaments, vec!["TOUR01"]);
+        assert_eq!(next.joined_tournaments, vec!["TOUR02"]);
+    }
+
+    /// The shell-side mirror must never come to hold a tournament
+    /// `player_token`.
+    ///
+    /// This is the field the token would have outlived its operation in: the
+    /// list is never pruned, `SocketIdentity` is per-socket state that
+    /// survives every broker call, and the equivalent WASM shell copies the
+    /// same `ConnState` verbatim into a durable WebSocket attachment. So the
+    /// assertion is made against a REAL minted token from a REAL join, not a
+    /// placeholder — a shape-only check would pass just as happily against a
+    /// tuple that still carried the secret.
+    #[test]
+    fn socket_identity_never_retains_a_tournament_player_token() {
+        use lobby_broker::{LobbyClientMessage, LobbyServerMessage};
+        use server_core::protocol::{BracketShape, MatchArity, ScoringPolicy};
+
+        // `SysEnv` is the production token source, so the needle below is a
+        // genuine `generate_player_token()` value.
+        let env = SysEnv;
+        let mut broker = Broker::new();
+        let mut identity = empty_identity();
+        let mut conn = identity.to_conn_state();
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        let (code, organizer_token) = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                ..
+            }) => (code.clone(), organizer_token.clone()),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        };
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            &env,
+        );
+        let player_token = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentJoined { player_token, .. }) => {
+                player_token.clone()
+            }
+            other => panic!("expected TournamentJoined, got {other:?}"),
+        };
+        assert!(!player_token.is_empty() && !organizer_token.is_empty());
+
+        identity.absorb_conn_state(conn);
+
+        // Reach-guard: the create and the join really did reach the mirror, so
+        // the negatives below are statements about a populated field rather
+        // than about an empty one.
+        assert_eq!(identity.lobby_organized_tournaments, vec![code.clone()]);
+        assert_eq!(identity.lobby_joined_tournaments, vec![code.clone()]);
+
+        // Structural: scan the whole projected `ConnState` — the exact value
+        // the WASM shell serializes into its durable attachment — so a token
+        // reintroduced at ANY nesting depth fails this, not just one in the
+        // field it is expected in.
+        let projected = identity.to_conn_state();
+        let json = serde_json::to_string(&projected).expect("ConnState serializes");
+        assert!(
+            json.contains(code.as_str()),
+            "reach-guard: the tournament code must be present: {json}"
+        );
+        assert!(
+            !json.contains(player_token.as_str()),
+            "player_token retained in per-socket state: {json}"
+        );
+        assert!(
+            !json.contains(organizer_token.as_str()),
+            "organizer_token retained in per-socket state: {json}"
+        );
     }
 }
 

@@ -171,8 +171,9 @@ pub struct EntryMods {
 /// struct that also rides in `DeliveryCtx`.
 #[derive(Default)]
 pub struct ExileLinkSpec {
-    /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
-    /// link; other durations / `None` fall back to `tracking`.
+    /// A host-lifetime duration — `Some(d)` with `d.ends_when_host_leaves_play()`
+    /// — installs a return-on-source-leave link; other durations / `None` fall
+    /// back to `tracking`.
     pub duration: Option<Duration>,
     /// Resolved controller for a monarch-bounded link. `Some` is captured when
     /// the originating ability resolves; `None` means that duration cannot
@@ -1805,7 +1806,7 @@ pub(crate) fn apply_zone_delivery_tail(
     if to == Zone::Exile {
         if let Some(source_id) = cause.or(source_id) {
             let kind = match duration {
-                Some(Duration::UntilHostLeavesPlay) => {
+                Some(d) if d.ends_when_host_leaves_play() => {
                     Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
                 Some(Duration::UntilOpponentBecomesMonarch) => {
@@ -1814,7 +1815,20 @@ pub(crate) fn apply_zone_delivery_tail(
                         controller,
                     })
                 }
-                _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
+                // CR 607.2b: track either when the caller already determined
+                // (via `should_track_exiled_by_source`, ability-chain-aware)
+                // that this exile must be linked, OR when the resolved source
+                // independently carries a "cards exiled with [this object]"
+                // ability — the auto-detect a bare replacement redirect (SBA
+                // death, `Effect::Destroy`, `Effect::Sacrifice`, none of which
+                // resolve through an ability chain) needs, since those callers
+                // have no `ResolvedAbility` to run the ability-level half of
+                // that check against.
+                _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource)
+                    || crate::game::exile_links::source_is_linked_exile_consumer(
+                        state, source_id,
+                    ) =>
+                {
                     Some(ExileLinkKind::TrackedBySource)
                 }
                 _ => None,
@@ -3764,7 +3778,11 @@ pub(crate) fn deliver_replaced_zone_change(
                 let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
                     source_id: copy.source_id,
                     controller: copy.controller,
-                    duration_subject_id: copy.source_id,
+                    // CR 400.7 + CR 611.2b: this effect applies to the
+                    // entering permanent, not to the copied object (which can
+                    // be absent by the time this replacement is delivered,
+                    // e.g. Mystic Reflection's resolved source).
+                    duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
                     duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
                     values: *copy.values,
                     display_source: copy.display_source,
