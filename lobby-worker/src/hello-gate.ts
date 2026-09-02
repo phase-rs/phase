@@ -12,6 +12,22 @@ export interface ConnAttachment {
   subscribed: boolean;
   host_game: string | null;
   reservations: unknown[];
+  /**
+   * Tournament codes this connection created / joined. Mirrors
+   * `lobby_broker::ConnState::organized_tournaments` and
+   * `::joined_tournaments` (`crates/lobby-broker/src/broker.rs`), which the
+   * broker round-trips through this attachment verbatim.
+   *
+   * **Never an authority.** Organizer and player permission is the
+   * `organizer_token` / `player_token` checked against the stored tournament
+   * record — never membership in these lists, which is why nothing in the
+   * broker reads them. They are reconnect-convenience bookkeeping for a future
+   * "your events" client flow, and nothing in this shell reads them today
+   * either; they are declared here so the attachment type stays a faithful
+   * mirror of the state that actually crosses the WASM boundary.
+   */
+  organized_tournaments: string[];
+  joined_tournaments: string[];
 }
 
 /**
