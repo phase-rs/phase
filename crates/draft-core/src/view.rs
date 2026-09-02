@@ -503,6 +503,7 @@ fn chaos_assignments_are_complete(status: DraftStatus) -> bool {
 fn set_source_view_for_player(
     layout: &SetLayout,
     status: DraftStatus,
+    seat_index: u8,
     current_pack_number: u8,
     current_pack_origin: Option<u8>,
 ) -> SetLayoutView {
@@ -548,6 +549,7 @@ fn source_view_for_player(session: &DraftSession, seat_index: u8) -> DraftSource
             layout: set_source_view_for_player(
                 layout,
                 session.status,
+                seat_index,
                 session.current_pack_number,
                 current_pack_origin(session, seat_index),
             ),
@@ -2270,7 +2272,7 @@ mod tests {
 
         session.status = DraftStatus::Deckbuilding;
         let deckbuilder = filter_for_player(&session, 0);
-        match deckbuilder.source {
+        match &deckbuilder.source {
             DraftSourceView::Set {
                 layout:
                     SetLayoutView::Chaos {
@@ -2281,7 +2283,7 @@ mod tests {
             } => {
                 assert_eq!(
                     completed_own_pack_codes,
-                    Some(vec![
+                    &Some(vec![
                         "AAA".to_string(),
                         "BBB".to_string(),
                         "AAA".to_string()
@@ -2289,7 +2291,7 @@ mod tests {
                 );
                 assert_eq!(
                     actual_set_codes,
-                    Some(vec!["AAA".to_string(), "BBB".to_string()])
+                    &Some(vec!["AAA".to_string(), "BBB".to_string()])
                 );
             }
             _ => panic!("expected a Chaos source view"),

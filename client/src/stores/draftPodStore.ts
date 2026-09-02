@@ -385,7 +385,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     createPod: async () => {
-      let { config, hostDisplayName, poolMode, setDraftMode, cubeForm } = get();
+      let { config, poolMode, setDraftMode } = get();
+      const { hostDisplayName, cubeForm } = get();
 
       if (!hostDisplayName.trim()) {
         set({ configError: "Enter a display name" });
