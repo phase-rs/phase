@@ -103,6 +103,8 @@ interface DraftPodState {
   allowedPodSizes: number[] | null;
   /** Configuration for which the procedure cache was published. */
   procedureCacheKey: ProcedureCacheKey | null;
+  /** A deep-link entry may adopt the engine procedure's default seat count once. */
+  pendingProcedureDefault: ProcedureCacheKey | null;
   /** Engine-published pack delivery behavior. `null` until the kind procedure loads. */
   packDistribution: PackDistribution | null;
   /**
@@ -186,6 +188,7 @@ const initialState: DraftPodState = {
   configError: null,
   allowedPodSizes: null,
   procedureCacheKey: null,
+  pendingProcedureDefault: null,
   packDistribution: null,
   packsPerPlayer: null,
 };
@@ -291,6 +294,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           // procedure so the selector cannot offer values from the prior shape.
           allowedPodSizes: procedureChanged ? null : prev.allowedPodSizes,
           procedureCacheKey: procedureChanged ? null : prev.procedureCacheKey,
+          pendingProcedureDefault: procedureChanged ? null : prev.pendingProcedureDefault,
           packDistribution,
           packsPerPlayer: kindChanged ? null : prev.packsPerPlayer,
           loadingPool: false,
@@ -309,6 +313,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         kind,
         tournamentFormat: get().config.tournamentFormat,
       };
+      set({ pendingProcedureDefault: target });
       try {
         const procedure = await loadProcedure(target.kind, target.tournamentFormat);
         // A newer entry or refresh can target the same kind, so kind equality
@@ -317,7 +322,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           !isCurrentProcedureRequest(procedureRequest)
           || !procedureTargetMatchesConfig(target, get().config)
         ) return;
-        set(procedureCache(procedure, target));
+        set({ ...procedureCache(procedure, target), pendingProcedureDefault: null });
         get().setConfig({ podSize: procedure.pod_size });
       } catch (err) {
         if (
@@ -340,8 +345,15 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           !isCurrentProcedureRequest(procedureRequest)
           || !procedureTargetMatchesConfig(target, get().config)
         ) return;
-        set(procedureCache(procedure, target));
-        if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
+        const adoptsProcedureDefault = get().pendingProcedureDefault?.kind === target.kind
+          && get().pendingProcedureDefault?.tournamentFormat === target.tournamentFormat;
+        set({
+          ...procedureCache(procedure, target),
+          pendingProcedureDefault: adoptsProcedureDefault ? null : get().pendingProcedureDefault,
+        });
+        if (adoptsProcedureDefault) {
+          get().setConfig({ podSize: procedure.pod_size });
+        } else if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
           get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
         }
       } catch (err) {
