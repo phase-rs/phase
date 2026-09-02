@@ -779,19 +779,24 @@ pub(crate) fn targeted_player_impact_in(
 }
 
 /// "each creature target player controls" (Requisition
-/// Raid) has exactly one instance of the word "target", and it names a PLAYER.
-/// The objects the effect touches are described *by reference to* that chosen
-/// player, so the slot being filled is the player slot and the effect's impact
-/// lands on whichever player is chosen. `player_matches_target_filter_in_state`
-/// deliberately fails closed on `ControllerRef::TargetPlayer` (it has no ability
-/// context to resolve the reference against); here the candidate player *is*
-/// that target, so the effect must be counted for them rather than dropped —
-/// dropping it left the whole spell reading as "no per-player signal".
+/// Raid) or "each creature target opponent controls" has exactly one instance
+/// of the word "target", and it names a PLAYER. The objects the effect touches
+/// are described *by reference to* that chosen player, so the slot being
+/// filled is the player slot and the effect's impact lands on whichever player
+/// is chosen. `player_matches_target_filter_in_state` deliberately fails closed
+/// on both `ControllerRef::TargetPlayer` and `ControllerRef::TargetOpponent`
+/// (it has no ability context to resolve the reference against); here the
+/// candidate player *is* that target, so the effect must be counted for them
+/// rather than dropped — dropping it left the whole spell reading as "no
+/// per-player signal".
 fn filter_names_the_chosen_players_permanents(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::Typed(typed)
-            if matches!(typed.controller, Some(ControllerRef::TargetPlayer))
+            if matches!(
+                typed.controller,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)
+            )
     )
 }
 
