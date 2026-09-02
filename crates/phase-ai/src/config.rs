@@ -582,6 +582,17 @@ pub struct PolicyPenalties {
     /// `LandSequencingPolicy`, which subtracts this magnitude.
     #[serde(default = "default_land_tempo_rider_penalty")]
     pub land_tempo_rider_penalty: f64,
+    /// Pay-life COUNT at or above which a self-cost activation whose payoff is
+    /// certified trivial is vetoed outright, whatever the priced cost works out
+    /// to. Consumed by `SelfCostValuePolicy`.
+    ///
+    /// A count, not a rate, and deliberately not expressed in the same units as
+    /// `self_cost_pay_life_per_point`: that scalar prices life for the
+    /// *comparison* against a payoff, while this one bounds a branch that has no
+    /// payoff to compare against. See `self_cost_value.rs`'s module docs for why
+    /// the bound has to be stated in the resource the player actually spends.
+    #[serde(default = "default_self_cost_material_life")]
+    pub self_cost_material_life: i32,
 }
 
 impl Default for PolicyPenalties {
@@ -666,6 +677,7 @@ impl Default for PolicyPenalties {
             creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
             land_color_demand_unit: default_land_color_demand_unit(),
             land_tempo_rider_penalty: default_land_tempo_rider_penalty(),
+            self_cost_material_life: default_self_cost_material_life(),
         }
     }
 }
@@ -711,6 +723,17 @@ fn default_land_color_demand_unit() -> f64 {
 /// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
 fn default_land_tempo_rider_penalty() -> f64 {
     1.0
+}
+
+/// Two life. One life is inside the noise a repeatable ability may legitimately
+/// be worth exploring — `cheap_pay_life_trivial_is_marginal` keeps that on the
+/// graduated branch — while two life for a payoff this module has certified
+/// trivial is never right, and Adanto Vanguard's 4 is well clear of it. Shared
+/// by `Default` and `#[serde(default)]` so a tuning artifact written before this
+/// field existed still deserializes (`ai_tune` reads `policy_penalties` directly
+/// into this struct).
+fn default_self_cost_material_life() -> i32 {
+    2
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -1161,6 +1184,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "land_tempo_rider_penalty",
         "LandSequencingPolicy enters-tapped / unless-pay rider cost; must stay strictly above land_color_demand_unit's capped maximum and strictly below the module's BOUNCE_DEPRIORITIZE, and no paired-seed ai-gate calibration exists for it yet",
+    ),
+    (
+        "self_cost_material_life",
+        "veto threshold, not a rate — SelfCostValuePolicy's trivial-payoff materiality bound is a life COUNT in i32, so the continuous [-15.0, 15.0] penalties vector CMA-ES optimizes cannot carry it at all; promotion would need a discrete search, not a paired-seed rerun",
     ),
 ];
 
@@ -1956,6 +1983,32 @@ mod tests {
         assert_eq!(
             PolicyPenalties::default().devotion_pip_progress,
             default_devotion_pip_progress(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_self_cost_material_life_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("self_cost_material_life")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-self_cost_material_life artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.self_cost_material_life,
+            default_self_cost_material_life(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().self_cost_material_life,
+            default_self_cost_material_life(),
             "Default and serde must share one source of truth"
         );
     }
