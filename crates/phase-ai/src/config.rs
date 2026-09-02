@@ -329,14 +329,15 @@ pub struct PolicyPenalties {
     /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
     #[serde(default = "default_combo_progress_next_turn_bonus")]
     pub combo_progress_next_turn_bonus: f64,
-    /// CR 701.6a: Penalty for casting a spell whose mana value matches the
-    /// charge-counter count on a Chalice-of-the-Void-class permanent the AI
-    /// controls — the spell is countered for free, pure tempo and card loss.
-    /// Consumed by `ChaliceAvoidancePolicy`.
+    /// CR 701.6a: Penalty for casting a spell that a Chalice-class cast trap
+    /// the AI controls would counter — mana value equal to the charge-counter
+    /// count (Chalice of the Void) or no mana spent (Vexing Bauble). The spell
+    /// is countered for free, pure tempo and card loss. Consumed by
+    /// `ChaliceAvoidancePolicy`.
     #[serde(default = "default_own_chalice_counter_penalty")]
     pub own_chalice_counter_penalty: f64,
     /// CR 701.6a: Penalty for casting a spell that an opponent's Chalice-class
-    /// permanent would counter. Lighter than the own-Chalice penalty: the AI
+    /// cast trap (counter-count or no-mana-spent gate) would counter. Lighter than the own-Chalice penalty: the AI
     /// may still want the spell on the stack (e.g. to bait, or when the spell's
     /// value clears the loss), so this demotes rather than vetoes.
     #[serde(default = "default_opponent_chalice_counter_penalty")]
