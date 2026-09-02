@@ -47,13 +47,27 @@ else
 fi
 
 # --- tilt: the repo's canonical dev-loop orchestrator (CLAUDE.md assumes it is
-# always running). Install a pinned release to /usr/local/bin if missing.
+# always running). This bootstrap runs automatically and installs tilt to
+# /usr/local/bin with sudo, so the release archive MUST be verified against a
+# pinned digest before it is trusted — mirroring .github/actions/binaryen. The
+# archive is downloaded to a file (never piped into tar), checked with
+# `sha256sum -c`, and only then extracted and installed.
 TILT_VERSION="0.37.7"
+# SHA-256 of tilt.<version>.linux.x86_64.tar.gz from the release's checksums.txt.
+# Bump this in the SAME edit as TILT_VERSION: a mismatched pair fails the verify
+# step below instead of installing an unverified binary. scripts/check-tilt-pin.sh
+# statically asserts this version/digest/verify triple stays intact.
+TILT_SHA256="b695193fab68def8310cb971fa60bbe47ba0a782e24f54ebad287c13316a61b0"
 if ! command -v tilt >/dev/null 2>&1; then
   echo "Installing tilt v$TILT_VERSION..."
   tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.x86_64.tar.gz" \
-    | tar -xz -C "$tmp" tilt
+  archive="$tmp/tilt.${TILT_VERSION}.linux.x86_64.tar.gz"
+  # -f so an HTML error page is never handed to tar; -o so nothing is piped
+  # into an extractor before the digest has been verified.
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -o "$archive" \
+    "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.x86_64.tar.gz"
+  echo "${TILT_SHA256}  ${archive}" | sha256sum -c -
+  tar -xzf "$archive" -C "$tmp" tilt
   sudo install -m 0755 "$tmp/tilt" /usr/local/bin/tilt
   rm -rf "$tmp"
 else

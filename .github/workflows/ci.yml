@@ -112,6 +112,13 @@ jobs:
         # ResolutionStack mutation remains top-only or adjacent-pair scoped.
         run: ./scripts/check-resolution-frame-boundaries.sh
 
+      - name: Tilt pin/verify gate
+        # Static assertion that .cursor/install.sh installs tilt only from a
+        # digest-verified archive (pinned SHA-256 checked before sudo install),
+        # so the auto-run Cloud Agent bootstrap cannot execute an unverified
+        # root-level binary.
+        run: ./scripts/check-tilt-pin.sh
+
       - name: Test card-data load gate
         # Diff-based gate: new test code must not reparse the full ~90 MB
         # client/public/card-data.json (tens of seconds/test under nextest, and

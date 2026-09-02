@@ -9,4 +9,7 @@ echo "  [rust] parser combinator gate"
 echo "  [rust] PreLowered ratchet"
 ./scripts/check-prelowered-ratchet.sh
 
+echo "  [env] tilt pin/verify gate"
+./scripts/check-tilt-pin.sh
+
 echo "All pre-commit checks passed."
