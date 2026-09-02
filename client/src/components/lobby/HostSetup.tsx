@@ -586,8 +586,19 @@ export function HostSetup({
       })),
     [t],
   );
+  // No CustomFormatRules deck-validation resolver exists yet (Phase 1d) —
+  // `validate_deck_for_format` (the authoritative game-creation gate) rejects
+  // EVERY Custom-format deck unconditionally, for any deck, so hosting or
+  // joining with a saved custom format deterministically fails at
+  // initialization today. The live-check chip reports this format as
+  // "idle" (deliberately not "illegal" — the engine has no opinion, not a
+  // rejection), so `hostDisabled` alone never catches this case. Block
+  // submission locally instead of letting the user walk the full
+  // save/select/deck-pick flow into a guaranteed dead end.
+  const customFormatHostUnavailable = activeSavedFormat !== null;
   const submitDisabled =
     hostDisabled
+    || customFormatHostUnavailable
     || isSubmitting
     || isResolvingFormat
     || hostingStatus !== "idle"
@@ -649,6 +660,12 @@ export function HostSetup({
                 className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
               />
             </Field>
+
+            {customFormatHostUnavailable && (
+              <p role="status" className="text-xs text-amber-300 sm:col-span-2">
+                {t("hostSetup.customFormatHostingUnavailable")}
+              </p>
+            )}
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
               <IntegerField
@@ -945,7 +962,13 @@ export function HostSetup({
           <button
             type="submit"
             disabled={submitDisabled}
-            title={hostDisabled ? hostDisabledReason : undefined}
+            title={
+              customFormatHostUnavailable
+                ? t("hostSetup.customFormatHostingUnavailable")
+                : hostDisabled
+                  ? hostDisabledReason
+                  : undefined
+            }
             aria-disabled={submitDisabled || undefined}
             className={`${menuButtonClass({ tone: accentTone, size: "md" })} w-full disabled:cursor-not-allowed disabled:opacity-50`}
           >

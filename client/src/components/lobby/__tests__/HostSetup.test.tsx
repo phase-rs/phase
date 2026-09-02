@@ -32,8 +32,59 @@ const localStorageItems = vi.hoisted(() => {
   return items;
 });
 
+// The saved-format select flow resolves through the WASM adapter. No real
+// engine runs in this environment; stub the one method HostSetup calls.
+vi.mock("../../../adapter/wasm-adapter", () => ({
+  getHostAdapter: () => ({
+    formatConfigForCustomRules: vi.fn().mockResolvedValue({
+      format: "Custom:0",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: { type: "Minimum", data: 60 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Limited", data: 15 },
+      default_deck_copy_limit: { type: "UpTo", data: 4 },
+      allow_debug_actions: false,
+      custom_rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 2,
+          max_players: 4,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+    }),
+  }),
+}));
+
 import { HostSetup } from "../HostSetup";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
+import { saveCustomFormat } from "../../../services/customFormats";
 
 describe("HostSetup", () => {
   beforeEach(() => {
@@ -326,4 +377,67 @@ describe("HostSetup", () => {
       });
     },
   );
+
+  /**
+   * No `CustomFormatRules` deck-validation resolver exists yet (Phase 1d) —
+   * `validate_deck_for_format` (the authoritative game-creation gate)
+   * unconditionally rejects every Custom-format deck. Before this test, a
+   * host could select a saved custom format, fill in a deck, and click Host
+   * Game, only to have that submission deterministically fail at engine
+   * init with no warning beforehand. The Host action must be unavailable for
+   * that selection instead of walking the user into a guaranteed dead end.
+   */
+  it("disables the Host action once a saved custom format is selected", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    saveCustomFormat("Grandpa's House Rules", {
+      rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 2,
+          max_players: 4,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+      label: "Grandpa's House Rules",
+      short_label: "GRA",
+      description: "60-card minimum, 2–4 players",
+      reprint_policy: null,
+      printing_fidelity: "NotApplicable",
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    const hostButton = await screen.findByRole("button", { name: "Host Game" });
+    expect(hostButton).toBeDisabled();
+    expect(
+      screen.getByText(/Hosting with a custom format isn't supported yet/),
+    ).toBeInTheDocument();
+
+    await user.click(hostButton);
+    expect(onHost).not.toHaveBeenCalled();
+  });
 });

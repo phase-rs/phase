@@ -1203,6 +1203,74 @@ fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
         let def = CustomFormatDef::from_lobby_config("Saved Format".to_string(), &source)
             .unwrap_or_else(|error| panic!("{:?}: {error}", source.format));
         let resolved = FormatConfig::for_custom_rules(&def.rules);
+
+        // `back == resolved` below only proves the resolver and serde agree
+        // with THEMSELVES — a `from_lobby_config`/`for_custom_rules` mapping
+        // bug that swaps or drops a field the same way on both sides would
+        // still pass it. Compare `resolved` against `source` directly for
+        // every field the charter's documented mapping
+        // (IMPLEMENTATION_PLAN.md's Phase 1c section) calls a direct copy or
+        // a lossless CommandZoneMode round trip, so a real capture/resolve
+        // regression is caught here instead.
+        assert_eq!(
+            resolved.starting_life, source.starting_life,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.min_players, source.min_players,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.max_players, source.max_players,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(resolved.deck_size, source.deck_size, "{:?}", source.format);
+        assert_eq!(resolved.singleton, source.singleton, "{:?}", source.format);
+        assert_eq!(
+            resolved.team_based, source.team_based,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.range_of_influence, source.range_of_influence,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.sideboard_policy, source.sideboard_policy,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.default_deck_copy_limit, source.default_deck_copy_limit,
+            "{:?}",
+            source.format
+        );
+        // CommandZoneMode-derived, not direct-copy — but every built-in
+        // source's command-zone shape round-trips losslessly through it.
+        assert_eq!(
+            resolved.command_zone, source.command_zone,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.commander_damage_threshold, source.commander_damage_threshold,
+            "{:?}",
+            source.format
+        );
+        assert_eq!(
+            resolved.uses_commander, source.uses_commander,
+            "{:?}",
+            source.format
+        );
+        // Deliberately NOT compared against `source` (per for_custom_rules's
+        // own doc comment): `format`/`custom_rules` are fixed to the Custom
+        // sentinel, and `archenemy_player`/`supplies_fixed_deck`/
+        // `allow_debug_actions` are always reset, never captured.
+
         let json = serde_json::to_value(&resolved).unwrap();
         let back = serde_json::from_value::<FormatConfig>(json)
             .unwrap_or_else(|error| panic!("{:?}: {error}", source.format));

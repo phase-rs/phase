@@ -229,7 +229,8 @@
     "deleteCustomFormat": "Supprimer",
     "loadingCustomFormat": "Chargement du format…",
     "noSavedCustomFormats": "Aucun format personnalisé enregistré.",
-    "customFormatResolveFailed": "Impossible de charger ce format enregistré."
+    "customFormatResolveFailed": "Impossible de charger ce format enregistré.",
+    "customFormatHostingUnavailable": "Héberger avec un format personnalisé n'est pas encore pris en charge — la légalité du deck ne peut pas être vérifiée pour ce format. Enregistrez-le et prévisualisez-le pour l'instant."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",

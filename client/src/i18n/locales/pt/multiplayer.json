@@ -229,7 +229,8 @@
     "deleteCustomFormat": "Excluir",
     "loadingCustomFormat": "Carregando formato…",
     "noSavedCustomFormats": "Nenhum formato personalizado salvo ainda.",
-    "customFormatResolveFailed": "Não foi possível carregar esse formato salvo."
+    "customFormatResolveFailed": "Não foi possível carregar esse formato salvo.",
+    "customFormatHostingUnavailable": "Hospedar com um formato personalizado ainda não é suportado — a legalidade do baralho não pode ser verificada para ele. Por enquanto, salve e apenas visualize."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",

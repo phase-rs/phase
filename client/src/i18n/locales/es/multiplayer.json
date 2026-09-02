@@ -229,7 +229,8 @@
     "deleteCustomFormat": "Eliminar",
     "loadingCustomFormat": "Cargando formato…",
     "noSavedCustomFormats": "Todavía no hay formatos personalizados guardados.",
-    "customFormatResolveFailed": "No se pudo cargar ese formato guardado."
+    "customFormatResolveFailed": "No se pudo cargar ese formato guardado.",
+    "customFormatHostingUnavailable": "Hospedar con un formato personalizado aún no es compatible — no se puede comprobar la legalidad del mazo para él. Por ahora, guárdalo y solo previsualízalo."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",

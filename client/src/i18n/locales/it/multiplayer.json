@@ -229,7 +229,8 @@
     "deleteCustomFormat": "Elimina",
     "loadingCustomFormat": "Caricamento del formato…",
     "noSavedCustomFormats": "Nessun formato personalizzato salvato.",
-    "customFormatResolveFailed": "Impossibile caricare il formato salvato."
+    "customFormatResolveFailed": "Impossibile caricare il formato salvato.",
+    "customFormatHostingUnavailable": "Ospitare con un formato personalizzato non è ancora supportato — la legalità del mazzo non può essere verificata per esso. Per ora, salvalo e limitati all'anteprima."
   },
   "page": {
     "deckRejected": "Il mazzo è stato rifiutato dall'host.",
