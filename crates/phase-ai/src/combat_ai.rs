@@ -861,6 +861,79 @@ pub fn choose_blockers_with_profile(
         }
     }
 
+    // Reserved favourable trades (maintainer verdict on the reported block:
+    // "100% should have traded"). The second pass walks `sorted_attackers` in
+    // descending value order, so the biggest attacker gets first claim on every
+    // blocker — including a blocker that can only CHUMP it but could KILL a
+    // smaller attacker further down the list. Trading a body for a body is worth
+    // strictly more than the two or three life a chump saves, so a blocker with a
+    // reserved trade is withheld from the chump.
+    //
+    // The one exception is survival: when the chump is what keeps the player alive
+    // through this combat, a trade next turn is worth nothing. The guard below
+    // (`chump_is_survival_critical`) suppresses the reservation in that case.
+    // Both halves are load-bearing — do not collapse either one away.
+    //
+    // Built once, only under the two objectives whose chump predicates can fire,
+    // and only from values already in hand (`sorted_attackers`, `blocker_value`,
+    // `evaluate_block_outcome`): no `evaluate_creature` re-calls, no board scans.
+    // Deathtouch blockers already committed above are skipped, and a blocker that
+    // reflects damage to its controller is never reserved because blocking with it
+    // costs life on top of the exchange (handled per-attacker below).
+    let incoming_power = sum_power(state, attacker_ids);
+    let p_life = state.players[player.0 as usize].life;
+    let favorable_kill_targets: HashMap<ObjectId, Vec<ObjectId>> = if matches!(
+        objective,
+        CombatObjective::Race | CombatObjective::Stabilize
+    ) {
+        available_blockers
+            .iter()
+            .filter_map(|&bid| {
+                if used_blockers.contains(&bid) {
+                    return None;
+                }
+                let blocker = state.objects.get(&bid)?;
+                if has_damage_reflection_to_controller(blocker) {
+                    return None;
+                }
+                let selected_blocker_value = blocker_value(&bid);
+                let targets: Vec<ObjectId> = sorted_attackers
+                    .iter()
+                    .filter_map(|&(aid, attacker_value)| {
+                        // CR 509.1b: a lone blocker is an illegal declaration
+                        // against an attacker with a minimum-blocker floor, so
+                        // those never count as a reservable trade.
+                        if required_blockers(&aid) > 1
+                            || !can_block_with_engine_map(state, bid, aid, valid_block_targets)
+                        {
+                            return None;
+                        }
+                        let attacker = state.objects.get(&aid)?;
+                        let (kills, survives) = evaluate_block_outcome(blocker, attacker);
+                        if !kills {
+                            return None;
+                        }
+                        // Same `favorable_trade` arithmetic the pass applies below,
+                        // including CR 702.19b trample (a dying blocker only stops
+                        // its own toughness worth of damage).
+                        let priority = (survives as u8) * 2 + (kills as u8);
+                        let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
+                            blocker.toughness.unwrap_or(1)
+                        } else {
+                            attacker.power.unwrap_or(0)
+                        };
+                        let favorable_trade = priority != 1
+                            || selected_blocker_value <= attacker_value + damage_prevented as f64;
+                        favorable_trade.then_some(aid)
+                    })
+                    .collect();
+                (!targets.is_empty()).then_some((bid, targets))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     // Second pass: assign remaining blockers where they'd survive.
     // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 — a lone
     // blocker is an illegal declaration against them (handled in gang-block pass).
@@ -877,6 +950,20 @@ pub fn choose_blockers_with_profile(
             continue;
         }
 
+        let attacker_power = attacker.power.unwrap_or(0);
+        // CR 903.10a: For commander attackers, the effective lethal threshold can be
+        // tighter than raw life. Use min(life, headroom) so we chump-stabilize when
+        // a 5-power commander would cross the 21-cmd-damage threshold.
+        let effective_life = commander_lethal_headroom(state, player, attacker_id)
+            .map(|h| p_life.min(h as i32))
+            .unwrap_or(p_life);
+        // Survival guard for the reserved-trade skip above: the aggregate attack is
+        // already lethal (CR 704.5a), or this single attacker alone is (raw life, or
+        // the tighter CR 903.10a commander-damage threshold folded into
+        // `effective_life`). Keeping a body for a future trade is worthless then.
+        let chump_is_survival_critical =
+            incoming_power >= p_life || effective_life <= attacker_power;
+
         // Find a blocker that survives and can kill the attacker
         let best = available_blockers
             .iter()
@@ -889,6 +976,18 @@ pub fn choose_blockers_with_profile(
                 let (kills, survives) = evaluate_block_outcome(blocker, attacker);
                 // Prefer: survives and kills > survives > kills > neither
                 let priority = (survives as u8) * 2 + (kills as u8);
+                // This blocker can only chump here, but it kills a still-unblocked
+                // attacker later in `sorted_attackers` — hold it for that trade.
+                if priority == 0
+                    && favorable_kill_targets.get(&bid).is_some_and(|targets| {
+                        targets
+                            .iter()
+                            .any(|&aid| aid != attacker_id && !blocked_attackers.contains(&aid))
+                    })
+                    && !chump_is_survival_critical
+                {
+                    return None;
+                }
                 Some((bid, priority, blocker_value(&bid)))
             })
             .max_by(|a, b| {
@@ -897,9 +996,6 @@ pub fn choose_blockers_with_profile(
             });
 
         if let Some((blocker_id, priority, selected_blocker_value)) = best {
-            let attacker_power = attacker.power.unwrap_or(0);
-            let p_life = state.players[player.0 as usize].life;
-
             // Damage-reflection check (Jackal Pup pattern): if the blocker has a
             // DamageReceived trigger that deals the same damage to its controller,
             // blocking effectively costs the player that damage too. Skip blocking
@@ -939,13 +1035,6 @@ pub fn choose_blockers_with_profile(
                     continue;
                 }
             }
-
-            // CR 903.10a: For commander attackers, the effective lethal threshold can be
-            // tighter than raw life. Use min(life, headroom) so we chump-stabilize when
-            // a 5-power commander would cross the 21-cmd-damage threshold.
-            let effective_life = commander_lethal_headroom(state, player, attacker_id)
-                .map(|h| p_life.min(h as i32))
-                .unwrap_or(p_life);
 
             let should_chump_stabilize = priority == 0
                 && damage_prevented >= 2
@@ -2624,6 +2713,112 @@ mod tests {
         assert!(
             !blockers.contains(&(chump, attacker)),
             "Healthy defender should keep the chump blocker"
+        );
+    }
+
+    /// Thread 1541556099650691193 — maintainer: "100% should have traded".
+    /// `sorted_attackers` puts the 2/5 (value 8.0) ahead of the 3/2 (value 6.5),
+    /// so the lone 4/2 used to be spent chumping the wall it cannot kill instead
+    /// of trading with the brute it does kill.
+    #[test]
+    fn race_objective_trades_instead_of_chumping_the_bigger_body() {
+        let mut state = setup();
+        let wall = add_creature(&mut state, PlayerId(0), "Wall", 2, 5, vec![]);
+        let brute = add_creature(&mut state, PlayerId(0), "Brute", 3, 2, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Brawler", 4, 2, vec![]);
+        state.players[1].life = 14;
+
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, brute], &AiProfile::default()),
+            CombatObjective::Race,
+            "life 14 vs incoming 5 over own board power 4 must land in the Race band"
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[wall, brute]);
+
+        assert!(
+            blockers.contains(&(blocker, brute)),
+            "the 4/2 should trade with the 3/2 it kills, got {blockers:?}"
+        );
+        assert!(
+            !blockers.contains(&(blocker, wall)),
+            "the 4/2 must not be spent chumping the 2/5, got {blockers:?}"
+        );
+    }
+
+    /// The reservation only withholds a blocker that actually has a trade. With
+    /// nothing on the board it can kill, the Race chump behaviour is unchanged.
+    #[test]
+    fn chump_still_taken_when_no_trade_exists() {
+        let mut state = setup();
+        let wall = add_creature(&mut state, PlayerId(0), "Wall", 2, 5, vec![]);
+        let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 6, 6, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Brawler", 4, 2, vec![]);
+        state.players[1].life = 22;
+
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, ogre], &AiProfile::default()),
+            CombatObjective::Race,
+            "life 22 vs incoming 8 over own board power 4 must land in the Race band"
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[wall, ogre]);
+
+        assert!(
+            blockers.contains(&(blocker, ogre)),
+            "with no trade available the 4/2 should still chump the 6/6, got {blockers:?}"
+        );
+    }
+
+    /// Same board as the Race case, in the Stabilize band: the stabilize chump
+    /// predicate must not consume the blocker either.
+    #[test]
+    fn stabilize_band_also_prefers_the_trade() {
+        let mut state = setup();
+        let wall = add_creature(&mut state, PlayerId(0), "Wall", 2, 5, vec![]);
+        let brute = add_creature(&mut state, PlayerId(0), "Brute", 3, 2, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Brawler", 4, 2, vec![]);
+        state.players[1].life = 6;
+
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, brute], &AiProfile::default()),
+            CombatObjective::Stabilize,
+            "life 6 vs incoming 5 must land in the Stabilize band"
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[wall, brute]);
+
+        assert!(
+            blockers.contains(&(blocker, brute)),
+            "the 4/2 should trade with the 3/2 it kills, got {blockers:?}"
+        );
+        assert!(
+            !blockers.contains(&(blocker, wall)),
+            "the 4/2 must not be spent chumping the 2/5, got {blockers:?}"
+        );
+    }
+
+    /// CR 704.5a survival guard: when the attack is already lethal in aggregate,
+    /// the chump is what keeps the player alive and outranks the reserved trade.
+    #[test]
+    fn lethal_board_still_chumps_the_bigger_attacker() {
+        let mut state = setup();
+        let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 4, 5, vec![]);
+        let brute = add_creature(&mut state, PlayerId(0), "Brute", 3, 2, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Brawler", 4, 2, vec![]);
+        state.players[1].life = 4;
+
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[ogre, brute], &AiProfile::default()),
+            CombatObjective::Stabilize,
+            "incoming 7 at life 4 is unconditional Stabilize"
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[ogre, brute]);
+
+        assert!(
+            blockers.contains(&(blocker, ogre)),
+            "facing lethal, the 4/2 must chump the 4/5 rather than hold its trade, got {blockers:?}"
         );
     }
 
