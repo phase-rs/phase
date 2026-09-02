@@ -2586,6 +2586,7 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
@@ -2628,6 +2629,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
                 assert_eq!(
@@ -2920,8 +2922,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_55_for_room_half_identities() {
-        assert_eq!(PROTOCOL_VERSION, 55);
+    fn protocol_version_is_56_for_commander_designation_count() {
+        assert_eq!(PROTOCOL_VERSION, 56);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2932,7 +2934,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_55_for_room_half_identities` stays
+    /// `protocol_version_is_56_for_commander_designation_count` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

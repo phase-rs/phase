@@ -63,6 +63,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     status: "Drafting",
     kind: "Premier",
     launch_capability: "None",
+    commanders_required: 0,
     current_pack_number: 0,
     pick_number: 0,
     pass_direction: "Left",

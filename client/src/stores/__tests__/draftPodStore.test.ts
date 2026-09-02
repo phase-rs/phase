@@ -834,6 +834,50 @@ describe("draftPodStore", () => {
   });
 
   describe("createPod (cube branch)", () => {
+    it("rejects an incompatible pool mode without publishing a matching cache key", async () => {
+      mocks.draftProcedure.mockResolvedValue({
+        pod_size: 8,
+        human_seats: 1,
+        min_pod_size: 2,
+        max_pod_size: 8,
+        allowed_pod_sizes: [8],
+        packs_per_player: 6,
+        cards_per_pick: 1,
+        distribution: "AllAtOnce",
+        min_deck_size: 40,
+        cube_min_deck_size: 73,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      });
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "C",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 8,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+      const emissions: Array<ReturnType<typeof useDraftPodStore.getState>> = [];
+      const unsubscribe = useDraftPodStore.subscribe((state) => emissions.push(state));
+
+      await useDraftPodStore.getState().createPod();
+      unsubscribe();
+
+      expect(useDraftPodStore.getState().configError).toBe("This procedure requires a set pool");
+      expect(emissions.some((state) =>
+        state.procedureCacheKey?.kind === state.config.kind
+        && state.procedureCacheKey.tournamentFormat === state.config.tournamentFormat
+      )).toBe(false);
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
     it("rejects an empty cube list with a config error", async () => {
       useDraftPodStore.setState({
         poolMode: "cube",
@@ -1029,6 +1073,48 @@ describe("draftPodStore", () => {
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledWith(
         expect.objectContaining({ podSize: 8 }),
       );
+    });
+
+    it("publishes a matching create cache only with normalized dependent state", async () => {
+      stubPools(["ISD"]);
+      mocks.draftProcedure.mockResolvedValue({
+        pod_size: 4,
+        human_seats: 1,
+        min_pod_size: 4,
+        max_pod_size: 4,
+        allowed_pod_sizes: [4],
+        packs_per_player: 3,
+        cards_per_pick: 1,
+        distribution: "PickAndPass",
+        min_deck_size: 40,
+        cube_min_deck_size: 73,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      });
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [{ code: "ISD", name: "Innistrad" }],
+          setCode: "ISD",
+          podSize: 2,
+        },
+        poolMode: "set",
+        hostDisplayName: "Host",
+      }));
+      const emissions: Array<ReturnType<typeof useDraftPodStore.getState>> = [];
+      const unsubscribe = useDraftPodStore.subscribe((state) => emissions.push(state));
+
+      await useDraftPodStore.getState().createPod();
+      unsubscribe();
+
+      const matchingPublications = emissions.filter((state) =>
+        state.procedureCacheKey?.kind === state.config.kind
+        && state.procedureCacheKey.tournamentFormat === state.config.tournamentFormat
+      );
+      expect(matchingPublications).not.toHaveLength(0);
+      expect(matchingPublications.every((state) =>
+        state.config.podSize === 4 && state.poolMode === "set"
+      )).toBe(true);
     });
 
     /**

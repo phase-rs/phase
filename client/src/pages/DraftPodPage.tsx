@@ -1083,7 +1083,7 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
         preferences,
         interactionLocked,
         capabilities: { kind: "editable-pool", suggestions: false },
-        ...(view.kind === "CommanderDraft"
+        ...(view.commanders_required > 0
           ? { commanderDesignation: "initial-pod" as const }
           : {}),
         onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),

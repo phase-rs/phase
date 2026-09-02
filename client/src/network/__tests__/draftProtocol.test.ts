@@ -19,7 +19,7 @@ const validWorkspace = {
   virtualBasics: [{ instanceId: "basic-1", name: "Island" }],
 };
 
-const validDraftView = { launch_capability: "None" as const };
+const validDraftView = { launch_capability: "None" as const, commanders_required: 0 };
 
 function workspaceWithPlacementCount(count: number) {
   return {
@@ -42,8 +42,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 25", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(25);
+    it("is version 26", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(26);
     });
   });
 
@@ -498,6 +498,16 @@ describe("draftProtocol", () => {
       },
     );
 
+    it.each([undefined, null, -1, 0.5, 256, "1"])(
+      "rejects a missing or invalid commander count at protocol v26",
+      (commanders_required) => {
+        expect(() => validateDraftMessage({
+          type: "draft_state_update",
+          view: { ...validDraftView, commanders_required },
+        })).toThrow("commanders_required must be a u8 count");
+      },
+    );
+
     it.each(["draft_welcome", "draft_reconnect_ack"])(
       "accepts nullable workspace state for %s",
       (type) => {
@@ -884,6 +894,7 @@ describe("draftProtocol", () => {
       // Build a message large enough to trigger compression
       const longView = {
         launch_capability: "None" as const,
+        commanders_required: 0,
         status: "Deckbuilding",
         kind: "Sealed",
         current_pack_number: 1,

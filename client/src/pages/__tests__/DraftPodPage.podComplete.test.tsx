@@ -159,6 +159,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
         launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
           ? "CommanderMultiplayer"
           : "None",
+        commanders_required: stubConfig.postDraftPlay === "CompleteImmediately" ? 1 : 0,
         seat_index: seat,
         current_round: 1,
         pairings: [],

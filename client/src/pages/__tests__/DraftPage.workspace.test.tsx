@@ -142,7 +142,7 @@ function card(instanceId: string, name = instanceId): DraftCardInstance {
 
 function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
   return {
-    status: "Drafting", kind: "Quick", launch_capability: "None", pool: [], current_pack: [], draft_effects: [],
+    status: "Drafting", kind: "Quick", launch_capability: "None", commanders_required: 0, pool: [], current_pack: [], draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
       type_filter_options: [], color_filter_options: [],

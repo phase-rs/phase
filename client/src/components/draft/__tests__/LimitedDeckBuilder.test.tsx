@@ -194,6 +194,7 @@ const TEST_VIEW: BuilderView = {
   status: "Deckbuilding",
   kind: "Quick",
   launch_capability: "None",
+  commanders_required: 0,
   current_pack_number: 1,
   pick_number: 1,
   pass_direction: "Left",

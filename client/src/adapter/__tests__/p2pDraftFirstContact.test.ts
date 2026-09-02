@@ -57,7 +57,7 @@ describe("P2P draft first-contact gate", () => {
     });
   });
 
-  it("rejects a v24 peer before it can allocate a seat because v25 requires launch_capability", async () => {
+  it("rejects a v25 peer before it can allocate a seat because v26 requires commanders_required", async () => {
     sessionState.firstContact = null;
     sessionState.send.mockClear();
     sessionState.close.mockClear();
@@ -83,10 +83,10 @@ describe("P2P draft first-contact gate", () => {
     const rejected = sessionState.firstContact!({
       type: "draft_join",
       displayName: "Alice",
-      // v24 is the upstream public-seat contract. It lacks this client's
-      // procedure-owned launch capability and must not complete first contact
+      // v25 is the launch-capability contract. It lacks this client's exact
+      // procedure-owned commander count and must not complete first contact
       // under the same version number.
-      draftProtocolVersion: 24,
+      draftProtocolVersion: 25,
     } as never);
 
     expect(allocate).not.toHaveBeenCalled();

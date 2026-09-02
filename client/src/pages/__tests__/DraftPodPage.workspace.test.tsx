@@ -43,7 +43,7 @@ const store = vi.hoisted(() => {
     { instance_id: "copy-a", name: "Shared", set_code: "TST", collector_number: "1", rarity: "mythic", colors: [], cmc: 1, type_line: "Card" },
   ];
   const view = {
-    status: "Drafting", kind: "Premier", pool: cards, current_pack: cards, draft_effects: [],
+    status: "Drafting", kind: "Premier", commanders_required: 0, pool: cards, current_pack: cards, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
       type_filter_options: [], color_filter_options: [],
@@ -305,11 +305,17 @@ describe("DraftPodPage workspace", () => {
 
     expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
 
-    act(() => { store.state.view.kind = "CommanderDraft"; });
+    act(() => {
+      store.state.view.kind = "Premier";
+      store.state.view.commanders_required = 1;
+    });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.deckbuilder?.commanderDesignation).toBe("initial-pod");
 
-    act(() => { store.state.view.kind = "Premier"; });
+    act(() => {
+      store.state.view.kind = "CommanderDraft";
+      store.state.view.commanders_required = 0;
+    });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.deckbuilder?.commanderDesignation).toBeUndefined();
   });

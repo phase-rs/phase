@@ -3125,6 +3125,7 @@ export class P2PDraftHost {
       status: "Lobby",
       kind: this.kind,
       launch_capability: this.procedure.launch_capability,
+      commanders_required: this.procedure.commanders_required,
       current_pack_number: 0,
       pick_number: 0,
       pass_direction: "Left",

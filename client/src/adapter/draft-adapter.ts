@@ -379,6 +379,12 @@ export interface DraftPlayerView {
   source?: DraftSourceView;
   /** Engine-owned completed-pod launch capability; never infer this from kind. */
   launch_capability: DraftLaunchCapability;
+  /**
+   * CR 903.3 / CR 903.13f: exact number of commanders this procedure requires.
+   * This remains a count because valid Commander construction can designate
+   * multiple cards; never infer designation capability from `kind`.
+   */
+  commanders_required: number;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";

@@ -100,6 +100,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
     status: "Drafting",
     kind: "Quick",
     launch_capability: "None",
+    commanders_required: 0,
     pool,
     current_pack: [],
     draft_effects: [],

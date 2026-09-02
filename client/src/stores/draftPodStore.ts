@@ -458,11 +458,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           set({ configError: "This procedure requires a set pool" });
           return;
         }
-        set(procedureCache(procedure, target));
-        if (!procedure.allowed_pod_sizes.includes(config.podSize)) {
-          get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
-        }
-        get().setConfig({});
+        set((prev) => procedurePublication(prev, procedure, target, false));
         config = get().config;
         poolMode = get().poolMode;
         setDraftMode = get().setDraftMode;

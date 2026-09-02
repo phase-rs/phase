@@ -92,11 +92,13 @@ function engineView(
     pack_sizes: number[];
     min_deck_size: number;
     launch_capability: "None" | "CommanderMultiplayer";
+    commanders_required: number;
   }> = {},
 ) {
   return {
     kind,
     launch_capability: "None",
+    commanders_required: 0,
     seats: Array.from({ length: seatCount }, (_, seat_index) => ({ seat_index })),
     pack_count: 4,
     cards_per_pack: 12,
