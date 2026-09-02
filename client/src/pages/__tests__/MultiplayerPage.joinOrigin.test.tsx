@@ -9,13 +9,26 @@ import type { LobbyGame } from "../../adapter/types";
  * The join/spectate origin the lobby produced must ride all the way onto the
  * route. These cases drive the real page with a stubbed `LobbyView` that
  * invokes the callback under test, and read the navigation the page performed.
- * The real `multiplayerStore` module is used (not mocked) so the origin
- * constructors under test are the production ones.
+ * The real `multiplayerStore` module is used (everything but the one export
+ * below is `importOriginal`) so the origin constructors under test are the
+ * production ones.
  */
 const harness = vi.hoisted(() => ({
   navigate: vi.fn(),
   lobbyAction: null as null | ((props: Record<string, unknown>) => void),
   connectionMode: undefined as string | undefined,
+}));
+
+/**
+ * `findLobbyGameByCode` reads the store module's private per-source channel
+ * snapshots, which nothing this file renders can populate. Replacing that one
+ * export is what makes a cross-source `game_code` COLLISION expressible: the
+ * spectate context lookup must consult only the authority being watched.
+ */
+const storeMocks = vi.hoisted(() => ({ findLobbyGameByCode: vi.fn() }));
+vi.mock("../../stores/multiplayerStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/multiplayerStore")>()),
+  findLobbyGameByCode: storeMocks.findLobbyGameByCode,
 }));
 
 vi.mock("react-router", async (importOriginal) => ({
@@ -142,6 +155,8 @@ function navigatedParams(): { path: string; params: URLSearchParams } {
 describe("MultiplayerPage join origin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` drops calls but keeps queued implementations.
+    storeMocks.findLobbyGameByCode.mockReset();
     harness.lobbyAction = null;
     harness.connectionMode = undefined;
     localStorage.setItem("active-deck", "Test Deck");
@@ -220,6 +235,61 @@ describe("MultiplayerPage join origin", () => {
     expect(path).toBe("/draft-spectator");
     expect(params.get("code")).toBe("ABC123");
     expect(params.get("server")).toBe(ORIGIN_URL);
+  });
+
+  /** The same `game_code` listed by two authorities: unscoped resolves to the
+   * one that is NOT the origin, exactly as the real derived-order scan would. */
+  const LISTING_URL = "wss://other.example/ws";
+  const listingSource = adHocLobbySource(LISTING_URL) as LobbySource;
+  function collidingLookup() {
+    storeMocks.findLobbyGameByCode.mockImplementation(
+      (_code: string, sourceUrl?: string) =>
+        sourceUrl === undefined || sourceUrl === LISTING_URL
+          ? { game: draftGame(), source: listingSource }
+          : undefined,
+    );
+  }
+
+  it("routes to the draft spectator when the origin itself lists the draft", async () => {
+    collidingLookup();
+    harness.lobbyAction = (props) => {
+      (props.onSpectate as (code: string, origin: LobbySource) => void)(
+        "ABC123",
+        listingSource,
+      );
+    };
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(harness.navigate).toHaveBeenCalled();
+    });
+    // Paired positive for the case below: this row DOES route to the draft
+    // spectator when it is looked up on the authority being watched.
+    const { path, params } = navigatedParams();
+    expect(path).toBe("/draft-spectator");
+    expect(params.get("server")).toBe(LISTING_URL);
+    expect(storeMocks.findLobbyGameByCode).toHaveBeenCalledWith("ABC123", LISTING_URL);
+  });
+
+  it("ignores a draft row listed by a source other than the spectate origin", async () => {
+    collidingLookup();
+    harness.lobbyAction = (props) => {
+      (props.onSpectate as (code: string, origin: LobbySource) => void)("ABC123", origin);
+    };
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(harness.navigate).toHaveBeenCalled();
+    });
+    // The collision is invisible from this origin, so the code stays a game:
+    // the reach-guard is that it navigated at all, to /game with the origin.
+    const { path, params } = navigatedParams();
+    expect(path).toMatch(/^\/game\//);
+    expect(params.get("mode")).toBe("spectate");
+    expect(params.get("server")).toBe(ORIGIN_URL);
+    expect(storeMocks.findLobbyGameByCode).toHaveBeenCalledWith("ABC123", ORIGIN_URL);
   });
 
   it("routes a typed code the server does not know to the draft spectator with its origin", async () => {

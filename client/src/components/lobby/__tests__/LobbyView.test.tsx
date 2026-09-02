@@ -9,6 +9,7 @@ import { SERVER_PRESETS } from "../../../services/serverDetection";
 import {
   useMultiplayerStore,
   type LobbySource,
+  type LobbySourceStatus,
 } from "../../../stores/multiplayerStore";
 
 /**
@@ -298,12 +299,30 @@ describe("LobbyView", () => {
     });
 
     it("watches a CODE@host code on that host", async () => {
+      // A browsed source lists the same code; the typed address names an
+      // ad-hoc host nobody browses. Modelled as the real function behaves:
+      // an UNSCOPED scan finds the colliding row, a scan scoped to the
+      // ad-hoc host finds nothing (there is no snapshot for it).
+      const collidingRow = lobbyGame("ABC123", "Someone else's table", 100);
+      storeMocks.findLobbyGameByCode.mockImplementation(
+        (_code: string, sourceUrl?: string) =>
+          sourceUrl === undefined
+            ? { game: collidingRow, source: SOURCE_A }
+            : undefined,
+      );
       const onSpectate = vi.fn();
       renderLobby({ onSpectate });
       const user = await typeCode("ABC123@play.example.com");
 
       await user.click(screen.getByRole("button", { name: "Watch" }));
 
+      // The context lookup is scoped to the authority being watched...
+      expect(storeMocks.findLobbyGameByCode).toHaveBeenCalledWith(
+        "ABC123",
+        "wss://play.example.com/ws",
+      );
+      // ...so the colliding row on another source is never handed to the
+      // spectate handler as the row that picks the draft-vs-game route.
       expect(onSpectate).toHaveBeenCalledWith(
         "ABC123",
         expect.objectContaining({ url: "wss://play.example.com/ws", origin: "user" }),
@@ -360,7 +379,9 @@ describe("LobbyView", () => {
   const SOURCE_A: LobbySource = { url: "wss://a.example/ws", name: "a.example", origin: "user" };
   const SOURCE_B: LobbySource = { url: "wss://b.example/ws", name: "b.example", origin: "user" };
 
-  /** Both sources browsed, each with its own ambient socket. */
+  /** Both sources browsed and handshaken, each with its own ambient socket.
+   * `sourceStatus` mirrors production: a source only ever delivers ambient
+   * frames after `ensureSubscriptionSocket` has recorded it `"open"`. */
   function renderTwoSources(onJoinGame?: (...args: unknown[]) => void) {
     const sockets = new Map([
       [SOURCE_A.url, ambientSocket()],
@@ -368,6 +389,10 @@ describe("LobbyView", () => {
     ]);
     useMultiplayerStore.setState({
       userLobbySources: [SOURCE_A, SOURCE_B],
+      sourceStatus: new Map([
+        [SOURCE_A.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
+        [SOURCE_B.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
+      ]),
       subscribeLobby: vi.fn(async () => () => {}),
       ensureSubscriptionSocket: vi.fn(
         async (url: string) => sockets.get(url)?.socket ?? null,
@@ -402,11 +427,50 @@ describe("LobbyView", () => {
     expect(screen.queryByText("8 online")).not.toBeInTheDocument();
   });
 
+  it("drops a source's count from the total once that source goes offline", async () => {
+    const sockets = renderTwoSources();
+    await waitFor(() => {
+      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
+    });
+
+    act(() => {
+      sockets.get(SOURCE_A.url)!.emit("PlayerCount", { count: 3 });
+      sockets.get(SOURCE_B.url)!.emit("PlayerCount", { count: 5 });
+    });
+
+    // Reach-guard: both counts really are in the total while both sources are
+    // open, so the assertion after the flap measures the drop.
+    expect(await screen.findByText("8 online")).toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({
+        sourceStatus: new Map([
+          [SOURCE_A.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
+          [SOURCE_B.url, { state: "offline", serverInfo: null } satisfies LobbySourceStatus],
+        ]),
+      });
+    });
+
+    // B is still a browsed source (the picker shows it, marked down) and its
+    // last count is still in `playerCounts`, but it is delivering nothing —
+    // counting it would advertise players on a server shown as offline.
+    expect(await screen.findByText("3 online")).toBeInTheDocument();
+    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+  });
+
   it("sends a reactive password retry to the source the frame arrived on", async () => {
     // Codes are unique per authority, not across the merged list: the same
-    // code is listed on A while B is the server actually demanding a password.
-    const listedOnA = lobbyGame("ABC123", "Table A", 100);
-    storeMocks.findLobbyGameByCode.mockReturnValue({ game: listedOnA, source: SOURCE_A });
+    // code is listed on BOTH sources while B is the server actually demanding
+    // a password. An unscoped rescan resolves to A (first in derived order),
+    // so every field the modal carries must be looked up scoped to B.
+    const listedOnA: LobbyGame = { ...lobbyGame("ABC123", "Table A", 100), format: "Commander" };
+    const listedOnB: LobbyGame = { ...lobbyGame("ABC123", "Table B", 200), format: "Modern" };
+    storeMocks.findLobbyGameByCode.mockImplementation(
+      (_code: string, sourceUrl?: string) =>
+        sourceUrl === SOURCE_B.url
+          ? { game: listedOnB, source: SOURCE_B }
+          : { game: listedOnA, source: SOURCE_A },
+    );
     const onJoinGame = vi.fn();
     const sockets = renderTwoSources(onJoinGame);
     await waitFor(() => {
@@ -420,11 +484,21 @@ describe("LobbyView", () => {
     const user = userEvent.setup();
     await user.type(await screen.findByPlaceholderText("Enter password"), "hunter2{Enter}");
 
-    // The retry goes to B — the socket the demand arrived on — while the
-    // rescan still supplies the display context.
+    // The lookup is scoped to the arriving authority...
+    expect(storeMocks.findLobbyGameByCode).toHaveBeenCalledWith("ABC123", SOURCE_B.url);
+    // ...so origin, format and context all come from B. `context` is what
+    // routes the join downstream (`MultiplayerPage` branches on
+    // `context.draft_metadata`), so A's colliding row must not be carried.
     expect(onJoinGame).toHaveBeenCalledWith(
       "ABC123",
       SOURCE_B,
+      "hunter2",
+      listedOnB.format,
+      listedOnB,
+    );
+    expect(onJoinGame).not.toHaveBeenCalledWith(
+      "ABC123",
+      expect.anything(),
       "hunter2",
       listedOnA.format,
       listedOnA,

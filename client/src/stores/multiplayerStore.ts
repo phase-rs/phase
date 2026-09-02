@@ -368,10 +368,25 @@ function attachLobbyListener(
 
 /** Lobby row for a game/draft code, with the source that listed it, from the
  * cached channel snapshots. Sources are scanned in derived order, so a code
- * listed by two authorities resolves to the first one browsed. */
-export function findLobbyGameByCode(code: string): LobbyGameEntry | undefined {
+ * listed by two authorities resolves to the first one browsed.
+ *
+ * `sourceUrl` scopes the search to one authority's snapshot. `game_code` is
+ * unique per authority, not across the merged list, so any caller that
+ * already knows which server it is talking to (a frame that arrived on a
+ * specific socket) must scope: an unscoped rescan can otherwise return a
+ * colliding row listed by a different server. Unscoped stays the right call
+ * for a code the user typed, which names no authority. */
+export function findLobbyGameByCode(
+  code: string,
+  sourceUrl?: string,
+): LobbyGameEntry | undefined {
   const normalized = code.trim().toUpperCase();
-  for (const source of lobbySources(useMultiplayerStore.getState())) {
+  const sources = lobbySources(useMultiplayerStore.getState());
+  const scoped =
+    sourceUrl === undefined
+      ? sources
+      : sources.filter((source) => source.url === sourceUrl);
+  for (const source of scoped) {
     const game = subscriptionChannels
       .get(source.url)
       ?.snapshot

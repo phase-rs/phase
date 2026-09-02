@@ -203,13 +203,14 @@ export function LobbyView({
             // Reactive fallback: the proactive path in `handleJoinFromList`
             // opens the modal before any server round-trip, so this only
             // fires for stale rows where the client thought the room was
-            // open and the server said otherwise. The retry goes back to
-            // the socket the frame arrived on: `game_code` is unique per
-            // authority, not across the merged list, so a global rescan can
-            // name a server that never asked for a password. That rescan
-            // supplies display context only.
+            // open and the server said otherwise. Every field comes from the
+            // socket the frame arrived on: `game_code` is unique per
+            // authority, not across the merged list, so an unscoped rescan
+            // could name a server that never asked for a password, and its
+            // row would then route the join (a `draft_metadata` row sends
+            // `MultiplayerPage` down the draft flow) on the wrong authority.
             const data = msg.data as { game_code: string };
-            const listed = findLobbyGameByCode(data.game_code);
+            const listed = findLobbyGameByCode(data.game_code, source.url);
             setPasswordModal({
               gameCode: data.game_code,
               origin: source,
@@ -309,7 +310,11 @@ export function LobbyView({
       showToast(t("lobbyView.invalidJoinServer"));
       return;
     }
-    onSpectate(code, resolved.origin, findLobbyGameByCode(code)?.game);
+    // Context scoped to the resolved authority: the row that decides the
+    // draft-vs-game route must come from the server being watched, not from
+    // a colliding code on another source. A `null` origin (hosting "None")
+    // is refused by `onSpectate` before the context is ever read.
+    onSpectate(code, resolved.origin, findLobbyGameByCode(code, resolved.origin?.url)?.game);
   }, [joinCode, onSpectate, resolveTypedOrigin, showToast, t]);
 
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
@@ -365,8 +370,15 @@ export function LobbyView({
   // so a removed source would otherwise keep its last count in the total for
   // the life of the mounted view. Same membership rule as `entries`.
   const playerCount = useMemo(
-    () => sources.reduce((sum, source) => sum + (playerCounts.get(source.url) ?? 0), 0),
-    [playerCounts, sources],
+    () =>
+      sources
+        // `"open"` is the only state whose last `PlayerCount` frame is still
+        // live: a source that is "reconnecting"/"connecting" (or "offline",
+        // which the picker is simultaneously showing as down) is delivering
+        // no frames, so its cached count is stale and must leave the total.
+        .filter((source) => sourceStatus.get(source.url)?.state === "open")
+        .reduce((sum, source) => sum + (playerCounts.get(source.url) ?? 0), 0),
+    [playerCounts, sources, sourceStatus],
   );
 
   // Count-free by design: the picker lists each source with its own status,

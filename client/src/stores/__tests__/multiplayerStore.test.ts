@@ -1393,6 +1393,52 @@ describe("multiplayerStore", () => {
     detach?.();
   });
 
+  it("scopes a code lookup to one source's snapshot", async () => {
+    const A = "wss://a.example/ws";
+    const B = "wss://b.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: A,
+      userLobbySources: [
+        { url: A, name: "a.example", origin: "user" },
+        { url: B, name: "b.example", origin: "user" },
+      ],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    // "DUP11" is listed by BOTH authorities — codes are unique per server,
+    // not across the merged list — while "ONB22" is listed only by B.
+    brokerMocks.lobbyUpdaters.get(A)?.([
+      lobbyGame({ game_code: "DUP11", host_name: "OnA" }),
+    ]);
+    brokerMocks.lobbyUpdaters.get(B)?.([
+      lobbyGame({ game_code: "DUP11", host_name: "OnB" }),
+      lobbyGame({ game_code: "ONB22" }),
+    ]);
+
+    // Paired unscoped positive on the same fixture: both codes ARE findable
+    // unscoped (resolving to A, first in derived order, for the collision),
+    // so the scoped misses below are the scope refusing them and not an
+    // empty snapshot.
+    expect(findLobbyGameByCode("DUP11")?.game.host_name).toBe("OnA");
+    expect(findLobbyGameByCode("onb22")?.source.url).toBe(B);
+
+    // Scoped: each source answers only for its own snapshot.
+    expect(findLobbyGameByCode("DUP11", B)?.game.host_name).toBe("OnB");
+    expect(findLobbyGameByCode("DUP11", B)?.source.url).toBe(B);
+    expect(findLobbyGameByCode("DUP11", A)?.game.host_name).toBe("OnA");
+    expect(findLobbyGameByCode("onb22", A)).toBeUndefined();
+    // A URL that is no source at all resolves to nothing rather than falling
+    // back to a global scan.
+    expect(findLobbyGameByCode("onb22", "wss://nobody.example/ws")).toBeUndefined();
+    detach?.();
+  });
+
   it("does not list games from a join-origin socket", async () => {
     const A = "wss://a.example/ws";
     const AD_HOC = "wss://adhoc.example/ws";

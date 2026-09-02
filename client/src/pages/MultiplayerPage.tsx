@@ -575,7 +575,11 @@ export function MultiplayerPage() {
         showToast(t("page.joinNeedsServer"));
         return;
       }
-      const resolved = context ?? findLobbyGameByCode(code)?.game;
+      // Scoped to the authority being watched (non-null past the guard): a
+      // `game_code` is unique per server, so an unscoped rescan could pick a
+      // colliding row from another source and route a game to the draft
+      // spectator (or the reverse).
+      const resolved = context ?? findLobbyGameByCode(code, origin.url)?.game;
       // Every spectate navigation carries the origin — the draft-spectator
       // socket opens on it exactly as the game socket does.
       const spectatorParams = new URLSearchParams({ code, server: origin.url });
