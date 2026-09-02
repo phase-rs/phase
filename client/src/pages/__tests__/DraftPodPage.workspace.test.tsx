@@ -176,10 +176,15 @@ vi.mock("../../components/draft/HostControls", () => ({
   }): readonly DraftShellTopAction[] => {
     captured.hostActionsEnabled.push(enabled);
     captured.hostEndActions.push(endDraftAction);
-    return enabled && store.state.role === "host" ? [
-      { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
-      endDraftAction,
-    ] : [];
+    if (!enabled || store.state.role !== "host") return [];
+    if (store.state.phase === "drafting") {
+      return [
+        { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
+        endDraftAction,
+      ];
+    }
+    if (store.state.phase === "deckbuilding") return [endDraftAction];
+    return [];
   },
 }));
 vi.mock("../../components/draft/SeatStatusRing", () => ({ SeatStatusRing: () => <div data-testid="seat-status-ring" /> }));
@@ -382,9 +387,11 @@ describe("DraftPodPage workspace", () => {
     expect(captured.shellMode).toBe("phone-deckbuilding");
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.builderLayout).toBe(responsiveLayout);
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
-    expect(captured.topActions).toEqual([]);
-    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.topActions).toHaveLength(1);
+    expect(captured.topActions[0].id).toBe("end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -444,11 +451,13 @@ describe("DraftPodPage workspace", () => {
     expect(captured.showProgress).toBe(true);
     expect(captured.builderLayout).toBe(responsiveLayout);
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
-    expect(captured.topActions).toEqual([]);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.topActions).toHaveLength(1);
+    expect(captured.topActions[0].id).toBe("end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
     expect(captured.phoneAction).toBeUndefined();
     expect(screen.queryByRole("dialog", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
   });
 
   it("keeps desktop drafting controls floating while guest and non-drafting states stay gated", () => {
@@ -473,8 +482,8 @@ describe("DraftPodPage workspace", () => {
       store.state.phase = "deckbuilding";
     });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    expect(captured.topActions).toEqual([]);
-    expect(captured.floatingActions).toEqual([]);
+    expect(captured.topActions.map(({ id }) => id)).toEqual(["end-draft"]);
+    expect(captured.floatingActions.map(({ id }) => id)).toEqual(["end-draft"]);
     expect(captured.floatingEndAction).toBe(captured.hostEndActions[captured.hostEndActions.length - 1]);
     expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
   });
@@ -506,7 +515,7 @@ describe("DraftPodPage workspace", () => {
     });
   });
 
-  it("keeps a pending compact end action disabled after the phase moves to floating controls", () => {
+  it("keeps a pending compact end action disabled after the phase moves to deckbuilding", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
     vi.stubGlobal("confirm", vi.fn(() => true));
@@ -520,10 +529,11 @@ describe("DraftPodPage workspace", () => {
 
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    const floatingEndAction = captured.floatingEndAction;
-    expect(screen.getByTestId("host-controls-floating")).toBeDisabled();
-    expect(floatingEndAction).toMatchObject({ disabled: true });
-    act(() => floatingEndAction?.onClick());
+    const deckbuildingEndAction = captured.topActions.find(({ id }) => id === "end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
+    expect(deckbuildingEndAction).toMatchObject({ disabled: true });
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    act(() => deckbuildingEndAction?.onClick());
     expect(store.state.leave).toHaveBeenCalledOnce();
   });
 

@@ -1293,7 +1293,7 @@ export function DraftPodPage() {
     onClick: handleEndDraft,
   }), [endingDraft, handleEndDraft, t]);
   const hostDraftTopActions = useHostDraftTopActions({
-    enabled: phase === "drafting",
+    enabled: phase === "drafting" || phase === "deckbuilding",
     endDraftAction,
   });
   const betweenGamesEditorActive = screen === "betweenGames"
@@ -1492,7 +1492,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!(phase === "drafting" && compactHostControlsLayout) && (
+      {!((phase === "drafting" || phase === "deckbuilding") && compactHostControlsLayout) && (
         <HostControls
           draftTopActions={hostDraftTopActions}
           endDraftAction={endDraftAction}

@@ -220,7 +220,7 @@ describe("HostControls", () => {
     expect(draftState.requestResume).toHaveBeenCalledOnce();
   });
 
-  it("returns no responsive draft actions when disabled, non-drafting, or guest", () => {
+  it("gates responsive draft actions when disabled, in other phases, or guest", () => {
     draftState.phase = "drafting";
     const endDraftAction = makeEndDraftAction();
     const { result, rerender } = renderHook(
@@ -235,9 +235,14 @@ describe("HostControls", () => {
     rerender({ enabled: true });
     expect(result.current).toEqual([]);
     draftState.role = "host";
-    draftState.phase = "deckbuilding";
+    draftState.phase = "matchInProgress";
     rerender({ enabled: true });
     expect(result.current).toEqual([]);
+    draftState.phase = "deckbuilding";
+    rerender({ enabled: true });
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toBe(endDraftAction);
+    expect(result.current.some(({ id }) => id === "pause-resume")).toBe(false);
   });
 
   it("forwards the supplied page action through responsive and floating controls", () => {

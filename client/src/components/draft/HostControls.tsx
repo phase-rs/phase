@@ -32,18 +32,24 @@ export function useHostDraftTopActions({
   const requestResume = useMultiplayerDraftStore((state) => state.requestResume);
 
   return useMemo(() => {
-    if (!enabled || role !== "host" || phase !== "drafting") {
+    if (!enabled || role !== "host") {
       return EMPTY_HOST_DRAFT_TOP_ACTIONS;
     }
-    return [
-      {
-        id: "pause-resume",
-        label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
-        tone: paused ? "emerald" : "neutral",
-        onClick: paused ? requestResume : requestPause,
-      },
-      endDraftAction,
-    ];
+    if (phase === "drafting") {
+      return [
+        {
+          id: "pause-resume",
+          label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
+          tone: paused ? "emerald" : "neutral",
+          onClick: paused ? requestResume : requestPause,
+        },
+        endDraftAction,
+      ];
+    }
+    if (phase === "deckbuilding") {
+      return [endDraftAction];
+    }
+    return EMPTY_HOST_DRAFT_TOP_ACTIONS;
   }, [enabled, endDraftAction, paused, phase, requestPause, requestResume, role, t]);
 }
 
