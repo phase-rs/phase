@@ -75,7 +75,7 @@ const REAP_INTERVAL_MS = 60_000;
 /// Per-socket state, mirroring `lobby_broker::ConnState::default()`. Stored in
 /// the WebSocket attachment as a structured object; stringified across the WASM
 /// boundary and written back from each call's result.
-const DEFAULT_CONN = {
+const DEFAULT_CONN: ConnAttachment = {
   client_hello: null,
   subscribed: false,
   host_game: null,

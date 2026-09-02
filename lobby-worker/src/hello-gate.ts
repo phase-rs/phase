@@ -13,10 +13,10 @@ export interface ConnAttachment {
   host_game: string | null;
   reservations: unknown[];
   /**
-   * Tournament codes this connection created / joined. Mirrors
-   * `lobby_broker::ConnState::organized_tournaments` and
-   * `::joined_tournaments` (`crates/lobby-broker/src/broker.rs`), which the
-   * broker round-trips through this attachment verbatim.
+   * Tournament codes this connection CREATED — one appended per successful
+   * `CreateTournament`. Mirrors `lobby_broker::ConnState::organized_tournaments`
+   * (`crates/lobby-broker/src/broker.rs`), which the broker round-trips through
+   * this attachment verbatim.
    *
    * **Never an authority.** Organizer and player permission is the
    * `organizer_token` / `player_token` checked against the stored tournament
@@ -24,9 +24,22 @@ export interface ConnAttachment {
    * broker reads them. They are reconnect-convenience bookkeeping for a future
    * "your events" client flow, and nothing in this shell reads them today
    * either; they are declared here so the attachment type stays a faithful
-   * mirror of the state that actually crosses the WASM boundary.
+   * mirror of the state that actually crosses the WASM boundary. That warning
+   * covers `joined_tournaments` below in equal measure.
    */
   organized_tournaments: string[];
+  /**
+   * Tournament codes this connection JOINED AS A PLAYER — one appended per
+   * successful `JoinTournament`, as distinct from the events it organizes
+   * above. Mirrors `lobby_broker::ConnState::joined_tournaments`.
+   *
+   * **Codes only, never the `player_token`.** The token is the entrant's
+   * authority and is deliberately kept out of this list, because the list is
+   * never pruned and lands verbatim in durable Durable Object attachments that
+   * outlive the socket; a code carries no such risk, being already broadcast to
+   * every subscriber in each `TournamentListUpdate`. The non-authority framing
+   * on `organized_tournaments` applies here identically.
+   */
   joined_tournaments: string[];
 }
 
