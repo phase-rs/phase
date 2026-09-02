@@ -51,10 +51,11 @@ use engine::game::players::is_opponent;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{
-    ControllerRef, DamageSource, Effect, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ControllerRef, DamageSource, Effect, QuantityExpr, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{DistributionUnit, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 
@@ -199,6 +200,40 @@ pub(crate) enum PendingDamage {
     Dealt(DamageOutcome),
 }
 
+/// CR 120.3: resolve one `DealDamage` effect's amount against live game state.
+///
+/// CR 120.3 + CR 208.1 + CR 601.2c: for a `DamageSource::Target` effect whose
+/// amount is "X, where X is its power", the amount is the FIRST object target's
+/// power — the same bound source object the caller resolved.
+/// `resolve_quantity_with_targets_slice` resolves `QuantityRef::Power { scope:
+/// Target }` against the first entry of the passed slice, which is the declared
+/// source already bound in `selection.selected_slots[0]`. All other sources
+/// resolve the amount against the source object (CR 120.3 default) or a fixed
+/// value.
+///
+/// The single authority for "how many points does this effect deal", shared by
+/// the per-target [`pending_damage_to_object`] and the divided-damage pool in
+/// [`divided_damage_facts`] so the two can never disagree about an amount.
+fn resolve_damage_amount(
+    ctx: &PolicyContext<'_>,
+    amount: &QuantityExpr,
+    damage_source: Option<&DamageSource>,
+    source_id: ObjectId,
+) -> u32 {
+    let resolved = if matches!(damage_source, Some(DamageSource::Target)) {
+        resolve_quantity_with_targets_slice(
+            ctx.state,
+            amount,
+            ctx.ai_player,
+            source_id,
+            &bound_target_slice(ctx),
+        )
+    } else {
+        resolve_quantity(ctx.state, amount, ctx.ai_player, source_id)
+    };
+    u32::try_from(resolved.max(0)).unwrap_or(u32::MAX)
+}
+
 /// Reduce every damage effect on the pending spell that reaches `target` into a
 /// single typed [`PendingDamage`].
 ///
@@ -233,33 +268,7 @@ pub(crate) fn pending_damage_to_object(
                     return PendingDamage::Unresolved;
                 };
                 found = true;
-                // CR 120.3 + CR 208.1 + CR 601.2c: for a `DamageSource::Target`
-                // effect whose amount is "X, where X is its power", the amount is
-                // the FIRST object target's power — the same bound source object
-                // resolved above. `resolve_quantity_with_targets_slice` resolves
-                // `QuantityRef::Power { scope: Target }` against the first entry
-                // of the passed slice, which is the declared source already bound
-                // in `selection.selected_slots[0]`. All other sources resolve the
-                // amount against the source object (CR 120.3 default) or a fixed
-                // value, unchanged.
-                let dealt = if matches!(damage_source, Some(DamageSource::Target)) {
-                    u32::try_from(
-                        resolve_quantity_with_targets_slice(
-                            ctx.state,
-                            amount,
-                            ctx.ai_player,
-                            source_id,
-                            &bound_target_slice(ctx),
-                        )
-                        .max(0),
-                    )
-                    .unwrap_or(u32::MAX)
-                } else {
-                    u32::try_from(
-                        resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0),
-                    )
-                    .unwrap_or(u32::MAX)
-                };
+                let dealt = resolve_damage_amount(ctx, amount, damage_source.as_ref(), source_id);
                 // CR 120.3d + CR 702.80a + CR 702.90c: wither/infect damage to a
                 // creature is dealt as -1/-1 counters and is never marked.
                 if is_creature
@@ -376,6 +385,241 @@ pub(crate) fn lethality_bonus(
     }
     let survived = reduced_toughness(target, &outcome).max(0);
     -(f64::from(survived) * WASTE_PENALTY_MULT).min(WASTE_PENALTY_MAX)
+}
+
+/// CR 601.2d: does the pending spell or ability DIVIDE damage among the targets
+/// being chosen?
+///
+/// Read from the ENGINE's authority for the division — `PendingCast.distribute`
+/// for a spell being cast and `PendingTrigger.distribute` for a triggered
+/// ability — rather than from a copy carried on the resolved ability, so the
+/// answer is the same one the engine consults before it opens
+/// `WaitingFor::DistributeAmong`.
+///
+/// `WaitingFor::MultiTargetSelection` is deliberately OUT of scope: it presents
+/// whole target SUBSETS as candidates instead of one step-wise `ChooseTarget`
+/// per slot, so there is no already-declared prefix to price a remaining budget
+/// against. Only the step-wise `TargetSelection` / `TriggerTargetSelection`
+/// arms are covered.
+fn pending_ability_distributes_damage(ctx: &PolicyContext<'_>) -> bool {
+    let unit = match &ctx.decision.waiting_for {
+        WaitingFor::TargetSelection { pending_cast, .. } => pending_cast.distribute.as_ref(),
+        WaitingFor::TriggerTargetSelection { .. } => ctx
+            .state
+            .pending_trigger
+            .as_ref()
+            .and_then(|trigger| trigger.distribute.as_ref()),
+        _ => None,
+    };
+    matches!(unit, Some(DistributionUnit::Damage))
+}
+
+/// CR 120.3 + CR 601.2d: everything a divided-damage pool's lethality maths
+/// needs from the damage SOURCE, hoisted ONCE per candidate so the per-share
+/// scans below never repeat a keyword lookup.
+struct DividedDamageFacts {
+    /// CR 601.2d: the WHOLE pool being divided, not a per-target share.
+    total: u32,
+    /// CR 120.3d + CR 702.80a + CR 702.90c: the source has wither or infect, so
+    /// its damage to a creature becomes -1/-1 counters instead of marked damage.
+    wither_or_infect: bool,
+    /// CR 702.2b: the source has deathtouch, so any marked damage is lethal.
+    deathtouch: bool,
+}
+
+/// CR 601.2d: the divided-damage pool and its source facts for the effect that
+/// reaches `target_id` (or, for `None`, the ability's divided-damage effect
+/// itself — a player candidate has no object to match). `None` when no modelled
+/// damage effect applies or the source is unresolvable (CR 120.3) —
+/// the caller then stays neutral rather than scoring a guess.
+fn divided_damage_facts(
+    ctx: &PolicyContext<'_>,
+    target_id: Option<ObjectId>,
+) -> Option<DividedDamageFacts> {
+    ctx.effects().into_iter().find_map(|effect| {
+        let Effect::DealDamage {
+            amount,
+            damage_source,
+            ..
+        } = effect
+        else {
+            return None;
+        };
+        // A player candidate has no object to match against the filter; the
+        // pool and its source facts are properties of the effect either way.
+        if target_id.is_some_and(|id| !effect_targets_object(ctx, effect, id)) {
+            return None;
+        }
+        let EffectDamageSource::Object(source_id) =
+            effect_damage_source(ctx, damage_source.as_ref())
+        else {
+            return None;
+        };
+        Some(DividedDamageFacts {
+            total: resolve_damage_amount(ctx, amount, damage_source.as_ref(), source_id),
+            wither_or_infect: object_has_effective_keyword_kind(
+                ctx.state,
+                source_id,
+                KeywordKind::Wither,
+            ) || object_has_effective_keyword_kind(
+                ctx.state,
+                source_id,
+                KeywordKind::Infect,
+            ),
+            deathtouch: object_has_effective_keyword_kind(
+                ctx.state,
+                source_id,
+                KeywordKind::Deathtouch,
+            ),
+        })
+    })
+}
+
+/// CR 120.3d / CR 120.3e: route `dealt` points of a divided pool onto one
+/// recipient according to the hoisted source facts.
+fn divided_outcome(facts: &DividedDamageFacts, target: &GameObject, dealt: u32) -> DamageOutcome {
+    // CR 120.3d: only a creature converts wither/infect damage into -1/-1
+    // counters; other permanents take the damage by their own rules.
+    let is_creature = target.card_types.core_types.contains(&CoreType::Creature);
+    DamageOutcome {
+        marked: if is_creature && facts.wither_or_infect {
+            0
+        } else {
+            dealt
+        },
+        minus_counters: if is_creature && facts.wither_or_infect {
+            dealt
+        } else {
+            0
+        },
+        // CR 702.2b: the deathtouch flag comes from the source that actually
+        // dealt damage, so a zero share carries none.
+        deathtouch: facts.deathtouch && dealt > 0,
+    }
+}
+
+/// CR 601.2d + CR 704.5f/g/h: the smallest share of a divided pool that kills
+/// `target`, or `None` when no share within `budget` does.
+///
+/// [`outcome_is_lethal`] is MONOTONE in the share for a fixed source — more
+/// marked damage only crosses the CR 704.5g threshold, more -1/-1 counters only
+/// lower the CR 704.5f toughness — and a share equal to the creature's
+/// toughness is already lethal under either routing whenever any share is. The
+/// scan is therefore bounded by the toughness, never by the pool: a 100-point
+/// Fireball still costs O(toughness), not O(100).
+fn divided_lethal_requirement(
+    facts: &DividedDamageFacts,
+    target: &GameObject,
+    budget: u32,
+) -> Option<u32> {
+    let toughness = u32::try_from(target.toughness.unwrap_or(0)).unwrap_or(0);
+    (1..=budget.min(toughness))
+        .find(|&dealt| outcome_is_lethal(target, &divided_outcome(facts, target, dealt)))
+}
+
+/// CR 601.2d: how much of the pool the ALREADY-DECLARED targets have committed.
+///
+/// Each chosen target must receive at least one of what is divided, and a
+/// chosen creature target is only worth choosing for the share that actually
+/// kills it — so its reserve is its lethal requirement, falling back to the
+/// CR 601.2d minimum of one when no share in the pool can kill it
+/// (indestructible per CR 702.12b, or already dying). Player and non-creature
+/// targets reserve that same minimum.
+///
+/// Reads the same `TargetSelectionProgress.selected_slots` slice
+/// [`bound_target_slice`] does (CR 601.2c) — bounded by the ability's target
+/// maximum, so this is a handful of iterations, never a board scan.
+fn declared_targets_reserve(
+    ctx: &PolicyContext<'_>,
+    declared: &[TargetRef],
+    facts: &DividedDamageFacts,
+) -> u32 {
+    declared
+        .iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => ctx
+                .state
+                .objects
+                .get(id)
+                .filter(|object| object.card_types.core_types.contains(&CoreType::Creature))
+                .and_then(|object| divided_lethal_requirement(facts, object, facts.total))
+                .unwrap_or(1),
+            _ => 1,
+        })
+        .fold(0u32, u32::saturating_add)
+}
+
+/// CR 601.2d: what a divided-damage pool can still do to one more target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DividedDamage {
+    /// Some share of the REMAINING pool kills the target.
+    Lethal,
+    /// No share of the remaining pool kills it — including the exhausted case
+    /// where nothing is left to assign beyond the CR 601.2d minimum.
+    CannotKill,
+}
+
+/// CR 601.2d: the pool left for one MORE target after the already-declared
+/// targets have taken their lethal reserves.
+///
+/// `None` when the pending ability does not divide damage, when the damage
+/// source is not resolvable during target selection (CR 120.3), or when NO
+/// target has been declared yet — with nothing reserved there is no "extra"
+/// target and nothing for one to eat into.
+///
+/// `Some(0)` is the exhausted pool: every declared target already holds exactly
+/// the share that kills it, so any further target — a player or planeswalker
+/// just as much as a creature — must be given its mandatory one point
+/// (CR 601.2d) out of a reserve that was killing something.
+pub(crate) fn divided_damage_remaining_budget(ctx: &PolicyContext<'_>) -> Option<u32> {
+    if !pending_ability_distributes_damage(ctx) {
+        return None;
+    }
+    let declared = bound_target_slice(ctx);
+    if declared.is_empty() {
+        return None;
+    }
+    let facts = divided_damage_facts(ctx, None)?;
+    Some(
+        facts
+            .total
+            .saturating_sub(declared_targets_reserve(ctx, &declared, &facts)),
+    )
+}
+
+/// Divided-damage building block: can the pool still kill `target` once the
+/// already-declared targets have taken their lethal reserves?
+///
+/// `None` when the pending ability does not divide damage (every non-divided
+/// damage spell is untouched) or the damage source is not resolvable during
+/// target selection (CR 120.3).
+///
+/// This is what stops the "add every creature until the slot maximum" pathology
+/// on the Bogardan Hellkite class: the per-candidate lethality term prices each
+/// `ChooseTarget` step as if it received the whole pool, so every creature with
+/// toughness ≤ the pool looks killable, and CR 601.2d then forces a
+/// one-point-each split that kills nothing. Covers every "divided as you
+/// choose" damage source, not one card.
+pub(crate) fn divided_damage_verdict(
+    ctx: &PolicyContext<'_>,
+    target_id: ObjectId,
+    target: &GameObject,
+) -> Option<DividedDamage> {
+    if !pending_ability_distributes_damage(ctx) {
+        return None;
+    }
+    let facts = divided_damage_facts(ctx, Some(target_id))?;
+    let declared = bound_target_slice(ctx);
+    let remaining = facts
+        .total
+        .saturating_sub(declared_targets_reserve(ctx, &declared, &facts));
+    Some(
+        if divided_lethal_requirement(&facts, target, remaining).is_some() {
+            DividedDamage::Lethal
+        } else {
+            DividedDamage::CannotKill
+        },
+    )
 }
 
 /// Cast-commit lethality guard: does the pending spell's targeted creature
@@ -688,14 +932,22 @@ mod tests {
 
     use super::*;
     use crate::config::AiConfig;
+    use crate::policies::evasion_removal_priority::EvasionRemovalPriorityPolicy;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::triggers::PendingTrigger;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, EffectKind, QuantityExpr, QuantityRef,
+        ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
     };
     use engine::types::actions::GameAction;
-    use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+    use engine::types::game_state::{
+        CastPaymentMode, GameState, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
+    };
+    // `verdict` is a `TacticalPolicy` method — the divided-damage Reject is
+    // asserted through the production trait, not a bare inherent call.
+    use crate::policies::registry::{PolicyVerdict, TacticalPolicy};
     use engine::types::identifiers::CardId;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
@@ -1942,6 +2194,335 @@ mod tests {
             "the mixed wipe's resolver-mirroring population must include the hexproof 3/3 \
              (CR 115.10a: the wipe is NON-targeted, so hexproof gates targeting only, \
              CR 702.11b)"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 601.2d — divided damage ("deals N damage divided as you choose")
+    // ---------------------------------------------------------------------
+
+    /// A Bogardan-Hellkite-shaped divided-damage ETB trigger mid-target-
+    /// selection, with `already_selected` declared in
+    /// `TargetSelectionProgress.selected_slots` (CR 601.2c) and a `ChooseTarget`
+    /// candidate naming `candidate_target`.
+    ///
+    /// `trigger_unit` is what `PendingTrigger.distribute` carries — the ENGINE's
+    /// authority for the division. The `ResolvedAbility` deliberately leaves its
+    /// own `distribute` at the `ResolvedAbility::new` default (`None`) so the
+    /// fixture also pins WHICH field the term reads.
+    ///
+    /// Shape verified against `data/card-data.json`, "bogardan hellkite":
+    /// `mode: ChangesZone`, `execute: { DealDamage { Fixed 5, Any },
+    /// multi_target { min: 0, max: 5 }, distribute: Damage }`.
+    fn with_divided_damage_trigger<R>(
+        state: &mut GameState,
+        trigger_unit: Option<DistributionUnit>,
+        already_selected: &[ObjectId],
+        candidate_target: Option<TargetRef>,
+        f: impl FnOnce(&PolicyContext<'_>) -> R,
+    ) -> R {
+        let source = create_object(
+            state,
+            CardId(90_100),
+            PlayerId(0),
+            "Bogardan Hellkite".to_string(),
+            Zone::Battlefield,
+        );
+        state.pending_trigger = Some(Box::new(PendingTrigger {
+            source_id: source,
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: trigger_unit,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: Vec::new(),
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: Some(PlayerId(0)),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: Vec::new(),
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::DealDamage,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: TargetSelectionProgress {
+                    current_slot: already_selected.len(),
+                    selected_slots: already_selected
+                        .iter()
+                        .map(|id| Some(TargetRef::Object(*id)))
+                        .collect(),
+                    current_legal_targets: Vec::new(),
+                },
+                source_id: Some(source),
+                description: None,
+            },
+            candidates: Vec::new(),
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: candidate_target,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        f(&ctx)
+    }
+
+    /// CR 601.2d, first step: nothing is declared yet, so the whole 5-point pool
+    /// is available and the 4-toughness body is killable.
+    #[test]
+    fn divided_damage_first_target_gets_full_budget() {
+        let mut state = make_state();
+        let bear = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[],
+            Some(TargetRef::Object(bear)),
+            |ctx| {
+                let target = ctx.state.objects.get(&bear).unwrap();
+                assert_eq!(
+                    divided_damage_verdict(ctx, bear, target),
+                    Some(DividedDamage::Lethal),
+                    "the first chosen target of a 5-damage division can take the whole pool"
+                );
+            },
+        );
+    }
+
+    /// CR 601.2d, later steps: the already-declared 4-toughness target reserves
+    /// the 4 points that kill it, so only 1 point remains. A 3-toughness body
+    /// can no longer be killed; a 1-toughness body still can.
+    ///
+    /// REVERT-FAILING: without the remaining-budget model every candidate is
+    /// priced against the full 5, so the 3-toughness body reads lethal and the
+    /// AI keeps adding targets until the slot maximum — at which point CR 601.2d
+    /// forces one point each and nothing dies.
+    #[test]
+    fn divided_damage_budget_shrinks_after_selected_targets() {
+        let mut state = make_state();
+        let big = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+        let medium = add_creature(&mut state, PlayerId(1), "Three Tough", 1, 3);
+        let small = add_creature(&mut state, PlayerId(1), "One Tough", 1, 1);
+
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big],
+            Some(TargetRef::Object(medium)),
+            |ctx| {
+                let target = ctx.state.objects.get(&medium).unwrap();
+                assert_eq!(
+                    divided_damage_verdict(ctx, medium, target),
+                    Some(DividedDamage::CannotKill),
+                    "with 4 of 5 points reserved by the declared target, 1 point cannot \
+                     kill a 3-toughness creature (CR 704.5g)"
+                );
+            },
+        );
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big],
+            Some(TargetRef::Object(small)),
+            |ctx| {
+                let target = ctx.state.objects.get(&small).unwrap();
+                assert_eq!(
+                    divided_damage_verdict(ctx, small, target),
+                    Some(DividedDamage::Lethal),
+                    "the last remaining point still kills a 1-toughness creature"
+                );
+            },
+        );
+    }
+
+    /// CR 601.2d, exhausted pool: the declared 4- and 1-toughness targets reserve
+    /// all 5 points, so any further creature target is a categorical Reject —
+    /// adding it would force a point away from a body that dies. The finishing
+    /// `ChooseTarget { target: None }` keeps a finite score, so it wins.
+    ///
+    /// REVERT-FAILING: pre-fix both candidates score, and the extra target's
+    /// full-pool "lethal" bonus beats finishing.
+    #[test]
+    fn divided_damage_exhausted_budget_rejects_further_targets() {
+        let mut state = make_state();
+        let big = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+        let small = add_creature(&mut state, PlayerId(1), "One Tough", 1, 1);
+        let extra = add_creature(&mut state, PlayerId(1), "Two Tough", 1, 2);
+
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big, small],
+            Some(TargetRef::Object(extra)),
+            |ctx| {
+                assert_eq!(divided_damage_remaining_budget(ctx), Some(0));
+                assert!(
+                    matches!(
+                        EvasionRemovalPriorityPolicy.verdict(ctx),
+                        PolicyVerdict::Reject { .. }
+                    ),
+                    "a target the exhausted pool cannot kill must be rejected categorically"
+                );
+            },
+        );
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big, small],
+            None,
+            |ctx| {
+                assert!(
+                    matches!(
+                        EvasionRemovalPriorityPolicy.verdict(ctx),
+                        PolicyVerdict::Score { .. }
+                    ),
+                    "finishing target selection must stay a finite score, so it outranks \
+                     the rejected extra target"
+                );
+            },
+        );
+    }
+
+    /// CR 601.2d, exhausted pool, NON-creature recipient: with the declared
+    /// 4- and 1-toughness targets holding all 5 points, even a face-damage
+    /// target is rejected — its mandatory one point has to come out of a
+    /// reserve that was killing a creature. The player exemption ("chip damage
+    /// to the face is legitimate") only holds while a point is actually spare.
+    #[test]
+    fn divided_damage_exhausted_budget_rejects_a_player_target_too() {
+        let mut state = make_state();
+        let big = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+        let small = add_creature(&mut state, PlayerId(1), "One Tough", 1, 1);
+        let face = Some(TargetRef::Player(PlayerId(1)));
+
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big, small],
+            face.clone(),
+            |ctx| {
+                assert_eq!(divided_damage_remaining_budget(ctx), Some(0));
+                assert!(
+                    matches!(
+                        EvasionRemovalPriorityPolicy.verdict(ctx),
+                        PolicyVerdict::Reject { .. }
+                    ),
+                    "an exhausted pool must reject a PLAYER target too — its \
+                     CR 601.2d minimum comes out of a lethal reserve"
+                );
+            },
+        );
+
+        // One point still spare: face damage is a legitimate use of it again.
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[big],
+            face,
+            |ctx| {
+                assert_eq!(divided_damage_remaining_budget(ctx), Some(1));
+                assert!(
+                    matches!(
+                        EvasionRemovalPriorityPolicy.verdict(ctx),
+                        PolicyVerdict::Score { .. }
+                    ),
+                    "with a point to spare, chip damage to the face keeps a finite score"
+                );
+            },
+        );
+    }
+
+    /// A pending ability that does NOT divide its damage is untouched: the term
+    /// reports `None` and every non-divided damage spell keeps today's
+    /// full-amount lethality model.
+    #[test]
+    fn non_divided_damage_verdict_is_none() {
+        let mut state = make_state();
+        let bear = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+
+        with_divided_damage_trigger(
+            &mut state,
+            None,
+            &[],
+            Some(TargetRef::Object(bear)),
+            |ctx| {
+                let target = ctx.state.objects.get(&bear).unwrap();
+                assert_eq!(
+                    divided_damage_verdict(ctx, bear, target),
+                    None,
+                    "without a division there is no budget to model"
+                );
+            },
+        );
+    }
+
+    /// R5 pin: the division is read from the ENGINE's authority —
+    /// `PendingTrigger.distribute` — not from the `ResolvedAbility` copy. The
+    /// fixture's `ResolvedAbility::new` leaves `distribute` at `None`, so a term
+    /// reading the ability copy would report `None` here.
+    #[test]
+    fn divided_damage_reads_distribute_from_the_pending_trigger() {
+        let mut state = make_state();
+        let bear = add_creature(&mut state, PlayerId(1), "Four Tough", 1, 4);
+
+        with_divided_damage_trigger(
+            &mut state,
+            Some(DistributionUnit::Damage),
+            &[],
+            Some(TargetRef::Object(bear)),
+            |ctx| {
+                assert!(
+                    ctx.state
+                        .pending_trigger
+                        .as_ref()
+                        .is_some_and(|trigger| trigger.ability.distribute.is_none()),
+                    "fixture premise: the ResolvedAbility copy carries no division"
+                );
+                let target = ctx.state.objects.get(&bear).unwrap();
+                assert!(
+                    divided_damage_verdict(ctx, bear, target).is_some(),
+                    "the division must be read from PendingTrigger.distribute"
+                );
+            },
         );
     }
 }

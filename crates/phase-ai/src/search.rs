@@ -16,15 +16,16 @@ use engine::ai_support::{
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
-    TargetFilter,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoiceContext,
-    ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, DistributionUnit, GameState, ManaChoice,
+    ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -3557,6 +3558,20 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
+    // CR 601.2d + CR 704.5g: divided-damage split. `WaitingFor::DistributeAmong`
+    // is the tail of a target-selection sequence the AI has already committed
+    // to, and the engine offers at most two shapes for it (the even split and
+    // `ai_support`'s lethal-first split). Deciding it here on kill count keeps
+    // `quiesce` — which calls `deterministic_choice` with `context: None` —
+    // seeing through the trigger to the board that results, instead of stalling
+    // the rollout on two near-identical distribution vectors. This is the same
+    // call that decides the ROOT prompt (the pre-search early return in
+    // `score_candidates_with_session`), so the arm is context-free by
+    // construction: it reads only `state` and `actions`.
+    if let Some(action) = most_lethal_distribution(state, actions) {
+        return Some(action);
+    }
+
     // CR 103.5 + CR 103.6: Mulligan decisions — defer to the sibling
     // `MulliganRegistry` for structured, feature-aware hand evaluation. All
     // registered `MulliganPolicy` implementations contribute; search can't
@@ -4204,6 +4219,79 @@ fn validated_declare_attackers(
     // first-generic-legal-action fallback with the single engine legality authority
     // (no second combat validator, no repeat-tax loop).
     engine::game::combat::complete_attacker_proposal(state, &attacks, &[])
+}
+
+/// CR 704.5g: does `share` of a divided damage pool destroy this target?
+///
+/// CR 702.12b: an indestructible creature ignores the lethal-damage
+/// state-based action, so no share kills it. A body already at 0 or less
+/// toughness is dying to CR 704.5f regardless, and a player or planeswalker is
+/// not a kill at all.
+fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
+    let TargetRef::Object(id) = target else {
+        return false;
+    };
+    state.objects.get(id).is_some_and(|object| {
+        object.card_types.core_types.contains(&CoreType::Creature)
+            && object.toughness.unwrap_or(0) > 0
+            && !object.has_keyword(&Keyword::Indestructible)
+            // The threshold comes from `combat_damage::lethal_damage_needed`,
+            // the documented single authority for how much a body absorbs; it
+            // already accounts for damage already marked.
+            && share >= engine::game::combat_damage::lethal_damage_needed(state, *id, false)
+    })
+}
+
+/// CR 601.2d: pick the offered damage division that destroys the most creature
+/// targets, keeping the engine's emission order on a tie so the even split —
+/// emitted first by `ai_support::candidate_actions` — stands when no split
+/// kills more.
+///
+/// Only `DistributionUnit::Damage` has a lethality notion; counter and life
+/// divisions fall through to the ordinary scoring path. Deathtouch is not
+/// modelled: `WaitingFor::DistributeAmong` carries no source id, and with a
+/// deathtouch source every share of one or more is lethal (CR 702.2b), so both
+/// offered splits tie and the even split stands anyway.
+fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong {
+            unit: DistributionUnit::Damage,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let divisions: Vec<&GameAction> = actions
+        .iter()
+        .filter(|action| matches!(action, GameAction::DistributeAmong { .. }))
+        .collect();
+    // Strictly additive: this arm exists to break the tie between the engine's
+    // OFFERED divisions. With a single division on the table the candidate set
+    // is whatever it was before the lethal-first split was added, so leave it to
+    // the ordinary pipeline (which may prefer `CancelCast` when a pending cast
+    // makes that an option).
+    if divisions.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(usize, &GameAction)> = None;
+    for action in divisions {
+        let GameAction::DistributeAmong { distribution } = action else {
+            continue;
+        };
+        let kills = distribution
+            .iter()
+            .filter(|(target, share)| share_is_lethal(state, target, *share))
+            .count();
+        let is_better = match best {
+            Some((most, _)) => kills > most,
+            None => true,
+        };
+        if is_better {
+            best = Some((kills, action));
+        }
+    }
+    best.map(|(_, action)| action.clone())
 }
 
 fn prefer_land_drop(
@@ -12436,6 +12524,62 @@ mod tests {
                 pile_a: vec![eligible[0], eligible[3], eligible[4]],
             }),
             "MVs 5,4,3,2,1 balance as 5+2+1 against 4+3"
+        );
+    }
+
+    /// CR 601.2d + CR 704.5g: `WaitingFor::DistributeAmong` is settled
+    /// deterministically on kill count, so `quiesce` (which calls
+    /// `deterministic_choice` with `context: None`) sees the board the division
+    /// actually produces instead of stalling the rollout on two near-identical
+    /// distribution vectors. The 2/3 even split leaves the 3-toughness body
+    /// alive; the 4/1 lethal-first split destroys both.
+    ///
+    /// Second half: when both offered splits kill the same number of targets the
+    /// engine's emission order decides, so the even split (emitted first) wins.
+    #[test]
+    fn distribute_among_deterministic_choice_prefers_lethal_split() {
+        let mut state = GameState::new_two_player(42);
+        let tough = add_creature(&mut state, PlayerId(1), 1, 3);
+        let frail = add_creature(&mut state, PlayerId(1), 1, 1);
+        let targets = vec![TargetRef::Object(tough), TargetRef::Object(frail)];
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: P0,
+            total: 5,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+        };
+
+        let even = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 2), (targets[1].clone(), 3)],
+        };
+        let lethal_first = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 4), (targets[1].clone(), 1)],
+        };
+        let config = AiConfig::default();
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[even.clone(), lethal_first.clone()],
+                None
+            ),
+            Some(lethal_first),
+            "the split that destroys both targets must win"
+        );
+
+        // Both splits kill only the 1-toughness body — a tie, so emission order
+        // holds and the even split stands.
+        let tie_a = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 2), (targets[1].clone(), 3)],
+        };
+        let tie_b = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 1), (targets[1].clone(), 4)],
+        };
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[tie_a.clone(), tie_b], None),
+            Some(tie_a),
+            "an equal kill count must keep the engine's emission order"
         );
     }
 

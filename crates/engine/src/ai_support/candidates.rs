@@ -3147,7 +3147,12 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*player),
             )]
         }
-        // CR 601.2d: Distribute — even split as default.
+        // CR 601.2d: Distribute — the even split as default, plus a lethal-first
+        // split so a division that actually kills its targets exists in the
+        // candidate set. The even split whiffs whenever the pool spreads below
+        // each body's lethal requirement (5 damage split 2/3 across a 1- and a
+        // 3-toughness creature kills neither, where 2/3 the other way round
+        // kills both). The tactical layer re-prices the emitted candidates.
         WaitingFor::DistributeAmong {
             player,
             total,
@@ -3172,11 +3177,28 @@ pub fn candidate_actions_broad_with_probe(
                         last.1 += *total - assigned;
                     }
                 }
-                vec![candidate(
-                    GameAction::DistributeAmong { distribution: dist },
+                let mut candidates = vec![candidate(
+                    GameAction::DistributeAmong {
+                        distribution: dist.clone(),
+                    },
                     TacticalClass::Selection,
                     Some(*player),
-                )]
+                )];
+                // The decision contract matches `DistributeAmong` by exact
+                // vector equality, so an identical lethal-first split would be
+                // a duplicate contract entry — emit it only when it differs.
+                if let Some(lethal_first) = lethal_first_distribution(state, *total, targets) {
+                    if lethal_first != dist {
+                        candidates.push(candidate(
+                            GameAction::DistributeAmong {
+                                distribution: lethal_first,
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                    }
+                }
+                candidates
             }
         }
         // CR 115.7a: propose every legal alternative. The previous arm proposed
@@ -5873,6 +5895,94 @@ pub fn balanced_pile_partition(state: &GameState, eligible: &[ObjectId]) -> Vec<
         .collect()
 }
 
+/// CR 704.5g: how much more damage the creature `target` names needs before it
+/// is destroyed, given it already has one point of the divided pool. `None` for
+/// a player, a planeswalker, a non-creature, or a body already at or past
+/// lethal — none of those can absorb a lethal top-up.
+///
+/// The lethal requirement itself comes from `combat_damage::lethal_damage_needed`
+/// — the documented single authority for "how much does this body absorb",
+/// which already subtracts damage already marked.
+fn lethal_top_up(state: &GameState, target: &TargetRef) -> Option<u32> {
+    let TargetRef::Object(id) = target else {
+        return None;
+    };
+    let object = state.objects.get(id)?;
+    if !object.card_types.core_types.contains(&CoreType::Creature) {
+        return None;
+    }
+    // CR 702.2b is not modelled here: `WaitingFor::DistributeAmong` carries no
+    // source id, so the divider's deathtouch is unknowable at this seam.
+    let needed = crate::game::combat_damage::lethal_damage_needed(state, *id, false);
+    // Subtract the one point every target already holds under CR 601.2d.
+    Some(needed.saturating_sub(1))
+}
+
+/// CR 601.2d: a lethal-first division of `total` among `targets`, returned in
+/// `targets` order so it compares directly against the even split.
+///
+/// Every target starts at the CR 601.2d minimum of one, then the creature
+/// targets are topped up to lethal (CR 704.5g) in descending mana value while
+/// the remainder allows; whatever is left over goes to the most valuable
+/// creature target, or to the last target when there is no creature among them.
+/// The result therefore always sums to `total` with every share at least one.
+///
+/// `None` when `total` is smaller than the number of targets: that prompt is
+/// already degenerate (the engine's even split is the only shape that gives
+/// everyone their minimum), so the even split stands alone.
+///
+/// Mana value is the ordering proxy for "which body is worth killing first".
+/// `ai_support` lives in the engine and cannot reach `phase-ai`'s creature
+/// evaluation, the same constraint `balanced_pile_partition` works under; the
+/// candidate only has to EXIST for the tactical layer to pick it.
+fn lethal_first_distribution(
+    state: &GameState,
+    total: u32,
+    targets: &[TargetRef],
+) -> Option<Vec<(TargetRef, u32)>> {
+    let count = u32::try_from(targets.len()).ok()?;
+    if total < count {
+        return None;
+    }
+    let mut shares = vec![1u32; targets.len()];
+    let mut remainder = total - count;
+
+    let mana_value = |target: &TargetRef| -> u32 {
+        match target {
+            TargetRef::Object(id) => state
+                .objects
+                .get(id)
+                .map_or(0, |object| object.mana_cost.mana_value()),
+            _ => 0,
+        }
+    };
+    // `sort_by_key` is stable, so equal mana values keep `targets` order.
+    let mut by_value: Vec<usize> = (0..targets.len()).collect();
+    by_value.sort_by_key(|&index| Reverse(mana_value(&targets[index])));
+
+    for &index in &by_value {
+        if remainder == 0 {
+            break;
+        }
+        let Some(top_up) = lethal_top_up(state, &targets[index]) else {
+            continue;
+        };
+        let assigned = top_up.min(remainder);
+        shares[index] += assigned;
+        remainder -= assigned;
+    }
+    if remainder > 0 {
+        let index = by_value
+            .iter()
+            .copied()
+            .find(|&index| lethal_top_up(state, &targets[index]).is_some())
+            .unwrap_or(targets.len() - 1);
+        shares[index] += remainder;
+    }
+
+    Some(targets.iter().cloned().zip(shares).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::game::game_object::RoomDoor;
@@ -5993,6 +6103,108 @@ mod tests {
         assert_eq!(
             balanced_pile_partition(&state, &tokens),
             vec![tokens[0], tokens[2], tokens[4]]
+        );
+    }
+
+    /// A creature target for a divided-damage prompt: `toughness` toughness and
+    /// `generic` mana value (the ordering proxy `lethal_first_distribution`
+    /// reads).
+    fn distribution_creature(
+        state: &mut GameState,
+        index: u64,
+        toughness: i32,
+        generic: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(700 + index),
+            PlayerId(1),
+            format!("Damage Target {index}"),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(1);
+        object.toughness = Some(toughness);
+        object.mana_cost = match generic {
+            0 => ManaCost::NoCost,
+            generic => ManaCost::Cost {
+                shards: Vec::new(),
+                generic,
+            },
+        };
+        id
+    }
+
+    /// Prompt `state` with a `total`-point damage division over `targets` and
+    /// collect every distribution the candidate set offers.
+    fn distribution_candidates(
+        state: &mut GameState,
+        total: u32,
+        targets: &[TargetRef],
+    ) -> Vec<Vec<(TargetRef, u32)>> {
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total,
+            targets: targets.to_vec(),
+            unit: crate::types::game_state::DistributionUnit::Damage,
+        };
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::DistributeAmong { distribution } => Some(distribution),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 601.2d + CR 704.5g: 5 damage across a 3-toughness and a 1-toughness
+    /// creature. The even split hands out 2 then 3 — the 3-toughness body
+    /// survives on 2, so only one target dies. The lethal-first split starts
+    /// both at the CR 601.2d minimum of one, tops the higher-mana-value body up
+    /// to lethal, and drops the leftover on it: 4/1, and BOTH die.
+    ///
+    /// REVERT-FAILING: pre-fix the even split is the arm's only candidate, so
+    /// no policy and no search node can reach the division that kills both.
+    #[test]
+    fn lethal_first_distribution_candidate_present() {
+        let mut state = GameState::new_two_player(42);
+        let tough = distribution_creature(&mut state, 0, 3, 3);
+        let frail = distribution_creature(&mut state, 1, 1, 1);
+        let targets = vec![TargetRef::Object(tough), TargetRef::Object(frail)];
+
+        let distributions = distribution_candidates(&mut state, 5, &targets);
+        assert!(
+            distributions.contains(&vec![
+                (TargetRef::Object(tough), 2),
+                (TargetRef::Object(frail), 3),
+            ]),
+            "the even split must still be offered, got {distributions:?}"
+        );
+        assert!(
+            distributions.contains(&vec![
+                (TargetRef::Object(tough), 4),
+                (TargetRef::Object(frail), 1),
+            ]),
+            "a lethal-first split killing both bodies must be offered, got {distributions:?}"
+        );
+        assert!(
+            distributions.iter().all(
+                |dist| dist.iter().map(|(_, share)| *share).sum::<u32>() == 5
+                    && dist.iter().all(|(_, share)| *share >= 1)
+            ),
+            "CR 601.2d: every division must sum to the pool with each target at \
+             one or more, got {distributions:?}"
+        );
+
+        // CR 601.2d degenerate prompt: fewer points than targets means no legal
+        // division gives everyone their minimum, so the even split stands alone.
+        let distributions = distribution_candidates(&mut state, 1, &targets);
+        assert_eq!(
+            distributions.len(),
+            1,
+            "a pool smaller than the target count must offer only the even split, \
+             got {distributions:?}"
         );
     }
 
