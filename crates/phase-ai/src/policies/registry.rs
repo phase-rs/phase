@@ -172,6 +172,9 @@ pub enum PolicyId {
     /// into two piles of equal value, since the adversary chooses which pile
     /// the AI ends up with.
     PilePartition,
+    /// CR 106.4: a ritual's mana empties at end of step/phase — don't cast one
+    /// when nothing in reach can spend it in this window.
+    RitualSink,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -435,6 +438,7 @@ impl Default for PolicyRegistry {
             Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
             Box::new(CreatureTypeChoicePolicy),
             Box::new(super::pile_partition::PilePartitionPolicy),
+            Box::new(super::ritual_sink::RitualSinkPolicy),
         ];
         Self::from_policies(policies)
     }

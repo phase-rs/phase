@@ -54,6 +54,7 @@ mod recursion_awareness;
 mod redundancy_avoidance;
 pub mod registry;
 mod removal_lethality;
+mod ritual_sink;
 mod sacrifice_cost_mana_gate;
 mod sacrifice_land_protection;
 mod sacrifice_value;
