@@ -391,7 +391,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     const onHost = vi.fn();
 
-    saveCustomFormat("Grandpa's House Rules", {
+    const saved = saveCustomFormat("Grandpa's House Rules", {
       rules: {
         id: 0,
         structural: {
@@ -439,5 +439,25 @@ describe("HostSetup", () => {
 
     await user.click(hostButton);
     expect(onHost).not.toHaveBeenCalled();
+
+    const selectedConfig = useMultiplayerStore.getState().formatConfig;
+    if (selectedConfig == null) throw new Error("saved custom format did not resolve");
+    useMultiplayerStore.getState().rememberHostConfig({
+      format: selectedConfig.format,
+      formatConfig: selectedConfig,
+      savedCustomFormatId: saved.id,
+      playerCount: 2,
+      matchType: "Bo1",
+      loopDetection: { type: "Off" },
+      isPublic: true,
+      startWhenFull: true,
+      ranked: false,
+      aiSeats: [],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Delete custom format" }));
+
+    expect(useMultiplayerStore.getState().lastHostConfig).toBeNull();
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
   });
 });

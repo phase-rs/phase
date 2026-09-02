@@ -209,6 +209,7 @@ export function HostSetup({
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
   const lastHostConfig = useMultiplayerStore((s) => s.lastHostConfig);
   const rememberHostConfig = useMultiplayerStore((s) => s.rememberHostConfig);
+  const clearRememberedHostConfig = useMultiplayerStore((s) => s.clearRememberedHostConfig);
 
   const isP2P = connectionMode === "p2p";
 
@@ -406,8 +407,16 @@ export function HostSetup({
   };
 
   const handleDeleteSavedFormat = (id: string) => {
+    // A selection may still be resolving when its saved definition is removed.
+    // Invalidate that resolver before changing the local record so its delayed
+    // result cannot restore a definition that no longer exists.
+    formatResolveSeq.current += 1;
+    setIsResolvingFormat(false);
     deleteSavedCustomFormat(id);
     setSavedFormats(loadSavedCustomFormats());
+    if (lastHostConfig?.savedCustomFormatId === id) {
+      clearRememberedHostConfig();
+    }
     // Deleting the active selection falls back to a built-in, so the form is
     // never left pointing at a definition that no longer exists.
     if (savedCustomFormatId === id) {
@@ -543,16 +552,7 @@ export function HostSetup({
     } ${extra}`;
   const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
   const activeSavedFormat = savedFormats.find((s) => s.id === savedCustomFormatId) ?? null;
-  // Saved formats are subject to the same P2P seat ceiling as built-ins. Read
-  // `min_players` off the saved definition's own StructuralRules — a custom
-  // format has no registry entry to consult.
-  const availableSavedFormats = useMemo(
-    () =>
-      isP2P
-        ? savedFormats.filter((s) => s.def.rules.structural.min_players <= P2P_MAX_PEERS)
-        : savedFormats,
-    [isP2P, savedFormats],
-  );
+  const availableSavedFormats = savedFormats;
   // A custom format has no registry metadata, so its label/description come
   // from the engine-authored `CustomFormatDef` instead.
   const formatLabel = activeSavedFormat

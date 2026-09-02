@@ -337,6 +337,7 @@ interface MultiplayerActions {
   setFormatConfig: (config: FormatConfig | null) => void;
   setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
+  clearRememberedHostConfig: () => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -1087,6 +1088,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       rememberHostConfig: (config) => set({
         lastHostConfig: normalizeRememberedHostConfig(config),
       }),
+      clearRememberedHostConfig: () => set({ lastHostConfig: null }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
