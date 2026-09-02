@@ -5927,9 +5927,10 @@ fn lethal_top_up(state: &GameState, target: &TargetRef) -> Option<u32> {
 /// creature target, or to the last target when there is no creature among them.
 /// The result therefore always sums to `total` with every share at least one.
 ///
-/// `None` when `total` is smaller than the number of targets: that prompt is
-/// already degenerate (the engine's even split is the only shape that gives
-/// everyone their minimum), so the even split stands alone.
+/// `None` when there are no targets, or when `total` is smaller than the
+/// number of targets: that prompt is already degenerate (the engine's even
+/// split is the only shape that gives everyone their minimum), so the even
+/// split stands alone.
 ///
 /// Mana value is the ordering proxy for "which body is worth killing first".
 /// `ai_support` lives in the engine and cannot reach `phase-ai`'s creature
@@ -5941,7 +5942,7 @@ fn lethal_first_distribution(
     targets: &[TargetRef],
 ) -> Option<Vec<(TargetRef, u32)>> {
     let count = u32::try_from(targets.len()).ok()?;
-    if total < count {
+    if targets.is_empty() || total < count {
         return None;
     }
     let mut shares = vec![1u32; targets.len()];
@@ -6198,13 +6199,18 @@ mod tests {
         );
 
         // CR 601.2d degenerate prompt: fewer points than targets means no legal
-        // division gives everyone their minimum, so the even split stands alone.
-        let distributions = distribution_candidates(&mut state, 1, &targets);
-        assert_eq!(
-            distributions.len(),
-            1,
-            "a pool smaller than the target count must offer only the even split, \
-             got {distributions:?}"
+        // division gives everyone their minimum, so the helper stands down and
+        // the even split is the arm's only candidate. The engine never opens
+        // this prompt — `cap_distribution_target_slots` truncates the slots to
+        // the pool on the casting and the triggered path alike — so the arm is
+        // not asked to answer it.
+        assert!(
+            lethal_first_distribution(&state, 1, &targets).is_none(),
+            "a pool smaller than the target count has no lethal-first split"
+        );
+        assert!(
+            lethal_first_distribution(&state, 1, &[]).is_none(),
+            "an empty target list has no lethal-first split"
         );
     }
 
