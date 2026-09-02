@@ -16,7 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -501,6 +501,7 @@ fn run_games_parallel(
                             // Parallel path never harvests (harvesting forces the
                             // sequential branch in `run_all_matchups`).
                             let (game, elapsed_ms) = play_reported_game(
+                                db,
                                 spec,
                                 payload,
                                 options,
@@ -621,6 +622,7 @@ fn winner_label(winner: Option<PlayerId>) -> &'static str {
 /// this function itself makes scheduling-dependent, and it is excluded from
 /// [`SuiteReport::deterministic_core`].
 fn play_reported_game(
+    db: &CardDatabase,
     spec: &MatchupSpec,
     payload: &DeckPayload,
     options: &SuiteOptions,
@@ -644,9 +646,13 @@ fn play_reported_game(
         // records, partial buffer dropped with the harvester).
         let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game_observed(payload, seed, options.difficulty, &mut |state, session| {
-                harvester.observe(state, session)
-            })
+            run_game_observed(
+                db,
+                payload,
+                seed,
+                options.difficulty,
+                &mut |state, session| harvester.observe(state, session),
+            )
         }));
         let (winner, turns) = match outcome {
             Ok(result) => result,
@@ -664,7 +670,7 @@ fn play_reported_game(
         (winner, turns)
     } else {
         match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game(payload, seed, options.difficulty)
+            run_game(db, payload, seed, options.difficulty)
         })) {
             Ok(result) => result,
             Err(_) => {
@@ -759,6 +765,7 @@ fn run_single_matchup(
     let mut total_duration_ms: u128 = 0;
     for game_idx in 0..options.games_per_matchup {
         let (game, elapsed_ms) = play_reported_game(
+            db,
             spec,
             &payload,
             options,
@@ -873,8 +880,13 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
     )
 }
 
-fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
-    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+fn run_game(
+    db: &CardDatabase,
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+) -> (Option<PlayerId>, u32) {
+    drive_game(Some(db), payload, seed, difficulty, MAX_TOTAL_ACTIONS)
 }
 
 /// [`run_game`]'s observing sibling — same `MAX_TOTAL_ACTIONS` cap, so harvested
@@ -882,22 +894,37 @@ fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Opti
 /// the action cap in lockstep with `run_game` is what guarantees no drift between
 /// the two paths.
 fn run_game_observed(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
     observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
 ) -> (Option<PlayerId>, u32) {
-    drive_game_observed(payload, seed, difficulty, MAX_TOTAL_ACTIONS, observe)
+    drive_game_observed(
+        Some(db),
+        payload,
+        seed,
+        difficulty,
+        MAX_TOTAL_ACTIONS,
+        observe,
+    )
 }
 
 /// Deterministic core game driver shared by the win-rate suite and the perf
-/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// gate. Builds the two-player state through the canonical
+/// [`load_and_hydrate_decks`] init path (the same one the WASM bridge and
+/// server-core use), so dual-faced cards get their back faces and the
+/// `#[serde(skip)]` card-name pool behind `NamedChoice { CardName, .. }` is
+/// populated — with the bare loader, a Pithing Needle prompt leaves the AI
+/// with zero legal actions and the game records a draw. `db` is `Option`
+/// only for db-free unit tests; every runner passes `Some`. Installs
+/// measurement-mode AI configs, and
 /// loops `run_ai_actions` until the action stream is empty or `action_cap` total
 /// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
 /// realized count may overshoot the cap within a batch — identical semantics to
 /// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
 /// result `(winner, turn_number)` is a function of
-/// `(binary, payload, seed, difficulty, action_cap)` and nothing this function
+/// `(binary, db, payload, seed, difficulty, action_cap)` and nothing this function
 /// itself reads. `projection.rs`'s wall-clock projection cap is now gated on
 /// measurement mode (`projection::projection_deadline` returns
 /// `Deadline::none()` under `ExecutionMode::Measurement`), so projections here
@@ -905,6 +932,7 @@ fn run_game_observed(
 /// targets. The remaining run-to-run caveat is `RandomState` iteration order
 /// (#4878) — see the notes at the top of [`super::perf`].
 pub(crate) fn drive_game(
+    db: Option<&CardDatabase>,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -914,7 +942,7 @@ pub(crate) fn drive_game(
     // per `run_ai_actions` *batch* (a batch spans many engine applies), so at
     // measurement granularity this is perf-neutral vs the historical body — the
     // unchanged `ai-perf-gate` baseline is the witness.
-    drive_game_observed(payload, seed, difficulty, action_cap, &mut |_, _| {})
+    drive_game_observed(db, payload, seed, difficulty, action_cap, &mut |_, _| {})
 }
 
 /// [`drive_game`] with an observer seam: `observe(&state, &ai_session)` fires
@@ -923,6 +951,7 @@ pub(crate) fn drive_game(
 /// planner consumes. With a no-op closure the results are byte-identical to the
 /// historical `drive_game` body.
 pub(crate) fn drive_game_observed(
+    db: Option<&CardDatabase>,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -930,7 +959,7 @@ pub(crate) fn drive_game_observed(
     observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    load_and_hydrate_decks(&mut state, payload, db);
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -1445,8 +1474,15 @@ mod tests {
     fn observer_seam_is_inert_for_noop_observer() {
         let payload = DeckPayload::default();
         let seed = 4242;
-        let baseline = drive_game(&payload, seed, AiDifficulty::Easy, 200);
-        let observed = drive_game_observed(&payload, seed, AiDifficulty::Easy, 200, &mut |_, _| {});
+        let baseline = drive_game(None, &payload, seed, AiDifficulty::Easy, 200);
+        let observed = drive_game_observed(
+            None,
+            &payload,
+            seed,
+            AiDifficulty::Easy,
+            200,
+            &mut |_, _| {},
+        );
         assert_eq!(
             baseline, observed,
             "no-op observer must not perturb (winner, turns)"
