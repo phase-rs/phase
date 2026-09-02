@@ -98,6 +98,7 @@ describe("draftPodStore", () => {
       cards_per_pick: 1,
       distribution: "PickAndPass",
       min_deck_size: 40,
+      cube_min_deck_size: 73,
       post_draft_play: "TournamentPairings",
       match_config: { best_of: 3 },
     });
@@ -115,7 +116,7 @@ describe("draftPodStore", () => {
 
   describe("enterKind", () => {
     // Every axis but `pod_size` is inert here; only `pod_size` is read.
-    function procedure(podSize: number) {
+    function procedure(podSize: number, cubeMinDeckSize = 73) {
       return {
         pod_size: podSize,
         human_seats: 1,
@@ -126,6 +127,7 @@ describe("draftPodStore", () => {
         cards_per_pick: 2,
         distribution: "PickAndPass",
         min_deck_size: 60,
+        cube_min_deck_size: cubeMinDeckSize,
         post_draft_play: "CompleteImmediately",
         match_config: { best_of: 1 },
       };
@@ -144,6 +146,7 @@ describe("draftPodStore", () => {
         kind: "CommanderDraft",
         podSize: 4,
       });
+      expect(useDraftPodStore.getState().cubeMinDeckSize).toBe(73);
     });
 
     it("adopts a pod size no client literal could have produced", async () => {
@@ -185,19 +188,46 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState().poolMode).toBe("set");
     });
 
+    it("publishes entry cache and dependent normalization atomically", async () => {
+      mocks.draftProcedure.mockResolvedValue({
+        ...procedure(4),
+        distribution: "AllAtOnce",
+        allowed_pod_sizes: [3, 4],
+      });
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        loadingPool: true,
+        configError: "stale error",
+      });
+      const emissions: Array<ReturnType<typeof useDraftPodStore.getState>> = [];
+      const unsubscribe = useDraftPodStore.subscribe((state) => emissions.push(state));
+
+      await useDraftPodStore.getState().enterKind("Premier");
+      unsubscribe();
+
+      const published = emissions.filter((state) => state.procedureCacheKey !== null);
+      expect(published).not.toHaveLength(0);
+      expect(published.every((state) =>
+        state.poolMode === "set"
+        && state.config.podSize === 4
+        && state.loadingPool === false
+        && state.configError === null
+      )).toBe(true);
+    });
+
     it("ignores a stale kind response after a newer kind has loaded", async () => {
       let resolveCommander!: () => void;
       let resolvePremier!: () => void;
       mocks.draftProcedure.mockImplementation((kind: string) => new Promise((resolve) => {
         if (kind === "CommanderDraft") {
           resolveCommander = () => resolve({
-            ...procedure(4),
+            ...procedure(4, 91),
             post_draft_play: "CompleteImmediately",
           });
           return;
         }
         resolvePremier = () => resolve({
-          ...procedure(6),
+          ...procedure(6, 73),
         min_pod_size: 2,
         allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
         post_draft_play: "TournamentPairings",
@@ -217,6 +247,7 @@ describe("draftPodStore", () => {
         allowedPodSizes: [2, 3, 4, 5, 6, 7, 8],
         packDistribution: "PickAndPass",
         packsPerPlayer: 3,
+        cubeMinDeckSize: 73,
       });
     });
 
@@ -232,7 +263,7 @@ describe("draftPodStore", () => {
 
       expect(pending).toHaveLength(2);
       pending[1]!({
-        ...procedure(8),
+        ...procedure(8, 73),
         min_pod_size: 2,
         allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
         packs_per_player: 6,
@@ -240,7 +271,7 @@ describe("draftPodStore", () => {
       });
       await refreshing;
       pending[0]!({
-        ...procedure(6),
+        ...procedure(6, 91),
         min_pod_size: 3,
         allowed_pod_sizes: [3, 4, 5, 6, 7, 8],
         packs_per_player: 4,
@@ -255,6 +286,26 @@ describe("draftPodStore", () => {
         allowedPodSizes: [2, 3, 4, 5, 6, 7, 8],
         packDistribution: "PickAndPass",
         packsPerPlayer: 6,
+        cubeMinDeckSize: 73,
+      });
+    });
+
+    it("drops a pending procedure success after reset", async () => {
+      let resolveProcedure!: (value: ReturnType<typeof procedure>) => void;
+      mocks.draftProcedure.mockImplementation(() => new Promise((resolve) => {
+        resolveProcedure = resolve;
+      }));
+
+      const entering = useDraftPodStore.getState().enterKind("CommanderDraft");
+      useDraftPodStore.getState().reset();
+      resolveProcedure(procedure(6, 83));
+      await entering;
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        config: { kind: "Premier", podSize: 8 },
+        procedureCacheKey: null,
+        cubeMinDeckSize: null,
+        configError: null,
       });
     });
 
@@ -274,6 +325,7 @@ describe("draftPodStore", () => {
         allowedPodSizes: null,
         packDistribution: null,
         packsPerPlayer: null,
+        cubeMinDeckSize: null,
         configError: null,
       });
     });
@@ -310,6 +362,9 @@ describe("draftPodStore", () => {
       useDraftPodStore.setState({
         allowedPodSizes: [2, 3, 4, 5, 6, 7, 8],
         procedureCacheKey: { kind: "Premier", tournamentFormat: "Swiss" },
+        packDistribution: "PickAndPass",
+        packsPerPlayer: 3,
+        cubeMinDeckSize: 73,
       });
 
       const refreshing = useDraftPodStore.getState().refreshProcedure();
@@ -320,6 +375,9 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState()).toMatchObject({
         allowedPodSizes: null,
         procedureCacheKey: null,
+        packDistribution: null,
+        packsPerPlayer: null,
+        cubeMinDeckSize: null,
       });
       expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier", "Swiss");
 
@@ -333,6 +391,7 @@ describe("draftPodStore", () => {
         cards_per_pick: 1,
         distribution: "PickAndPass",
         min_deck_size: 40,
+        cube_min_deck_size: 83,
         post_draft_play: "TournamentPairings",
         match_config: { best_of: 3 },
       });
@@ -342,7 +401,103 @@ describe("draftPodStore", () => {
         config: { tournamentFormat: "SingleElimination" },
         allowedPodSizes: null,
         procedureCacheKey: null,
+        packDistribution: null,
+        packsPerPlayer: null,
+        cubeMinDeckSize: null,
       });
+    });
+
+    it("drops an original A success after A to B to A before replacement starts", async () => {
+      let resolveOriginal!: (value: Record<string, unknown>) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOriginal = resolve;
+      }));
+
+      const original = useDraftPodStore.getState().refreshProcedure();
+      useDraftPodStore.getState().setConfig({ tournamentFormat: "SingleElimination" });
+      useDraftPodStore.getState().setConfig({ tournamentFormat: "Swiss" });
+      expect(mocks.draftProcedure).toHaveBeenCalledTimes(1);
+
+      resolveOriginal({
+        pod_size: 8,
+        human_seats: 1,
+        min_pod_size: 2,
+        max_pod_size: 8,
+        allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+        packs_per_player: 3,
+        cards_per_pick: 1,
+        distribution: "PickAndPass",
+        min_deck_size: 40,
+        cube_min_deck_size: 97,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      });
+      await original;
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        procedureCacheKey: null,
+        cubeMinDeckSize: null,
+        configError: null,
+      });
+    });
+
+    it("drops an original A failure after A to B to A before replacement starts", async () => {
+      let rejectOriginal!: (error: Error) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectOriginal = reject;
+      }));
+
+      const original = useDraftPodStore.getState().refreshProcedure();
+      useDraftPodStore.getState().setConfig({ tournamentFormat: "SingleElimination" });
+      useDraftPodStore.getState().setConfig({ tournamentFormat: "Swiss" });
+      expect(mocks.draftProcedure).toHaveBeenCalledTimes(1);
+
+      rejectOriginal(new Error("original A failed late"));
+      await original;
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        procedureCacheKey: null,
+        configError: null,
+      });
+    });
+
+    it("publishes refreshed cache and dependent normalization atomically", async () => {
+      mocks.draftProcedure.mockResolvedValue({
+        pod_size: 4,
+        human_seats: 1,
+        min_pod_size: 3,
+        max_pod_size: 4,
+        allowed_pod_sizes: [3, 4],
+        packs_per_player: 6,
+        cards_per_pick: 1,
+        distribution: "AllAtOnce",
+        min_deck_size: 40,
+        cube_min_deck_size: 83,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      });
+      useDraftPodStore.setState((prev) => ({
+        config: { ...prev.config, podSize: 8 },
+        poolMode: "cube",
+        pendingProcedureDefault: { kind: "Premier", tournamentFormat: "Swiss" },
+        loadingPool: true,
+        configError: "stale error",
+      }));
+      const emissions: Array<ReturnType<typeof useDraftPodStore.getState>> = [];
+      const unsubscribe = useDraftPodStore.subscribe((state) => emissions.push(state));
+
+      await useDraftPodStore.getState().refreshProcedure();
+      unsubscribe();
+
+      const published = emissions.filter((state) => state.procedureCacheKey !== null);
+      expect(published).not.toHaveLength(0);
+      expect(published.every((state) =>
+        state.poolMode === "set"
+        && state.config.podSize === 4
+        && state.pendingProcedureDefault === null
+        && state.loadingPool === false
+        && state.configError === null
+      )).toBe(true);
     });
   });
 
@@ -419,6 +574,7 @@ describe("draftPodStore", () => {
         cards_per_pick: 1,
         distribution: "PickAndPass",
         min_deck_size: 40,
+        cube_min_deck_size: 89,
         post_draft_play: "TournamentPairings",
         match_config: { best_of: 3 },
       });
@@ -440,6 +596,7 @@ describe("draftPodStore", () => {
         cards_per_pick: 1,
         distribution: "PickAndPass",
         min_deck_size: 40,
+        cube_min_deck_size: 89,
         post_draft_play: "TournamentPairings",
         match_config: { best_of: 3 },
       });
@@ -450,7 +607,64 @@ describe("draftPodStore", () => {
         allowedPodSizes: [2, 3, 4, 5, 6, 7, 8],
         packDistribution: "PickAndPass",
         packsPerPlayer: 6,
+        cubeMinDeckSize: 89,
       });
+    });
+
+    it("publishes resumed cache and dependent normalization atomically", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({
+        ...persistedSession,
+        poolInput: {
+          type: "Cube" as const,
+          data: {
+            cube_list_text: "1 Lightning Bolt\n",
+            cube_name: "Recovered Cube",
+            cube_draft_settings: {
+              pod_size: 8,
+              pack_count: 3,
+              cards_per_pack: 15,
+              min_deck_size: 40,
+              addable_cards: { policy: "StandardBasics" as const, custom: [] },
+            },
+          },
+        },
+      });
+      mocks.draftProcedure.mockResolvedValue({
+        pod_size: 4,
+        human_seats: 1,
+        min_pod_size: 3,
+        max_pod_size: 4,
+        allowed_pod_sizes: [3, 4],
+        packs_per_player: 6,
+        cards_per_pick: 1,
+        distribution: "AllAtOnce",
+        min_deck_size: 40,
+        cube_min_deck_size: 89,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      });
+      useDraftPodStore.setState({
+        pendingProcedureDefault: {
+          kind: "CommanderDraft",
+          tournamentFormat: "SingleElimination",
+        },
+      });
+      const emissions: Array<ReturnType<typeof useDraftPodStore.getState>> = [];
+      const unsubscribe = useDraftPodStore.subscribe((state) => emissions.push(state));
+
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("resumed");
+      unsubscribe();
+
+      const published = emissions.filter((state) => state.procedureCacheKey !== null);
+      expect(published).not.toHaveLength(0);
+      expect(published.every((state) =>
+        state.poolMode === "set"
+        && state.config.podSize === 3
+        && state.pendingProcedureDefault === null
+        && state.loadingPool === false
+        && state.configError === null
+      )).toBe(true);
     });
 
     it("does not report recovery as resumed when host initialization fails", async () => {

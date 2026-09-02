@@ -237,6 +237,8 @@ export interface DraftProcedure {
   pick_selection_mode: "Direct" | "Ordered";
   distribution: PackDistribution;
   min_deck_size: number;
+  /** Engine-owned minimum accepted for cube settings under this procedure. */
+  cube_min_deck_size: number;
   /**
    * CR 903.3: how many commanders a deck built from this kind's pool must
    * designate. `0` for the four CR 905.1a kinds, `1` for CommanderDraft.

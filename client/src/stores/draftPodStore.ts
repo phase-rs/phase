@@ -119,6 +119,8 @@ interface DraftPodState {
    * refuses a sequence longer than the kind opens regardless of this cache.
    */
   packsPerPlayer: number | null;
+  /** Engine-published cube deck-size floor for `procedureCacheKey`. */
+  cubeMinDeckSize: number | null;
 }
 
 interface DraftPodActions {
@@ -193,6 +195,7 @@ const initialState: DraftPodState = {
   pendingProcedureDefault: null,
   packDistribution: null,
   packsPerPlayer: null,
+  cubeMinDeckSize: null,
 };
 
 /**
@@ -263,13 +266,38 @@ function procedureCache(
   procedureCacheKey: ProcedureCacheKey,
 ): Pick<
   DraftPodState,
-  "allowedPodSizes" | "procedureCacheKey" | "packDistribution" | "packsPerPlayer"
+  "allowedPodSizes" | "procedureCacheKey" | "packDistribution" | "packsPerPlayer" | "cubeMinDeckSize"
 > {
   return {
     allowedPodSizes: procedure.allowed_pod_sizes,
     procedureCacheKey,
     packDistribution: procedure.distribution,
     packsPerPlayer: procedure.packs_per_player,
+    cubeMinDeckSize: procedure.cube_min_deck_size,
+  };
+}
+
+function procedurePublication(
+  prev: DraftPodState,
+  procedure: DraftProcedure,
+  target: ProcedureCacheKey,
+  adoptsProcedureDefault: boolean,
+): Partial<DraftPodState> {
+  const podSize = adoptsProcedureDefault
+    ? procedure.pod_size
+    : procedure.allowed_pod_sizes.includes(prev.config.podSize)
+      ? prev.config.podSize
+      : procedure.allowed_pod_sizes[0];
+
+  return {
+    ...procedureCache(procedure, target),
+    config: podSize === prev.config.podSize
+      ? prev.config
+      : { ...prev.config, podSize },
+    pendingProcedureDefault: adoptsProcedureDefault ? null : prev.pendingProcedureDefault,
+    poolMode: procedure.distribution === "AllAtOnce" ? "set" : prev.poolMode,
+    loadingPool: false,
+    configError: null,
   };
 }
 
@@ -286,7 +314,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           partial.tournamentFormat !== undefined
           && partial.tournamentFormat !== prev.config.tournamentFormat;
         const procedureChanged = kindChanged || tournamentFormatChanged;
-        const packDistribution = kindChanged ? null : prev.packDistribution;
+        if (procedureChanged) beginProcedureRequest();
+        const packDistribution = procedureChanged ? null : prev.packDistribution;
 
         return {
           config: { ...prev.config, ...partial },
@@ -298,7 +327,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           procedureCacheKey: procedureChanged ? null : prev.procedureCacheKey,
           pendingProcedureDefault: procedureChanged ? null : prev.pendingProcedureDefault,
           packDistribution,
-          packsPerPlayer: kindChanged ? null : prev.packsPerPlayer,
+          packsPerPlayer: procedureChanged ? null : prev.packsPerPlayer,
+          cubeMinDeckSize: procedureChanged ? null : prev.cubeMinDeckSize,
           loadingPool: false,
           configError: null,
         };
@@ -306,11 +336,11 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     enterKind: async (kind) => {
-      const procedureRequest = beginProcedureRequest();
       // Apply the kind first: it is the entry point's whole purpose and must not
       // depend on the wasm load succeeding. `setConfig` is the single authority for
       // the Sealed pool-mode rule.
       get().setConfig({ kind });
+      const procedureRequest = beginProcedureRequest();
       const target: ProcedureCacheKey = {
         kind,
         tournamentFormat: get().config.tournamentFormat,
@@ -323,8 +353,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           !isCurrentProcedureRequest(procedureRequest)
           || !procedureTargetMatchesConfig(target, get().config)
         ) return;
-        set({ ...procedureCache(procedure, target), pendingProcedureDefault: null });
-        get().setConfig({ podSize: procedure.pod_size });
+        set((prev) => procedurePublication(prev, procedure, target, true));
       } catch (err) {
         if (
           !isCurrentProcedureRequest(procedureRequest)
@@ -356,17 +385,11 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           !isCurrentProcedureRequest(procedureRequest)
           || !procedureTargetMatchesConfig(target, get().config)
         ) return;
-        const adoptsProcedureDefault = get().pendingProcedureDefault?.kind === target.kind
-          && get().pendingProcedureDefault?.tournamentFormat === target.tournamentFormat;
-        set({
-          ...procedureCache(procedure, target),
-          pendingProcedureDefault: adoptsProcedureDefault ? null : get().pendingProcedureDefault,
+        set((prev) => {
+          const adoptsProcedureDefault = prev.pendingProcedureDefault?.kind === target.kind
+            && prev.pendingProcedureDefault?.tournamentFormat === target.tournamentFormat;
+          return procedurePublication(prev, procedure, target, adoptsProcedureDefault);
         });
-        if (adoptsProcedureDefault) {
-          get().setConfig({ podSize: procedure.pod_size });
-        } else if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
-          get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
-        }
       } catch (err) {
         if (
           !isCurrentProcedureRequest(procedureRequest)
@@ -588,7 +611,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         // Fence the persisted read itself. A new entry, refresh, creation, or
         // reset that starts while storage is pending must win before this
         // resume can publish its recovered configuration.
-        const procedureRequest = beginProcedureRequest();
+        let procedureRequest = beginProcedureRequest();
         const persisted = await loadDraftHostSession(meta.id);
         if (!isCurrentAttempt() || !isCurrentProcedureRequest(procedureRequest)) return "superseded";
         if (!persisted) {
@@ -611,6 +634,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           }
           return sessionState === "terminal" ? "terminal" : "invalid";
         }
+
+        procedureRequest = beginProcedureRequest();
 
         // Branch on the persisted pool source: restore the matching UI
         // state (poolMode + cubeForm or setPoolJson cache) so a refresh
@@ -640,8 +665,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             configError: null,
             allowedPodSizes: null,
             procedureCacheKey: null,
+            pendingProcedureDefault: null,
             packDistribution: null,
             packsPerPlayer: null,
+            cubeMinDeckSize: null,
           });
         } else {
           // Restore the pack sequence the pod was configured with, so a host
@@ -668,8 +695,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             configError: null,
             allowedPodSizes: null,
             procedureCacheKey: null,
+            pendingProcedureDefault: null,
             packDistribution: null,
             packsPerPlayer: null,
+            cubeMinDeckSize: null,
           });
         }
 
@@ -686,10 +715,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             || !isCurrentProcedureRequest(procedureRequest)
             || !procedureTargetMatchesConfig(target, get().config)
           ) return "superseded";
-          set(procedureCache(procedure, target));
-          if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
-            get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
-          }
+          set((prev) => procedurePublication(prev, procedure, target, false));
         } catch (err) {
           if (
             !isCurrentAttempt()

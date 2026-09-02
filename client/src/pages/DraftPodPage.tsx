@@ -124,6 +124,12 @@ function PodSetup() {
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
+  const cubeMinDeckSize = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.cubeMinDeckSize
+      : null,
+  );
   const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
 
   // The kind radios record intent (`setConfig`) but publish nothing, so the
@@ -467,7 +473,8 @@ function PodSetup() {
               setCubeForm({ cubeName, cubeListText, settings });
               void createPod();
             }}
-            disabled={loadingPool}
+            minimumDeckSize={cubeMinDeckSize ?? undefined}
+            disabled={loadingPool || cubeMinDeckSize === null}
           />
         )}
 

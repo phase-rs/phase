@@ -31,10 +31,10 @@ export function auto_pick(): any;
 /**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * Premier, Traditional, Sealed, or Commander draft with human + bot seats from
- * either a Set pool or a custom Cube list.
+ * a Set pool, host-local Chaos candidate pools, or a custom Cube list.
  *
  * - `pool_input_json`: serialized `PoolInput` discriminated union
- *   (`{ "type": "Set" | "Cube", "data": { ... } }`)
+ *   (`{ "type": "Set" | "Chaos" | "Cube", "data": { ... } }`)
  * - `seats_json`: JSON array of SeatDescriptors
  * - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed, 4=CommanderDraft
  *   (CR 903.13a). The mapping's single authority is `draft_kind_wire_number`.
@@ -60,7 +60,9 @@ export function draft_procedure(kind: number, tournament_format: string): any;
  * Serialize the full DraftSession to JSON for host persistence.
  *
  * The host persists this after every authoritative mutation so a
- * crashed/reloaded host can restore the draft state.
+ * crashed/reloaded host can restore the draft state. This is the trusted
+ * authority export: unlike `DraftSourceView`, it intentionally retains a
+ * Chaos layout's complete assignment matrix and must not be sent to guests.
  */
 export function export_draft_session(): string;
 
@@ -255,7 +257,7 @@ export interface InitOutput {
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
     readonly auto_pick: () => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
-    readonly draft_procedure: (a: number) => [number, number, number];
+    readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
     readonly filter_pool_listing: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly get_bot_deck: (a: number) => [number, number, number];
