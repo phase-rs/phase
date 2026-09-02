@@ -717,11 +717,14 @@ fn default_land_color_demand_unit() -> f64 {
 
 /// A positive MAGNITUDE the policy subtracts, matching
 /// the module's `BOUNCE_DEPRIORITIZE` convention. Seeded at one card: entering
-/// tapped costs a whole turn of that land's mana, which is worth strictly more
-/// than the capped color-fixing bonus above (so a tapped dual does not out-score
-/// an untapped basic on fixing alone) and strictly less than the bounce-land
-/// deprioritization (1.5), whose downside is a whole land drop. Shared by
-/// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
+/// tapped costs a whole turn of that land's mana, which is worth at least the
+/// capped color-fixing bonus above (so a tapped dual never out-scores an
+/// untapped basic on fixing alone — at the two-color cap the two cancel and the
+/// other terms decide) and strictly less than the bounce-land deprioritization
+/// (1.5), whose downside is a whole land drop. The ordering is pinned by
+/// `land_sequencing::tests::land_play_magnitudes_keep_their_documented_ordering`.
+/// Shared by `Default` and `#[serde(default)]` for the same
+/// artifact-compatibility reason.
 fn default_land_tempo_rider_penalty() -> f64 {
     1.0
 }

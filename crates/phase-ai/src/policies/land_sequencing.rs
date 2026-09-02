@@ -446,6 +446,28 @@ mod tests {
 
     const AI: PlayerId = PlayerId(0);
 
+    /// The three land-play magnitudes keep the ordering their docs promise: the
+    /// capped color-fixing bonus never out-scores one charged tempo rider (at
+    /// the two-color cap they cancel and the other terms decide), and a rider
+    /// never out-scores the bounce-land deprioritization.
+    #[test]
+    fn land_play_magnitudes_keep_their_documented_ordering() {
+        let penalties = AiConfig::default().policy_penalties;
+        let max_fixing_bonus = penalties.land_color_demand_unit * COLOR_FIX_CAP as f64;
+        assert!(
+            max_fixing_bonus <= penalties.land_tempo_rider_penalty,
+            "a tapped dual must not out-score an untapped basic on fixing alone: \
+             capped bonus {max_fixing_bonus} vs rider {}",
+            penalties.land_tempo_rider_penalty
+        );
+        assert!(
+            penalties.land_tempo_rider_penalty < BOUNCE_DEPRIORITIZE,
+            "a tempo rider must stay below the bounce deprioritization: rider {} vs {}",
+            penalties.land_tempo_rider_penalty,
+            BOUNCE_DEPRIORITIZE
+        );
+    }
+
     fn own_land_bounce_effect() -> Effect {
         Effect::Bounce {
             target: TargetFilter::Typed(
