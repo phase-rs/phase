@@ -17,7 +17,7 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded};
+use phase_ai::auto_play::{driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsStop};
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::duel_suite::compare::{
     compare as compare_reports, emit_gate_verdict, load_report, render_error_markdown,
@@ -590,6 +590,7 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
                 .wrapping_add(u64::from(candidate_seat) * 10_000)
                 .wrapping_add(game_idx as u64);
             let result = run_commander_game(CommanderGameOptions {
+                db,
                 payload: &payload,
                 seed,
                 candidate,
@@ -693,8 +694,20 @@ enum StopReason {
     WallTimeout,
     /// Actions kept being taken with no change in turn number — a driver loop.
     StalledSameTurn,
-    /// The AI produced no action for a decision it was asked to make.
+    /// No AI seat could act while the game was not over
+    /// (`AiActionsStop::NoEligibleAiActor`).
     NoLegalActions,
+    /// The AI policy stack returned no action for a decision it was asked to
+    /// make (`AiActionsStop::ChooseActionNone`).
+    AiChoseNoAction,
+    /// The engine rejected an action the AI chose
+    /// (`AiActionsStop::ApplyFailed`).
+    ActionRejected,
+    /// A seat had no `AiConfig` (`AiActionsStop::MissingAiConfig`). Caller
+    /// wiring, not a game condition.
+    MissingAiConfig,
+    /// `auto_play`'s module-wide safety cap fired inside one batch.
+    ActionSafetyCap,
 }
 
 impl StopReason {
@@ -706,7 +719,41 @@ impl StopReason {
             StopReason::WallTimeout => "wall_timeout",
             StopReason::StalledSameTurn => "stalled_same_turn",
             StopReason::NoLegalActions => "no_legal_actions",
+            StopReason::AiChoseNoAction => "ai_chose_no_action",
+            StopReason::ActionRejected => "action_rejected",
+            StopReason::MissingAiConfig => "missing_ai_config",
+            StopReason::ActionSafetyCap => "action_safety_cap",
         }
+    }
+}
+
+/// Maps one batch's terminal condition onto this driver's stop reasons.
+///
+/// `None` means "keep going": the batch spent this driver's own step budget,
+/// which is the ordinary way a bounded step returns.
+///
+/// Every other variant is terminal and keeps its identity. A batch can return
+/// actions AND carry a terminal stop — `auto_play::DriverStep` documents exactly
+/// this case — so a driver that inspects the stop only when the batch came back
+/// empty discards the real cause, loops again, and reports whichever unrelated
+/// condition happens to fire next (a wall timeout, say) as though it were the
+/// reason the game died.
+fn batch_stop_reason(actions_taken: usize, stop: &AiActionsStop) -> Option<StopReason> {
+    match stop {
+        // This driver's own step boundary: a batch that did work and spent it is
+        // the normal path back to the loop top.
+        AiActionsStop::ActionBudgetReached { .. } if actions_taken > 0 => None,
+        // A batch that spent its budget without taking a single action has made
+        // no progress; continuing would spin.
+        AiActionsStop::ActionBudgetReached { .. } => Some(StopReason::NoLegalActions),
+        // Terminal whether or not the batch did work first. When the handoff is
+        // because the game ended, `classify_outcome` sees `GameOver` and reports
+        // the result rather than this reason.
+        AiActionsStop::NoEligibleAiActor => Some(StopReason::NoLegalActions),
+        AiActionsStop::MissingAiConfig { .. } => Some(StopReason::MissingAiConfig),
+        AiActionsStop::ChooseActionNone { .. } => Some(StopReason::AiChoseNoAction),
+        AiActionsStop::ApplyFailed { .. } => Some(StopReason::ActionRejected),
+        AiActionsStop::ActionSafetyCapReached { .. } => Some(StopReason::ActionSafetyCap),
     }
 }
 
@@ -892,9 +939,40 @@ impl EliminationLedger {
 
 struct CommanderGameResult {
     outcome: GameOutcome,
+    /// The seat the ENGINE put on the play, from the CR 103.1 contest run by
+    /// `start_game` — not the caller's seat assignment.
+    starting_player: PlayerId,
     turns: u32,
     candidate_survival_turn: u32,
     candidate_elimination_order: u8,
+}
+
+/// Builds the Commander `GameState` both of this binary's Commander paths play.
+///
+/// Single authority for the setup sequence: `run_commander_game` and the setup
+/// regression test below both call it, so the two cannot drift apart.
+///
+/// Populates `state.all_card_names` (a `#[serde(skip)]` field, so deserialization
+/// never restores it) right after deck loading, mirroring `ai_commander`'s
+/// `build_game_state` and every other game-construction site
+/// (`engine-wasm/src/lib.rs`, `replay.rs`, `server-core/src/session.rs`).
+/// Without it, `NamedChoice { choice_type: CardName, .. }` candidate generation
+/// (`ai_support::candidate_actions` -> `card_name_choice_candidates`, which
+/// returns an empty vector on an empty `all_card_names`) yields zero legal
+/// actions — a permanent AI stall the first time any card asks a player to name
+/// a card. From outside the process that stall is indistinguishable from the
+/// non-terminating games this binary's `--trace` mode exists to diagnose, which
+/// is precisely why it must not be left to chance here.
+fn build_commander_state(
+    db: &CardDatabase,
+    payload: &DeckPayload,
+    players: u8,
+    seed: u64,
+) -> GameState {
+    let mut state = GameState::new(FormatConfig::commander(), players, seed);
+    load_deck_into_state(&mut state, payload);
+    state.all_card_names = db.card_names().into();
+    state
 }
 
 /// Everything one Commander game needs, as a struct rather than a positional
@@ -902,6 +980,9 @@ struct CommanderGameResult {
 /// file, and keeps the two callers from transposing the seat count, the seeds and
 /// the two difficulties — all of which are same-typed and adjacent.
 struct CommanderGameOptions<'a> {
+    /// Needed for `all_card_names`, which the AI's "name a card" candidate
+    /// generation reads. See `build_commander_state`.
+    db: &'a CardDatabase,
     payload: &'a DeckPayload,
     seed: u64,
     /// The seat being measured. It takes `candidate_difficulty`, anchors the
@@ -918,6 +999,7 @@ struct CommanderGameOptions<'a> {
 
 fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult {
     let CommanderGameOptions {
+        db,
         payload,
         seed,
         candidate,
@@ -928,9 +1010,14 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
         trace,
     } = options;
 
-    let mut state = GameState::new(FormatConfig::commander(), players, seed);
-    load_deck_into_state(&mut state, payload);
+    let mut state = build_commander_state(db, payload, players, seed);
     engine::game::engine::start_game(&mut state);
+    // CR 103.1: `start_game` picks the starting player with a seeded d20 contest
+    // per seat, so who is on the play is the ENGINE's decision and cannot be
+    // inferred from how the caller assigned the seats. Captured here because
+    // `active_player` advances with the turns, while `current_starting_player`
+    // is the durable record of the contest's winner.
+    let starting_player = state.current_starting_player;
 
     let ai_players: HashSet<PlayerId> = (0..players).map(PlayerId).collect();
     let mut ai_configs: HashMap<PlayerId, _> = HashMap::new();
@@ -988,9 +1075,9 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
             &ai_session,
             DRIVER_STEP_ACTIONS,
         );
-        if run.results.is_empty() {
-            break Some(StopReason::NoLegalActions);
-        }
+        // The per-action ring is filled first: `driver_step` consumes the batch,
+        // and its own contract asks callers to process the individual results
+        // before or after taking the count/stop decision.
         if let Some(opts) = trace {
             for result in &run.results {
                 if recent.len() == opts.ring {
@@ -1002,7 +1089,8 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
                 ));
             }
         }
-        let taken = run.results.len();
+        let step = driver_step(run);
+        let taken = step.actions_taken;
         total_actions += taken;
 
         if state.turn_number != last_progress_turn {
@@ -1021,6 +1109,11 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
                     )
                 );
             }
+        }
+        // Consumed at the batch boundary and AFTER the actions are accounted for,
+        // so a batch that did work and then died still reports why it died.
+        if let Some(reason) = batch_stop_reason(taken, &step.stop) {
+            break Some(reason);
         }
     };
 
@@ -1043,6 +1136,7 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
 
     CommanderGameResult {
         outcome,
+        starting_player,
         turns: state.turn_number,
         candidate_survival_turn: ledger.survival_turn(candidate, state.turn_number),
         candidate_elimination_order: ledger.elimination_order(candidate),
@@ -1181,19 +1275,43 @@ fn paired_seed(base_seed: u64, game_idx: usize) -> u64 {
     base_seed.wrapping_add((game_idx / 2) as u64)
 }
 
-/// Whether deck 0 is on the play for `game_idx`. Even games seat it first.
-fn deck0_on_the_play(game_idx: usize) -> bool {
+/// Whether deck 0 takes seat 0 for `game_idx`. Even games seat it first.
+///
+/// Deliberately named for the SEAT, not for the play. `start_game` decides who
+/// is actually on the play with a CR 103.1 d20 contest, so seat 0 is an
+/// assignment this harness controls and "on the play" is an outcome it can only
+/// observe — see `on_the_play_label`.
+fn deck0_takes_first_seat(game_idx: usize) -> bool {
     game_idx.is_multiple_of(2)
 }
 
-/// Rejects a game count that cannot give both decks the play equally.
+/// The deck that the ENGINE put on the play, as a label.
+///
+/// Reads the contest winner recorded by `start_game` rather than assuming the
+/// first seat leads. Both halves matter: the seat a deck occupies alternates by
+/// game index, and which seat wins the contest is decided by the seeded roll, so
+/// neither on its own identifies the deck that actually started.
+fn on_the_play_label<'a>(
+    starting_player: PlayerId,
+    deck0_seat: PlayerId,
+    p0: &'a str,
+    p1: &'a str,
+) -> &'a str {
+    if starting_player == deck0_seat {
+        p0
+    } else {
+        p1
+    }
+}
+
+/// Rejects a game count that cannot give both decks each seat equally.
 fn validate_duel_games(games: usize) -> Result<(), String> {
     if games == 0 {
         return Err("--games must be at least 2 for a 1v1 run".to_string());
     }
     if !games.is_multiple_of(2) {
         return Err(format!(
-            "--games must be even for a 1v1 run so both decks get the play equally (got {games})"
+            "--games must be even for a 1v1 run so both decks occupy each seat equally (got {games})"
         ));
     }
     Ok(())
@@ -1235,10 +1353,15 @@ fn duel_game_disposition<'a>(
 
 /// Head-to-head Commander between two decks from a feed, identified by commander name.
 ///
-/// Seats alternate every game. Commander's first-player advantage is large, and a short
-/// unbalanced sample mostly measures who was on the play, so an even `--games` gives each deck
-/// the play exactly half the time; an odd count is rejected rather than silently handing one
-/// deck an extra turn one.
+/// Seats alternate every game, and an odd `--games` is rejected, so each deck occupies each
+/// seat the same number of times.
+///
+/// Note what that does and does not buy. Seat assignment is this harness's to control;
+/// who is on the play is NOT — `start_game` runs the CR 103.1 d20 contest and picks a
+/// starting player from the seeded rolls. Alternation therefore balances the seats, and the
+/// play/draw split is measured rather than assumed: every row carries the engine's actual
+/// starting deck in `on_the_play`, and the report totals it per deck so an imbalance is
+/// visible in the output instead of being asserted by a comment.
 fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
     if let Err(message) = validate_duel_games(options.games) {
         eprintln!("{message}");
@@ -1267,11 +1390,14 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
     let mut p1_wins = 0usize;
     let mut draws = 0usize;
     let mut incomplete = 0usize;
+    let mut p0_on_the_play = 0usize;
+    let mut p1_on_the_play = 0usize;
     let mut rows = Vec::new();
 
     for game_idx in 0..options.games {
-        // Even games put deck0 on the play (seat 0); odd games swap the seats.
-        let deck0_first = deck0_on_the_play(game_idx);
+        // Even games give deck0 seat 0; odd games swap the seats. Which deck ends
+        // up on the play is the engine's call, read back from the result below.
+        let deck0_first = deck0_takes_first_seat(game_idx);
         let (player, opponent) = if deck0_first {
             (deck0.clone(), deck1.clone())
         } else {
@@ -1290,6 +1416,7 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
             eprintln!("  game {game_idx} (seed {seed}) starting...");
         }
         let result = run_commander_game(CommanderGameOptions {
+            db,
             payload: &payload,
             seed,
             candidate: deck0_seat,
@@ -1310,7 +1437,12 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         }
         let winner_label = duel_result_label(result.outcome, deck0_seat, options.p0, options.p1);
         let stop_reason = result.outcome.stop_reason();
-        let on_play = if deck0_first { options.p0 } else { options.p1 };
+        let on_play = on_the_play_label(result.starting_player, deck0_seat, options.p0, options.p1);
+        if result.starting_player == deck0_seat {
+            p0_on_the_play += 1;
+        } else {
+            p1_on_the_play += 1;
+        }
         rows.push(serde_json::json!({
             "game": game_idx,
             "seed": seed,
@@ -1335,6 +1467,10 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         "{} {}-{} {} ({} decided, {} drawn, {} incomplete of {})",
         options.p0, p0_wins, p1_wins, options.p1, decided, draws, incomplete, options.games
     );
+    eprintln!(
+        "  on the play (engine CR 103.1 contest): {} {}, {} {}",
+        options.p0, p0_on_the_play, options.p1, p1_on_the_play
+    );
 
     let report = serde_json::json!({
         "schema_version": 1,
@@ -1345,6 +1481,9 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         "games": options.games,
         "base_seed": options.base_seed,
         "seed_schedule": "paired: games 2k and 2k+1 share base_seed+k with the seats reversed",
+        "on_the_play_source": "engine CR 103.1 starting-player contest, not seat order",
+        "p0_on_the_play": p0_on_the_play,
+        "p1_on_the_play": p1_on_the_play,
         "difficulty": format!("{:?}", options.difficulty),
         "p0_wins": p0_wins,
         "p1_wins": p1_wins,
@@ -1542,6 +1681,66 @@ fn list_matchups() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::ai_support::candidate_actions;
+    use engine::types::ability::ChoiceType;
+    use phase_ai::auto_play::AiActionsStop;
+
+    /// Two-card database: enough for `resolve_deck_list` to build a Commander
+    /// payload and for `all_card_names` to be non-empty.
+    fn fixture_db() -> CardDatabase {
+        let json = serde_json::json!({
+            "test commander": {
+                "name": "Test Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Human"]
+                },
+                "power": { "type": "Fixed", "value": 2 },
+                "toughness": { "type": "Fixed", "value": 2 },
+                "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "test land": {
+                "name": "Test Land",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Plains"]
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+        CardDatabase::from_json_str(&json).expect("ai_duel test fixture parses")
+    }
+
+    /// A resolved two-seat Commander payload built from `fixture_db`.
+    fn fixture_duel_payload(db: &CardDatabase) -> DeckPayload {
+        let seat = PlayerDeckList {
+            main_deck: vec!["Test Land".to_string(); 10],
+            commander: vec!["Test Commander".to_string()],
+            ..Default::default()
+        };
+        resolve_deck_list(
+            db,
+            &DeckList {
+                player: seat.clone(),
+                opponent: seat,
+                ai_decks: Vec::new(),
+                ..Default::default()
+            },
+        )
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
@@ -1808,8 +2007,14 @@ mod tests {
                 paired_seed(1_000, odd),
                 "pair {pair} must replay one seed"
             );
-            assert!(deck0_on_the_play(even), "deck 0 leads the even game");
-            assert!(!deck0_on_the_play(odd), "deck 1 leads the odd game");
+            assert!(
+                deck0_takes_first_seat(even),
+                "deck 0 takes seat 0 on even games"
+            );
+            assert!(
+                !deck0_takes_first_seat(odd),
+                "deck 1 takes seat 0 on odd games"
+            );
         }
     }
 
@@ -1982,6 +2187,186 @@ mod tests {
             ),
             "INCOMPLETE"
         );
+    }
+
+    // ------------------------------------------- setup: card-name candidates
+
+    /// Calls the same setup function the production path uses, so removing the
+    /// `all_card_names` assignment from `build_commander_state` fails this test
+    /// rather than silently passing against a duplicated copy.
+    #[test]
+    fn commander_setup_populates_all_card_names_for_named_choice_candidates() {
+        let db = fixture_db();
+        let payload = fixture_duel_payload(&db);
+        let mut state = build_commander_state(&db, &payload, DUEL_SEATS, 42);
+
+        assert!(
+            !state.all_card_names.is_empty(),
+            "setup must populate all_card_names right after deck loading"
+        );
+
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        assert!(
+            !candidate_actions(&state).is_empty(),
+            "NamedChoice{{CardName}} must yield candidates once all_card_names is populated"
+        );
+    }
+
+    /// The failure mode the assignment prevents: with an empty `all_card_names`,
+    /// `card_name_choice_candidates` returns nothing and the seat can never act.
+    #[test]
+    fn an_empty_card_name_table_yields_no_candidates() {
+        let db = fixture_db();
+        let payload = fixture_duel_payload(&db);
+        let mut state = build_commander_state(&db, &payload, DUEL_SEATS, 42);
+        state.all_card_names = Vec::new().into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        assert!(
+            candidate_actions(&state).is_empty(),
+            "this is the stall the setup exists to prevent — if it ever stops \
+             being true, the setup test above stops discriminating"
+        );
+    }
+
+    // --------------------------------------- batch boundary: terminal reasons
+
+    /// The defect: a batch can return actions AND carry a terminal stop. Testing
+    /// only `results.is_empty()` discards the cause and lets a later, unrelated
+    /// condition be reported as the reason the game died.
+    #[test]
+    fn a_nonempty_batch_still_reports_its_terminal_reason() {
+        let stop = AiActionsStop::ChooseActionNone {
+            player: PlayerId(1),
+        };
+        assert_eq!(
+            batch_stop_reason(7, &stop),
+            Some(StopReason::AiChoseNoAction),
+            "seven actions then a dead choice is still a dead choice"
+        );
+        assert_eq!(
+            batch_stop_reason(0, &stop),
+            Some(StopReason::AiChoseNoAction)
+        );
+    }
+
+    #[test]
+    fn spending_the_step_budget_is_not_a_terminal_condition() {
+        let stop = AiActionsStop::ActionBudgetReached {
+            limit: DRIVER_STEP_ACTIONS,
+        };
+        assert_eq!(
+            batch_stop_reason(DRIVER_STEP_ACTIONS, &stop),
+            None,
+            "the ordinary bounded step must return to the loop, not end the game"
+        );
+        assert_eq!(
+            batch_stop_reason(0, &stop),
+            Some(StopReason::NoLegalActions),
+            "a batch that spent its budget on zero actions has made no progress"
+        );
+    }
+
+    #[test]
+    fn every_terminal_batch_stop_maps_to_its_own_reason() {
+        let cases = [
+            (AiActionsStop::NoEligibleAiActor, StopReason::NoLegalActions),
+            (
+                AiActionsStop::MissingAiConfig {
+                    player: PlayerId(0),
+                },
+                StopReason::MissingAiConfig,
+            ),
+            (
+                AiActionsStop::ChooseActionNone {
+                    player: PlayerId(0),
+                },
+                StopReason::AiChoseNoAction,
+            ),
+            (
+                AiActionsStop::ActionSafetyCapReached { limit: 200 },
+                StopReason::ActionSafetyCap,
+            ),
+        ];
+        for (stop, expected) in cases {
+            assert_eq!(batch_stop_reason(3, &stop), Some(expected), "{stop:?}");
+        }
+    }
+
+    // ------------------------------------------------ on the play: the engine
+
+    /// `on_the_play` must follow the engine's CR 103.1 contest, not seat parity.
+    /// The two disagree exactly when the contest picks the seat the parity
+    /// assumption did not.
+    #[test]
+    fn on_the_play_follows_the_engine_not_the_seat_parity() {
+        // Game 0: deck0 takes seat 0, so parity would claim deck0 leads.
+        let deck0_seat = PlayerId(0);
+        assert!(deck0_takes_first_seat(0));
+        assert_eq!(
+            on_the_play_label(PlayerId(1), deck0_seat, "p0", "p1"),
+            "p1",
+            "the contest gave seat 1 the play, so the report must say deck 1"
+        );
+        assert_eq!(on_the_play_label(PlayerId(0), deck0_seat, "p0", "p1"), "p0");
+
+        // Game 1: seats swap, so seat 0 is deck1. A seat-0 contest win is a
+        // deck1 lead, which the seat index alone cannot tell you.
+        let deck0_seat = PlayerId(1);
+        assert!(!deck0_takes_first_seat(1));
+        assert_eq!(on_the_play_label(PlayerId(0), deck0_seat, "p0", "p1"), "p1");
+        assert_eq!(on_the_play_label(PlayerId(1), deck0_seat, "p0", "p1"), "p0");
+    }
+
+    /// The engine really does decide this: a started two-seat Commander game
+    /// records a contest winner, and across seeds it is not a constant.
+    #[test]
+    fn the_engine_selects_the_starting_player_from_the_seed() {
+        let db = fixture_db();
+        let payload = fixture_duel_payload(&db);
+        let winners: HashSet<u8> = (0..40u64)
+            .map(|seed| {
+                let mut state = build_commander_state(&db, &payload, DUEL_SEATS, seed);
+                engine::game::engine::start_game(&mut state);
+                state.current_starting_player.0
+            })
+            .collect();
+        assert!(
+            winners.len() > 1,
+            "the CR 103.1 contest must vary with the seed, else reporting it \
+             would be no better than assuming it (got {winners:?})"
+        );
+        assert!(
+            winners.iter().all(|seat| *seat < DUEL_SEATS),
+            "a contest winner must be a real seat: {winners:?}"
+        );
+    }
+
+    /// The same seed must pick the same starting seat, which is what makes the
+    /// paired schedule a controlled swap rather than two unrelated games.
+    #[test]
+    fn the_starting_player_is_reproducible_for_a_seed() {
+        let db = fixture_db();
+        let payload = fixture_duel_payload(&db);
+        let start = |seed: u64| {
+            let mut state = build_commander_state(&db, &payload, DUEL_SEATS, seed);
+            engine::game::engine::start_game(&mut state);
+            state.current_starting_player
+        };
+        assert_eq!(start(99), start(99));
     }
 
     #[test]
