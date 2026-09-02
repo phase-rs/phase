@@ -2630,8 +2630,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_50_for_format_copy_limit_and_active_pack_count() {
-        assert_eq!(PROTOCOL_VERSION, 50);
+    fn protocol_version_is_51_for_custom_format_wire_capability() {
+        assert_eq!(PROTOCOL_VERSION, 51);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2642,7 +2642,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_50_for_format_copy_limit_and_active_pack_count` stays
+    /// `protocol_version_is_51_for_custom_format_wire_capability` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

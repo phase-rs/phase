@@ -43,6 +43,19 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 51 — `FormatConfig.custom_rules` became LIVE on the wire. The field has
+///      existed in the schema since the custom-format work began, but no
+///      frame could carry content in it: no shipped UI could populate it and
+///      `FormatConfig`'s own `Deserialize` rejected every externally-supplied
+///      `Custom` payload for want of a resolver. This phase lands the
+///      resolver (`FormatConfig::for_custom_rules`) and the saved-format
+///      lobby UI that produces one, so a real `CustomFormatRules` now travels
+///      `GameState.format_config` the same way `default_deck_copy_limit` did
+///      at 50: a CAPABILITY bump, not a parse bump — the field is
+///      `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a
+///      peer missing it still deserializes `GameState` cleanly, it simply
+///      cannot host or join the one format class that peer never had a UI
+///      for. Lobby carriers move too; see `LOBBY_PROTOCOL_VERSION` 4.
 /// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
 ///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
 ///      `max_deck_copies` and the deck-compatibility admission path now both
@@ -221,7 +234,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 50;
+pub const PROTOCOL_VERSION: u32 = 51;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -707,12 +720,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 50);
+        assert_eq!(PROTOCOL_VERSION, 51);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 49);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 50);
     }
 
     #[test]

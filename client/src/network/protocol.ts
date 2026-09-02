@@ -95,6 +95,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  38 — FormatConfig.custom_rules became LIVE on the wire. The field has
+ *       existed in the schema since the custom-format work began, but no
+ *       frame could carry content in it: no shipped UI could populate it and
+ *       the engine rejected every externally-supplied Custom payload for want
+ *       of a resolver. This phase lands the resolver and the saved-format
+ *       lobby UI that produces one. game_setup and reconnect_ack both carry
+ *       the full GameState, so this P2P track is broken by the same change as
+ *       the full-game PROTOCOL_VERSION track (see
+ *       crates/lobby-broker/src/protocol.rs entry 51) and must bump in
+ *       lockstep with it.
  *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
  *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
  *       and the deck-compatibility admission path now both read. The field
@@ -216,7 +226,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 37 as const;
+export const WIRE_PROTOCOL_VERSION = 38 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
