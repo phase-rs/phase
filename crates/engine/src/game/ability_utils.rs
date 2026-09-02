@@ -16119,6 +16119,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
 
         assert_eq!(

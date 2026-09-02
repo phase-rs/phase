@@ -16830,6 +16830,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let power = resolve_quantity_with_targets(
             &state,
@@ -16979,6 +16980,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let resolved = resolve_quantity_with_targets(
             &state,
@@ -17059,6 +17061,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         assert!(
             ability.cost_paid_object.is_none(),
@@ -17138,6 +17141,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         assert!(
             ability.cost_paid_object.is_none(),
@@ -17203,6 +17207,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
         // observable.
@@ -17265,6 +17270,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
@@ -17320,6 +17326,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
         ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3));
@@ -17398,6 +17405,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7, 2));
         ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3, 3));

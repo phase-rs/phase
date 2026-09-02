@@ -4647,10 +4647,10 @@ pub(super) fn handle_resolution_choice(
                 .and_then(|_| chosen.first())
                 .and_then(|id| {
                     state.objects.get(id).map(|object| {
-                        crate::types::ability::CostPaidObjectSnapshot {
-                            object_id: *id,
-                            lki: object.snapshot_for_mana_spent(),
-                        }
+                        crate::types::ability::CostPaidObjectSnapshot::capture(
+                            object,
+                            object.snapshot_for_mana_spent(),
+                        )
                     })
                 });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -6087,10 +6087,10 @@ pub(super) fn handle_resolution_choice(
                     // "the creature you blighted" remains available when the
                     // continuation resumes.
                     if let Some(obj) = state.objects.get(&blighted) {
-                        let snapshot = crate::types::ability::CostPaidObjectSnapshot {
-                            object_id: blighted,
-                            lki: obj.snapshot_for_mana_spent(),
-                        };
+                        let snapshot = crate::types::ability::CostPaidObjectSnapshot::capture(
+                            obj,
+                            obj.snapshot_for_mana_spent(),
+                        );
                         if let Some(frame) = state.active_ability_continuation_frame_mut() {
                             frame
                                 .pending

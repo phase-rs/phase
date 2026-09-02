@@ -10917,6 +10917,7 @@ fn cost_paid_object_resolves_as_put_counter_effect_target() {
     ability.cost_paid_object = Some(CostPaidObjectSnapshot {
         object_id: recipient,
         lki: snapshot,
+        incarnation: 0,
     });
 
     let mut events = Vec::new();

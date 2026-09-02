@@ -1690,6 +1690,7 @@ mod tests {
                 .get(&sacrificed)
                 .unwrap()
                 .snapshot_for_mana_spent(),
+            incarnation: 0,
         };
 
         // The looked-at set (normally populated by the look-only Dig): a

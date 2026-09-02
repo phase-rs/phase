@@ -1879,10 +1879,10 @@ pub(crate) fn handle_discard_for_cost(
         if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY discarded card, not
@@ -3228,10 +3228,11 @@ pub(crate) fn handle_sacrifice_for_cost(
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
-            object_id: first,
-            lki: obj.snapshot_for_mana_spent(),
-        }) {
+        if let Some(snapshot) = state
+            .objects
+            .get(&first)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        {
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
@@ -3548,10 +3549,11 @@ pub(crate) fn handle_unattach_for_cost(
     // BEFORE it leaves the source, stamping it onto the resolving ability as the
     // cost-paid-object referent for "that Equipment's mana value".
     if let Some(&first) = chosen.first() {
-        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
-            object_id: first,
-            lki: obj.snapshot_for_mana_spent(),
-        }) {
+        if let Some(snapshot) = state
+            .objects
+            .get(&first)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        {
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
@@ -3815,10 +3817,10 @@ pub(crate) fn handle_remove_counter_for_cost(
     if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
         pending
             .ability
-            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: obj.0,
-                lki: obj.1.snapshot_for_mana_spent(),
-            });
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj.1,
+                obj.1.snapshot_for_mana_spent(),
+            ));
     }
 
     pending.mark_activation_cost_committed();
@@ -3989,10 +3991,10 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
         if let Some(obj) = state.objects.get(&choice.object_id) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: choice.object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
 
@@ -4072,10 +4074,10 @@ pub(crate) fn handle_blight_choice(
     if let Some(obj) = state.objects.get(&chosen[0]) {
         pending
             .ability
-            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: chosen[0],
-                lki: obj.snapshot_for_mana_spent(),
-            });
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
     }
 
     if counters > 0
@@ -4325,10 +4327,10 @@ pub(crate) fn handle_behold_for_cost(
             ));
         }
         if snapshot.is_none() {
-            snapshot = Some(CostPaidObjectSnapshot {
-                object_id: chosen_id,
-                lki: obj.snapshot_for_mana_spent(),
-            });
+            snapshot = Some(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
         }
         if action == BeholdCostAction::ChooseOrReveal && from_hand {
             revealed_ids.push(chosen_id);
@@ -4589,10 +4591,10 @@ fn finish_exile_selection_for_cost(
             }
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY exiled object, not
@@ -5496,10 +5498,10 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         if let Some(obj) = state.objects.get(&source_id) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: source_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
             events.push(GameEvent::CardsRevealed {
                 player,
                 card_ids: vec![source_id],
@@ -8142,12 +8144,9 @@ fn pay_additional_cost_with_source(
             // there is no choice to make, the object is already known.
             let Some(filter) = filter else {
                 if let Some(obj) = state.objects.get(&pending.object_id) {
-                    pending
-                        .ability
-                        .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                            object_id: pending.object_id,
-                            lki: obj.snapshot_for_mana_spent(),
-                        });
+                    pending.ability.set_cost_paid_object_recursive(
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()),
+                    );
                     events.push(GameEvent::CardsRevealed {
                         player,
                         card_ids: vec![pending.object_id],
@@ -8227,10 +8226,10 @@ pub(crate) fn handle_reveal_for_cost(
         if index == 0 {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: card_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
 

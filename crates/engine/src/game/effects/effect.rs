@@ -1225,6 +1225,7 @@ mod tests {
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
             object_id: army,
             lki: state.objects[&army].snapshot_public_characteristics(),
+            incarnation: 0,
         };
 
         let static_def = StaticDefinition::continuous()
@@ -1286,6 +1287,7 @@ mod tests {
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
             object_id: paid,
             lki: state.objects[&paid].snapshot_public_characteristics(),
+            incarnation: 0,
         };
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::CostPaidObject)

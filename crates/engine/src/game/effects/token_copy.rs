@@ -2947,6 +2947,7 @@ mod tests {
             CostPaidObjectSnapshot {
                 object_id: artifact_id,
                 lki: artifact.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         let mut ability = ResolvedAbility::new(

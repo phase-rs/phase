@@ -21292,6 +21292,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -21362,6 +21363,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -21549,6 +21551,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner

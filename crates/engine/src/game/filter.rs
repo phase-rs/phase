@@ -3433,6 +3433,14 @@ fn filter_inner_for_object(
         // the chain resolver, never into `cost_paid_object`. Without the slot-2
         // fallback the `SharesQuality { reference: CostPaidObject }` reference
         // matched nothing and the reveal dug past the shared-type card.
+        //
+        // CR 400.7: this arm matches a LIVE board object, so it validates the
+        // incarnation captured at binding time. An object that changed zones and
+        // returned is a new object at the same storage id and must not match.
+        // LKI-only readers (the `ObjectScope::CostPaidObject` characteristic
+        // arms in `game/quantity.rs`) deliberately do NOT validate — CR 608.2h
+        // requires them to keep reporting the departed object's recorded
+        // characteristics.
         TargetFilter::CostPaidObject => ability
             .and_then(|ability| {
                 ability
@@ -3440,7 +3448,9 @@ fn filter_inner_for_object(
                     .as_ref()
                     .or(ability.effect_context_object.as_ref())
             })
-            .is_some_and(|snapshot| snapshot.object_id == object_id),
+            .is_some_and(|snapshot| {
+                snapshot.object_id == object_id && snapshot.is_current(state)
+            }),
         // CR 701.47c: "the amassed Army" / "the Army you amassed" — the Army
         // creature the current amass instruction chose, threaded via
         // `ability.amassed_army_object` (mirrors `CostPaidObject` immediately
@@ -14252,6 +14262,7 @@ mod tests {
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: creature_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             super::matches_target_filter(
@@ -14267,6 +14278,7 @@ mod tests {
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: land_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             !super::matches_target_filter(
@@ -14293,6 +14305,7 @@ mod tests {
         stale.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: creature_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             super::matches_target_filter(

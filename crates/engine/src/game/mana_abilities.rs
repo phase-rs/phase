@@ -1511,10 +1511,10 @@ pub fn handle_exile_for_mana_ability(
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
     // characteristics before it leaves its zone.
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -1558,10 +1558,10 @@ pub fn handle_sacrifice_for_mana_ability(
     }
 
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -4746,10 +4746,10 @@ fn prepare_deterministic_exile_cost_selection(
         ));
     }
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
     let mut updated = pending.clone();
     updated.chosen_exiled = chosen;
@@ -14072,6 +14072,7 @@ mod tests {
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
             object_id: paid.id,
             lki: paid.snapshot_for_mana_spent(),
+            incarnation: 0,
         });
 
         let resolved = resolve_quantity_with_targets(

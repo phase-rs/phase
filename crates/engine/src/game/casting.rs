@@ -18360,10 +18360,10 @@ pub(crate) fn stamp_self_ref_discard_cost_paid_object(
         return;
     }
     if let Some(obj) = state.objects.get(&source_id) {
-        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-            object_id: source_id,
-            lki: obj.snapshot_for_mana_spent(),
-        });
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+            obj,
+            obj.snapshot_for_mana_spent(),
+        ));
     }
 }
 

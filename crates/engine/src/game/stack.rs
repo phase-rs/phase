@@ -5397,6 +5397,7 @@ mod tests {
             CostPaidObjectSnapshot {
                 object_id: exiled_id,
                 lki: exiled.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         let spell_id = create_object(
