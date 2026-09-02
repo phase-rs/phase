@@ -109,6 +109,12 @@ describe("isFormatConfigShape", () => {
     "deck_size",
     "singleton",
     "command_zone",
+    // Required (`number | null`, no `?:`) — the engine's `commander_damage_threshold`
+    // carries no `#[serde(skip_serializing_if)]`, so a genuine serialized
+    // FormatConfig always has the key. A blob missing it entirely is not a
+    // real serialization, not a `None`. See the sibling `isOptionalInteger`
+    // helper for fields that ARE genuinely allowed to omit their key.
+    "commander_damage_threshold",
     "team_based",
     "uses_commander",
     "sideboard_policy",
@@ -218,6 +224,22 @@ describe("isCustomFormatRulesShape", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("rejects an Enabled command zone missing commander_damage_threshold", () => {
+    // Same field, same reasoning as FormatConfig's own required
+    // commander_damage_threshold: no skip_serializing_if, so a missing key
+    // means the blob was never a real serialized CommandZoneMode.
+    const rules = customRules();
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: {
+          ...rules.structural,
+          command_zone_mode: { Enabled: { eligibility_rule: "Standard" } },
+        },
+      }),
+    ).toBe(false);
   });
 
   it("rejects an Enabled command zone with an unknown eligibility rule", () => {

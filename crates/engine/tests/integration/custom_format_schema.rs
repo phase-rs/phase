@@ -1192,6 +1192,10 @@ fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
     for source in [
         FormatConfig::standard(),
         FormatConfig::commander(),
+        // CR 903.13f(1)/(2): the only saveable source combining a command
+        // zone with DeckSizeRule::Minimum and an Unlimited copy limit — a
+        // structural shape none of the other sources below exercise.
+        FormatConfig::commander_draft(),
         FormatConfig::tiny_leaders(),
         FormatConfig::two_headed_giant(),
         FormatConfig::limited(),
@@ -1220,7 +1224,7 @@ fn short_label_is_derived_from_the_name_and_tolerates_short_names() {
         let def = CustomFormatDef::from_lobby_config(name.to_string(), &FormatConfig::standard())
             .unwrap_or_else(|error| panic!("{name:?}: {error}"));
         assert_eq!(def.short_label, expected, "{name:?}");
-        assert_eq!(def.label, name, "label is the name verbatim");
+        assert_eq!(def.label, name.trim(), "label is the name, trimmed");
     }
 }
 

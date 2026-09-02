@@ -47,6 +47,19 @@ function isOptionalInteger(value: unknown): value is number | null {
   return value === null || value === undefined || isInteger(value);
 }
 
+/**
+ * For a Rust `Option<T>` field with NO `#[serde(skip_serializing_if =
+ * "Option::is_none")]` (unlike `archenemy_player`, which has one): the engine
+ * always serializes the key, as `null` for `None` or an integer for `Some`.
+ * An absent key is therefore not a value this field can legitimately take —
+ * it means the blob was never a real serialized `FormatConfig`/`CommandZoneMode`
+ * at all, not that the value is `None`. Unlike {@link isOptionalInteger},
+ * `undefined` (a missing key) is rejected, not treated as an accepted absence.
+ */
+function isRequiredNullableInteger(value: unknown): value is number | null {
+  return value === null || isInteger(value);
+}
+
 /** CR 100.5 / CR 903.5a: the variant is authoritative — never infer it. */
 function isDeckSizeRule(value: unknown): value is DeckSizeRule {
   if (!isRecord(value)) return false;
@@ -82,7 +95,7 @@ function isCommandZoneMode(value: unknown): value is CommandZoneMode {
   if (!isRecord(value) || !isRecord(value.Enabled)) return false;
   const enabled = value.Enabled;
   return (
-    isOptionalInteger(enabled.commander_damage_threshold)
+    isRequiredNullableInteger(enabled.commander_damage_threshold)
     && (enabled.eligibility_rule === "Standard"
       || enabled.eligibility_rule === "TinyLeaders"
       || enabled.eligibility_rule === "OathbreakerSignatureSpell"
@@ -165,7 +178,7 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
     || !isDeckSizeRule(value.deck_size)
     || typeof value.singleton !== "boolean"
     || typeof value.command_zone !== "boolean"
-    || !isOptionalInteger(value.commander_damage_threshold)
+    || !isRequiredNullableInteger(value.commander_damage_threshold)
     || typeof value.team_based !== "boolean"
     || typeof value.uses_commander !== "boolean"
     || !isSideboardPolicy(value.sideboard_policy)

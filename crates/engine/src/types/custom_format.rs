@@ -446,6 +446,11 @@ impl CustomFormatDef {
                     .to_string(),
             ));
         }
+        // Normalize once, right after validating: the emptiness check above
+        // already treats leading/trailing whitespace as insignificant, so the
+        // stored `label` should match that judgment rather than preserving
+        // whitespace the validation itself ignored.
+        let name = name.trim().to_string();
 
         // Closes the general defect class documented on
         // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase

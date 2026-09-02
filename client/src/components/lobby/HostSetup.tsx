@@ -768,6 +768,16 @@ export function HostSetup({
                   type="text"
                   value={customFormatName}
                   onChange={(e) => setCustomFormatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    // This field lives inside the Host Game <form>, whose
+                    // onSubmit calls handleHost(). Without this, pressing
+                    // Enter to confirm a format name would instead submit the
+                    // form and start hosting immediately.
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    if (customFormatName.trim().length === 0 || isResolvingFormat) return;
+                    void handleSaveAsCustomFormat();
+                  }}
                   placeholder={t("hostSetup.customFormatNamePlaceholder")}
                   maxLength={40}
                   className={inp}
