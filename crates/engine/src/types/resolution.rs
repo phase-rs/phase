@@ -4034,7 +4034,12 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
 /// CR 122.1 + CR 614.1: v1 counter-removal queues removed the current tuple
 /// before a replacement choice but did not serialize it separately. Rebuild
 /// that unsettled removal from the parked proposed event so its actual result
-/// contributes to the resumed queue's `applied_total`.
+/// contributes to the resumed queue's `applied_total`. v1 only retained the
+/// queue's original requested total and unconsumed tail, so it cannot recover
+/// a replacement-modified actual count for a fully settled prefix. Preserve
+/// that format's requested-count semantics by seeding the prefix as
+/// `total - remaining requested - current requested`; the reconstructed current
+/// removal still contributes its measured actual result after it resumes.
 fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
     let Some((object_id, counter_type, count)) =
         state
@@ -4075,6 +4080,18 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
         return;
     }
 
+    let remaining_requested = queue
+        .remaining
+        .iter()
+        .map(|removal| removal.count)
+        .sum::<u32>();
+    // v1 removed the current tuple from `remaining` before it surfaced the
+    // replacement choice. Its settled prefix has no actual-count record, so
+    // retain the legacy requested-count accounting for that unrecoverable
+    // prefix while the in-flight tuple below remains actual-count based.
+    queue.applied_total = queue
+        .total
+        .saturating_sub(remaining_requested.saturating_add(count));
     queue.in_flight = Some(PendingCounterRemovalInFlight {
         removal: PendingCounterRemoval {
             object_id,
