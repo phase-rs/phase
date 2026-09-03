@@ -67,13 +67,18 @@ export function TournamentPage() {
    * could detach it when the route changes: the closure alone can only ever
    * compare a code to itself.
    *
-   * EVERY write a continuation makes is behind this guard — the two failure
-   * alerts, `run`'s `setBusy(null)` and `handleReport`'s `setReporting(null)`.
-   * That is the whole rule, and it is deliberately not "guard the writes that
-   * looked reachable": each unguarded one found so far turned out to have a
-   * concrete repro against a successor tournament's page. The counterpart is
-   * that the subscription effect resets each of those same pieces of state on
-   * a `:code` change, so declining a stale write here never strands anything.
+   * EVERY write a continuation makes is either behind this guard or behind a
+   * strictly stronger one. Four are behind this guard directly — the two
+   * failure alerts, `run`'s `setBusy(null)` and `handleReport`'s
+   * `setReporting(null)`. The fifth, the subscription effect's own
+   * `setOffline(true)`, does not need it: that continuation is scoped by the
+   * effect-instance `cancelled` flag instead, which additionally covers
+   * unmount — a case `shownCode` alone does not reach. This is deliberately
+   * not "guard the writes that looked reachable": each of the four unguarded
+   * ones found so far turned out to have a concrete repro against a successor
+   * tournament's page. The counterpart is that the subscription effect resets
+   * each of those same pieces of state on a `:code` change, so declining a
+   * stale write here never strands anything.
    *
    * Assigned in the subscription effect rather than during render, and
    * deliberately immediately before the state resets there. That placement
