@@ -129,8 +129,8 @@ describe("PackDisplay pod controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
       "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
     expect(selected).not.toHaveClass("!duration-0", "transition-all", "scale-105");

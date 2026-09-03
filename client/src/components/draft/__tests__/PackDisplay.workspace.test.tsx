@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -214,11 +217,18 @@ function firePointerActivation(
 
 function RealDragPackHarness({
   onDrop,
+  confirmPick,
+  onSelectionChange,
+  viewOverride,
   responsiveLayout = "desktop",
 }: {
   onDrop(request: DraftDropRequest): DraftDropDispatch;
+  confirmPick?: ConfirmPick;
+  onSelectionChange?(instanceId: string | null): void;
+  viewOverride?: DraftPlayerView;
   responsiveLayout?: "desktop" | "tablet-portrait";
 }) {
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [interaction, setInteraction] = useState<DraftPickInteractionSnapshot>({
     interactionGeneration: 4,
     pickInteractionLocked: false,
@@ -249,13 +259,21 @@ function RealDragPackHarness({
     },
     resolveCollapsedSideboardColumn: () => 0,
   });
+  const selectCard = (instanceId: string | null) => {
+    onSelectionChange?.(instanceId);
+    setSelectedCard(instanceId);
+  };
   return (
     <>
       <PackDisplay
         controller={controller({
+          view: viewOverride ?? view,
           dragController: drag,
           pendingIntent: interaction.pendingPickIntent,
           interactionLocked: interaction.pickInteractionLocked,
+          selectedCard,
+          selectCard,
+          ...(confirmPick === undefined ? {} : { confirmPick }),
         })}
         presentation={{ packScale: 1, setPackScale: vi.fn() }}
         onCardHover={vi.fn()}
@@ -277,6 +295,16 @@ describe("PackDisplay local workspace controller", () => {
     imageState.sources = {};
     imageState.faceSources = {};
     alternateFaceState.values = {};
+  });
+
+  it("uses_arcane_cyan_for_the_selected_pack_keyframe_without_the_old_green", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+    const keyframe = css.match(/@keyframes draft-pack-selected-glow \{[\s\S]*?\n\}/)?.[0];
+
+    expect(css).toContain("--color-arcane: #38bdf8");
+    expect(keyframe).toContain("var(--color-arcane)");
+    expect(keyframe).toContain("rgb(56 189 248 / 0.55)");
+    expect(keyframe).not.toMatch(/(?:rgb|rgba)\(3,\s*139,\s*6/);
   });
 
   it("renders_authoritative_sequence_once_and_preserves_duplicate_names_and_unknown_rarity", () => {
@@ -602,8 +630,8 @@ describe("PackDisplay local workspace controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
       "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
     expect(cardElement).not.toHaveClass("transition-all");
@@ -611,6 +639,157 @@ describe("PackDisplay local workspace controller", () => {
 
     fireEvent.doubleClick(cardElement);
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
+  it("selects_a_desktop_pack_card_when_pointer_capture_retargets_its_click_to_the_card_shell", async () => {
+    const onDrop = vi.fn();
+    const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const onSelectionChange = vi.fn();
+    const rendered = render(
+      <RealDragPackHarness
+        onDrop={onDrop as never}
+        confirmPick={confirmPick}
+        onSelectionChange={onSelectionChange}
+      />,
+    );
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 97, pointerType: "mouse" });
+    fireEvent.pointerUp(cardElement, { clientX: 10, clientY: 10, isPrimary: true, pointerId: 97, pointerType: "mouse" });
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 97, pointerType: "mouse" });
+
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    expect(onSelectionChange).toHaveBeenCalledWith("unknown");
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(cardElement).toHaveClass("ring-arcane", "shadow-[0_0_7px_3px_#38bdf8]");
+    expect(screen.getByRole("button", { name: "Confirm Pick" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
+    await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects_once_when_an_ordinary_desktop_click_stays_on_the_nested_pack_activation", () => {
+    const onDrop = vi.fn();
+    const onSelectionChange = vi.fn();
+    const rendered = render(
+      <RealDragPackHarness onDrop={onDrop as never} onSelectionChange={onSelectionChange} />,
+    );
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 98, pointerType: "mouse" });
+    fireEvent.pointerUp(cardElement, { clientX: 10, clientY: 10, isPrimary: true, pointerId: 98, pointerType: "mouse" });
+    firePointerActivation(activation, "click", { detail: 1, pointerId: 98, pointerType: "mouse" });
+
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    expect(onSelectionChange).toHaveBeenCalledWith("unknown");
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(cardElement).toHaveClass("ring-arcane", "shadow-[0_0_7px_3px_#38bdf8]");
+    expect(screen.getByRole("button", { name: "Confirm Pick" })).toBeInTheDocument();
+  });
+
+  it("does_not_select_when_the_desktop_alternate_face_control_is_activated", () => {
+    const doubleFaced = { ...cards[0], name: "Front // Back" };
+    const onDrop = vi.fn();
+    const onSelectionChange = vi.fn();
+    alternateFaceState.values = {
+      "Front // Back": { name: "Back", faceIndex: 1, side: "back" },
+    };
+    imageState.sources = {
+      "Front // Back": "/front.png",
+      "": null,
+    };
+    imageState.faceSources = { "Front // Back:1": "/back.png" };
+    render(
+      <RealDragPackHarness
+        onDrop={onDrop as never}
+        onSelectionChange={onSelectionChange}
+        viewOverride={{ ...view, current_pack: [doubleFaced, cards[1]] }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show other face of Front // Back" }));
+
+    expect(screen.getByRole("img", { name: "Back" })).toHaveAttribute("src", "/back.png");
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
+  });
+
+  it("does_not_select_from_a_retargeted_mouse_click_on_tablet_portrait", () => {
+    const onDrop = vi.fn();
+    const onSelectionChange = vi.fn();
+    const rendered = render(
+      <RealDragPackHarness
+        onDrop={onDrop as never}
+        onSelectionChange={onSelectionChange}
+        responsiveLayout="tablet-portrait"
+      />,
+    );
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 99, pointerType: "mouse" });
+    fireEvent.pointerUp(cardElement, { clientX: 10, clientY: 10, isPrimary: true, pointerId: 99, pointerType: "mouse" });
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 99, pointerType: "mouse" });
+
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(cardElement).toHaveAttribute("data-visual-state", "default");
+    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
+  });
+
+  it.each(["mouse", "pen"] as const)("selects_a_desktop_%s_pack_card_after_a_no_target_drag_release", async (pointerType) => {
+    const onDrop = vi.fn();
+    const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
+    const rendered = render(<RealDragPackHarness onDrop={onDrop as never} confirmPick={confirmPick} />);
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const target = screen.getByTestId("real-drag-target");
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => ({ left: 100, top: 0, right: 300, bottom: 200, width: 200, height: 200, x: 100, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    fireEvent.pointerDown(cardElement, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 96, pointerType });
+    fireEvent.pointerMove(cardElement, { clientX: 30, clientY: 30, pointerId: 96, pointerType });
+    fireEvent.pointerUp(cardElement, { clientX: 30, clientY: 30, pointerId: 96, pointerType });
+    expect(onDrop).not.toHaveBeenCalled();
+
+    firePointerActivation(within(cardElement).getByRole("button", { name: "Same" }), "click", {
+      detail: 1, pointerId: 96, pointerType,
+    });
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(cardElement).toHaveClass("ring-2", "ring-arcane", "shadow-[0_0_7px_3px_#38bdf8]");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
+    await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
+  it.each([
+    ["desktop", true],
+    ["phone-portrait", false],
+    ["tablet-landscape", false],
+  ] as const)("uses_the_reduced_hover_scale_only_for_%s", (responsiveLayout, hasDesktopHover) => {
+    const rendered = render(
+      <PackDisplay
+        controller={controller()}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout={responsiveLayout}
+      />,
+    );
+    const packCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(hasDesktopHover);
+    expect(packCard.classList.contains("hover:scale-[1.08]")).toBe(false);
   });
 
   it("keeps_commander_pick_two_selection_in_click_order_and_submits_that_order_manually", () => {
@@ -872,6 +1051,33 @@ describe("PackDisplay local workspace controller", () => {
     expect(selectCard).toHaveBeenCalledWith("unknown");
   });
 
+  it("ignores_exact_shell_desktop_clicks_while_locked_before_consuming_compatibility_activation", () => {
+    const selectCard = vi.fn();
+    const localDrag = {
+      ...dragController,
+      consumeCompatibilityActivation: vi.fn(() => false),
+    };
+    const initial = controller({
+      interactionLocked: true,
+      selectCard,
+      dragController: localDrag,
+    });
+    const rendered = render(<PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 12, pointerType: "mouse" });
+
+    expect(localDrag.consumeCompatibilityActivation).not.toHaveBeenCalled();
+    expect(selectCard).not.toHaveBeenCalled();
+
+    rendered.rerender(<PackDisplay controller={{ ...initial, interactionLocked: false }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    firePointerActivation(cardElement, "click", { detail: 1, pointerId: 12, pointerType: "mouse" });
+
+    expect(localDrag.consumeCompatibilityActivation).toHaveBeenCalledTimes(1);
+    expect(selectCard).toHaveBeenCalledTimes(1);
+    expect(selectCard).toHaveBeenCalledWith("unknown");
+  });
+
   it("allows_keyboard_selection_after_one_compatibility_click_without_an_in_card_confirmation", () => {
     let suppressCompatibility = true;
     const selectCard = vi.fn();
@@ -891,7 +1097,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const firstCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const cardButton = within(firstCard).getByRole("button", { name: "Same" });
-    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.08]", "hover:ring-white/20");
+    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.05]", "hover:ring-white/20");
 
     fireEvent.click(cardButton, { detail: 1, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
@@ -903,8 +1109,8 @@ describe("PackDisplay local workspace controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
       "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
     expect(firstCard).not.toHaveClass("transition-all");
@@ -1056,6 +1262,47 @@ describe("PackDisplay local workspace controller", () => {
     await act(async () => resolveOutcome({ status: "ignored", reason: "busy" }));
     fireEvent.click(screen.getByRole("button", { name: "unlock" }));
     expect(source).toHaveAttribute("data-visual-state", "default");
+  });
+
+  it("suppresses_the_trailing_desktop_shell_click_after_a_collapsed_sideboard_drop", async () => {
+    let resolveOutcome!: (outcome: Awaited<DraftDropDispatch["outcome"]>) => void;
+    const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => ({
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome: new Promise((resolve) => { resolveOutcome = resolve; }),
+    }));
+    const onSelectionChange = vi.fn();
+    const rendered = render(
+      <RealDragPackHarness
+        onDrop={onDrop}
+        onSelectionChange={onSelectionChange}
+      />,
+    );
+    const source = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(source).getByRole("button", { name: "Same" });
+    const target = screen.getByTestId("real-drag-target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => ({ left: 100, top: 0, right: 300, bottom: 200, width: 200, height: 200, x: 100, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 100, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 120, clientY: 20, pointerId: 100, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 120, clientY: 20, isPrimary: true, pointerId: 100, pointerType: "mouse" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 100, pointerType: "mouse" });
+
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledWith(expect.objectContaining({
+      destination: "sideboard",
+      placementHint: { column: 0 },
+    }));
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(source).toHaveAttribute("data-visual-state", "waiting");
+    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
+
+    await act(async () => resolveOutcome({ status: "acknowledged" }));
+    fireEvent.click(screen.getByRole("button", { name: "unlock" }));
+    expect(source).toHaveAttribute("data-visual-state", "default");
+    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
   });
 
   it("dispatches_a_tablet_touch_pack_drag_to_the_collapsed_sideboard", async () => {

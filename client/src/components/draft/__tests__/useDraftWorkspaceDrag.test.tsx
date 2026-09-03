@@ -528,7 +528,7 @@ describe("useDraftWorkspaceDrag", () => {
     expect(screen.getByTestId("announcement")).toHaveTextContent("Could not submit Card One. Try again.");
   });
 
-  it("suppresses_the_complete_drag_click_double_click_sequence_until_a_new_pointer_down", async () => {
+  it.each(["mouse", "pen"] as const)("suppresses_the_complete_successful_%s_pack_drag_click_double_click_sequence_until_a_new_pointer_down", async (pointerType) => {
     const interaction = createInteraction();
     const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => ({
       requestToken: request.requestToken,
@@ -542,12 +542,12 @@ describe("useDraftWorkspaceDrag", () => {
     source.releasePointerCapture = vi.fn();
     target.getBoundingClientRect = () => rect(0, 0, 200, 200);
 
-    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 20, pointerType: "mouse" });
-    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType: "mouse" });
-    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType: "mouse" });
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 20, pointerType });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType });
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 20, pointerType });
     await act(async () => Promise.resolve());
-    firePointerActivation(source, "click", { detail: 1, pointerId: 20, pointerType: "mouse" });
-    firePointerActivation(source, "click", { detail: 2, pointerId: 20, pointerType: "mouse" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 20, pointerType });
+    firePointerActivation(source, "click", { detail: 2, pointerId: 20, pointerType });
     fireEvent(source, new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
     expect(screen.getByTestId("clicks")).toHaveTextContent("0:0");
 
@@ -684,6 +684,35 @@ describe("useDraftWorkspaceDrag", () => {
     expect(source.setPointerCapture).not.toHaveBeenCalled();
     expect(onDrop).not.toHaveBeenCalled();
     expect(screen.getByTestId("clicks")).toHaveTextContent("1:0");
+  });
+
+  it("keeps_touch_workspace_compatibility_activation_suppressed_after_a_no_target_drag_release", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceTouchEnabled
+        workspaceSourceOverride={{
+          kind: "workspace", instanceIds: ["card-1"], cards: [card], previewWidth: 146, previewHeight: 204, onDrop: onWorkspaceDrop,
+        }}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(100, 0, 300, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 25, pointerType: "touch" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 25, pointerType: "touch" });
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 25, pointerType: "touch" });
+    firePointerActivation(source, "click", { detail: 1, pointerId: 25, pointerType: "touch" });
+
+    expect(onWorkspaceDrop).not.toHaveBeenCalled();
+    expect(screen.getByTestId("clicks")).toHaveTextContent("0:0");
   });
 
   it("clips_expanded_columns_to_their_board_and_rejects_release_outside_the_board", async () => {

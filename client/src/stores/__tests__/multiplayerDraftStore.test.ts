@@ -997,6 +997,34 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
 
+    it("appends_an_acknowledged_host_pick_to_its_resolved_target_stack", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const target = card("host-target");
+      capturedHostEventHandler!({ type: "viewUpdated", view: { ...mockView("Drafting"), pool: [target] } });
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("host-target", {
+        zone: "deck", column: 3, row: 1, order: 0,
+      });
+      mockHostAdapter.updateWorkspace.mockClear();
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"), pool: [target, card("host-picked")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("host-picked", "deck", { column: 3, row: 1 }))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      expect(placements["host-target"]).toEqual({ zone: "deck", column: 3, row: 1, order: 0 });
+      expect(placements["host-picked"]).toEqual({ zone: "deck", column: 3, row: 1, order: 1 });
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
+    });
+
     it("forwards the commander designation through the host adapter", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
@@ -1039,6 +1067,17 @@ describe("multiplayerDraftStore", () => {
       mockHostAdapter.submitPick.mockResolvedValueOnce({ ...mockView("Drafting"), pool: [card("card-123")] });
       await useMultiplayerDraftStore.getState().confirmPick();
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
+    });
+
+    it("ignores selection replacement while pick interaction is locked", () => {
+      useMultiplayerDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
+
+      useMultiplayerDraftStore.getState().selectCard("replacement");
+      expect(useMultiplayerDraftStore.getState().selectedCard).toBe("prior");
+
+      useMultiplayerDraftStore.setState({ pickInteractionLocked: false });
+      useMultiplayerDraftStore.getState().selectCard("replacement");
+      expect(useMultiplayerDraftStore.getState().selectedCard).toBe("replacement");
     });
 
     it("autoPickCard submits from the visible pack without manual selection", async () => {
@@ -1098,19 +1137,28 @@ describe("multiplayerDraftStore", () => {
 
       const first = card("auto-first", "First");
       const second = card("auto-second", "Second");
+      const firstTarget = card("auto-first-target", "First target");
+      const secondTarget = card("auto-second-target", "Second target");
       capturedHostEventHandler!({
         type: "viewUpdated",
         view: {
           ...mockView("Drafting"),
           kind: "CommanderDraft",
+          pool: [firstTarget, secondTarget],
           current_pack: [first, second],
           required_pick_count: 2,
         },
       });
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("auto-first-target", {
+        zone: "deck", column: 0, row: 0, order: 0,
+      });
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("auto-second-target", {
+        zone: "deck", column: 4, row: 1, order: 0,
+      });
       mockHostAdapter.submitPick.mockResolvedValueOnce({
         ...mockView("Drafting"),
         kind: "CommanderDraft",
-        pool: [first, second],
+        pool: [firstTarget, secondTarget, first, second],
       });
 
       await useMultiplayerDraftStore.getState().autoPickCard({
@@ -1119,30 +1167,40 @@ describe("multiplayerDraftStore", () => {
       });
 
       const placements = useMultiplayerDraftStore.getState().workspaceState?.placements;
-      expect(placements?.["auto-first"]).toMatchObject({ zone: "deck", column: 0, row: 0 });
-      expect(placements?.["auto-second"]).toMatchObject({ zone: "deck", column: 4, row: 1 });
+      expect(placements?.["auto-first-target"]).toEqual({ zone: "deck", column: 0, row: 0, order: 0 });
+      expect(placements?.["auto-first"]).toEqual({ zone: "deck", column: 0, row: 0, order: 1 });
+      expect(placements?.["auto-second-target"]).toEqual({ zone: "deck", column: 4, row: 1, order: 0 });
+      expect(placements?.["auto-second"]).toEqual({ zone: "deck", column: 4, row: 1, order: 1 });
     });
 
     it("waits_for_guest_acknowledgement_before_committing_the_pick", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
       capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
-      capturedGuestEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      const target = card("guest-target");
+      capturedGuestEventHandler!({ type: "viewUpdated", view: { ...mockView("Drafting"), pool: [target] } });
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("guest-target", {
+        zone: "sideboard", column: 3, row: 1, order: 0,
+      });
       mockGuestAdapter.updateWorkspace.mockClear();
 
       const outcome = useMultiplayerDraftStore.getState().submitPick("guest-card", "sideboard", { column: 3, row: 1 });
       await Promise.resolve();
       expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(true);
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-card"]).toBeUndefined();
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-target"])
+        .toEqual({ zone: "sideboard", column: 3, row: 1, order: 0 });
 
       capturedGuestEventHandler!({
         type: "pickAcknowledged",
-        view: { ...mockView("Drafting"), pool: [card("guest-card")] },
+        view: { ...mockView("Drafting"), pool: [target, card("guest-card")] },
       });
 
       await expect(outcome).resolves.toEqual({ status: "acknowledged" });
-      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-card"]).toEqual(
-        expect.objectContaining({ zone: "sideboard", column: 3, row: 1 }),
-      );
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-target"])
+        .toEqual({ zone: "sideboard", column: 3, row: 1, order: 0 });
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-card"])
+        .toEqual({ zone: "sideboard", column: 3, row: 1, order: 1 });
       expect(mockGuestAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
 

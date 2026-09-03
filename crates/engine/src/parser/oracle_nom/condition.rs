@@ -9862,6 +9862,47 @@ pub fn parse_you_put_onto_battlefield_this_way_clause(
     Ok((rest, (filter, false)))
 }
 
+/// CR 608.2c + CR 701.25a: Parse "you put [quantifier] [type] into your
+/// graveyard this way" — the active-voice reflexive gate created by a
+/// preceding "surveil N" instruction (Chandra, Chill of Compliance prints
+/// "Surveil 1." followed by "If you put a noncreature, nonland card into
+/// your graveyard this way, put that card into your hand."; Enlightened
+/// Confidant shares the shape).
+///
+/// CR 701.25a: to surveil, each looked-at card is EITHER put into the
+/// graveyard OR left on top of the library — a genuine choice, unlike
+/// discard/sacrifice/exile, whose destination is inherent to the verb. So
+/// (like the `parse_you_put_onto_battlefield_this_way_clause` sibling right
+/// above) this clause is DESTINATION-BOUND: a redirect that sends the card
+/// elsewhere as it moves (Rest in Peace / Leyline of the Void: "would be put
+/// into a graveyard from anywhere → exile instead") defeats it — the caller
+/// must pair the returned filter with `destination: Some(Zone::Graveyard)`,
+/// not `None`. The surveil choice's library → graveyard move publishes the
+/// moved card into `state.last_zone_changed_ids`, mirroring the
+/// `parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`
+/// siblings below; only the verb and destination differ.
+pub fn parse_you_put_into_graveyard_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("into your graveyard this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 701.9a: Parse "you discard [quantifier] [type] card[s] this way" — the
 /// active-voice condition following a preceding "discard a card" instruction
 /// in the same ability (Talion's Messenger: "draw a card,

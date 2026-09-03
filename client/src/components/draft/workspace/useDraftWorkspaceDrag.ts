@@ -93,6 +93,19 @@ interface PointerSession {
   expectedLostCapture: boolean;
 }
 
+function pointerSequenceSuppression(session: PointerSession): Exclude<CompatibilitySuppression, { readonly kind: "none" }> {
+  return {
+    kind: "pointer-sequence",
+    pointerId: session.pointerId,
+    pointerType: session.pointerType,
+    surface: session.source.kind === "workspace" ? "workspace" : "pack",
+    sourceInstanceId: session.source.kind === "workspace"
+      ? session.source.instanceIds[0]
+      : session.source.sourceInstanceId,
+    phase: "awaiting-click",
+  };
+}
+
 type Admission =
   | { readonly kind: "owned"; readonly lockEpoch: number; readonly lockTrueOrder: number; readonly expectedIntent: PendingDraftPickIntent }
   | { readonly kind: "unowned"; readonly observedOrder: number }
@@ -453,16 +466,9 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
       const dy = event.clientY - session.startY;
       if (dx * dx + dy * dy <= MOVE_THRESHOLD_SQUARED) return;
       session.phase = "dragging";
-      suppressionRef.current = {
-        kind: "pointer-sequence",
-        pointerId: session.pointerId,
-        pointerType: session.pointerType,
-        surface: session.source.kind === "workspace" ? "workspace" : "pack",
-        sourceInstanceId: session.source.kind === "workspace"
-          ? session.source.instanceIds[0]
-          : session.source.sourceInstanceId,
-        phase: "awaiting-click",
-      };
+      if (session.source.kind === "workspace" || session.pointerType === "touch") {
+        suppressionRef.current = pointerSequenceSuppression(session);
+      }
       setAnnouncement(t("workspace.drag.started", { card: session.source.cards.map((card) => card.name).join(", ") }));
     }
     setDragPreview({ source: session.source, clientX: event.clientX, clientY: event.clientY });
@@ -492,6 +498,9 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     if (target === null) {
       retirePointer(true);
       return;
+    }
+    if (session.source.kind !== "workspace" && session.pointerType !== "touch") {
+      suppressionRef.current = pointerSequenceSuppression(session);
     }
     if (session.source.kind === "workspace") {
       flushSync(() => setDragPreview(null));

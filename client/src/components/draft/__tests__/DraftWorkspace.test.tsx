@@ -22,6 +22,7 @@ import {
 import type { DraftWorkspaceState } from "../workspace/types";
 import {
   createDefaultDraftWorkspacePreferences,
+  DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX,
   DRAFT_WORKSPACE_PACK_SCALE_MAX,
   type DraftWorkspacePreferences,
 } from "../workspace/workspacePreferences";
@@ -1383,7 +1384,9 @@ describe("draft workspace shell", () => {
     };
     const { container, rerender } = render(<DraftWorkspace {...props} />);
     expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style
-      .getPropertyValue("--collapsed-sideboard-card-width")).toContain("clamp(");
+      .getPropertyValue("--collapsed-sideboard-card-width")).toBe(
+        `clamp(166.4px, 16vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX * 0.8}px)`,
+      );
 
     rerender(<DraftWorkspace {...props} responsiveContext="builder" />);
     expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style

@@ -204,7 +204,7 @@ function PackCard({
     <motion.div
       data-instance-id={card.instance_id}
       data-visual-state={state}
-      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.08]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_7px_3px_rgb(3,139,6)] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
+      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.05]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-arcane shadow-[0_0_7px_3px_#38bdf8] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
       style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
       onMouseEnter={() => onHover(cardInfo(card))}
       onMouseLeave={() => onHover(null)}
@@ -275,6 +275,13 @@ function PackCard({
       }}
       onLostPointerCapture={(event) => local?.dragController.handleLostPointerCapture(event)}
       onContextMenu={longPress.handlers.onContextMenu}
+      onClick={(event) => {
+        // The desktop drag controller captures the pointer on this shell. A
+        // browser may consequently target its trailing click here instead of
+        // the nested activation button; accept only that retargeted case.
+        if (locked || !desktopLayout || event.target !== event.currentTarget) return;
+        if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
+      }}
       onDoubleClick={(event) => {
         const target = event.target as HTMLElement;
         if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;

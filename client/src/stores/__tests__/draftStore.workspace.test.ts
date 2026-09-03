@@ -322,6 +322,21 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().workspaceState?.placements.unrelated.zone).toBe("deck");
   });
 
+  it("appends_an_acknowledged_single_pick_to_its_resolved_target_stack", async () => {
+    await start([card("target")]);
+    useDraftStore.getState().setWorkspacePlacement("target", {
+      zone: "deck", row: 0, column: 5, order: 0,
+    });
+    wasm.submit_pick.mockReturnValue(view([card("target"), card("picked")]));
+
+    await expect(useDraftStore.getState().pickCard("picked", "deck", { column: 5, row: 0 }))
+      .resolves.toEqual({ status: "acknowledged" });
+
+    const placements = useDraftStore.getState().workspaceState!.placements;
+    expect(placements.target).toEqual({ zone: "deck", column: 5, row: 0, order: 0 });
+    expect(placements.picked).toEqual({ zone: "deck", column: 5, row: 0, order: 1 });
+  });
+
   it("acknowledges_a_selected_card_through_confirm_pick", async () => {
     await start();
     useDraftStore.getState().selectCard("selected");
@@ -331,6 +346,17 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().workspaceState?.placements.selected)
       .toMatchObject({ zone: "sideboard", column: 2 });
     expect(useDraftStore.getState().selectedCard).toBeNull();
+  });
+
+  it("ignores_selection_replacement_while_pick_interaction_is_locked", () => {
+    useDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
+
+    useDraftStore.getState().selectCard("replacement");
+    expect(useDraftStore.getState().selectedCard).toBe("prior");
+
+    useDraftStore.setState({ pickInteractionLocked: false });
+    useDraftStore.getState().selectCard("replacement");
+    expect(useDraftStore.getState().selectedCard).toBe("replacement");
   });
 
   it.each([
@@ -366,7 +392,7 @@ describe("draft store workspace authority", () => {
     expect(adapterIds).not.toBe(tuple);
   });
 
-  it("acknowledges_both_effect_ids_and_places_only_them", async () => {
+  it("appends_acknowledged_draft_effect_cards_in_request_order", async () => {
     await start([card("effect")]);
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
       card("effect"), card("first"), card("second"),
@@ -376,9 +402,8 @@ describe("draft store workspace authority", () => {
     )).resolves.toEqual({ status: "acknowledged" });
     const placements = useDraftStore.getState().workspaceState!.placements;
     expect(placements.effect.zone).toBe("deck");
-    expect(placements.first).toMatchObject({ zone: "sideboard", column: 4 });
-    expect(placements.second).toMatchObject({ zone: "sideboard", column: 4 });
-    expect(placements.first.order).not.toBe(placements.second.order);
+    expect(placements.first).toEqual({ zone: "sideboard", column: 4, row: 0, order: 0 });
+    expect(placements.second).toEqual({ zone: "sideboard", column: 4, row: 0, order: 1 });
   });
 
   it.each([
@@ -394,19 +419,24 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().workspaceState).toBe(original);
   });
 
-  it("acknowledges_exactly_one_new_auto_pick_in_deck", async () => {
-    await start([card("existing")]);
+  it("appends_the_acknowledged_auto_pick_to_its_resolved_target_stack", async () => {
+    await start([card("existing"), card("target")]);
     useDraftStore.getState().setWorkspacePlacement("existing", {
       zone: "sideboard", row: 0, column: 2, order: 0,
     });
-    wasm.auto_pick.mockReturnValue(view([card("existing"), card("added")]));
+    useDraftStore.getState().setWorkspacePlacement("target", {
+      zone: "deck", row: 1, column: 4, order: 0,
+    });
+    wasm.auto_pick.mockReturnValue(view([card("existing"), card("target"), card("added")]));
     await expect(useDraftStore.getState().autoPickCard("deck", {
       added: { column: 4, row: 1 },
     }))
       .resolves.toEqual({ status: "acknowledged" });
     expect(useDraftStore.getState().workspaceState?.placements.existing.zone).toBe("sideboard");
+    expect(useDraftStore.getState().workspaceState?.placements.target)
+      .toEqual({ zone: "deck", column: 4, row: 1, order: 0 });
     expect(useDraftStore.getState().workspaceState?.placements.added)
-      .toMatchObject({ zone: "deck", column: 4, row: 1 });
+      .toEqual({ zone: "deck", column: 4, row: 1, order: 1 });
   });
 
   it.each([

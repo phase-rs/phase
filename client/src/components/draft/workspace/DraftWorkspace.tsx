@@ -36,6 +36,7 @@ import {
 const DRAG_PREVIEW_SCALE = 0.55;
 const DRAG_PREVIEW_GAP = 4;
 const DRAG_PREVIEW_OFFSET = 12;
+const DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE = 0.8;
 
 type VisualColumnCapOrientation = "portrait" | "landscape";
 type VisualColumnCapPreferenceTarget = "phoneDeckVisualColumnCaps" | "tabletDeckVisualColumnCaps";
@@ -247,7 +248,7 @@ export function DraftWorkspace({
   const builderCompact = builderPhoneOrTabletLayout && renderedView === "compact";
   const showDeckContents = shouldShowDraftWorkspaceDeck(deckCollapsed, builderCompact);
   const collapsedSideboardCardWidth = responsiveContext === "draft" && responsiveLayout === "desktop"
-    ? `clamp(208px, 20vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px)`
+    ? `clamp(${208 * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px, 16vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px)`
     : `${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px`;
   const collapsedCompositionClass = builderCompact
     ? tabletLayout
