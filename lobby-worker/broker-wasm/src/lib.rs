@@ -109,11 +109,8 @@ enum ValidationDto {
 ///   3. `info_json` does not parse as a [`ServerInfoDocument`].
 ///
 /// The shell cannot distinguish the three and has no reason to. A reader of
-/// this verdict must not, though: source 3 is **not** an announcer's fault. The
-/// info document is fetched from the *announced host*, so "the host served
-/// garbage at the info path" is a first-class production case for the
-/// verify-by-fetch caller, and attributing it to a bad announcement would
-/// blame the wrong party.
+/// this verdict must not, though: source 3 is not a defect in the announcement
+/// *body*; the announcement is simply unverified, and must be treated as such.
 ///
 /// *From the announcement side*, an announcement that passed
 /// [`directory_validate_announcement`] serializes — via the `Valid` arm's
@@ -603,7 +600,7 @@ mod tests {
         );
         // Source 3: a VALID announcement whose info document is unparseable —
         // the announced host served garbage. Distinct from the two cases above
-        // in who is at fault, identical in verdict, and the case the `Invalid`
+        // in what is unverified, identical in verdict, and the case the `Invalid`
         // arm's "only from the announcement side" wording is scoped around.
         assert_eq!(
             parse(directory_compare_announcement_to_info(&raw_json, "{"))["kind"],
