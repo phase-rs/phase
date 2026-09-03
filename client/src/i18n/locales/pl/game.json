@@ -2253,7 +2253,15 @@
   "replacement": {
     "eyebrow": "Kolejność rozpatrywania",
     "title": "Efekty zastępujące",
-    "subtitle": "Wybierz, który efekt zastępujący zastosować jako pierwszy.",
+    "orderSubtitle": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustalić kolejność — ostatni zastosowany efekt jest tym, który zadziała (CR 616.1).",
+    "appliedFirst": "Zastosowany pierwszy (zostanie nadpisany)",
+    "appliedLast": "Zastosowany ostatni — ten zadziała",
+    "resultLabel": "Wynik: {{outcome}}",
+    "confirmOrder": "Potwierdź kolejność",
+    "moveUp": "Przesuń wcześniej",
+    "moveDown": "Przesuń później",
+    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}"
   },
   "retargetChoice": {

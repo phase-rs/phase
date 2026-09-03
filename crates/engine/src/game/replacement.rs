@@ -21,7 +21,7 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -873,7 +873,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
             .map(|obj| obj.name.clone())
             .unwrap_or_default()
     };
-    let (candidate_count, candidates) = state
+    let (candidate_count, candidates, kind) = state
         .pending_replacement
         .as_ref()
         .map(|p| match &p.proposed {
@@ -896,7 +896,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                             })
                     })
                     .collect();
-                (cands.len(), cands)
+                (cands.len(), cands, ReplacementChoiceKind::Order)
             }
             _ => {
                 let all_search_found_candidates_optional = !p.search_found_candidates.is_empty()
@@ -904,6 +904,17 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         .iter()
                         .all(|candidate| candidate.is_optional);
                 let count = pending_replacement_option_count(state, p);
+                // CR 616.1: classify the prompt shape for the display layer.
+                // Only a distinct multi-candidate set is an ordering decision;
+                // optional accept/decline and found-card destinations are
+                // alternatives and must not render as a sortable list.
+                let kind = if p.is_optional {
+                    ReplacementChoiceKind::OptionalBranch
+                } else if !p.search_found_candidates.is_empty() {
+                    ReplacementChoiceKind::SearchFoundDestination
+                } else {
+                    ReplacementChoiceKind::Order
+                };
                 let cands: Vec<ReplacementCandidateSummary> = if p.is_optional
                     && !p.search_found_candidates.is_empty()
                 {
@@ -975,10 +986,10 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         })
                         .collect()
                 };
-                (count, cands)
+                (count, cands, kind)
             }
         })
-        .unwrap_or((0, vec![]));
+        .unwrap_or((0, vec![], ReplacementChoiceKind::Order));
 
     // Issue #4277 softlock guard: a zero-candidate `ReplacementChoice` is
     // unactionable. `candidate_actions_exact` enumerates `(0..candidate_count)`,
@@ -1003,6 +1014,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
         player,
         candidate_count,
         candidates,
+        kind,
     }
 }
 
@@ -1222,10 +1234,19 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
     }
 }
 
-/// CR 616.1 / CR 614.1c / CR 614.1d: Outcome-descriptive label for one
-/// candidate in a competing-replacement (distinct, non-optional) choice.
-/// Derived from the replacement's own `execute` effect so the label states
-/// the *result* of selecting it, not the source card's Oracle text.
+/// CR 616.1 / CR 614.1c / CR 614.1d: Effect-descriptive label for one candidate
+/// in a competing-replacement (distinct, non-optional) choice. Derived from the
+/// replacement's own `execute` effect so the label names what that effect DOES
+/// ("Enters tapped"), not the source card's Oracle text.
+///
+/// IMPORTANT — this is the label for one *effect*, not for the final outcome of
+/// the event. In a CR 616.1e ordering prompt the player arranges candidates and
+/// CR 616.1f applies them in sequence, so the effect applied LAST is the one
+/// whose write survives. A UI that renders these labels as if picking one
+/// selects its outcome states the exact opposite of the result whenever two
+/// candidates write the same field in opposite directions (the tapland +
+/// Spelunking class). Ordering prompts must present these as sequence entries
+/// with an explicit "applied last wins" frame; see `ReplacementChoiceKind`.
 ///
 /// NOTE: unlike the sibling `replacement_cost_description` (which is a
 /// fully-exhaustive `match` on `AbilityCost` with no wildcard, so a new
@@ -9244,6 +9265,30 @@ enum CandidateMateriality {
     Disjoint,
 }
 
+/// CR 614.1c: the `enter_tapped` commute class an effect writes, if it is the
+/// single-target self tap/untap modifier class. `None` for every other effect.
+///
+/// The single authority for "does this effect write `enter_tapped`, and in which
+/// direction" — shared by the `execute` path and the `decline`-branch path in
+/// [`candidate_materiality`] so the two cannot drift on which shapes count.
+/// The `target: TargetFilter::SelfRef` + `EffectScope::Single` constraints are
+/// load-bearing: a mass or non-self tap is not an ETB entry modifier.
+fn enter_tapped_commute_class(effect: &Effect) -> Option<CommuteClass> {
+    match effect {
+        // CR 701.26a / CR 701.26b: keyed by the value written, so opposite
+        // directions (tapland vs Spelunking) do NOT commute.
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state,
+        } => Some(match state {
+            TapStateChange::Tap => CommuteClass::EnterTapped,
+            TapStateChange::Untap => CommuteClass::EnterUntapped,
+        }),
+        _ => None,
+    }
+}
+
 /// CR 616.1: classify a candidate. A `null`-`execute` replacement is *not* a
 /// guaranteed no-op — it can carry an event-modifying side field
 /// (`quantity_modification` / `mana_modification` / `damage_modification`) that
@@ -9389,6 +9434,28 @@ fn candidate_materiality(
                 commute: damage_commute_class(modification),
             };
         }
+        // CR 614.1c + CR 616.1e: a `null` `execute` whose MODE carries a
+        // `decline` branch still writes an event field when that branch runs.
+        // The shock-land class ("As this land enters, you may pay 2 life. If you
+        // don't, it enters tapped.") parses as `execute: None` +
+        // `MayCost { decline: SetTapState(Tap) }` — the enters-tapped write lives
+        // entirely in the decline branch. Without this the candidate classified
+        // `Disjoint`, no `enter_tapped` collision with a "lands enter untapped"
+        // source (Spelunking / Archelos) was detected, and the CR 616.1 ordering
+        // choice was silently skipped: declining the payment applied the tap
+        // unopposed. Mirrors the prevention-shield fix above, which had this
+        // identical `execute:null` blind spot.
+        //
+        // The declined branch is the one that can collide: paying the cost runs
+        // `execute` (here, nothing), so only the decline path writes the field.
+        if let Some(decline) = replacement_mode_decline(&repl_def.mode) {
+            if let Some(commute) = enter_tapped_commute_class(&decline.effect) {
+                return CandidateMateriality::Writes {
+                    field: EventField::EnterTapped,
+                    commute,
+                };
+            }
+        }
         return CandidateMateriality::Disjoint;
     };
     // CR 616.1: a proliferate count-doubler ("proliferate twice instead",
@@ -9442,6 +9509,10 @@ fn candidate_materiality(
             } => {
                 field = Some(EventField::EnterTapped);
                 // Keyed by the value written so opposite directions don't commute.
+                // NOTE: this arm is deliberately looser than
+                // `enter_tapped_commute_class` (it does not constrain `target`),
+                // preserving the pre-existing `execute`-path behavior; the shared
+                // helper is used for the stricter `decline`-branch classification.
                 enter_tapped_commute = Some(match state {
                     TapStateChange::Tap => CommuteClass::EnterTapped,
                     TapStateChange::Untap => CommuteClass::EnterUntapped,

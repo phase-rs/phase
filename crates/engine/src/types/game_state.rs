@@ -8456,6 +8456,30 @@ pub struct ReplacementCandidateSummary {
     pub description: String,
 }
 
+/// CR 616.1: Which *kind* of decision a [`WaitingFor::ReplacementChoice`] asks
+/// for. One `WaitingFor` variant serves three structurally different prompts,
+/// and the display layer cannot tell them apart from the candidate list alone
+/// (an accept/decline pair and a two-effect ordering prompt are both "two
+/// candidates"). The engine owns the distinction; the frontend must never
+/// re-derive it by inspecting label text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum ReplacementChoiceKind {
+    /// CR 616.1e: two or more *distinct* applicable replacements whose order is
+    /// material. The player arranges them; per CR 616.1f the engine applies the
+    /// selected one and re-prompts for whatever is still applicable, so the
+    /// effect applied LAST is the one whose write survives.
+    #[default]
+    Order,
+    /// CR 614.1: a single optional ("you may") replacement surfaced as two
+    /// branches of one source — index 0 accepts, index 1 declines. A yes/no
+    /// decision, NOT an ordering; it must never render as a sortable list.
+    OptionalBranch,
+    /// CR 616.1: a choice between destinations for a found card. Distinct
+    /// alternatives rather than a sequence, so it also renders as plain options.
+    SearchFoundDestination,
+}
+
 /// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
 /// for a single raw event batch, produced before any live occurrence is claimed.
 ///
@@ -12266,6 +12290,11 @@ pub enum WaitingFor {
         candidate_count: usize,
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
+        /// CR 616.1: which kind of decision this is. Defaults to
+        /// [`ReplacementChoiceKind::Order`] so pre-existing serialized states
+        /// and the many test constructions keep deserializing unchanged.
+        #[serde(default)]
+        kind: ReplacementChoiceKind,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -28253,6 +28282,7 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -28420,6 +28450,7 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33574,6 +33605,7 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: vec![],
+            kind: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

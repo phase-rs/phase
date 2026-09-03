@@ -2253,7 +2253,15 @@
   "replacement": {
     "eyebrow": "Auflösungsreihenfolge",
     "title": "Ersatzeffekte",
-    "subtitle": "Wähle, welcher Ersatzeffekt zuerst angewendet wird.",
+    "orderSubtitle": "Diese Effekte ändern alle, wie dieses Ereignis abläuft. Ziehe, um die Reihenfolge festzulegen — der zuletzt angewendete Effekt ist der wirksame (CR 616.1).",
+    "appliedFirst": "Zuerst angewendet (wird überschrieben)",
+    "appliedLast": "Zuletzt angewendet — dieser gilt",
+    "resultLabel": "Ergebnis: {{outcome}}",
+    "confirmOrder": "Reihenfolge bestätigen",
+    "moveUp": "Nach vorne",
+    "moveDown": "Nach hinten",
+    "dragHint": "Zum Umsortieren ziehen oder die Pfeile benutzen.",
+    "chooseSubtitle": "Wähle, welcher Ersatzeffekt angewendet wird.",
     "candidateFallback": "Ersatzeffekt {{number}}"
   },
   "retargetChoice": {

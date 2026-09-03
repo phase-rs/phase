@@ -1037,6 +1037,7 @@ mod tests {
             player,
             candidate_count,
             candidates,
+            ..
         } = &state.waiting_for
         else {
             panic!(

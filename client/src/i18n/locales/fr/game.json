@@ -2253,7 +2253,15 @@
   "replacement": {
     "eyebrow": "Ordre de résolution",
     "title": "Effets de remplacement",
-    "subtitle": "Choisissez quel effet de remplacement s'applique en premier.",
+    "orderSubtitle": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : le dernier appliqué est celui qui prend effet (CR 616.1).",
+    "appliedFirst": "Appliqué en premier (sera écrasé)",
+    "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
+    "resultLabel": "Résultat : {{outcome}}",
+    "confirmOrder": "Confirmer l'ordre",
+    "moveUp": "Déplacer avant",
+    "moveDown": "Déplacer après",
+    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
     "candidateFallback": "Effet de remplacement {{number}}"
   },
   "retargetChoice": {

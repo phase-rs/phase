@@ -4111,6 +4111,7 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
         };
 
         assert!(cheap_reject_candidate(

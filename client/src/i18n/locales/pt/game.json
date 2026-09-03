@@ -2253,7 +2253,15 @@
   "replacement": {
     "eyebrow": "Ordem de Resolução",
     "title": "Efeitos de Substituição",
-    "subtitle": "Escolha qual efeito de substituição se aplica primeiro.",
+    "orderSubtitle": "Todos estes efeitos alteram como este evento acontece. Arraste para definir a ordem de aplicação — o último aplicado é o que prevalece (CR 616.1).",
+    "appliedFirst": "Aplicado primeiro (será sobrescrito)",
+    "appliedLast": "Aplicado por último — este prevalece",
+    "resultLabel": "Resultado: {{outcome}}",
+    "confirmOrder": "Confirmar ordem",
+    "moveUp": "Mover para antes",
+    "moveDown": "Mover para depois",
+    "dragHint": "Arraste para reordenar, ou use as setas.",
+    "chooseSubtitle": "Escolha qual efeito de substituição aplicar.",
     "candidateFallback": "Efeito de Substituição {{number}}"
   },
   "retargetChoice": {
