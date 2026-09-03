@@ -3231,9 +3231,13 @@ const ANNOUNCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// only, and an `http://` public URL would announce an address this server does
 /// not serve), or one whose host the directory contract refuses.
 ///
-/// Assembly only: every rule it could have inlined — scheme, host shape, field
-/// caps, normalisation — lives in `lobby_broker::directory` and is applied by
-/// the same [`validate_announcement`] the directory itself runs.
+/// Assembly only, with one deliberate exception: every rule it could have
+/// inlined — scheme, host shape, normalisation — lives in
+/// `lobby_broker::directory` and is applied by the same
+/// [`validate_announcement`] the directory itself runs. The exception is the
+/// name cap: `name` is the host truncated to [`MAX_SERVER_NAME_LEN`], while
+/// `url` keeps the full host, so a host too long to be a display name still
+/// yields an announceable address rather than no announcement at all.
 fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, String> {
     let public_url = state.public_url.as_deref().ok_or_else(|| {
         "no public URL to announce (--public-url is unset, or was dropped as malformed)".to_string()
@@ -3264,10 +3268,13 @@ fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, Strin
     //
     // Truncating by CHARACTERS, which is the unit `validate_required_label`
     // itself bounds (`value.chars().count()`), so this is the exact inverse of
-    // the check it has to satisfy and cannot split a codepoint. Rule 8 does
-    // guarantee an ASCII host — for which characters and bytes coincide — but
-    // it runs inside `validate_announcement`, i.e. after this line, so nothing
-    // here may assume it.
+    // the check it has to satisfy and cannot split a codepoint. Characters and
+    // bytes also coincide here, but the guarantee for that is `Url::host_str()`
+    // having already applied IDNA ToASCII on a special scheme — and the scheme
+    // was checked to be `https` above (measured: `https://bücher.example`
+    // parses to host `xn--bcher-kva.example`). That guarantee is UPSTREAM of
+    // this line. The directory contract's own ASCII rule is not: it runs inside
+    // `validate_announcement` below, so nothing here may lean on it.
     let name: String = host.chars().take(MAX_SERVER_NAME_LEN).collect();
     // `/ws` by construction: this server is describing its own route, and
     // `build_router` registers exactly that path.
@@ -3291,7 +3298,7 @@ fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, Strin
 ///
 /// `base` is already validated (built once by [`announcement_from_state`] at
 /// startup) and `client` is already built (by the caller, carrying
-/// [`ANNOUNCE_REQUEST_TIMEOUT`]), so this loop has NO setup path at all — it
+/// [`ANNOUNCE_REQUEST_TIMEOUT`]), so the task has no *fallible* setup — it
 /// cannot fail to build an announcement and it cannot fail to build a client.
 /// Both of those failures are the caller's single startup `error!`; building
 /// the client in here instead would put either a fourth outcome or a silent
@@ -3302,6 +3309,14 @@ fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, Strin
 /// `period` is a parameter so the test drives the real loop without a
 /// wall-clock minute; production passes [`ANNOUNCE_INTERVAL`]. The handle is
 /// returned only so that test can assert the task is still alive.
+///
+/// # Panics
+///
+/// `period` must be non-zero. `tokio::time::interval` panics on a zero period,
+/// and it would do so at the first poll *inside* the spawned task — precisely
+/// the unobservable failure mode the caller-built `client` exists to avoid,
+/// since production discards the handle. The `debug_assert!` below moves that
+/// failure onto the caller's thread instead.
 fn spawn_announce_task(
     endpoint: Url,
     client: reqwest::Client,
@@ -3309,6 +3324,12 @@ fn spawn_announce_task(
     player_count: SharedPlayerCount,
     period: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    // Deliberately in the synchronous body rather than beside the `interval`
+    // call it guards: a panic raised inside the spawned task is exactly the
+    // unobservable failure this assertion exists to catch, so it has to fire on
+    // the caller's thread to be worth anything. No runtime branch — the loop
+    // keeps exactly its three per-tick failure classes.
+    debug_assert!(!period.is_zero(), "announce period must be non-zero");
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         // A stalled process must not fire a burst of announcements on catch-up.
