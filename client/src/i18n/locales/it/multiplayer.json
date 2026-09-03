@@ -282,6 +282,8 @@
     "descriptionDraftLobby": "In attesa che i giocatori si uniscano al pod di draft.",
     "descriptionDeckSelectFormat": "Scegli un mazzo per {{format}}.",
     "descriptionDeckSelect": "Scegli il mazzo che vuoi portare online.",
+    "offlineUnavailableTitle": "Il multigiocatore non è disponibile offline.",
+    "offlineUnavailableDescription": "Riconnettiti o disattiva la modalità offline per ospitare o unirti a una partita multigiocatore.",
     "eyebrow": "Multigiocatore",
     "activeDeck": "Mazzo attivo",
     "edit": "Modifica",

@@ -19,6 +19,7 @@ import {
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 const SET_LABELS: Record<string, string> = {
   otj: "Outlaws of Thunder Junction",
@@ -76,6 +77,7 @@ export function DraftLandingPage() {
   // rather than duplicating the string into draft locales.
   const { t: tMenu } = useTranslation("menu");
   const navigate = useNavigate();
+  const effectiveOffline = useEffectiveOffline();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
   const [activeGuestPod, setActiveGuestPod] = useState<ActiveDraftGuestMeta | null>(null);
@@ -143,19 +145,25 @@ export function DraftLandingPage() {
                 tone="jade"
                 motif="network"
                 title={t("landing.podDraft.title")}
-                description={t("landing.podDraft.description")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.podDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <PodIcon className={cls} />}
                 onClick={() => navigate("/draft-pod")}
+                disabled={effectiveOffline}
               />
               <MenuActionTile
                 tone="arcane"
                 motif="network"
                 title={t("landing.commanderDraft.title")}
-                description={t("landing.commanderDraft.description")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.commanderDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <CrownIcon className={cls} />}
                 onClick={() => navigate(`/draft-pod?kind=${COMMANDER_DRAFT_ENTRY}`)}
+                disabled={effectiveOffline}
               />
             </div>
           </div>

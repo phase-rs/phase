@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   draftPodScreen,
+  isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
+import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
 import type { ActionRejection, EngineAdapter } from "../../adapter/types";
 import { actionRejectionError } from "../../adapter/types";
@@ -24,11 +26,18 @@ import {
 } from "../../services/intergameCommandLedger";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
+import { useConnectivityStore } from "../connectivityStore";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
 let capturedHostEventHandler: ((event: unknown) => void) | null = null;
 let capturedGuestEventHandler: ((event: unknown) => void) | null = null;
+
+const guestRecovery = vi.hoisted(() => ({
+  inspect: vi.fn(),
+  loadSession: vi.fn(),
+  clearIfCurrent: vi.fn(),
+}));
 
 const mockHostAdapter = {
   onEvent: vi.fn((handler: (event: unknown) => void) => {
@@ -130,6 +139,13 @@ vi.mock("../../adapter/draftPodGuestAdapter", () => ({
   }),
 }));
 
+vi.mock("../../services/draftPersistence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/draftPersistence")>()),
+  inspectActiveDraftGuest: guestRecovery.inspect,
+  loadDraftGuestSession: guestRecovery.loadSession,
+  clearActiveDraftGuestIfCurrent: guestRecovery.clearIfCurrent,
+}));
+
 vi.mock("../../adapter/wasm-adapter", () => ({
   WasmAdapter: wasmMatchAdapterMock.WasmAdapter,
 }));
@@ -216,6 +232,9 @@ describe("multiplayerDraftStore", () => {
     mockGuestAdapter.updateWorkspace.mockResolvedValue(undefined);
     capturedHostEventHandler = null;
     capturedGuestEventHandler = null;
+    guestRecovery.inspect.mockReturnValue({ type: "absent" });
+    guestRecovery.loadSession.mockResolvedValue(null);
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
     useMultiplayerDraftStore.getState().reset();
     useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
     wasmMatchAdapterMock.reset();
@@ -238,9 +257,32 @@ describe("multiplayerDraftStore", () => {
       expect(state.view).toBeNull();
       expect(state.seats).toEqual([]);
     });
+
+    it("recognizes only role-owned live pod phases", () => {
+      expect(isMultiplayerDraftPodLive({ role: "guest", phase: "connecting" })).toBe(true);
+      expect(isMultiplayerDraftPodLive({ role: "host", phase: "roundComplete" })).toBe(true);
+      expect(isMultiplayerDraftPodLive({ role: null, phase: "lobby" })).toBe(false);
+      expect(isMultiplayerDraftPodLive({ role: "guest", phase: "complete" })).toBe(false);
+    });
   });
 
   describe("hostDraft", () => {
+    it("does not replace the active adapter when effective offline already blocks hosting", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+      useConnectivityStore.setState({ forcedOffline: true });
+
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Other", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      })).resolves.toBe(false);
+
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+      expect(mockHostAdapter.dispose).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().error).toBe("offline.startUnavailable");
+    });
     it("hands a completed host session off before joining and gates its late events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
@@ -285,6 +327,71 @@ describe("multiplayerDraftStore", () => {
       expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(2);
     });
 
+    it("does not construct a same-session replacement after its held owner claim becomes offline", async () => {
+      const config = {
+        poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+        persistenceId: "shared-recovery",
+      };
+      const route = new AbortController();
+      await expect(useMultiplayerDraftStore.getState().hostDraft({ ...config, signal: route.signal })).resolves.toBe(true);
+
+      let releaseCleanup!: () => void;
+      mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }));
+      route.abort();
+      await vi.waitFor(() => expect(mockHostAdapter.dispose).toHaveBeenCalledOnce());
+
+      const replacement = useMultiplayerDraftStore.getState().hostDraft(config);
+      await Promise.resolve();
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+
+      useConnectivityStore.setState({ forcedOffline: true });
+      releaseCleanup();
+
+      await expect(replacement).resolves.toBe(false);
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
+    });
+
+    it("resets the detached lifecycle when its authorized replacement teardown settles offline", async () => {
+      const config = {
+        poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+      };
+      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toBe(true);
+
+      let releaseTeardown!: () => void;
+      mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseTeardown = resolve;
+      }));
+      const replacement = useMultiplayerDraftStore.getState().hostDraft(config);
+      await Promise.resolve();
+      useConnectivityStore.setState({ forcedOffline: true });
+      releaseTeardown();
+
+      await expect(replacement).resolves.toBe(false);
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
+    });
+
     it("disposes a superseded in-flight host after its late initialization resolves", async () => {
       let resolveHost!: () => void;
       mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -305,6 +412,25 @@ describe("multiplayerDraftStore", () => {
 
       expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
       expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+    });
+
+    it("keeps a host initialization that began online when connectivity changes before success", async () => {
+      let resolveHost!: () => void;
+      mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveHost = resolve;
+      }));
+
+      const hosting = useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+      await vi.waitFor(() => expect(mockHostAdapter.initialize).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ browserOnline: false });
+      resolveHost();
+
+      await expect(hosting).resolves.toBe(true);
+      expect(mockHostAdapter.dispose).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", phase: "connecting" });
     });
 
     it("releases an in-flight host when its owning route aborts", async () => {
@@ -330,6 +456,25 @@ describe("multiplayerDraftStore", () => {
       await expect(hosting).resolves.toBe(false);
       expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
       expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
+    });
+
+    it("cleans a current failed host after connectivity drops and reports the offline sentinel", async () => {
+      mockHostAdapter.initialize.mockImplementationOnce(async () => {
+        useConnectivityStore.setState({ forcedOffline: true });
+        throw new Error("host unavailable");
+      });
+
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      })).resolves.toBe(false);
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
     });
 
     it("releases an initialized host when its owning route later aborts", async () => {
@@ -606,6 +751,47 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("joinDraft", () => {
+    it("does not construct a guest adapter while effective offline", async () => {
+      useConnectivityStore.setState({ browserOnline: false });
+
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      })).resolves.toBe(false);
+
+      expect(capturedGuestEventHandler).toBeNull();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
+    });
+
+    it("resets the detached lifecycle when joining becomes offline during authorized teardown", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+      let releaseTeardown!: () => void;
+      mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseTeardown = resolve;
+      }));
+
+      const joining = useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+      await Promise.resolve();
+      useConnectivityStore.setState({ browserOnline: false });
+      releaseTeardown();
+
+      await expect(joining).resolves.toBe(false);
+      expect(vi.mocked(DraftPodGuestAdapter)).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
+    });
+
     it("sets role to guest and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
         kind: "new",
@@ -639,6 +825,42 @@ describe("multiplayerDraftStore", () => {
       resolveGuest();
       await joining;
       expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: true });
+    });
+
+    it("keeps a guest initialization that began online when connectivity changes before success", async () => {
+      let resolveGuest!: () => void;
+      mockGuestAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveGuest = resolve;
+      }));
+
+      const joining = useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      });
+      await vi.waitFor(() => expect(mockGuestAdapter.initialize).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ forcedOffline: true });
+      resolveGuest();
+
+      await expect(joining).resolves.toBe(true);
+      expect(mockGuestAdapter.dispose).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", phase: "connecting" });
+    });
+
+    it("cleans a current failed guest after connectivity drops and reports the offline sentinel", async () => {
+      mockGuestAdapter.initialize.mockImplementationOnce(async () => {
+        useConnectivityStore.setState({ browserOnline: false });
+        throw new Error("guest unavailable");
+      });
+
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "ABCDE", displayName: "Alice",
+      })).resolves.toBe(false);
+
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: true });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: null,
+        phase: "idle",
+        error: "offline.startUnavailable",
+      });
     });
 
     it("sets seatIndex and draftCode on joined event", async () => {
@@ -834,6 +1056,139 @@ describe("multiplayerDraftStore", () => {
       expect(state.phase).toBe("matchInProgress");
       expect(state.error).toBe("boom");
     });
+  });
+
+  describe("resumeDraft session reads", () => {
+    const locator = {
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      timestamp: 1,
+    };
+
+    beforeEach(() => {
+      guestRecovery.inspect.mockReturnValue({
+        type: "present",
+        meta: locator,
+        capture: locator,
+      });
+    });
+
+    it.each([
+      ["offline", () => {
+        useConnectivityStore.setState({ forcedOffline: true });
+        throw new Error("IndexedDB unavailable");
+      }, "offline", "offline.startUnavailable"],
+      ["ordinary", () => { throw new Error("IndexedDB unavailable"); }, "failed", null],
+    ])("maps a rejected guest session read by current ownership before %s handling", async (_label, reject, outcome, error) => {
+      guestRecovery.loadSession.mockImplementationOnce(async () => reject());
+
+      await expect(useMultiplayerDraftStore.getState().resumeDraft()).resolves.toBe(outcome);
+
+      expect(guestRecovery.clearIfCurrent).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().error).toBe(error);
+    });
+
+    it.each([
+      ["forced offline", { forcedOffline: true, browserOnline: true }],
+      ["browser offline", { forcedOffline: false, browserOnline: false }],
+    ] as const)("returns offline after a fulfilled guest session read becomes %s", async (_label, connectivity) => {
+      let resolveSession!: (value: { draftToken: string }) => void;
+      guestRecovery.loadSession.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveSession = resolve;
+      }));
+      const resuming = useMultiplayerDraftStore.getState().resumeDraft();
+      await vi.waitFor(() => expect(guestRecovery.loadSession).toHaveBeenCalledOnce());
+      useConnectivityStore.setState(connectivity);
+      resolveSession({ draftToken: "token" });
+
+      await expect(resuming).resolves.toBe("offline");
+      expect(guestRecovery.clearIfCurrent).not.toHaveBeenCalled();
+      expect(vi.mocked(DraftPodGuestAdapter)).not.toHaveBeenCalled();
+    });
+
+    it.each(["fulfillment", "rejection"] as const)("does not let an old guest session %s clear a newer join locator", async (settlement) => {
+      let resolveSession!: (value: { draftToken: string }) => void;
+      let rejectSession!: (reason: Error) => void;
+      guestRecovery.loadSession.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        resolveSession = resolve;
+        rejectSession = reject;
+      }));
+      const resuming = useMultiplayerDraftStore.getState().resumeDraft();
+      await vi.waitFor(() => expect(guestRecovery.loadSession).toHaveBeenCalledOnce());
+
+      guestRecovery.inspect.mockReturnValue({
+        type: "present",
+        meta: { ...locator, roomCode: "NEWER", timestamp: 2 },
+        capture: { ...locator, roomCode: "NEWER", timestamp: 2 },
+      });
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "NEWER", displayName: "Alice" });
+      if (settlement === "fulfillment") resolveSession({ draftToken: "old-token" });
+      else rejectSession(new Error("old session failed"));
+
+      await expect(resuming).resolves.toBe("superseded");
+      expect(guestRecovery.clearIfCurrent).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+    });
+
+    it.each(["fulfillment", "rejection"] as const)("does not let a stale guest session %s clobber a newer offline owner", async (settlement) => {
+      let resolveSession!: (value: { draftToken: string }) => void;
+      let rejectSession!: (reason: Error) => void;
+      guestRecovery.loadSession.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        resolveSession = resolve;
+        rejectSession = reject;
+      }));
+      const resuming = useMultiplayerDraftStore.getState().resumeDraft();
+      await vi.waitFor(() => expect(guestRecovery.loadSession).toHaveBeenCalledOnce());
+
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new", roomCode: "NEWER", displayName: "Alice",
+      })).resolves.toBe(true);
+      useConnectivityStore.setState({ forcedOffline: true });
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      })).resolves.toBe(false);
+
+      if (settlement === "fulfillment") resolveSession({ draftToken: "old-token" });
+      else rejectSession(new Error("old session failed"));
+
+      await expect(resuming).resolves.toBe("superseded");
+      expect(guestRecovery.clearIfCurrent).not.toHaveBeenCalled();
+      expect(vi.mocked(DraftPodGuestAdapter)).toHaveBeenCalledTimes(1);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        role: "guest",
+        phase: "connecting",
+        error: "offline.startUnavailable",
+      });
+    });
+  });
+
+  describe("resumeDraft offline admission", () => {
+    const capture = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-ABCDE", timestamp: 1 };
+    const fixtures = [
+      ["absent", { type: "absent" }],
+      ["present", { type: "present", meta: capture, capture }],
+      ["malformed", { type: "invalid", capture: null }],
+      ["expired", { type: "invalid", capture }],
+    ] as const;
+
+    for (const [offlineLabel, connectivity] of [
+      ["forced offline", { forcedOffline: true, browserOnline: true }],
+      ["browser offline", { forcedOffline: false, browserOnline: false }],
+    ] as const) {
+      it.each(fixtures)(`does not inspect or mutate a %s locator while ${offlineLabel}`, async (_fixtureLabel, fixture) => {
+        guestRecovery.inspect.mockReturnValue(fixture);
+        useConnectivityStore.setState(connectivity);
+
+        await expect(useMultiplayerDraftStore.getState().resumeDraft()).resolves.toBe("offline");
+
+        expect(guestRecovery.inspect).not.toHaveBeenCalled();
+        expect(guestRecovery.loadSession).not.toHaveBeenCalled();
+        expect(guestRecovery.clearIfCurrent).not.toHaveBeenCalled();
+        expect(vi.mocked(DraftPodGuestAdapter)).not.toHaveBeenCalled();
+      });
+    }
   });
 
   describe("leave", () => {

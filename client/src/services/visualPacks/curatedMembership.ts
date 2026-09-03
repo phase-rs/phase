@@ -7,6 +7,7 @@ import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import type { ArtChainEntry, CardArtOverride } from "../../stores/preferencesStore.ts";
 import { canonicalDescriptors, englishDescriptors } from "./browser/descriptors.ts";
 import type { CanonicalCardIdentity, DescriptorFace, ScryfallAssetDescriptor } from "./browser/descriptors.ts";
+import { decodeCandidateKey } from "./candidateKeys.ts";
 import { catalogRoot } from "./types.ts";
 import type { AssetKey, CatalogRoot, PackId } from "./types.ts";
 
@@ -142,6 +143,24 @@ function descriptorFaces(entry: CuratedCardEntry, faces: readonly ImageFace[]): 
  * digest, reports drift, and lets the delta sync fetch what is newly
  * displayed. That is what the drift mechanism is for.
  */
+function orderedSourceContexts(sources: readonly SourcePrinting[]): SourcePrinting[] {
+  return [...sources].sort((left, right) => {
+    const leftSet = left.setCode.toLowerCase();
+    const rightSet = right.setCode.toLowerCase();
+    const leftCollector = left.collectorNumber.toLowerCase();
+    const rightCollector = right.collectorNumber.toLowerCase();
+    return leftSet < rightSet ? -1 : leftSet > rightSet ? 1
+      : leftCollector < rightCollector ? -1 : leftCollector > rightCollector ? 1
+        : left.setCode < right.setCode ? -1 : left.setCode > right.setCode ? 1
+          : left.collectorNumber < right.collectorNumber ? -1 : left.collectorNumber > right.collectorNumber ? 1 : 0;
+  });
+}
+
+/**
+ * Stored/no-source selection is the planner-primary authority. Deck-source
+ * contexts follow in a case-insensitive stable order with original-value ties
+ * so the emitted fallback never depends on saved-deck or map iteration order.
+ */
 function selectedPrintings(
   oracleId: string,
   printings: PrintingEntry[],
@@ -150,11 +169,26 @@ function selectedPrintings(
 ): PrintingEntry[] {
   const { artChain, artOverrides } = input;
   const byId = new Map<string, PrintingEntry>();
-  for (const source of [undefined, ...sources]) {
+  for (const source of [undefined, ...orderedSourceContexts(sources)]) {
     const printing = selectedPrinting(oracleId, printings, artChain, artOverrides, source);
+    // Source contexts remain distinct through selection because collector
+    // annotations can be case-sensitive. Only successful printing identity is
+    // deduplicated, after the authority has resolved it.
     if (printing) byId.set(printing.id, printing);
   }
   return [...byId.values()];
+}
+
+/** Only one exact printing may answer broad oracle/name semantic lookup for a
+ * card. Source-specific identity remains on every English descriptor. */
+function withoutBroadSemanticCandidates(descriptor: ScryfallAssetDescriptor): ScryfallAssetDescriptor {
+  return {
+    ...descriptor,
+    candidateKeys: descriptor.candidateKeys.filter((key) => {
+      const [kind] = decodeCandidateKey(key);
+      return kind !== "oracle_face" && kind !== "name_face";
+    }),
+  };
 }
 
 function cardDescriptors(
@@ -179,14 +213,20 @@ function cardDescriptors(
     input,
     sources,
   );
-  const exact = printings.flatMap((printing) => englishDescriptors(input.packId, {
-    id: printing.id,
-    oracleId: candidateOracleId,
-    set: printing.set,
-    collector: printing.collector_number,
-    name: entry.name,
-    faces: descriptorFaces(entry, printing.faces),
+  const selected = printings.map((printing) => ({
+    printing,
+    descriptors: englishDescriptors(input.packId, {
+      id: printing.id,
+      oracleId: candidateOracleId,
+      set: printing.set,
+      collector: printing.collector_number,
+      name: entry.name,
+      faces: descriptorFaces(entry, printing.faces),
+    }),
   }));
+  const primary = selected.find(({ descriptors }) => descriptors.length > 0)?.printing.id;
+  const exact = selected.flatMap(({ printing, descriptors }) =>
+    printing.id === primary ? descriptors : descriptors.map(withoutBroadSemanticCandidates));
   // A card that produced NO `exact_printing` descriptor falls back to the
   // canonical form, and one that produced any never emits it. The trigger is
   // stated as "emitted nothing" rather than "selected nothing" because the

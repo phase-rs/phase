@@ -105,7 +105,8 @@ const podStore = vi.hoisted(() => ({
 
 const router = vi.hoisted(() => ({ navigate: vi.fn() }));
 
-vi.mock("../../stores/multiplayerDraftStore", () => {
+vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../stores/multiplayerDraftStore")>();
   const hook = Object.assign(
     (selector: (state: typeof store.state) => unknown) => selector(store.state),
     {
@@ -114,6 +115,7 @@ vi.mock("../../stores/multiplayerDraftStore", () => {
     },
   );
   return {
+    ...actual,
     useMultiplayerDraftStore: hook,
     draftPodScreen: (state: typeof store.state) => state.phase,
     intergamePromptKey: () => null,

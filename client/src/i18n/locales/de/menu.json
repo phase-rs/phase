@@ -143,6 +143,7 @@
     "lastRefreshed": "Zuletzt aktualisiert: {{date}}",
     "addCustomFeed": "Eigenen Feed hinzufügen",
     "add": "Hinzufügen",
+    "offlineUnavailable": "Feed-Aktualisierungen sind offline nicht verfügbar.",
     "done": "Fertig"
   },
   "importDeck": {
@@ -165,6 +166,7 @@
     "confirmOathbreakerImport": "Oathbreaker-Deck importieren",
     "backToImport": "Zurück zum Import",
     "errorInvalidUrl": "Gib eine gültige Moxfield- oder Archidekt-Deck-URL ein.",
+    "errorOffline": "URL-Importe sind offline nicht verfügbar. Nutze Text einfügen oder Aus Datei.",
     "errorNetworkFailure": "Der Deck-Import-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
     "errorGeneric": "Deck-Import fehlgeschlagen.",
     "errorNoOathbreaker": "Diese Liste enthält keinen zulässigen Oathbreaker.",

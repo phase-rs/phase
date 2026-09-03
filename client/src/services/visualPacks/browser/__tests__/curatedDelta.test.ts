@@ -69,7 +69,18 @@ const BOLT_MID = printing("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "mh1", "2019-0
 const BOLT_OLD = printing("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "lea", "1993-08-05");
 
 function cardEntry(oracleId: string, name: string, faceName: string) {
-  return { oracle_id: oracleId, name, face_names: [faceName], faces: [imageFace(oracleId)] };
+  return {
+    oracle_id: oracleId,
+    name,
+    face_names: [faceName],
+    faces: [imageFace(oracleId)],
+    mana_cost: "",
+    cmc: 0,
+    type_line: "",
+    colors: [],
+    color_identity: [],
+    keywords: [],
+  };
 }
 
 const BOLT_ENTRY = cardEntry(BOLT, "Lightning Bolt", "lightning bolt");

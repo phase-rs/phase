@@ -172,6 +172,7 @@
     "signedInAs": "Angemeldet als {{name}}",
     "syncNow": "Jetzt synchronisieren",
     "statusSyncing": "Wird synchronisiert…",
+    "statusPaused": "Die Cloud-Synchronisierung ist pausiert, während du offline bist.",
     "statusError": "Synchronisierung fehlgeschlagen",
     "lastSynced": "Zuletzt synchronisiert {{time}}",
     "never": "nie",
@@ -211,6 +212,7 @@
   "visualPacks": {
     "title": "Offline-visueller Katalog",
     "description": "Wählen Sie aus, welche vertrauenswürdigen Kartenbilder auf diesem Gerät gespeichert werden sollen, oder installieren Sie den vollständigen aktuellen Katalog.",
+    "offlineUnavailable": "Netzwerkdownloads sind offline nicht verfügbar. Stellen Sie die Verbindung wieder her, um den Katalog zu aktualisieren oder Bilder zu installieren, zu synchronisieren, zu reparieren oder fortzusetzen.",
     "availability": {
       "loading": "Unterstützung für visuelle Offline-Kataloge wird geprüft …",
       "browser": "Offline-Bilddownloads sind in diesem Build nicht konfiguriert.",
@@ -399,6 +401,21 @@
       "combat": "Zeitpunkt des Kampfschadens — wie lange Blocker und Angreifer verweilen, bevor der Schaden abgehandelt wird.",
       "banners": "Anzeige des Banners zu Zugbeginn."
     }
+  },
+  "offlinePreparation": {
+    "title": "Offline-Vorbereitung",
+    "description": "Bereite diesen Desktop auf lokales Offline-Spiel vor, bevor Offline arbeiten aktiviert wird.",
+    "prepare": "Für Offline vorbereiten",
+    "preparing": "Wird vorbereitet…",
+    "workOffline": "Offline arbeiten",
+    "checklistLabel": "Offline-Bereitschaftsliste",
+    "visualWarning": "Installierte Bildpakete benötigen Aufmerksamkeit. Öffne Bildpakete zur Reparatur; lokales Spiel bleibt verfügbar.",
+    "incompleteTitle": "Offline-Vorbereitung ist unvollständig",
+    "incompleteMessage": "Fehlt: {{capabilities}}. Offline arbeiten trotzdem aktivieren?",
+    "confirmOffline": "Offline arbeiten aktivieren",
+    "states": { "needs-preparation": "Bereite dieses Gerät vor dem Offline-Arbeiten vor.", "preparing": "Lokale Spielfunktionen werden vorbereitet…", "ready": "Dieses Gerät ist für lokales Offline-Spiel bereit.", "failed": "Einige erforderliche Funktionen sind nicht bereit.", "reconnect-required": "Stelle die Verbindung wieder her, bevor du Offline-Spiel vorbereitest.", "reload-or-relaunch-required": "Lade die App neu oder starte den Desktop neu und bereite erneut vor." },
+    "capabilities": { "appShell": "App-Shell", "browserEngine": "Browser-Engine und Kartendatenbank", "scryfallSearch": "Kartensuchdaten", "preconCatalog": "Vorgefertigte Decks", "bundledAiCatalog": "KI-Deckkatalog", "deckLibrary": "Installierte Deckbibliothek", "nativeEngine": "Native Engine" },
+    "capabilityStates": { "ready": "Bereit", "not-ready": "Nicht bereit", "reload-required": "Neuladen erforderlich", "not-applicable": "Nicht anwendbar", "not-installed": "Nicht installiert" }
   },
   "artChain": {
     "emptyState": "Standard-Scryfall-Artwork wird verwendet. Füge unten Regeln hinzu, um anzupassen.",

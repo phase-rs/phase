@@ -282,6 +282,8 @@
     "descriptionDraftLobby": "Warten, bis Spieler dem Draft-Pod beitreten.",
     "descriptionDeckSelectFormat": "Wähle ein Deck für {{format}}.",
     "descriptionDeckSelect": "Wähle das Deck, das du online mitbringen möchtest.",
+    "offlineUnavailableTitle": "Mehrspieler ist offline nicht verfügbar.",
+    "offlineUnavailableDescription": "Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um ein Mehrspielerspiel zu hosten oder ihm beizutreten.",
     "eyebrow": "Mehrspieler",
     "activeDeck": "Aktives Deck",
     "edit": "Bearbeiten",

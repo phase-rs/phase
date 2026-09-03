@@ -9,6 +9,19 @@ pub enum NativeEngineKey {
     Release { version: String },
     Preview { fingerprint: String },
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeEngineIntent {
+    StartOnline,
+    StartOffline,
+    PrepareForOffline,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct NativeEngineCapabilities {
+    pub intent_contract: u8,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct NativeEngineReady {
     pub port: u16,
@@ -129,6 +142,26 @@ mod tests {
             })
             .unwrap(),
             r#"{"preview":{"fingerprint":"0123456789abcdef"}}"#
+        );
+    }
+
+    #[test]
+    fn native_engine_intent_and_capability_preserve_the_exact_wire_contract() {
+        assert_eq!(
+            serde_json::to_string(&NativeEngineIntent::StartOnline).unwrap(),
+            r#""start_online""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NativeEngineIntent::StartOffline).unwrap(),
+            r#""start_offline""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NativeEngineIntent::PrepareForOffline).unwrap(),
+            r#""prepare_for_offline""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NativeEngineCapabilities { intent_contract: 1 }).unwrap(),
+            r#"{"intent_contract":1}"#
         );
     }
 

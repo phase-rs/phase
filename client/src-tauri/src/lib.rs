@@ -47,6 +47,7 @@ pub fn run() {
             migration::confirm_legacy_import,
             migration::mark_remote_load_ok,
             native_engine::ensure_native_engine,
+            native_engine::native_engine_capabilities,
             native_engine::native_engine_progress,
             native_engine::stop_native_engine,
             native_bridge::connect_native_engine,
@@ -64,6 +65,7 @@ pub fn run() {
         migration::confirm_legacy_import,
         migration::mark_remote_load_ok,
         mobile_compat::ensure_native_engine,
+        mobile_compat::native_engine_capabilities,
         mobile_compat::native_engine_progress,
         mobile_compat::stop_native_engine,
         mobile_compat::connect_native_engine,
@@ -360,24 +362,72 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("gen/android/app/src/main");
         let launchers = [
             ("res/mipmap-mdpi/ic_launcher.png", 48, 0x5c1ab8a4b9388839),
-            ("res/mipmap-mdpi/ic_launcher_round.png", 48, 0x59147ebcc4d03aee),
-            ("res/mipmap-mdpi/ic_launcher_foreground.png", 108, 0x7475638e0402146d),
+            (
+                "res/mipmap-mdpi/ic_launcher_round.png",
+                48,
+                0x59147ebcc4d03aee,
+            ),
+            (
+                "res/mipmap-mdpi/ic_launcher_foreground.png",
+                108,
+                0x7475638e0402146d,
+            ),
             ("res/mipmap-hdpi/ic_launcher.png", 72, 0x6617db678c75ce93),
-            ("res/mipmap-hdpi/ic_launcher_round.png", 72, 0x4f89bf39172434e8),
-            ("res/mipmap-hdpi/ic_launcher_foreground.png", 162, 0x117a6af2e6fc0ba6),
+            (
+                "res/mipmap-hdpi/ic_launcher_round.png",
+                72,
+                0x4f89bf39172434e8,
+            ),
+            (
+                "res/mipmap-hdpi/ic_launcher_foreground.png",
+                162,
+                0x117a6af2e6fc0ba6,
+            ),
             ("res/mipmap-xhdpi/ic_launcher.png", 96, 0x093ba5f2f7965ec2),
-            ("res/mipmap-xhdpi/ic_launcher_round.png", 96, 0x4b3df36bd3042bc2),
-            ("res/mipmap-xhdpi/ic_launcher_foreground.png", 216, 0xf53f6d79f95ca531),
+            (
+                "res/mipmap-xhdpi/ic_launcher_round.png",
+                96,
+                0x4b3df36bd3042bc2,
+            ),
+            (
+                "res/mipmap-xhdpi/ic_launcher_foreground.png",
+                216,
+                0xf53f6d79f95ca531,
+            ),
             ("res/mipmap-xxhdpi/ic_launcher.png", 144, 0xff0c47390df3221d),
-            ("res/mipmap-xxhdpi/ic_launcher_round.png", 144, 0xd35d38485496323b),
-            ("res/mipmap-xxhdpi/ic_launcher_foreground.png", 324, 0x67326e67177dc7d1),
-            ("res/mipmap-xxxhdpi/ic_launcher.png", 192, 0x8392d43e0239107d),
-            ("res/mipmap-xxxhdpi/ic_launcher_round.png", 192, 0x1d2a7149b7716eff),
-            ("res/mipmap-xxxhdpi/ic_launcher_foreground.png", 432, 0x361ec69b50f865b4),
+            (
+                "res/mipmap-xxhdpi/ic_launcher_round.png",
+                144,
+                0xd35d38485496323b,
+            ),
+            (
+                "res/mipmap-xxhdpi/ic_launcher_foreground.png",
+                324,
+                0x67326e67177dc7d1,
+            ),
+            (
+                "res/mipmap-xxxhdpi/ic_launcher.png",
+                192,
+                0x8392d43e0239107d,
+            ),
+            (
+                "res/mipmap-xxxhdpi/ic_launcher_round.png",
+                192,
+                0x1d2a7149b7716eff,
+            ),
+            (
+                "res/mipmap-xxxhdpi/ic_launcher_foreground.png",
+                432,
+                0x361ec69b50f865b4,
+            ),
         ];
         for (relative, expected_size, expected_hash) in launchers {
             let bytes = fs::read(root.join(relative)).unwrap();
-            assert_eq!(png_dimensions(&bytes), (expected_size, expected_size), "{relative}");
+            assert_eq!(
+                png_dimensions(&bytes),
+                (expected_size, expected_size),
+                "{relative}"
+            );
             assert_eq!(fnv1a64(&bytes), expected_hash, "{relative}");
         }
 
@@ -406,7 +456,10 @@ mod tests {
             "res/drawable/ic_launcher_background.xml",
             "res/drawable-v24/ic_launcher_foreground.xml",
         ] {
-            assert!(!root.join(obsolete_stock_asset).exists(), "{obsolete_stock_asset}");
+            assert!(
+                !root.join(obsolete_stock_asset).exists(),
+                "{obsolete_stock_asset}"
+            );
         }
     }
 
@@ -617,6 +670,10 @@ mod tests {
         let app_permissions = acl_manifests["__app-acl__"]["permissions"]
             .as_object()
             .unwrap();
+        assert_eq!(
+            app_permissions["allow-ensure-native-engine"]["commands"]["allow"],
+            json!(["ensure_native_engine", "native_engine_capabilities"])
+        );
         for capability in [common_local, common_remote] {
             for permission in capability_permissions(capability) {
                 if permission.starts_with("allow-") {

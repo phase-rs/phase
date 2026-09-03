@@ -7,14 +7,20 @@ const mocks = vi.hoisted(() => ({
   leave: vi.fn(),
 }));
 
-vi.mock("../../stores/draftSpectatorStore", () => ({
+// `normalizeSpectatorDraftCode` stays the real one: the page's code
+// normalisation is what these assertions are checking, so stubbing it would
+// let a broken normalisation pass. Only the store HOOK is replaced.
+vi.mock("../../stores/draftSpectatorStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/draftSpectatorStore")>()),
   useDraftSpectatorStore: (
     selector: (state: Record<string, unknown>) => unknown,
   ) =>
     selector({
+      draftCode: null,
       status: "idle",
       view: null,
       error: null,
+      session: null,
       watchDraft: mocks.watchDraft,
       leave: mocks.leave,
     }),

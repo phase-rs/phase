@@ -282,6 +282,8 @@
     "descriptionDraftLobby": "Oczekiwanie na graczy dołączających do grupy draftu.",
     "descriptionDeckSelectFormat": "Wybierz talię dla formatu {{format}}.",
     "descriptionDeckSelect": "Wybierz talię, którą chcesz wystawić online.",
+    "offlineUnavailableTitle": "Tryb wieloosobowy jest niedostępny offline.",
+    "offlineUnavailableDescription": "Połącz się ponownie lub wyłącz Tryb Offline, aby hostować lub dołączyć do gry wieloosobowej.",
     "eyebrow": "Rozgrywka sieciowa",
     "activeDeck": "Aktywna talia",
     "edit": "Edytuj",

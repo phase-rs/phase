@@ -15,6 +15,7 @@ import {
 } from "../../constants/storage";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 import { useDeckFolders } from "../../hooks/useDeckFolders";
 import { DeckActionsMenu } from "./DeckActionsMenu";
 import { FolderActionsMenu } from "./FolderActionsMenu";
@@ -636,6 +637,7 @@ export function MyDecks({
   onActiveDeckCompatChange,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
+  const effectiveOffline = useEffectiveOffline();
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);
   const [showImport, setShowImport] = useState(false);
@@ -1375,6 +1377,7 @@ export function MyDecks({
   };
 
   const handleRefreshAll = async () => {
+    if (effectiveOffline) return;
     setIsRefreshing(true);
     try {
       await refreshAllFeeds();
@@ -1568,10 +1571,15 @@ export function MyDecks({
         )}
         {mode === "manage" && activeTab === "subscriptions" && (
           <div className="flex flex-wrap gap-2 self-start sm:self-auto">
+            {effectiveOffline && (
+              <p className="w-full text-xs text-amber-200 sm:w-auto sm:self-center">
+                {t("feedManager.offlineUnavailable")}
+              </p>
+            )}
             <button
               onClick={handleRefreshAll}
-              disabled={isRefreshing}
-              className={menuButtonClass({ tone: "neutral", size: "sm", disabled: isRefreshing })}
+              disabled={effectiveOffline || isRefreshing}
+              className={menuButtonClass({ tone: "neutral", size: "sm", disabled: effectiveOffline || isRefreshing })}
             >
               {isRefreshing ? t("myDecks.refreshing") : t("myDecks.refreshAll")}
             </button>

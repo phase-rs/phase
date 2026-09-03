@@ -282,6 +282,8 @@
     "descriptionDraftLobby": "En attente que des joueurs rejoignent le pod de draft.",
     "descriptionDeckSelectFormat": "Choisissez un deck pour {{format}}.",
     "descriptionDeckSelect": "Choisissez le deck que vous voulez amener en ligne.",
+    "offlineUnavailableTitle": "Le multijoueur n’est pas disponible hors ligne.",
+    "offlineUnavailableDescription": "Reconnectez-vous ou désactivez le mode hors ligne pour héberger ou rejoindre une partie multijoueur.",
     "eyebrow": "Multijoueur",
     "activeDeck": "Deck actif",
     "edit": "Modifier",

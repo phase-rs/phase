@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router";
 
@@ -40,6 +40,7 @@ import {
 } from "../stores/multiplayerDraftStore";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
 type ConnectionMode = "server" | "p2p";
@@ -85,6 +86,32 @@ type PendingAction =
     };
 
 export function MultiplayerPage() {
+  const effectiveOffline = useEffectiveOffline();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [view, setView] = useState<MultiplayerView>(() => (
+    parseViewParam(new URLSearchParams(location.search).get("view"))
+  ));
+
+  useEffect(() => {
+    if (!effectiveOffline || view === "draft-lobby" || view === "lobby") return;
+    setView("lobby");
+  }, [effectiveOffline, view]);
+
+  if (effectiveOffline) {
+    return <MultiplayerOfflineUnavailable onHome={() => navigate("/")} />;
+  }
+
+  return <MultiplayerPageContent view={view} setView={setView} />;
+}
+
+function MultiplayerPageContent({
+  view,
+  setView,
+}: {
+  view: MultiplayerView;
+  setView: Dispatch<SetStateAction<MultiplayerView>>;
+}) {
   const { t } = useTranslation("multiplayer");
   useAudioContext("lobby");
   const navigate = useNavigate();
@@ -115,9 +142,6 @@ export function MultiplayerPage() {
   const joinDraft = useMultiplayerDraftStore((s) => s.joinDraft);
   const leaveDraft = useMultiplayerDraftStore((s) => s.leave);
 
-  const [view, setView] = useState<MultiplayerView>(() => (
-    parseViewParam(new URLSearchParams(location.search).get("view"))
-  ));
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   // Initial mode tracks `hostingServer`: if the user has picked "None" in
   // `ServerPicker` (the `null` direct-codes sentinel), skip straight to P2P
@@ -1004,6 +1028,36 @@ export function MultiplayerPage() {
           onDismiss={() => setJoinErrorDialog(null)}
         />
       )}
+    </div>
+  );
+}
+
+function MultiplayerOfflineUnavailable({ onHome }: { onHome: () => void }) {
+  const { t } = useTranslation(["multiplayer", "menu"]);
+  const embedded = useInShell();
+
+  return (
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      {!embedded && <MenuParticles />}
+      <div className="menu-scene__vignette" />
+      <div className="menu-scene__sigil menu-scene__sigil--left" />
+      <div className="menu-scene__sigil menu-scene__sigil--right" />
+      <div className="menu-scene__haze" />
+      <MenuShell
+        eyebrow={t("page.eyebrow", { ns: "multiplayer" })}
+        title={t("page.offlineUnavailableTitle", { ns: "multiplayer" })}
+        description={t("page.offlineUnavailableDescription", { ns: "multiplayer" })}
+        layout="stacked"
+      >
+        <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col items-start gap-4 px-5 py-6">
+          <button
+            onClick={onHome}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("nav.home", { ns: "menu" })}
+          </button>
+        </MenuPanel>
+      </MenuShell>
     </div>
   );
 }

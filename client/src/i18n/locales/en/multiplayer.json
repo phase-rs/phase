@@ -282,6 +282,8 @@
     "descriptionDraftLobby": "Waiting for players to join the draft pod.",
     "descriptionDeckSelectFormat": "Pick a deck for {{format}}.",
     "descriptionDeckSelect": "Pick the deck you want to bring online.",
+    "offlineUnavailableTitle": "Multiplayer is unavailable while offline.",
+    "offlineUnavailableDescription": "Reconnect or turn off Offline Mode to host or join a multiplayer game.",
     "eyebrow": "Multiplayer",
     "activeDeck": "Active Deck",
     "edit": "Edit",

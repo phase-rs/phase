@@ -172,6 +172,7 @@
     "signedInAs": "Connecté en tant que {{name}}",
     "syncNow": "Synchroniser maintenant",
     "statusSyncing": "Synchronisation…",
+    "statusPaused": "La synchronisation cloud est en pause pendant que vous êtes hors ligne.",
     "statusError": "Échec de la synchronisation",
     "lastSynced": "Dernière synchronisation {{time}}",
     "never": "jamais",
@@ -211,6 +212,7 @@
   "visualPacks": {
     "title": "Catalogue visuel hors ligne",
     "description": "Choisissez les images de cartes de confiance à conserver sur cet appareil ou installez le catalogue complet actuel.",
+    "offlineUnavailable": "Les téléchargements réseau ne sont pas disponibles hors ligne. Reconnectez-vous pour mettre à jour le catalogue ou installer, synchroniser, réparer ou reprendre les images.",
     "availability": {
       "loading": "Vérification de la prise en charge du catalogue visuel hors ligne…",
       "browser": "Les téléchargements d'images hors ligne ne sont pas configurés dans cette version.",
@@ -399,6 +401,21 @@
       "combat": "Minutage des blessures de combat : combien de temps les bloqueurs et les attaquants restent avant que les blessures soient infligées.",
       "banners": "Affichage de la bannière de début de tour."
     }
+  },
+  "offlinePreparation": {
+    "title": "Préparation hors ligne",
+    "description": "Préparez ce bureau pour le jeu local hors ligne avant d’activer le travail hors ligne.",
+    "prepare": "Préparer hors ligne",
+    "preparing": "Préparation…",
+    "workOffline": "Travailler hors ligne",
+    "checklistLabel": "Liste de préparation hors ligne",
+    "visualWarning": "Les packs visuels installés nécessitent une attention. Ouvrez-les pour les réparer ; le jeu local reste disponible.",
+    "incompleteTitle": "La préparation hors ligne est incomplète",
+    "incompleteMessage": "Manquant : {{capabilities}}. Activer le travail hors ligne quand même ?",
+    "confirmOffline": "Activer le travail hors ligne",
+    "states": { "needs-preparation": "Préparez cet appareil avant de travailler hors ligne.", "preparing": "Préparation des capacités de jeu local…", "ready": "Cet appareil est prêt pour le jeu local hors ligne.", "failed": "Certaines capacités requises ne sont pas prêtes.", "reconnect-required": "Reconnectez-vous avant de préparer le jeu hors ligne.", "reload-or-relaunch-required": "Rechargez l’application ou relancez le bureau, puis réessayez." },
+    "capabilities": { "appShell": "Application", "browserEngine": "Moteur navigateur et base de cartes", "scryfallSearch": "Données de recherche", "preconCatalog": "Decks préconstruits", "bundledAiCatalog": "Catalogue de decks IA", "deckLibrary": "Bibliothèque de decks installée", "nativeEngine": "Moteur natif" },
+    "capabilityStates": { "ready": "Prêt", "not-ready": "Non prêt", "reload-required": "Rechargement requis", "not-applicable": "Non applicable", "not-installed": "Non installé" }
   },
   "artChain": {
     "emptyState": "Utilisation de l'illustration Scryfall par défaut. Ajoutez des règles ci-dessous pour personnaliser.",

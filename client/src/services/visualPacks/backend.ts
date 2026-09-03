@@ -123,3 +123,26 @@ export interface VisualPackBackend {
   subscribeProgress(listener: (event: ProgressEvent) => void): Promise<() => void>;
   subscribeRevision(listener: (event: RevisionEvent) => void): Promise<() => void>;
 }
+
+/**
+ * Optional lifecycle control for automatic deck-library reconciliation.
+ *
+ * Manual/resolution-only backends intentionally need not implement this: the
+ * scheduler must have this capability before it can dispatch background work.
+ */
+export interface DeckLibraryBackgroundLifecycle {
+  setDeckLibraryBackgroundPaused(paused: boolean): Promise<void>;
+  prepareDeckLibraryForOffline(): Promise<DeckLibraryPreparationResult>;
+}
+
+/** The installed Deck Catalog's state after an awaited background reconciliation. */
+export type DeckLibraryPreparationResult = "not-installed" | "ready";
+
+export function isDeckLibraryBackgroundLifecycle(
+  backend: VisualPackBackend,
+): backend is VisualPackBackend & DeckLibraryBackgroundLifecycle {
+  return "setDeckLibraryBackgroundPaused" in backend
+    && typeof backend.setDeckLibraryBackgroundPaused === "function"
+    && "prepareDeckLibraryForOffline" in backend
+    && typeof backend.prepareDeckLibraryForOffline === "function";
+}

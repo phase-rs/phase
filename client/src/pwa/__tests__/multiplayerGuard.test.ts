@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore";
 import {
+  isMultiplayerDraftPodLive,
   type MultiplayerDraftPhase,
   useMultiplayerDraftStore,
 } from "../../stores/multiplayerDraftStore";
@@ -11,7 +12,7 @@ import {
   whenMultiplayerGameEnds,
 } from "../multiplayerGuard";
 
-const LIVE_DRAFT_PHASES: MultiplayerDraftPhase[] = [
+const liveDraftPhases: MultiplayerDraftPhase[] = [
   "connecting",
   "lobby",
   "drafting",
@@ -44,10 +45,11 @@ describe("multiplayerGuard", () => {
     setDraftPod(null, "idle");
   });
 
-  it.each(LIVE_DRAFT_PHASES)("keeps update actions parked during draft pod %s", (phase) => {
+  it.each(liveDraftPhases)("keeps update actions parked during draft pod %s", (phase) => {
     setDraftPod("guest", phase);
 
     expect(isMultiplayerGameLive()).toBe(true);
+    expect(isMultiplayerDraftPodLive(useMultiplayerDraftStore.getState())).toBe(true);
   });
 
   it.each<MultiplayerDraftPhase>(["idle", "complete", "error", "kicked", "hostLeft"])(

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchDeckFromUrl, isSupportedDeckUrl, IMPORT_ERROR_KEYS } from "../deckUrlImport";
 import { detectAndParseDeck, resolveCommander, type ParsedDeck } from "../deckParser";
+import { useConnectivityStore } from "../../stores/connectivityStore";
 
 // resolveCommander delegates commander eligibility to the WASM engine; every
 // fixture below carries an explicit commander/sideboard so resolveCommander
@@ -13,6 +14,7 @@ vi.mock("../engineRuntime", () => ({
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
 function mockWorkerText(text: string): void {
@@ -91,6 +93,24 @@ describe("fetchDeckFromUrl", () => {
     await expect(fetchDeckFromUrl("https://example.com/decks/abc")).rejects.toThrow(
       IMPORT_ERROR_KEYS.invalidUrl,
     );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a valid URL offline without fetching", async () => {
+    global.fetch = vi.fn();
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(fetchDeckFromUrl("https://moxfield.com/decks/abc")).rejects.toThrow(
+      IMPORT_ERROR_KEYS.offline,
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps malformed URLs invalid while offline", async () => {
+    global.fetch = vi.fn();
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(fetchDeckFromUrl("nonsense")).rejects.toThrow(IMPORT_ERROR_KEYS.invalidUrl);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 

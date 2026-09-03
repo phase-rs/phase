@@ -384,6 +384,12 @@
     "viewResults": "Ergebnisse anzeigen",
     "setIconAlt": "{{code}} Symbol"
   },
+  "offline": {
+    "unavailableTitle": "Mehrspieler-Draft ist offline nicht verfügbar.",
+    "unavailableDescription": "Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um einen Mehrspieler-Draft zu hosten, ihm beizutreten, ihn zu starten oder anzusehen.",
+    "startUnavailable": "Ein Mehrspieler-Draft kann offline nicht gestartet werden. Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um fortzufahren.",
+    "watchUnavailable": "Ein Mehrspieler-Draft kann offline nicht angesehen werden. Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um fortzufahren."
+  },
   "podPhase": {
     "lobby": "Lobby",
     "drafting": "Draften",
@@ -418,6 +424,7 @@
     "exportUrl": "CubeCobra-Export-URL",
     "exportUrlPlaceholder": "Füge eine rohe Export-URL ein oder füge die Liste unten ein",
     "loadUrl": "URL laden",
+    "offlineUrlUnavailable": "Das Laden von Cube-Listen per URL ist offline nicht verfügbar.",
     "deckAddables": "Hinzufügbare Deck-Karten",
     "addablesStandardBasics": "Standard-Standardländer",
     "addablesBasicsPlusCustom": "Standardländer plus eigene",

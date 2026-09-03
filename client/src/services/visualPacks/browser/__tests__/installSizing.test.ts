@@ -61,7 +61,18 @@ function printing(id: string, set: string, releasedAt: string): PrintingEntry {
 }
 
 function cardEntry(oracleId: string, name: string, faceName: string) {
-  return { oracle_id: oracleId, name, face_names: [faceName], faces: [imageFace(oracleId)] };
+  return {
+    oracle_id: oracleId,
+    name,
+    face_names: [faceName],
+    faces: [imageFace(oracleId)],
+    mana_cost: "",
+    cmc: 0,
+    type_line: "",
+    colors: [],
+    color_identity: [],
+    keywords: [],
+  };
 }
 
 const BOLT_ENTRY = cardEntry(BOLT, "Lightning Bolt", "lightning bolt");
