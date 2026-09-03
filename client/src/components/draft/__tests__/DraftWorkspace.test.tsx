@@ -1539,6 +1539,54 @@ describe("draft workspace shell", () => {
       .toHaveTextContent("Pick in progress.");
   });
 
+  it("preserves_loaded_workspace_images_through_a_pick_lock", () => {
+    const cards = [card("deck", "Deck Card"), card("side", "Sideboard Card")];
+    const workspace = state({
+      deck: { zone: "deck", row: 0, column: 0, order: 0 },
+      side: { zone: "sideboard", row: 0, column: 0, order: 0 },
+    });
+    const sharedProps = {
+      pool: cards,
+      poolGroups: groups(cards),
+      workspace,
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+    };
+    const expanded = render(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: false })} interactionLocked={false} />,
+    );
+    const deckImage = screen.getByAltText("Deck Card");
+    const sideboardImage = screen.getByAltText("Sideboard Card");
+
+    expanded.rerender(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: false })} interactionLocked />,
+    );
+
+    expect(screen.getByAltText("Deck Card")).toBe(deckImage);
+    expect(screen.getByAltText("Sideboard Card")).toBe(sideboardImage);
+    expect(deckImage).toHaveAttribute("src", "/card.png");
+    expect(sideboardImage).toHaveAttribute("src", "/card.png");
+    expect(expanded.container.querySelector("fieldset")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Deck Card" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Sideboard Card" })).toBeDisabled();
+    expanded.unmount();
+
+    const compact = render(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: true })} interactionLocked={false} />,
+    );
+    const compactImage = screen.getByAltText("Sideboard Card");
+
+    compact.rerender(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: true })} interactionLocked />,
+    );
+
+    expect(screen.getByAltText("Sideboard Card")).toBe(compactImage);
+    expect(compactImage).toHaveAttribute("src", "/card.png");
+    expect(compact.container.querySelector("fieldset")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Sideboard Card" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move Sideboard Card to Deck" })).toBeDisabled();
+  });
+
   it("moves_deck_to_sideboard_with_destination_columns_rows_position_and_announcement", () => {
     const cards = [card("moving")];
     const workspaceChanges = vi.fn();
