@@ -507,7 +507,9 @@ export function PackDisplay({
   }, [view?.current_pack_number, view?.pick_number]);
 
   if (!view) return null;
-  const visibleRetained = retained.filter((entry) => sameDraftStep(entry.step, currentStep!));
+  const visibleRetained = retained.filter((entry) => (
+    entry.generation === localGeneration && sameDraftStep(entry.step, currentStep!)
+  ));
   if (pack.length === 0 && visibleRetained.length === 0) return <div className="flex justify-center py-12 text-white/40">{t("pack.waitingNext")}</div>;
 
   const updateStates = (update: (current: Readonly<Record<string, CardVisualRecord>>) => Readonly<Record<string, CardVisualRecord>>) => {
@@ -764,9 +766,12 @@ export function PackDisplay({
             const card = slot.card;
             const selected = selectedCard === card.instance_id || additionalCards.includes(card.instance_id);
             const waiting = local?.pendingIntent?.kind !== "auto-pick" && local?.pendingIntent?.instanceIds.includes(card.instance_id);
+            const visualRecord = states[card.instance_id];
             const state = waiting
               ? "waiting"
-              : states[card.instance_id]?.state ?? (selected ? "selected" : "default");
+              : visualRecord?.generation === localGeneration
+                ? visualRecord.state
+                : selected ? "selected" : "default";
             return <PackCard
               key={card.instance_id}
               card={card}

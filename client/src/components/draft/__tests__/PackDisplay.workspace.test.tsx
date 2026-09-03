@@ -1458,6 +1458,7 @@ describe("PackDisplay local workspace controller", () => {
     const first = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     fireEvent.click(within(first).getByRole("button", { name: "Pick Same to Deck" }));
     rendered.rerender(<PackDisplay controller={{ ...initial, interactionGeneration: 5 }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    expect(first).toHaveAttribute("data-visual-state", "default");
     await act(async () => resolvePick({ status: "rejected", reason: "invalid-request" }));
     expect(first).toHaveAttribute("data-visual-state", "default");
 
