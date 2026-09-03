@@ -21,7 +21,9 @@ use phase_ai::duel_suite::{all_matchups, resolve_deck_ref, MatchupSpec};
 use phase_ai::eval::{EvalWeightSet, EvalWeights, KeywordBonuses};
 
 use engine::database::CardDatabase;
-use engine::game::deck_loading::{resolve_deck_list, DeckList, DeckPayload, PlayerDeckList};
+use engine::game::deck_loading::{
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+};
 use engine::game::engine::start_game_skip_mulligan;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -737,13 +739,16 @@ fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPa
 /// Run a single game with separate AI configs for each player.
 /// Returns the winner (if any) and the turn count.
 fn run_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     config_p0: &AiConfig,
     config_p1: &AiConfig,
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    engine::game::deck_loading::load_deck_into_state(&mut state, payload);
+    // Canonical init path: hydrates back faces and the card-name pool behind
+    // `NamedChoice { CardName, .. }` prompts (see `ai_duel::run_game`).
+    load_and_hydrate_decks(&mut state, payload, Some(db));
 
     // Start game, skip mulligan for speed
     let _ = start_game_skip_mulligan(&mut state);
@@ -788,6 +793,7 @@ fn run_game(
 /// Evaluate fitness of a parameter vector by playing games across matchups.
 /// Returns the average win rate of the candidate config vs the baseline.
 fn evaluate_fitness(
+    db: &CardDatabase,
     group: TuneGroup,
     params: &[f64],
     matchups: &[(DeckPayload, &str)],
@@ -809,8 +815,8 @@ fn evaluate_fitness(
                     .wrapping_add(game_idx as u64);
 
                 let paired = [
-                    (true, run_game(payload, seed, &candidate, &opponent)),
-                    (false, run_game(payload, seed, &opponent, &candidate)),
+                    (true, run_game(db, payload, seed, &candidate, &opponent)),
+                    (false, run_game(db, payload, seed, &opponent, &candidate)),
                 ];
                 for (candidate_is_p0, (winner, _turns)) in paired {
                     let Some(_) = winner else {
@@ -939,7 +945,7 @@ fn main() {
             eprintln!("Error building holdout matchups: {err}");
             std::process::exit(1);
         });
-        run_validate(&holdout, games, base_seed, &output_path);
+        run_validate(&db, &holdout, games, base_seed, &output_path);
     } else {
         let resolved = build_tuning_matchups(&db, FITNESS_MATCHUP_IDS).unwrap_or_else(|err| {
             eprintln!("Error building fitness matchups: {err}");
@@ -948,12 +954,15 @@ fn main() {
         let fitness_matchups: Vec<(DeckPayload, &str)> =
             resolved.iter().map(|(p, m)| (p.clone(), m.id)).collect();
         run_cmaes(
+            &db,
             group,
             &fitness_matchups,
-            generations,
-            population,
-            games,
-            base_seed,
+            CmaesSchedule {
+                generations,
+                population,
+                games,
+                base_seed,
+            },
             &output_path,
         );
     }
@@ -974,6 +983,7 @@ fn build_holdout_matchups(
 /// A weight set that produces correct matchup polarities is better than one that
 /// doesn't — regardless of raw win rate against a baseline.
 fn run_validate(
+    db: &CardDatabase,
     matchups: &[(DeckPayload, &'static MatchupSpec)],
     games: usize,
     base_seed: u64,
@@ -1026,8 +1036,8 @@ fn run_validate(
                     (&opponent_config, &learned_config)
                 };
 
-                let (baseline_winner, _) = run_game(payload, seed, baseline_p0, baseline_p1);
-                let (learned_winner, _) = run_game(payload, seed, learned_p0, learned_p1);
+                let (baseline_winner, _) = run_game(db, payload, seed, baseline_p0, baseline_p1);
+                let (learned_winner, _) = run_game(db, payload, seed, learned_p0, learned_p1);
                 let baseline_won = candidate_won(baseline_winner, candidate_is_p0);
                 let learned_won = candidate_won(learned_winner, candidate_is_p0);
 
@@ -1177,15 +1187,28 @@ fn config_hash(config: &AiConfig) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn run_cmaes(
-    group: TuneGroup,
-    matchups: &[(DeckPayload, &str)],
+/// The CLI-supplied CMA-ES schedule: how long to search and how much play
+/// backs each fitness sample.
+struct CmaesSchedule {
     generations: usize,
     population: usize,
     games: usize,
     base_seed: u64,
+}
+
+fn run_cmaes(
+    db: &CardDatabase,
+    group: TuneGroup,
+    matchups: &[(DeckPayload, &str)],
+    schedule: CmaesSchedule,
     output_path: &std::path::Path,
 ) {
+    let CmaesSchedule {
+        generations,
+        population,
+        games,
+        base_seed,
+    } = schedule;
     eprintln!("=== CMA-ES AI Weight Tuning ===");
     let parameter_names = group.parameter_names();
     eprintln!(
@@ -1220,6 +1243,7 @@ fn run_cmaes(
                 .enumerate()
                 .map(|(i, params)| {
                     evaluate_fitness(
+                        db,
                         group,
                         params,
                         matchups,
@@ -1236,6 +1260,7 @@ fn run_cmaes(
             .enumerate()
             .map(|(i, params)| {
                 evaluate_fitness(
+                    db,
                     group,
                     params,
                     matchups,

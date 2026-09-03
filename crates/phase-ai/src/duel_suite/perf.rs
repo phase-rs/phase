@@ -378,12 +378,13 @@ pub struct PerfReport {
 /// game on the *same thread*, and snapshot the counters. The reset/snapshot pair
 /// is only meaningful because the counted paths never leave the calling thread.
 pub fn run_perf_scenario(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     action_cap: usize,
 ) -> PerfCounterSnapshot {
     perf_counters::reset();
-    let _ = drive_game(payload, seed, AiDifficulty::Medium, action_cap);
+    let _ = drive_game(Some(db), payload, seed, AiDifficulty::Medium, action_cap);
     perf_counters::snapshot()
 }
 
@@ -416,7 +417,7 @@ pub fn run_perf_suite(
             n = n + 1,
             total = scenarios.len(),
         );
-        let snapshot = run_perf_scenario(&payload, seed, action_cap);
+        let snapshot = run_perf_scenario(db, &payload, seed, action_cap);
         let scenario_counters = PerfCounters::from_snapshot(&snapshot);
         // One JSON line per scenario: a killed child still leaves a machine-readable
         // partial payload for every scenario that did finish.
@@ -1291,6 +1292,7 @@ mod tests {
         // and the counter snapshot for each run.
         perf_counters::reset();
         let wt_1 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1300,6 +1302,7 @@ mod tests {
 
         perf_counters::reset();
         let wt_2 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,

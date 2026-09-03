@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -111,10 +111,14 @@ function Field({
 /** iOS-style toggle switch (mirrors the mockup's Host-setup `Toggle`). The
  *  on-state accent follows the connection mode (emerald server / cyan P2P). */
 function Toggle({
+  label,
+  describedBy,
   on,
   onChange,
   accent,
 }: {
+  label: string;
+  describedBy?: string;
   on: boolean;
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
@@ -125,11 +129,15 @@ function Toggle({
     <button
       type="button"
       role="switch"
+      aria-label={label}
+      aria-describedby={describedBy}
       aria-checked={on}
       onClick={() => onChange(!on)}
-      className={`flex h-6 w-[42px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}
+      className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full"
     >
-      <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      <span aria-hidden="true" className={`flex h-6 w-[42px] items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}>
+        <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      </span>
     </button>
   );
 }
@@ -149,13 +157,14 @@ function OptionRow({
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
 }) {
+  const descriptionId = useId();
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
         <div className="text-sm text-fg-card-body">{label}</div>
-        {desc && <div className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
+        {desc && <div id={descriptionId} className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
       </div>
-      <Toggle on={on} onChange={onChange} accent={accent} />
+      <Toggle label={label} describedBy={desc ? descriptionId : undefined} on={on} onChange={onChange} accent={accent} />
     </div>
   );
 }

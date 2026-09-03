@@ -12,6 +12,35 @@ export interface ConnAttachment {
   subscribed: boolean;
   host_game: string | null;
   reservations: unknown[];
+  /**
+   * Tournament codes this connection CREATED — one appended per successful
+   * `CreateTournament`. Mirrors `lobby_broker::ConnState::organized_tournaments`
+   * (`crates/lobby-broker/src/broker.rs`), which the broker round-trips through
+   * this attachment verbatim.
+   *
+   * **Never an authority.** Organizer and player permission is the
+   * `organizer_token` / `player_token` checked against the stored tournament
+   * record — never membership in these lists, which is why nothing in the
+   * broker reads them. They are reconnect-convenience bookkeeping for a future
+   * "your events" client flow, and nothing in this shell reads them today
+   * either; they are declared here so the attachment type stays a faithful
+   * mirror of the state that actually crosses the WASM boundary. That warning
+   * covers `joined_tournaments` below in equal measure.
+   */
+  organized_tournaments: string[];
+  /**
+   * Tournament codes this connection JOINED AS A PLAYER — one appended per
+   * successful `JoinTournament`, as distinct from the events it organizes
+   * above. Mirrors `lobby_broker::ConnState::joined_tournaments`.
+   *
+   * **Codes only, never the `player_token`.** The token is the entrant's
+   * authority and is deliberately kept out of this list. Membership survives
+   * the connection lifecycle, while the broker keeps only a bounded set of
+   * recent codes in the attachment. A code carries no such risk, being already
+   * broadcast to every subscriber in each `TournamentListUpdate`. The
+   * non-authority framing on `organized_tournaments` applies here identically.
+   */
+  joined_tournaments: string[];
 }
 
 /**

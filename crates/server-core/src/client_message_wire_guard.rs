@@ -85,6 +85,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::Concede
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -306,6 +307,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -470,6 +472,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede

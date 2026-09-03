@@ -33,6 +33,8 @@ interface GameMenuProps {
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
+  logPanelOpen: boolean;
+  onToggleGameLog: () => void;
   /** The currently displayed layout, already resolved from the raw preference. */
   multiplayerBoardLayout?: ResolvedMultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
@@ -69,6 +71,8 @@ export function GameMenu({
   isOnlineMode,
   showAiHand,
   onToggleAiHand,
+  logPanelOpen,
+  onToggleGameLog,
   multiplayerBoardLayout,
   onToggleMultiplayerBoardLayout,
   showMultiplayerSplitLayoutNudge = false,
@@ -262,7 +266,13 @@ export function GameMenu({
           )}
           <div className="my-1 border-t border-gray-700/70" />
           <MenuSectionLabel label={t("gameMenu.sections.game")} />
-          <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
+          <MenuButton
+            label={logPanelOpen ? t("gameMenu.closeGameLog") : t("gameMenu.openGameLog")}
+            onClick={() => {
+              onToggleGameLog();
+              setOpen(false);
+            }}
+          />
           <MenuButton
             label={t("gameMenu.settings")}
             onClick={() => openSurfaceFromMenu(onSettingsClick)}

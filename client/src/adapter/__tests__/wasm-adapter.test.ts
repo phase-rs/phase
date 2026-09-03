@@ -505,6 +505,66 @@ describe("WasmAdapter", () => {
     });
   });
 
+  // The pool that actually broke the live site was fetched fine and then
+  // rejected by serde, so these pin the distinction the old code lost: a
+  // schema-rejected database must not be reported as an uncalled loader.
+  describe("card database load failure reaches the caller", () => {
+    const SCHEMA_ERROR =
+      "Failed to parse card database: unknown variant `Tap`, expected one of `DealDamage`, `SetTapState`";
+
+    it("reports the underlying cause, not a missing-loader message", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      const err = await adapter
+        .checkDeckCompatibility({ main_deck: ["Forest"] })
+        .then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("unknown variant `Tap`");
+      expect(err!.message).not.toContain("Call loadCardDb");
+    });
+
+    it("does not consult the worker once the database is known to be absent", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      await expect(
+        adapter.checkDeckCompatibility({ main_deck: ["Forest"] }),
+      ).rejects.toThrow();
+      expect(mockWorkerClient.evaluateDeckCompatibility).not.toHaveBeenCalled();
+    });
+
+    // The discriminator: without this, every assertion above would still pass
+    // if the strict gate simply rejected unconditionally.
+    it("still delegates normally when the database loads", async () => {
+      const request = { main_deck: ["Forest"] };
+      await expect(adapter.checkDeckCompatibility(request)).resolves.toEqual({
+        standard: { compatible: true, reasons: [] },
+      });
+      expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
+    });
+
+    // serde names every variant it rejected, which is thousands of characters.
+    it("trims a very long cause but keeps the diagnostic head", async () => {
+      const longCause = `${SCHEMA_ERROR}${", `Filler`".repeat(400)}`;
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(longCause));
+      const err = await adapter
+        .checkDeckCompatibility({ main_deck: ["Forest"] })
+        .then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("unknown variant `Tap`");
+      expect(err!.message).toMatch(/…$/);
+      expect(err!.message.length).toBeLessThan(longCause.length);
+      // The full text stays reachable for diagnosis even though the message is trimmed.
+      expect((err as Error & { cause?: Error }).cause?.message).toBe(longCause);
+    });
+
+    it("applies to game creation too, not only the compatibility chip", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      await adapter.initialize();
+      await expect(
+        adapter.initializeGame({ main_deck: ["Forest"] }),
+      ).rejects.toThrow("unknown variant `Tap`");
+      expect(mockWorkerClient.initializeGame).not.toHaveBeenCalled();
+    });
+  });
+
   // Symmetric with the block above, and load-bearing for exactly one reason: a
   // copy-paste slip inside `evaluateDeckFormatGate`'s real implementation —
   // calling `evaluateDeckCompatibility` instead of `evaluateDeckFormatGate` —

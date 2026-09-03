@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act } from "react";
+import i18n from "i18next";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // A real `localStorage` for the store's `persist` middleware and for the
@@ -85,6 +87,8 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
 import { HostSetup } from "../HostSetup";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { saveCustomFormat } from "../../../services/customFormats";
+import enMultiplayer from "../../../i18n/locales/en/multiplayer.json";
+import deMultiplayer from "../../../i18n/locales/de/multiplayer.json";
 
 describe("HostSetup", () => {
   beforeEach(() => {
@@ -96,8 +100,9 @@ describe("HostSetup", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await i18n.changeLanguage("en");
   });
 
   it("uses P2P labeling/theme and hides server-only lobby listing in p2p mode", () => {
@@ -129,6 +134,170 @@ describe("HostSetup", () => {
     // server-mode submit button + the server-only "List in lobby" toggle.
     expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
     expect(screen.getByText("List in lobby")).toBeInTheDocument();
+  });
+
+  describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
+    it("names every visible switch and associates only the sandbox help", () => {
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />);
+
+      const names = ["Start when full", "Sandbox Mode — allow debug actions", "Set password"];
+      if (connectionMode === "server") names.unshift("List in lobby");
+
+      expect(screen.getAllByRole("switch")).toHaveLength(names.length);
+      for (const name of names) {
+        const control = screen.getByRole("switch", { name });
+        if (name === "Sandbox Mode — allow debug actions") {
+          expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
+        } else {
+          expect(control).not.toHaveAttribute("aria-describedby");
+          expect(control).not.toHaveAccessibleDescription();
+        }
+      }
+      if (connectionMode === "p2p") {
+        expect(screen.queryByRole("switch", { name: "List in lobby" })).not.toBeInTheDocument();
+      }
+    });
+
+    it("keeps the compact track inside a non-shrinking touch target", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn();
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+
+      for (const control of screen.getAllByRole("switch")) {
+        // Happy DOM does not lay out CSS. Pin the sizing contract here; check
+        // rendered dimensions and clicks outside the track in a real browser.
+        expect(control).toHaveClass("min-h-11", "min-w-11", "shrink-0");
+        const track = control.firstElementChild;
+        expect(track).toHaveAttribute("aria-hidden", "true");
+        expect(track).toHaveClass("h-6", "w-[42px]");
+        if (!track) throw new Error("Switch track is missing");
+
+        const wasChecked = control.getAttribute("aria-checked");
+        await user.click(control);
+        expect(control).toHaveAttribute("aria-checked", wasChecked === "true" ? "false" : "true");
+        await user.click(track);
+        expect(control).toHaveAttribute("aria-checked", wasChecked);
+      }
+      expect(onHost).not.toHaveBeenCalled();
+    });
+
+    it("supports native Space and Enter without submitting until Host is activated", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn();
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+
+      if (connectionMode === "server") {
+        const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
+        expect(publicSwitch).toBeChecked();
+        await user.click(publicSwitch);
+        expect(publicSwitch).not.toBeChecked();
+      }
+
+      const startSwitch = screen.getByRole("switch", { name: "Start when full" });
+      expect(startSwitch).toBeChecked();
+      startSwitch.focus();
+      await user.keyboard(" ");
+      expect(startSwitch).not.toBeChecked();
+
+      const sandboxSwitch = screen.getByRole("switch", { name: "Sandbox Mode — allow debug actions" });
+      await user.tab();
+      expect(sandboxSwitch).toHaveFocus();
+      expect(sandboxSwitch).not.toBeChecked();
+      await user.keyboard("{Enter}");
+      expect(sandboxSwitch).toBeChecked();
+
+      const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
+      await user.tab();
+      expect(passwordSwitch).toHaveFocus();
+      expect(passwordSwitch).not.toBeChecked();
+      await user.keyboard(" ");
+      expect(passwordSwitch).toBeChecked();
+      await user.type(screen.getByPlaceholderText("Game password"), "test-password");
+
+      expect(onHost).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", {
+        name: connectionMode === "server" ? "Host Game" : "Host P2P Game",
+      }));
+      expect(onHost).toHaveBeenCalledTimes(1);
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({
+        public: connectionMode === "p2p",
+        startWhenFull: false,
+        password: "test-password",
+        formatConfig: expect.objectContaining({ allow_debug_actions: true }),
+      }));
+    });
+
+    it("clears a password when its named switch is turned off", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn();
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+
+      const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
+      await user.click(passwordSwitch);
+      await user.type(screen.getByPlaceholderText("Game password"), "discarded-password");
+      await user.click(passwordSwitch);
+      expect(screen.queryByPlaceholderText("Game password")).not.toBeInTheDocument();
+      await user.click(passwordSwitch);
+      expect(screen.getByPlaceholderText("Game password")).toHaveValue("");
+      await user.click(passwordSwitch);
+
+      expect(onHost).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", {
+        name: connectionMode === "server" ? "Host Game" : "Host P2P Game",
+      }));
+      expect(onHost).toHaveBeenCalledTimes(1);
+      expect(onHost).toHaveBeenCalledWith(expect.objectContaining({
+        public: true,
+        startWhenFull: true,
+        password: "",
+        formatConfig: expect.objectContaining({ allow_debug_actions: false }),
+      }));
+    });
+  });
+
+  it("updates switch names and sandbox help when the active locale changes", async () => {
+    const user = userEvent.setup();
+    i18n.addResourceBundle("de", "multiplayer", deMultiplayer, true, true);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+
+    const translations = [
+      ["List in lobby", "In Lobby listen"],
+      ["Start when full", "Starten, wenn voll"],
+      ["Sandbox Mode — allow debug actions", "Sandbox-Modus — Debug-Aktionen erlauben"],
+      ["Set password", "Passwort festlegen"],
+    ] as const;
+    const switches = translations.map(([name]) => screen.getByRole("switch", { name }));
+    const startSwitch = screen.getByRole("switch", { name: "Start when full" });
+    const sandboxSwitch = screen.getByRole("switch", { name: "Sandbox Mode — allow debug actions" });
+    expect(sandboxSwitch).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
+    await user.click(startSwitch);
+
+    // Component tests use their own lean i18next setup, without the production
+    // preferences-store subscription. Change that test instance while mounted.
+    await act(async () => {
+      await i18n.changeLanguage("de");
+    });
+
+    for (const [index, [, name]] of translations.entries()) {
+      expect(screen.getByRole("switch", { name })).toBe(switches[index]);
+    }
+    expect(sandboxSwitch).toHaveAccessibleDescription(deMultiplayer.hostSetup.sandboxModeHelp);
+    expect(startSwitch).not.toBeChecked();
+  });
+
+  it("keeps sandbox descriptions associated with their own mounted form", () => {
+    const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+    const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+
+    const descriptionIds = [first, second].map(({ container }) => {
+      const control = within(container).getByRole("switch", { name: "Sandbox Mode — allow debug actions" });
+      const description = within(container).getByText(enMultiplayer.hostSetup.sandboxModeHelp);
+      expect(description.id).not.toBe("");
+      expect(control).toHaveAttribute("aria-describedby", description.id);
+      expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
+      return description.id;
+    });
+    expect(new Set(descriptionIds).size).toBe(2);
   });
 
   it("allows Free-for-All hosts to choose 40-card deck size", async () => {

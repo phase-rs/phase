@@ -298,6 +298,10 @@ pub enum ClientMessage {
         request_id: u64,
         action: GameAction,
     },
+    /// Requests an unredacted, trusted engine snapshot for diagnostics. The
+    /// server authorizes this capability from the authenticated host seat;
+    /// neither a player token nor a game code travels in the payload.
+    ExportAuthoritativeState,
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
@@ -740,6 +744,16 @@ pub enum ServerMessage {
         request_id: u64,
         message: String,
     },
+    /// Host-only trusted engine persistence snapshot. This deliberately
+    /// contains no server-session metadata or player reconnect tokens.
+    AuthoritativeStateExport {
+        state: String,
+    },
+    /// Requester-only operational or authorization failure for an
+    /// authoritative-state export.
+    AuthoritativeStateExportFailed {
+        message: String,
+    },
     OpponentDisconnected {
         grace_seconds: u32,
         #[serde(default)]
@@ -1079,6 +1093,25 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn authoritative_state_export_messages_roundtrip() {
+        let request = ClientMessage::ExportAuthoritativeState;
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&request_json).unwrap(),
+            ClientMessage::ExportAuthoritativeState
+        ));
+
+        let response = ServerMessage::AuthoritativeStateExport {
+            state: "{\"state\":{}}".to_string(),
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&response_json).unwrap(),
+            ServerMessage::AuthoritativeStateExport { state } if state == "{\"state\":{}}"
+        ));
     }
 
     #[test]
@@ -2922,8 +2955,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_56_for_commander_designation_count() {
-        assert_eq!(PROTOCOL_VERSION, 56);
+    fn protocol_version_is_57_for_authoritative_state_export_and_commander_designation() {
+        assert_eq!(PROTOCOL_VERSION, 57);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2934,7 +2967,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_56_for_commander_designation_count` stays
+    /// `protocol_version_is_57_for_authoritative_state_export_and_commander_designation` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -69,6 +69,16 @@ export function moderationErrorForLobbyFrame(rawFrame: string): string | null {
       if (!data) return null;
       return validateOptionalVisibleLabel(data.display_name, "Player name", DISPLAY_NAME_MAX_LENGTH);
     }
+    case "CreateTournament": {
+      const data = asRecord(frame.data);
+      if (!data) return null;
+      return validateVisibleLabel(data.name, "Tournament name", ROOM_NAME_MAX_LENGTH);
+    }
+    case "JoinTournament": {
+      const data = asRecord(frame.data);
+      if (!data) return null;
+      return validateVisibleLabel(data.display_name, "Player name", DISPLAY_NAME_MAX_LENGTH);
+    }
     default:
       return null;
   }

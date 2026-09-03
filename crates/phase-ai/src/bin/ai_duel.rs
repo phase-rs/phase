@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
     PlayerDeckPayload,
 };
 use engine::types::format::FormatConfig;
@@ -218,7 +218,7 @@ fn run_single(
         }
 
         let start = Instant::now();
-        let (winner, turns) = run_game(&payload, game_seed, difficulty, verbose, is_batch);
+        let (winner, turns) = run_game(db, &payload, game_seed, difficulty, verbose, is_batch);
         let elapsed = start.elapsed().as_millis();
 
         match winner {
@@ -265,6 +265,7 @@ fn run_single(
 }
 
 fn run_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -272,7 +273,10 @@ fn run_game(
     silent: bool,
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    // Canonical init path (shared with engine-wasm / server-core): hydrates
+    // dual-faced back faces and the `#[serde(skip)]` card-name pool that
+    // `NamedChoice { CardName, .. }` prompts (Pithing Needle) validate against.
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -301,7 +305,10 @@ fn run_game(
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
-            eprintln!("Warning: no AI actions and game not over — breaking");
+            eprintln!(
+                "Warning: no AI actions and game not over — breaking (turn {}, waiting_for: {:?})",
+                state.turn_number, state.waiting_for
+            );
             break;
         }
         total_actions += results.len();
@@ -377,6 +384,7 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
                 .wrapping_add(candidate_seat as u64 * 10_000)
                 .wrapping_add(game_idx as u64);
             let result = run_commander_game(
+                db,
                 &payload,
                 seed,
                 candidate,
@@ -472,6 +480,7 @@ struct CommanderGameResult {
 }
 
 fn run_commander_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     candidate: PlayerId,
@@ -479,7 +488,7 @@ fn run_commander_game(
     baseline_difficulty: AiDifficulty,
 ) -> CommanderGameResult {
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
-    load_deck_into_state(&mut state, payload);
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = (0..4).map(|seat| PlayerId(seat as u8)).collect();

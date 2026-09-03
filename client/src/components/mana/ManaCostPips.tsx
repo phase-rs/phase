@@ -34,6 +34,14 @@ const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: str
 // together, and every card overlay wants the same placement.
 const FLUID_ANCHOR = "absolute right-[6.5%] top-[5%]";
 
+// A cost the engine reduced all the way to {0} is a badge of exactly ONE
+// symbol whose width never varies with the card. It also carries nothing the
+// player doesn't already know from the offer itself, while the mana VALUE it
+// would cover is what alternative costs are measured in — Amped Raptor pays an
+// amount of {E} equal to it, Nashi pays that much life. So this one badge parks
+// in the frame's right margin instead: beside the printed cost, not on it.
+const FLUID_ANCHOR_FREE = "absolute right-[0.5%] top-[5%]";
+
 interface ManaCostPipsProps {
   cost: ManaCost;
   isReduced?: boolean;
@@ -45,13 +53,15 @@ interface ManaCostPipsProps {
 export function ManaCostPips({ cost, isReduced, size = "md", className = "" }: ManaCostPipsProps) {
   const shards = manaCostToShards(cost);
   // Show {0} only when cost was reduced to zero (not for tokens/naturally free cards)
-  if (shards.length === 0 && isReduced) shards.push("0");
+  const isFreeBadge = shards.length === 0 && isReduced;
+  if (isFreeBadge) shards.push("0");
   if (shards.length === 0) return null;
 
   const s = PIP_SIZES[size];
+  const anchor = size !== "fluid" ? "" : isFreeBadge ? FLUID_ANCHOR_FREE : FLUID_ANCHOR;
 
   return (
-    <div className={`pointer-events-none ${size === "fluid" ? FLUID_ANCHOR : ""} ${className}`}>
+    <div className={`pointer-events-none ${anchor} ${className}`}>
       <div className={`relative flex ${s.gap}`}>
         <div
           data-mana-cost-backdrop

@@ -769,4 +769,60 @@ describe("useCardImage", () => {
       usePreferencesStore.getState().clearAllArtOverrides();
     });
   });
+
+  it("resolves art from the oracle id alone when the card has no name (#8293)", async () => {
+    // CR 709.5 + CR 709.5d: a copy of a Room enters with neither half
+    // unlocked and so has no name, but its `printed_ref` still points at the
+    // printing. The empty name alone must not short-circuit the lookup — the
+    // bail-out requires the oracle id and the token ref to be absent too.
+    const fetchCardImageAsset = vi.fn();
+    const fetchCardImageAssetByOracleId = vi.fn().mockResolvedValue({
+      src: "https://img.example/greenhouse.jpg",
+      isRotated: false,
+      source: { kind: "remote", src: "https://img.example/greenhouse.jpg" },
+      semantic: { oracleId: "greenhouse-oracle", faceIndex: 0 },
+    });
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ remote }: { remote: { src: string } }) => ({
+          revision: "0",
+          sources: [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
+    vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
+      fetchCardImageAsset,
+      fetchCardImageAssetByOracleId,
+      fetchCardImageByOracleId: vi.fn(),
+      fetchCardImageUrl: vi.fn(),
+      fetchTokenImageAssetByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn(),
+      getCardPrintings: vi.fn().mockResolvedValue([]),
+      imageUrlSize: vi.fn().mockReturnValue(null),
+      isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
+      isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      resolveFaceIndexSync: vi.fn().mockReturnValue(null),
+      resolveOracleIdSync: vi.fn().mockReturnValue(null),
+      resolvePrintingImageUrl: vi.fn(),
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage("", { size: "normal", oracleId: "greenhouse-oracle", faceName: "Greenhouse" }),
+    );
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/greenhouse.jpg"));
+    expect(fetchCardImageAssetByOracleId).toHaveBeenCalledWith(
+      "greenhouse-oracle",
+      "Greenhouse",
+      "normal",
+    );
+    expect(fetchCardImageAsset).not.toHaveBeenCalled();
+  });
 });

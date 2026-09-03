@@ -23,6 +23,9 @@
      `deploy/helm/phase-server/tests/assert-compression-boundary.sh` for the
      rendered-length assertion that keeps this contract honest. */}}
 {{- $wsMw := include "phase-server.middlewareRefs" (dict "ctx" . "excludeCompress" true) }}
+{{- /* The SPA keeps headers + compress but leaves the game API's rate bucket
+     alone — see phase-server.commonMiddlewares for why. */}}
+{{- $webMw := include "phase-server.middlewareRefs" (dict "ctx" . "excludeCompress" false "excludeRateLimit" true) }}
 {{- /* Every route below terminates TLS unconditionally, so an advertised
      `http://` ordinal URL names an address this chart does not serve. `http`
      stays legal with ingress.enabled=false, where the chart renders no route
@@ -74,6 +77,26 @@ spec:
           {{- end }}
     - kind: Rule
       match: Host(`{{ $host }}`)
+      {{- if .Values.web.enabled }}
+      {{- /* With the SPA enabled the catch-all becomes the site and the server's
+           own HTTP endpoints move to explicit longer rules below. Deliberately
+           NO sticky block here: the SPA and /ws are two load balancers over
+           different server lists (same pods, different ports) sharing one cookie
+           NAME, so every asset fetch would re-mint `{{ .Values.scaleOut.sticky.name }}`
+           with a value the /ws balancer cannot resolve — sending the host's own
+           post-GameStarted re-dial to a pod that never had its game. The SPA is
+           stateless and every pod serves identical bytes, so it needs no pin.
+           Serving it same-origin with /ws also stops that cookie being a
+           third-party cookie, which is what made it fragile in browsers that
+           block those. */}}
+      {{- with $webMw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ .Values.web.server.port }}
+      {{- else }}
       {{- with $mw | trim }}
       middlewares:
         {{- . | nindent 8 }}
@@ -90,6 +113,40 @@ spec:
               sameSite: {{ .Values.scaleOut.sticky.sameSite }}
               maxAge: {{ int64 .Values.scaleOut.sticky.maxAge }}
           {{- end }}
+      {{- end }}
+{{- if .Values.web.enabled }}
+{{- /* The server's non-/ws HTTP surface, walked from build_router and
+     mount_admin_routes rather than recalled: /health, /p2p-draft-backup (and
+     its /{code} form, covered by the same prefix), and /admin/drafts[/{code}]
+     when an admin token is mounted. Each match string is the catch-all's plus a
+     PathPrefix suffix, so it is unconditionally longer and wins under Traefik's
+     default rule-length ordering — the same contract the /ws rule relies on, and
+     the reason no `priority:` is set here either. Appended AFTER the catch-all
+     so the first two rules keep the positions
+     tests/assert-compression-boundary.sh slices by. */}}
+{{- /* `/admin/*` is deliberately absent here too — see templates/ingress.yaml. */}}
+{{- $serverPaths := list "/health" "/p2p-draft-backup" }}
+{{- range $p := $serverPaths }}
+    - kind: Rule
+      match: Host(`{{ $host }}`) && PathPrefix(`{{ $p }}`)
+      {{- with $mw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ $.Values.service.port }}
+          {{- if $.Values.scaleOut.sticky.enabled }}
+          sticky:
+            cookie:
+              name: {{ $.Values.scaleOut.sticky.name }}
+              secure: {{ $.Values.scaleOut.sticky.secure }}
+              httpOnly: {{ $.Values.scaleOut.sticky.httpOnly }}
+              sameSite: {{ $.Values.scaleOut.sticky.sameSite }}
+              maxAge: {{ int64 $.Values.scaleOut.sticky.maxAge }}
+          {{- end }}
+{{- end }}
+{{- end }}
   tls:
     secretName: {{ include "phase-server.tlsSecretName" . }}
     {{- if .Values.cloudflare.authenticatedOriginPulls.enabled }}

@@ -6,7 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to recover, e.g. v0.1.32
+        # Dispatch from the tag's own ref -- `gh workflow run release.yml --ref "$TAG"` --
+        # never from a branch. `build-web-image` deploys to the protected `release`
+        # environment, whose tag policy is matched against the run's GITHUB_REF and not
+        # against this input, so a branch-ref dispatch is turned away there; `release`
+        # needs that job, so the whole recovery run would then produce no release.
+        description: Release tag to recover, e.g. v0.1.32 (dispatch from that tag's ref, not from a branch)
         required: true
         type: string
 
@@ -687,6 +692,62 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
 
+  build-web-image:
+    name: Build Web Image
+    needs: [resolve-release-ref, build-wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    environment: release
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      # The same bundle Pages gets, so the image and the official site are the
+      # same build. Its baked-in default lobby is this release's, which is what
+      # a self-hoster who configures nothing should reach; the chart overrides it
+      # at runtime through /config.js.
+      - name: Download frontend bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frontend-dist
+          path: client/dist
+
+      - name: Verify build context
+        run: test -s client/dist/index.html
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No setup-qemu-action, unlike build-server-image: deploy/phase-web.Dockerfile
+      # is FROM + COPY with no RUN step, so there is nothing to execute in either
+      # target rootfs and buildx assembles both platforms natively.
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push web image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: client
+          file: deploy/phase-web.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
     needs: [build-wasm, release]
@@ -929,12 +990,13 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [resolve-release-ref, build-wasm, build-server, build-server-image]
+    needs: [resolve-release-ref, build-wasm, build-server, build-server-image, build-web-image]
     if: >-
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
-      needs.build-server-image.result == 'success'
+      needs.build-server-image.result == 'success' &&
+      needs.build-web-image.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

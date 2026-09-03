@@ -1004,6 +1004,7 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
   );
@@ -1730,6 +1731,8 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
+        logPanelOpen={logPanelOpen}
+        onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
         multiplayerBoardLayout={
           seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
         }

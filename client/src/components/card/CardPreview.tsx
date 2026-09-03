@@ -164,7 +164,9 @@ export function CardPreview({
   } | null>(null);
 
   useLayoutEffect(() => {
-    if (!cardName || handSourceObjectId == null || typeof document === "undefined") {
+    // Same question as the render gate below, spelled the same way: an empty
+    // name is a subject, only `null` is "nothing to preview".
+    if (cardName == null || handSourceObjectId == null || typeof document === "undefined") {
       setMeasuredHandOrigin(null);
       return;
     }
@@ -252,7 +254,13 @@ export function CardPreview({
 
   return (
     <AnimatePresence>
-      {cardName && handMeasurementReady ? (
+      {/* CR 709.5: a permanent with a shared type line doesn't have the name
+          of a half it hasn't unlocked, and CR 709.5d gives a copy of a Room
+          neither unlocked designation — so it has NO name at all. Its art
+          still resolves from the object's `printed_ref`, so an empty name is
+          a preview subject like any other. Only `null` is the caller's
+          "show nothing". */}
+      {cardName != null && handMeasurementReady ? (
         <CardPreviewInner
           key={previewKey}
           cardName={cardName}

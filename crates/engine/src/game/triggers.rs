@@ -8290,7 +8290,7 @@ enum PreparedTriggerTargets {
 }
 
 fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> PreparedTriggerTargets {
-    let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
+    let mut target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
         Ok(target_slots) => target_slots,
         Err(_) => {
             return if matches!(
@@ -8307,6 +8307,19 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
             };
         }
     };
+    // CR 603.3d: putting a triggered ability on the stack follows the spell
+    // process of CR 601.2c–d for choosing targets and dividing an effect, so a
+    // triggered divided effect ("deals N damage divided as you choose among any
+    // number of targets") offers at most one slot per divisible unit, the same
+    // cap `cast_spell` applies. CR 601.2d: each chosen target must receive at
+    // least one, so a target set wider than the pool has no legal division and
+    // the prompt would have no acceptable answer.
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &trigger.ability,
+        trigger.distribute.as_ref(),
+        &mut target_slots,
+    );
 
     let mut prepared_state = state.clone();
     let mut prepared_trigger = trigger.clone();
@@ -17345,11 +17358,22 @@ pub mod tests {
         min_targets: usize,
         target: TargetFilter,
     ) -> ObjectId {
+        make_divided_damage_etb_source_with_amount(state, 4, min_targets, target)
+    }
+
+    /// "Deals `amount` damage divided as you choose among any number of
+    /// target …" as an ETB trigger on a 3/3 controlled by P0.
+    fn make_divided_damage_etb_source_with_amount(
+        state: &mut GameState,
+        amount: i32,
+        min_targets: usize,
+        target: TargetFilter,
+    ) -> ObjectId {
         let source = make_creature(state, PlayerId(0), "Divided Damage Source", 3, 3);
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 4 },
+                amount: QuantityExpr::Fixed { value: amount },
                 target,
                 damage_source: None,
                 excess: None,
@@ -25715,6 +25739,50 @@ pub mod tests {
         assert_eq!(
             context.pending.ability.distribution, None,
             "preparation must leave the live pending trigger untouched"
+        );
+    }
+
+    /// CR 603.3d + CR 601.2c + CR 601.2d: a triggered "1 damage divided as you
+    /// choose among any number of target creatures" facing two legal targets
+    /// offers ONE slot, not two — the triggered ability follows the spell's
+    /// target-and-division process. Each chosen target must receive at least
+    /// one point, so a two-target choice could never be divided, and the
+    /// prompt it opened would have no answer `apply` accepts — the same cap
+    /// `cast_spell` already applies (issue #2856).
+    #[test]
+    fn divided_trigger_caps_target_slots_to_the_pool() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let _first = make_creature(&mut state, PlayerId(1), "First Target", 2, 2);
+        let _second = make_creature(&mut state, PlayerId(1), "Second Target", 2, 2);
+        let source = make_divided_damage_etb_source_with_amount(
+            &mut state,
+            1,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+        let trigger_events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        let pending = collect_pending_triggers(&mut state, &trigger_events);
+        let [context] = pending.as_slice() else {
+            panic!("expected exactly one divided ETB trigger");
+        };
+
+        let PreparedTriggerTargets::NeedsPlayerChoice { target_slots } =
+            prepare_trigger_targets(&state, &context.pending)
+        else {
+            panic!("one slot with two legal targets must prompt the controller");
+        };
+        assert_eq!(
+            target_slots.len(),
+            1,
+            "a one-point pool offers one target slot, however many creatures are legal"
         );
     }
 

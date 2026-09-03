@@ -824,7 +824,10 @@ jobs:
           test -x "$NODE_BIN"
           test -f "$TAURI_JS"
           export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
-          "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+          (
+            cd client
+            "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+          )
 
       - name: Inspect ARM64 debug APK
         run: |

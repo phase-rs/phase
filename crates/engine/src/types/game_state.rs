@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
@@ -5270,25 +5270,100 @@ pub struct PendingCounterMoveQueue {
 /// drained one `(counter_type, count)` at a time by
 /// `effects::counters::drain_pending_counter_removals`, which re-parks the queue
 /// when a per-removal replacement surfaces a `ReplacementChoice` mid-batch. When
-/// the queue empties, `total` is stamped into `last_effect_count` so a downstream
+/// the queue empties, `applied_total` is stamped into `last_effect_count` so a downstream
 /// "create that many" / "add that much" rider (Tetravus, storage lands) reading
 /// `QuantityRef::EventContextAmount` picks up the count removed.
 ///
 /// Serialized in the `CounterRemovals` frame so a mid-batch re-park survives the
 /// server→client→server state round-trip a `ReplacementChoice` requires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterRemoval {
+    pub object_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+/// A removal awaiting its replacement-pipeline result. The pre-removal count
+/// lets the queue record the actual clamped or replacement-modified removal
+/// when a `ReplacementChoice` resumes the parked queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterRemovalInFlight {
+    pub removal: PendingCounterRemoval,
+    pub counter_count_before: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
-    /// Remaining per-type removals to apply to `source_id`.
-    pub remaining: Vec<(CounterType, u32)>,
-    /// The object counters are removed from (the effect's single source).
-    pub source_id: ObjectId,
+    /// Remaining per-object counter removals.
+    pub remaining: Vec<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries; stamped into
-    /// `last_effect_count` when the queue empties.
+    /// Total counters requested across all entries. Retained for diagnostics and
+    /// legacy wire compatibility; use `applied_total` for effect result context.
     pub total: u32,
+    /// Counters actually removed so far, after clamping and replacements.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub applied_total: u32,
+    /// A removal whose replacement pipeline has not settled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<PendingCounterRemovalInFlight>,
+}
+
+#[derive(Deserialize)]
+struct PendingCounterRemovalQueueWire {
+    remaining: Vec<PendingCounterRemovalWire>,
+    #[serde(default)]
+    source_id: Option<ObjectId>,
+    effect_kind: EffectKind,
+    source_ability_id: ObjectId,
+    total: u32,
+    #[serde(default)]
+    applied_total: u32,
+    #[serde(default)]
+    in_flight: Option<PendingCounterRemovalInFlight>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PendingCounterRemovalWire {
+    Current(PendingCounterRemoval),
+    Legacy((CounterType, u32)),
+}
+
+/// CR 122.1 + CR 614.1: Accept the legacy single-source queue on the wire
+/// while persisting new multi-object removals with their object per entry.
+impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PendingCounterRemovalQueueWire::deserialize(deserializer)?;
+        let remaining = wire
+            .remaining
+            .into_iter()
+            .map(|entry| match entry {
+                PendingCounterRemovalWire::Current(entry) => Ok(entry),
+                PendingCounterRemovalWire::Legacy((counter_type, count)) => wire
+                    .source_id
+                    .map(|object_id| PendingCounterRemoval {
+                        object_id,
+                        counter_type,
+                        count,
+                    })
+                    .ok_or_else(|| serde::de::Error::missing_field("source_id")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            remaining,
+            effect_kind: wire.effect_kind,
+            source_ability_id: wire.source_ability_id,
+            total: wire.total,
+            applied_total: wire.applied_total,
+            in_flight: wire.in_flight,
+        })
+    }
 }
 
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
@@ -5820,6 +5895,18 @@ pub enum BatchCompletion {
     SurveilKeepOnTop {
         player: PlayerId,
         top_cards: Vec<ObjectId>,
+        /// CR 608.2c + CR 701.25a: the looked-at cards the surveil choice put
+        /// into the graveyard (everything NOT in `top_cards`) — published to
+        /// `state.last_zone_changed_ids` before the paused ability chain
+        /// resumes, so a "this way" rider on the surveil (Chandra, Chill of
+        /// Compliance: "If you put a noncreature, nonland card into your
+        /// graveyard this way, put that card into your hand") can check
+        /// whether one of them actually arrived there. Defaults to empty on
+        /// deserialize of an older save so a stale record degrades to "the
+        /// gate never fires" rather than a panic — never worse than the
+        /// pre-fix behavior.
+        #[serde(default)]
+        graveyard_bound: Vec<ObjectId>,
     },
     /// Manifest dread: after the non-manifested cards reach the graveyard, clear
     /// the reveal markers on every looked-at card.
@@ -26918,6 +27005,46 @@ mod tests {
             persisted["unrelated"],
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
+        let source_id = ObjectId(17);
+        let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
+            remaining: Vec::new(),
+            effect_kind: EffectKind::RemoveCounter,
+            source_ability_id: ObjectId(18),
+            total: 2,
+            applied_total: 0,
+            in_flight: None,
+        })
+        .expect("current counter-removal queue serializes");
+        legacy_wire["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
+        legacy_wire["remaining"] = serde_json::json!([[
+            serde_json::to_value(CounterType::Plus1Plus1).expect("counter type serializes"),
+            2
+        ]]);
+
+        let restored: PendingCounterRemovalQueue = serde_json::from_value(legacy_wire)
+            .expect("legacy single-source counter-removal queue migrates");
+
+        assert_eq!(
+            restored.remaining,
+            vec![PendingCounterRemoval {
+                object_id: source_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            }],
+            "legacy entries inherit their queue's single source ID"
+        );
+        assert_eq!(
+            restored.applied_total, 0,
+            "queues persisted before applied-count tracking start at zero"
+        );
+        assert!(
+            restored.in_flight.is_none(),
+            "legacy queues never carry a replacement-pipeline in-flight removal"
         );
     }
 

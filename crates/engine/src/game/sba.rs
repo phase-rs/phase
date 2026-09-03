@@ -59,11 +59,27 @@ fn live_battlefield_object_mut<'a>(
 /// also cannot express the other half of this gate: `pending_replacement`, which
 /// is a parked event rather than a `WaitingFor` variant at all.
 fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
-    state.pending_replacement.is_some()
-        || matches!(
-            state.waiting_for,
-            crate::types::game_state::WaitingFor::ReturnAsAuraTarget { .. }
-        )
+    // CR 704.4: a resolution carrier that is paused on a player prompt (an
+    // "each opponent may sacrifice" fan-out waiting on the next opponent, for
+    // instance) is reached only by the player-loss safety net in
+    // `reconcile_terminal_result`. The prompt-owning SBAs below (CR 903.9a
+    // commander zone return, CR 704.5j legend rule) would overwrite that
+    // paused prompt with their own, orphaning the carrier and its parked frames
+    // until `start_next_turn` rejects the turn. Every deferred SBA (CR 704.3)
+    // reruns on the ordinary priority-gated pass once the resolution completes;
+    // commander eligibility is state-derived, so the owner is still offered the
+    // choice then. A carrier inside a Priority window is NOT paused: the
+    // CR 724.1c / CR 724.2c checks run by `end_the_turn` and
+    // `end_combat_phase` keep their full SBA pass when the effect resolves
+    // from the stack. The same effects resolved from an accepted optional
+    // prompt (`resolve_optional_effect_decision` runs before the handler
+    // restores Priority) are a documented deferral: their object SBAs run on
+    // the next priority-gated pass instead.
+    let paused_on_prompt = state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    paused_on_prompt
+        || state.pending_replacement.is_some()
+        || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
 }
 
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
@@ -2383,7 +2399,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ResolvedAbility,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
@@ -2393,6 +2410,102 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 704.4 + CR 903.9a: the player-loss safety net runs SBAs while a
+    /// resolution is paused on an opponent's prompt (Fandaniel, Telophoroi
+    /// Ascian's "each opponent may sacrifice a nontoken creature" fan-out with
+    /// P2 still to answer). The dying player loses, but the commander-zone
+    /// choice for the sacrificed commander must wait for the priority-gated
+    /// pass after the resolution completes — issuing it now overwrites the
+    /// paused prompt and orphans the resolution carrier (ai-duel commander
+    /// suite seed 30777 aborted in `start_next_turn`).
+    #[test]
+    fn paused_resolution_defers_commander_zone_choice_until_resolution_completes() {
+        use crate::types::resolution::OptionalEffectFrame;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Fan-out source".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = create_object(
+            &mut state,
+            CardId(339),
+            PlayerId(3),
+            "Sacrificed commander".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.players[1].life = 0;
+
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+        crate::game::stack::begin_resolving_stack_entry(
+            &mut state,
+            StackEntry {
+                id: ObjectId(394),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability.clone()),
+                },
+            },
+            None,
+        );
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ability),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+        let paused_prompt = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(2),
+            source_id: source,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        state.waiting_for = paused_prompt.clone();
+
+        let mut events = Vec::new();
+        assert!(has_pending_player_loss_sba(&state));
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[1].is_eliminated, "CR 704.5a still fires");
+        assert_eq!(
+            state.waiting_for, paused_prompt,
+            "the paused resolution prompt must survive the safety-net pass"
+        );
+        assert!(state.resolving_stack_entry.is_some());
+        assert_eq!(state.resolution_stack.len(), 1);
+
+        // The resolution completes; the ordinary priority-gated pass now offers
+        // the deferred CR 903.9a choice to the commander's owner.
+        let _ = state
+            .take_active_optional_effect_frame()
+            .expect("frame is not buried")
+            .expect("frame is present");
+        crate::game::stack::finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        check_state_based_actions(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                player: PlayerId(3),
+                commander_id,
+                current_zone: Zone::Graveyard,
+            } if commander_id == commander
+        ));
     }
 
     fn create_creature(
