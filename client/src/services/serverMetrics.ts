@@ -45,8 +45,11 @@ export type ProbeOutcome =
   | "game_abandoned";
 
 /** One report. Mirrors `ServerProbeReport` in `lobby-worker/src/directory.ts`
- *  field-for-field; the mirror gate in `__tests__/serverMetrics.test.ts` is what
- *  keeps the duplication honest. */
+ *  field-for-field. The duplication is kept honest in BOTH directions:
+ *  {@link SERVER_PROBE_REPORT_KEYS} ties this interface to a runtime array that
+ *  the mirror gate in `__tests__/serverMetrics.test.ts` compares against the
+ *  Worker's own source text, so neither a field added here nor a field added
+ *  there can drift unnoticed. */
 export interface ServerProbeReport {
   /** The ANNOUNCED url — `DirectoryRow.url`, the `servers` PRIMARY KEY. Never
    *  the client-canonical `LobbySource.url`, which is not invertible back to
@@ -58,6 +61,31 @@ export interface ServerProbeReport {
   /** Mirrored only — see {@link ProbeOutcome}; nothing here ever sets it. */
   game_code?: string;
 }
+
+/**
+ * The runtime field list and its compile-time exhaustiveness assertion.
+ *
+ * BOTH halves are required and neither subsumes the other, exactly as
+ * `WIRE_SCORE_KEYS` in `serverDirectory.ts` needs both: `satisfies` rejects an
+ * array member that is not a key of {@link ServerProbeReport}, while the
+ * `Exclude` assertion rejects a key of the interface that is missing from the
+ * array. Only the second catches a field added to the client mirror and
+ * forgotten here — which is the direction a Worker-text comparison alone
+ * cannot see.
+ */
+export const SERVER_PROBE_REPORT_KEYS = [
+  "url",
+  "outcome",
+  "rtt_ms",
+  "game_code",
+] as const satisfies readonly (keyof ServerProbeReport)[];
+type MissingProbeReportKey = Exclude<
+  keyof ServerProbeReport,
+  (typeof SERVER_PROBE_REPORT_KEYS)[number]
+>;
+export const SERVER_PROBE_REPORT_KEYS_ARE_EXHAUSTIVE: [MissingProbeReportKey] extends [never]
+  ? true
+  : never = true;
 
 /** Envelope discriminant. `sanitizeMetricsBatch` returns `[]` for any other
  *  value, so a drift here is a silent 204 with zero ingest — which is why
@@ -110,6 +138,26 @@ const queue: ServerProbeReport[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let reportsThisSession = 0;
 let lifecycleInstalled = false;
+
+/**
+ * Drop every piece of this module's state: the queue, any armed timer, the
+ * per-session counter and the lifecycle latch.
+ *
+ * TEST-ONLY. Module state that no case can clear makes a suite order-dependent
+ * — the session cap is consumed cumulatively across cases, and
+ * `installServerMetricsLifecycle`'s latch means whichever case installs first
+ * leaves listeners registered for the rest of the file. Production has exactly
+ * one lifetime per page load and never needs this.
+ */
+export function __resetServerMetricsForTests(): void {
+  queue.length = 0;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  reportsThisSession = 0;
+  lifecycleInstalled = false;
+}
 
 /**
  * The metrics endpoint for this build's official lobby.

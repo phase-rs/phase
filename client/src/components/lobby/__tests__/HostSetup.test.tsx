@@ -186,8 +186,58 @@ describe("HostSetup", () => {
 
     render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
 
-    // Paired positive: V-U15a renders it from this very fixture.
+    // Reach-guard FIRST: the form really mounted in p2p mode — its own submit
+    // label, which server mode never renders — so the absence below is the
+    // `!isP2P` guard and not an empty render.
+    expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeInTheDocument();
+    // Paired positive: V-U15a renders the picker from this very fixture.
     expect(screen.queryByText("Host on")).not.toBeInTheDocument();
+  });
+
+  // V-U15i — the candidate list is ASYNCHRONOUS. `directorySources` and
+  // `sourceStatus` are not persisted, so on a cold session this form can mount
+  // before the directory read lands; the official preset carries no `kind`
+  // until its handshake, so `fullHostCandidates` is empty at that moment and
+  // the fallback is the official LobbyOnly broker — a server the picker's own
+  // filter excludes. A latched selection freezes there and submits a host the
+  // dropdown never offered.
+  it("re-resolves the selection when the directory arrives after mount", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    // Cold start: nothing in the stores yet.
+    useMultiplayerStore.setState({
+      directorySources: [],
+      sourceStatus: new Map(),
+      userLobbySources: [],
+      disabledDirectorySources: [],
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    // Reach-guard: the form mounted with an empty candidate list, which is the
+    // state the defect needs.
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
+
+    // The directory lands a moment later, exactly as `refreshServerDirectory`
+    // delivers it.
+    act(() => {
+      seedCandidates();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), FAST);
+
+    // Paired positive: an EXPLICIT choice is not clobbered by a later refresh.
+    // The derivation honours the pick while it remains a candidate, so this is
+    // not "the selection always tracks the top row".
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    act(() => {
+      seedCandidates();
+    });
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
   });
 
   // V-U15c

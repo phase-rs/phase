@@ -7,6 +7,8 @@ import {
   MAX_RTT_MS,
   METRICS_SCHEMA,
   PROBE_OUTCOMES,
+  SERVER_PROBE_REPORT_KEYS,
+  __resetServerMetricsForTests,
   flushMetricsNow,
   installServerMetricsLifecycle,
   metricsUrl,
@@ -48,6 +50,10 @@ const URL_A = "wss://a.example";
 
 describe("serverMetrics", () => {
   beforeEach(() => {
+    // Queue, timer, session counter and lifecycle latch. Without this the
+    // session cap is consumed cumulatively across cases and V-U12k's listeners
+    // outlive it, so the file's result would depend on its own ordering.
+    __resetServerMetricsForTests();
     vi.stubGlobal("navigator", { sendBeacon });
     vi.stubGlobal("fetch", fetchMock);
     sendBeacon.mockReset();
@@ -190,6 +196,17 @@ describe("serverMetrics", () => {
       { url: "wss://inf.example", outcome: "connect_ok" },
     ]);
     expect(reports.every((report) => !("rtt_ms" in report))).toBe(true);
+
+    // The OUTCOME half of the same guard: a latency handed in with a FAILED
+    // connect is dropped, because there was no completed handshake to time and
+    // folding one into the latency histogram would make a server that refuses
+    // connections quickly look fast.
+    sendBeacon.mockClear();
+    reportConnectOutcome("wss://fail.example", "connect_fail", 120);
+    flushMetricsNow();
+    expect(lastBeaconBatch().reports).toEqual([
+      { url: "wss://fail.example", outcome: "connect_fail" },
+    ]);
   });
 
   // V-U12j
@@ -259,10 +276,12 @@ describe("serverMetrics", () => {
     expect(ddlColumns(workerLobbyDo, "servers")).toContain("url");
   });
 
-  // V-M6
+  // V-M6 — compared against the CLIENT's own runtime key array, never a
+  // literal: a literal is a third declaration that agrees with the Worker
+  // while the interface it claims to mirror drifts away from both.
   it("mirrors ServerProbeReport field-for-field", () => {
-    expect(new Set(interfaceFields(workerDirectory, "ServerProbeReport"))).toEqual(
-      new Set(["url", "outcome", "rtt_ms", "game_code"]),
+    expect(new Set(SERVER_PROBE_REPORT_KEYS)).toEqual(
+      new Set(interfaceFields(workerDirectory, "ServerProbeReport")),
     );
   });
 

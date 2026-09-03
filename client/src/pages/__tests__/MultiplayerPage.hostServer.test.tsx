@@ -164,7 +164,8 @@ describe("MultiplayerPage host server", () => {
     harness.hostSetup = null;
     harness.lobby = null;
     localStorage.setItem("active-deck", "Test Deck");
-    // Egress guards: nothing here may reach a transport.
+    // Egress guards — defence-in-depth; the real mitigation is the module
+    // mock of `serverMetrics` above.
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     ensureSubscriptionSocket.mockResolvedValue({

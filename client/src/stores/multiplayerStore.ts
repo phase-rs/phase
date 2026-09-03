@@ -50,19 +50,26 @@ import {
   parseWebSocketUrl,
   type ServerPreset,
 } from "../services/serverDetection";
-// TYPE-ONLY, and it must stay that way. `verbatimModuleSyntax` erases this
-// import entirely, so this module gains no runtime edge to `serverDirectory`.
-// A value import would put the whole fetching service into this store's module
-// evaluation graph, beside the `serverDetection` ⇄ `multiplayerStore` cycle
-// that already constrains what `create()`/`migrate`/`merge` may read.
+// TYPE-ONLY, and worth keeping that way: `verbatimModuleSyntax` erases it, so
+// it costs this module nothing. It is NOT what keeps `serverDirectory` out of
+// the store's runtime graph, though — the `serverMetrics` import below reaches
+// it anyway (see there).
 import type { DirectorySource } from "../services/serverDirectory";
-// A VALUE import, unavoidably: the store is the single authority for opening a
-// lobby socket, so it is the only place that can observe a connect outcome.
-// `serverMetrics` reaches `serverDirectory` for the official-host derivation,
-// so this does give the store a transitive runtime edge to the fetching
-// service — inert by construction, because neither module reads anything from
-// this store during MODULE EVALUATION (every access is inside a function
-// body), which is the only window `create()`/`migrate`/`merge` care about.
+// A VALUE import, and with it a real runtime edge: `serverMetrics` value-imports
+// `directoryUrl` from `serverDirectory`, which imports `serverDetection`, which
+// imports this store. The store must take this edge — it is the single
+// authority for opening a lobby socket, so it is the only place a connect
+// outcome can be observed.
+//
+// THE INVARIANT THAT ACTUALLY MATTERS, and that this chain must keep: no module
+// in `serverMetrics` → `serverDirectory` → `serverDetection` may read store
+// state or `SERVER_PRESETS` during MODULE EVALUATION. Every such access in all
+// three sits inside a function body, so the cycle is resolved by the time
+// anything calls them. That is the only window `create()`, `migrate` and
+// `merge` care about, and it is what a change to any of those three files has
+// to preserve — a top-level `useMultiplayerStore.getState()` or
+// `SERVER_PRESETS` read added there is a temporal-dead-zone crash at boot, not
+// a lint nit.
 import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
@@ -2376,12 +2383,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               // joining open their own sockets and keep the exact-match window.
               return openPhaseSocket(url, { surface: "lobby" })
                 .then((socket) => {
-                  // FIRST attempt only. The handle re-arms on every drop and
-                  // re-invokes this factory with a bumped index, resetting it
-                  // to 0 on each successful open — so `attempt === 0` means
-                  // "the first open of this handle", and a flapping server
-                  // reports one outcome per channel open instead of drowning
-                  // the window in identical retries.
+                  // FIRST attempt only. `scheduleRetry` bumps the index before
+                  // re-invoking this factory, and a successful open resets it
+                  // to 0 — so a re-dial always arrives as `attempt >= 1` and
+                  // reports NOTHING. The cadence is therefore one outcome per
+                  // channel HANDLE, recorded at its first open, and none on any
+                  // re-dial: a flapping server contributes one report per
+                  // handle rather than drowning the window in identical
+                  // retries.
                   if (announced !== null && attempt === 0) {
                     reportConnectOutcome(announced, "connect_ok", Date.now() - startedAt);
                   }

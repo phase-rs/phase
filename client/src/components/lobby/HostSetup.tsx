@@ -580,7 +580,7 @@ export function HostSetup({
         // makes the same live `hostingServer` read it makes today. Passing the
         // anchor here instead would latch it at submit time, which is wrong for
         // a flow that can route through deck-select before it runs.
-        isP2P ? null : hostServerUrl,
+        isP2P ? null : selected,
       );
       if (ok !== false) return;
     } catch {
@@ -617,14 +617,10 @@ export function HostSetup({
   );
 
   /**
-   * Which server THIS game is hosted on. Session-local: choosing a game server
-   * for one match must not repoint `hostingServer`, which is the P2P broker
-   * target, the direct-codes sentinel and the browsing anchor all at once.
-   *
-   * The initial value walks a chain that terminates in a non-null constant, so
-   * the server leg's selection is a `string` by construction and never by
-   * assumption: the current anchor if it is itself a hostable candidate, else
-   * the best-evidenced candidate, else the build's default server.
+   * The user's explicit pick, when they have made one. Session-local: choosing
+   * a game server for one match must not repoint `hostingServer`, which is the
+   * P2P broker target, the direct-codes sentinel and the browsing anchor all at
+   * once.
    */
   const [hostServerUrl, setHostServerUrl] = useState<string>(
     () =>
@@ -632,6 +628,31 @@ export function HostSetup({
       ?? hostCandidates[0]?.url
       ?? DEFAULT_MULTIPLAYER_SERVER_URL,
   );
+
+  /**
+   * The server this submit will actually use — DERIVED every render, never a
+   * latch.
+   *
+   * The candidate list is asynchronous: `directorySources` and `sourceStatus`
+   * are not persisted, so on a cold session this form can mount before either
+   * has been populated. `fullHostCandidates` is then empty and the initial
+   * state above falls through to `DEFAULT_MULTIPLAYER_SERVER_URL` — the
+   * official broker, which is `LobbyOnly` and which the picker's own filter
+   * therefore excludes. A latched value would freeze there and submit a server
+   * the dropdown does not even offer, which the parent's mode probe would then
+   * route down the P2P branch while the user is looking at a list of Full
+   * servers.
+   *
+   * So: honour the explicit pick only while it is still a candidate, and
+   * otherwise fall back to the best-evidenced one that currently exists. This
+   * re-resolves as the directory lands, and it still terminates in a non-null
+   * constant, which is what makes the server leg's value a `string` by
+   * construction rather than by assumption.
+   */
+  const selected =
+    hostCandidates.some((candidate) => candidate.url === hostServerUrl)
+      ? hostServerUrl
+      : (hostCandidates[0]?.url ?? DEFAULT_MULTIPLAYER_SERVER_URL);
 
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
@@ -960,10 +981,10 @@ export function HostSetup({
               <MenuSelect
                 ariaLabel={t("hostSetup.hostServer")}
                 label={
-                  hostCandidates.find((candidate) => candidate.url === hostServerUrl)?.name
-                  ?? hostServerUrl
+                  hostCandidates.find((candidate) => candidate.url === selected)?.name
+                  ?? selected
                 }
-                selectedValue={hostServerUrl}
+                selectedValue={selected}
                 items={hostCandidates.map((candidate) => ({
                   value: candidate.url,
                   // The score is the directory's own 0–100 rank, rendered

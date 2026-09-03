@@ -374,9 +374,10 @@ describe("multiplayerStore", () => {
       unregister: brokerMocks.unregister,
       close: brokerMocks.close,
     });
-    // Egress guards. The metrics module is mocked away above, so nothing in
-    // this suite should reach a transport at all — these exist so V-U12d can
-    // ASSERT that, rather than the suite merely believing it.
+    // Egress guards — DEFENCE-IN-DEPTH; the real mitigation is the module
+    // mock above, which means no queue, timer or body is ever constructed
+    // here. These stubs only make that observable, and would catch a future
+    // transport reached by some path the mock does not cover.
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     socketMocks.currentWs = null;
@@ -2268,8 +2269,9 @@ describe("multiplayerStore", () => {
       metricsMocks.reportConnectOutcome.mock.calls.filter(([url]) => url === A),
     ).toHaveLength(1);
 
-    // The egress assertion. Nothing in this suite may reach a transport: the
-    // recording stub, not the network, received every report above.
+    // The egress check. Defence-in-depth, not the mitigation: the module mock
+    // is what prevents a send, and this confirms the recording stub — not the
+    // network — is what received every report above.
     expect(navigator.sendBeacon).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
     detach?.();

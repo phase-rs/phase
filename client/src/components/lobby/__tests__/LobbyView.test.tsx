@@ -140,8 +140,8 @@ describe("LobbyView", () => {
     useMultiplayerStore.getState().subscribeAmbientLobby;
 
   beforeEach(() => {
-    // Egress guards, so V-U12ra can ASSERT that no transport was reached
-    // rather than the suite merely believing it.
+    // Egress guards — defence-in-depth; the real mitigation is the module
+    // mock above. These only make the absence of a send observable.
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     useMultiplayerStore.setState({
@@ -697,7 +697,7 @@ describe("LobbyView", () => {
       document.dispatchEvent(new Event("visibilitychange"));
       expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(2);
 
-      // Egress: nothing in this suite may reach a transport.
+      // Egress check — defence-in-depth; the module mock is the mitigation.
       expect(navigator.sendBeacon).not.toHaveBeenCalled();
       expect(globalThis.fetch).not.toHaveBeenCalled();
     } finally {
@@ -722,6 +722,9 @@ describe("LobbyView", () => {
           connectionMode="p2p"
         />,
       );
+      // Reach-guard: a p2p-ONLY element, so the zero below is the effect's
+      // guard and not a render that never happened.
+      expect(screen.getByText(/Dedicated server unavailable/)).toBeInTheDocument();
       document.dispatchEvent(new Event("visibilitychange"));
       expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(0);
 
