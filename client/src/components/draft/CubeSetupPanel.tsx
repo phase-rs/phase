@@ -99,10 +99,7 @@ export function CubeSetupPanel({
       await onStart({
         cubeName,
         cubeListText: cubeText,
-        settings: {
-          ...settings,
-          min_deck_size: Math.max(settings.min_deck_size, minimumDeckSize ?? 1),
-        },
+        settings,
       });
     } catch (err) {
       setError(errorMessage(err, t("cubeSetup.startError")));

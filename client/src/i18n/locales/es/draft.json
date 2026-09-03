@@ -336,6 +336,7 @@
     "moreNeeded": "{{count}} más necesarias",
     "commanderRequired": "Designa un comandante de tu reserva para enviar.",
     "commanderUnavailable": "La designación de comandante no está disponible ahora mismo: no se pudo cargar la base de datos de cartas.",
+    "compatibilityPending": "Comprobando la compatibilidad del mazo...",
     "compatibilityUnavailable": "La compatibilidad del mazo no está disponible ahora mismo; inténtalo de nuevo antes de enviarlo.",
     "grantedFiller": "Tu reserva también incluye hasta {{maximum}} × {{name}}, utilizable solo como tu comandante."
   },

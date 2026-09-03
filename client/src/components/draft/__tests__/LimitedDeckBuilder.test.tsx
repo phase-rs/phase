@@ -1341,6 +1341,53 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(submitSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "pending",
+      () => new Promise(() => {}),
+      "Checking deck compatibility...",
+    ],
+    [
+      "unavailable",
+      () => Promise.reject(new Error("compatibility unavailable")),
+      "Deck compatibility is unavailable right now — try again before submitting.",
+    ],
+    [
+      "incompatible",
+      () => Promise.resolve({
+        ...compatibleResult(),
+        selected_format_compatible: false,
+        selected_format_reasons: ["Cards outside commander's color identity: Wind Drake"],
+      }),
+      "Cards outside commander's color identity: Wind Drake",
+    ],
+  ])("shows %s compatibility status in the phone submission dock", async (_state, evaluate, message) => {
+    onlyVehicleIsEligible();
+    compatibilityHarness.evaluate.mockImplementation(evaluate);
+    const fixture = workspaceDeckFixture();
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="phone-portrait"
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
+    const dock = container.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]")!;
+    await waitFor(() => expect(within(dock).getByText(message)).toBeInTheDocument());
+  });
+
   it("enables controlled submission only for the current strict-true engine result", async () => {
     onlyVehicleIsEligible();
     const submitSpy = vi.fn();

@@ -255,6 +255,8 @@ describe("DraftPodPage workspace", () => {
     captured.hostPresentations = [];
     store.state.phase = "drafting";
     store.state.role = "host";
+    store.state.view.kind = "Premier";
+    store.state.view.commanders_required = 0;
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });

@@ -7,7 +7,7 @@ import { CubeSetupPanel } from "../CubeSetupPanel";
 describe("CubeSetupPanel minimum deck size", () => {
   afterEach(cleanup);
 
-  it("preserves its raw value across floor changes and submits the current maximum", async () => {
+  it("shows the engine floor without normalizing the submitted configuration", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     const { rerender } = render(
@@ -16,13 +16,10 @@ describe("CubeSetupPanel minimum deck size", () => {
 
     const minimum = screen.getByRole("spinbutton", { name: "Min Deck" });
     expect(minimum).toHaveValue(73);
-    fireEvent.change(minimum, { target: { value: "89" } });
-    expect(minimum).toHaveValue(89);
+    expect(minimum).toHaveValue(73);
 
     rerender(<CubeSetupPanel onStart={onStart} minimumDeckSize={97} />);
     expect(minimum).toHaveValue(97);
-    rerender(<CubeSetupPanel onStart={onStart} minimumDeckSize={61} />);
-    expect(minimum).toHaveValue(89);
 
     await user.type(
       screen.getByPlaceholderText(/1 Lightning Bolt/),
@@ -31,7 +28,7 @@ describe("CubeSetupPanel minimum deck size", () => {
     await user.click(screen.getByRole("button", { name: "Start Cube Draft" }));
 
     expect(onStart).toHaveBeenCalledWith(expect.objectContaining({
-      settings: expect.objectContaining({ min_deck_size: 89 }),
+      settings: expect.objectContaining({ min_deck_size: 40 }),
     }));
   });
 

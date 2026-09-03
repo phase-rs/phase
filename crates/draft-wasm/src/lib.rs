@@ -152,7 +152,7 @@ fn default_cube_min_deck_size() -> usize {
     40
 }
 
-fn enforce_cube_minimum_deck_size(mut config: DraftConfig) -> DraftConfig {
+fn enforce_procedure_minimum_deck_size(mut config: DraftConfig) -> DraftConfig {
     config.min_deck_size = config
         .kind
         .procedure()
@@ -166,7 +166,7 @@ fn build_quick_cube_config(
     addable_cards: DeckAddableCards,
     seed: u64,
 ) -> DraftConfig {
-    enforce_cube_minimum_deck_size(DraftConfig {
+    enforce_procedure_minimum_deck_size(DraftConfig {
         source: DraftSource::Cube {
             id: "custom-cube".to_string(),
             name: cube_name.to_string(),
@@ -427,7 +427,7 @@ pub fn start_quick_draft(
 
     let ai_difficulty = map_difficulty(difficulty);
 
-    let config = enforce_cube_minimum_deck_size(DraftConfig {
+    let config = enforce_procedure_minimum_deck_size(DraftConfig {
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Quick,
@@ -1076,8 +1076,9 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 /// layout: the persisted snapshot remains host-local, while all ordinary views
 /// expose only `DraftSourceView`'s redacted metadata.
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
-    let session: DraftSession = serde_json::from_str(json)
+    let mut session: DraftSession = serde_json::from_str(json)
         .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
         .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
@@ -1620,7 +1621,7 @@ fn create_multiplayer_draft_inner(
             })?;
 
             // pod_size from settings is overridden by seats.len() — MP authoritative source
-            let config = enforce_cube_minimum_deck_size(DraftConfig {
+            let config = enforce_procedure_minimum_deck_size(DraftConfig {
                 source: DraftSource::Cube {
                     id: "custom-cube".to_string(),
                     name: cube_name.clone(),
@@ -2159,6 +2160,42 @@ mod create_multiplayer_draft_tests {
             .expect_err("a public redaction is not a restorable Chaos snapshot");
         assert!(error.contains("Failed to deserialize draft session"));
         DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
+    }
+
+    #[test]
+    fn import_normalizes_legacy_commander_deck_floors_for_human_and_bot_decks() {
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        seat_into_deckbuilding(0, 60);
+
+        let mut snapshot = with_installed_session(|session| {
+            serde_json::to_value(session).expect("serialize Commander snapshot")
+        });
+        snapshot["config"]["min_deck_size"] = serde_json::json!(59);
+        let restored = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect("a legacy Commander snapshot restores");
+        assert_eq!(restored.config.min_deck_size, 60);
+        DRAFT_SESSION.with(|cell| cell.set(Some(restored)));
+
+        let human_deck = seat_deck(0, 59);
+        let error = submit_deck_inner(&json(&human_deck), &json(&["Seat 0 Card 0".to_string()]))
+            .expect_err("a restored 59-card Commander deck is illegal");
+        assert!(
+            error.contains("59") && error.contains("60"),
+            "error = {error}"
+        );
+
+        let bot_deck = get_bot_deck_inner(1).expect("a restored Commander bot deck builds");
+        let bot_total = bot_deck.main_deck.len()
+            + bot_deck
+                .lands
+                .values()
+                .map(|&count| count as usize)
+                .sum::<usize>();
+        assert!(bot_total >= 60, "bot deck has {bot_total} cards");
+
+        clear_state();
     }
 
     #[test]

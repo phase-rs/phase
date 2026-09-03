@@ -464,6 +464,7 @@ function useCommanderDraftCompatibility({
   return {
     compatible: !active || result?.selected_format_compatible === true,
     reasons: result?.selected_format_reasons ?? [],
+    pending: active && currentState?.status === "pending",
     unavailable: active && currentState?.status === "error",
   };
 }
@@ -1619,7 +1620,15 @@ function WorkspaceDeckBuilder({
                 ? t("limitedDeck.readyToSubmit")
                 : deckNames.length < minDeckSize
                   ? t("limitedDeck.moreNeeded", { count: minDeckSize - deckNames.length })
-                  : t("limitedDeck.commanderRequired")}
+                  : !designationSatisfied
+                    ? t("limitedDeck.commanderRequired")
+                    : compatibility.reasons[0]
+                      ?? (compatibility.pending
+                        ? t("limitedDeck.compatibilityPending")
+                        : compatibility.unavailable
+                          ? t("limitedDeck.compatibilityUnavailable")
+                          : t("limitedDeck.commanderRequired"))
+              }
             </span>
           </div>
           {compactCommanderControls}

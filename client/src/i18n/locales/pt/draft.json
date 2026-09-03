@@ -336,6 +336,7 @@
     "moreNeeded": "{{count}} a mais necessárias",
     "commanderRequired": "Designe um comandante da sua reserva para enviar.",
     "commanderUnavailable": "A designação de comandante está indisponível no momento — não foi possível carregar a base de dados de cartas.",
+    "compatibilityPending": "Verificando a compatibilidade do deck...",
     "compatibilityUnavailable": "A compatibilidade do deck está indisponível no momento — tente novamente antes de enviar.",
     "grantedFiller": "Sua reserva também inclui até {{maximum}} × {{name}}, utilizável apenas como seu comandante."
   },
