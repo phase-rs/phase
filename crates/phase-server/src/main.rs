@@ -41,7 +41,7 @@ use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, validate_announcement, Broker, BrokerEnv,
     BuildCommitCheck, ConnState, Outbound, RawAnnouncement, ServerAnnouncement, ServerInfoDocument,
-    DIRECTORY_VERSION, INFO_PATH, NOT_OWNED_RESERVATION,
+    DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
 };
 use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
@@ -2397,17 +2397,28 @@ async fn serve() {
         cli.port
     );
 
-    // Validate once, here, where a bad configuration is one startup error the
-    // operator is watching for — rather than a warning every 60 s forever.
-    // `requires = "public_url"` guarantees the flag was supplied; it guarantees
-    // nothing about the value surviving `validate_public_url`.
+    // Both fallible announce-setup steps happen once, here, and share one
+    // `error!` arm: a bad configuration is a single startup error the operator
+    // is watching for, rather than a warning every 60 s forever — and, for the
+    // HTTP client, rather than a panic inside a detached task whose handle
+    // nothing holds. `requires = "public_url"` guarantees the flag was
+    // supplied; it guarantees nothing about the value surviving
+    // `validate_public_url`.
     if let Some(endpoint) = cli.announce_to.clone() {
-        match announcement_from_state(&app_state) {
-            Ok(base) => {
+        let announce_setup = announcement_from_state(&app_state).and_then(|base| {
+            reqwest::Client::builder()
+                .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+                .build()
+                .map(|client| (base, client))
+                .map_err(|error| format!("could not build the announce HTTP client: {error}"))
+        });
+        match announce_setup {
+            Ok((base, client)) => {
                 // The handle is discarded as a bare statement, matching the
                 // expiry task above: `JoinHandle` is not `#[must_use]`.
                 spawn_announce_task(
                     endpoint,
+                    client,
                     base,
                     app_state.player_count.clone(),
                     ANNOUNCE_INTERVAL,
@@ -3244,12 +3255,26 @@ fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, Strin
     let port_suffix = parsed
         .port()
         .map_or(String::new(), |port| format!(":{port}"));
+    // A host longer than the NAME cap must not disable announcing outright:
+    // `MAX_SERVER_URL_LEN` is 256 while `MAX_SERVER_NAME_LEN` is 64, so a host
+    // between those bounds yields an address the directory contract accepts and
+    // a display name it rejects. Truncate the name rather than fail the whole
+    // announcement — `url()` keeps the full host, and that is the field
+    // identity turns on.
+    //
+    // Truncating by CHARACTERS, which is the unit `validate_required_label`
+    // itself bounds (`value.chars().count()`), so this is the exact inverse of
+    // the check it has to satisfy and cannot split a codepoint. Rule 8 does
+    // guarantee an ASCII host — for which characters and bytes coincide — but
+    // it runs inside `validate_announcement`, i.e. after this line, so nothing
+    // here may assume it.
+    let name: String = host.chars().take(MAX_SERVER_NAME_LEN).collect();
     // `/ws` by construction: this server is describing its own route, and
     // `build_router` registers exactly that path.
     let raw = RawAnnouncement {
         directory_version: DIRECTORY_VERSION,
         url: format!("wss://{host}{port_suffix}/ws"),
-        name: host.to_string(),
+        name,
         mode: directory_mode(state.mode),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: PROTOCOL_VERSION,
@@ -3265,25 +3290,26 @@ fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, Strin
 /// ends with the runtime at process exit.
 ///
 /// `base` is already validated (built once by [`announcement_from_state`] at
-/// startup), so this loop has NO validation path — it cannot fail to build an
-/// announcement. Three per-tick failure classes remain, each logged at warn
-/// with the tick skipped and the loop continuing: a transport error, a
+/// startup) and `client` is already built (by the caller, carrying
+/// [`ANNOUNCE_REQUEST_TIMEOUT`]), so this loop has NO setup path at all — it
+/// cannot fail to build an announcement and it cannot fail to build a client.
+/// Both of those failures are the caller's single startup `error!`; building
+/// the client in here instead would put either a fourth outcome or a silent
+/// panic inside a task that is required never to die and whose handle
+/// production discards. Three per-tick failure classes remain, each logged at
+/// warn with the tick skipped and the loop continuing: a transport error, a
 /// non-success status, and a serialization error from `serde_json::to_vec`.
 /// `period` is a parameter so the test drives the real loop without a
 /// wall-clock minute; production passes [`ANNOUNCE_INTERVAL`]. The handle is
 /// returned only so that test can assert the task is still alive.
 fn spawn_announce_task(
     endpoint: Url,
+    client: reqwest::Client,
     base: ServerAnnouncement,
     player_count: SharedPlayerCount,
     period: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // The timeout is bound per request rather than on a
-        // `Client::builder()`: the builder returns a `Result` whose failure
-        // would be a fourth outcome in a loop that is required never to die,
-        // and `RequestBuilder::timeout` bounds exactly the same thing.
-        let client = reqwest::Client::new();
         let mut interval = tokio::time::interval(period);
         // A stalled process must not fire a burst of announcements on catch-up.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3302,7 +3328,6 @@ fn spawn_announce_task(
             let sent = client
                 .post(endpoint.clone())
                 .header(http::header::CONTENT_TYPE, "application/json")
-                .timeout(ANNOUNCE_REQUEST_TIMEOUT)
                 .body(body)
                 .send()
                 .await;
@@ -14323,8 +14348,8 @@ mod compression_tests {
     use super::{
         announcement_from_state, build_commit, build_router, draft_pools, persistence,
         spawn_announce_task, validate_announcement, AppState, RawAnnouncement, ServerContext,
-        ServerInfoDocument, ServerMode, DIRECTORY_VERSION, INFO_PATH, LOBBY_PROTOCOL_VERSION,
-        PROTOCOL_VERSION,
+        ServerInfoDocument, ServerMode, ANNOUNCE_REQUEST_TIMEOUT, DIRECTORY_VERSION, INFO_PATH,
+        LOBBY_PROTOCOL_VERSION, MAX_SERVER_NAME_LEN, PROTOCOL_VERSION,
     };
 
     fn test_app_state(temp_dir: &tempfile::TempDir, mode: ServerMode) -> AppState {
@@ -14695,6 +14720,26 @@ mod compression_tests {
         // this would otherwise become wss://host.example/ws, claiming 443.
         state.public_url = Some("http://host.example:80".to_string());
         assert!(announcement_from_state(&state).is_err());
+
+        // A host longer than the NAME cap but well inside the URL cap must
+        // still announce: the name is truncated, the ADDRESS is not. Without
+        // the truncation this returns `Err` and the server never announces at
+        // all. Every label is 60 bytes (inside rule 8's 63) and the whole host
+        // is 121 characters — a valid DNS name that exceeds
+        // MAX_SERVER_NAME_LEN.
+        let long_label = "a".repeat(60);
+        let long_host = format!("{long_label}.{long_label}");
+        assert!(long_host.chars().count() > MAX_SERVER_NAME_LEN);
+        state.public_url = Some(format!("https://{long_host}"));
+        let announcement =
+            announcement_from_state(&state).expect("a long but legal host is still announceable");
+        assert_eq!(announcement.name().len(), MAX_SERVER_NAME_LEN);
+        assert!(long_host.starts_with(announcement.name()));
+        assert_eq!(
+            announcement.url().as_str(),
+            format!("wss://{long_host}/ws"),
+            "the address must keep the FULL host; only the display name is truncated"
+        );
     }
 
     /// V16. The heartbeat actually POSTs: right shape, right cadence, and a
@@ -14709,12 +14754,21 @@ mod compression_tests {
         state.public_url = Some("https://play.example.com".to_string());
         state.player_count.store(3, Ordering::Relaxed);
         let base = announcement_from_state(&state).expect("fixture must be announceable");
+        // Built the way `serve()` builds it, so the test drives the real
+        // parameterised loop rather than a differently-configured client.
+        // `reqwest::Client` is a cheap `Arc` handle, so cloning it per case is
+        // what sharing one configured client looks like.
+        let client = reqwest::Client::builder()
+            .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+            .build()
+            .expect("announce client builds");
 
         // (A) `interval`'s first tick is immediate, so a 30 s period still
         // announces at startup — pinned without a 30 s wait.
         let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
         let handle = spawn_announce_task(
             endpoint,
+            client.clone(),
             base.clone(),
             state.player_count.clone(),
             std::time::Duration::from_secs(30),
@@ -14731,6 +14785,7 @@ mod compression_tests {
             spawn_recording_directory(StatusCode::INTERNAL_SERVER_ERROR).await;
         let handle = spawn_announce_task(
             endpoint,
+            client.clone(),
             base.clone(),
             state.player_count.clone(),
             std::time::Duration::from_millis(25),
@@ -14759,6 +14814,7 @@ mod compression_tests {
         let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
         let handle = spawn_announce_task(
             endpoint,
+            client.clone(),
             base,
             state.player_count.clone(),
             std::time::Duration::from_millis(25),

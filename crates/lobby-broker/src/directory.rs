@@ -375,10 +375,12 @@ pub fn normalize_announced_url(raw: &str) -> Result<AnnouncedUrl, String> {
         return Err("url host must be a DNS name, not an IP literal".to_string());
     }
 
-    // Rule 8: label rules. Requires at least two labels, which is what refuses
-    // a bare `localhost`, an empty authority, and a ported bracketed IPv6
-    // authority. Non-ASCII is refused so an IDN is announced as its punycode
-    // A-label and one name has one spelling.
+    // Rule 8: label rules — at least two labels, each non-empty, at most 63
+    // bytes, ASCII alphanumeric or hyphen, and neither hyphen-initial nor
+    // hyphen-final. Non-ASCII is refused so an IDN is announced as its punycode
+    // A-label and one name has one spelling. Which of these sub-checks fires
+    // for a given input depends on the label split and is deliberately not
+    // pinned, here or in any test; rule 5 carries the bracketed-IPv6 record.
     let labels: Vec<&str> = host.split('.').collect();
     if labels.len() < 2 {
         return Err("url host must be a public DNS name with at least two labels".to_string());
