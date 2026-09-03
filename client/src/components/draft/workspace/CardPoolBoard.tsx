@@ -490,8 +490,8 @@ export function CardPoolBoard({
         )}
         {visualColumnCap === undefined ? (
           <div className={model.rowCount === 2
-          ? "grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2 p-[18px]"
-          : "flex w-full gap-2 p-[18px]"
+          ? "grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2 p-[20px]"
+          : "flex w-full gap-2 p-[20px]"
           }>
           {model.rowCount === 2 && (
             <div
@@ -527,7 +527,7 @@ export function CardPoolBoard({
           </div>
           </div>
         ) : (
-          <div data-board-columns className="grid min-w-0 gap-y-2 p-[18px]">
+          <div data-board-columns className="grid min-w-0 gap-y-2 p-[20px]">
             {visualColumnGroups.map((columns, groupIndex) => (
               model.rowCount === 2 ? (
                 <div
