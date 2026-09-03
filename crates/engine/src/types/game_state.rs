@@ -5270,7 +5270,7 @@ pub struct PendingCounterMoveQueue {
 /// drained one `(counter_type, count)` at a time by
 /// `effects::counters::drain_pending_counter_removals`, which re-parks the queue
 /// when a per-removal replacement surfaces a `ReplacementChoice` mid-batch. When
-/// the queue empties, `total` is stamped into `last_effect_count` so a downstream
+/// the queue empties, `applied_total` is stamped into `last_effect_count` so a downstream
 /// "create that many" / "add that much" rider (Tetravus, storage lands) reading
 /// `QuantityRef::EventContextAmount` picks up the count removed.
 ///
@@ -5283,6 +5283,15 @@ pub struct PendingCounterRemoval {
     pub count: u32,
 }
 
+/// A removal awaiting its replacement-pipeline result. The pre-removal count
+/// lets the queue record the actual clamped or replacement-modified removal
+/// when a `ReplacementChoice` resumes the parked queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterRemovalInFlight {
+    pub removal: PendingCounterRemoval,
+    pub counter_count_before: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
     /// Remaining per-object counter removals.
@@ -5291,9 +5300,15 @@ pub struct PendingCounterRemovalQueue {
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries; stamped into
-    /// `last_effect_count` when the queue empties.
+    /// Total counters requested across all entries. Retained for diagnostics and
+    /// legacy wire compatibility; use `applied_total` for effect result context.
     pub total: u32,
+    /// Counters actually removed so far, after clamping and replacements.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub applied_total: u32,
+    /// A removal whose replacement pipeline has not settled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<PendingCounterRemovalInFlight>,
 }
 
 #[derive(Deserialize)]
@@ -5304,6 +5319,10 @@ struct PendingCounterRemovalQueueWire {
     effect_kind: EffectKind,
     source_ability_id: ObjectId,
     total: u32,
+    #[serde(default)]
+    applied_total: u32,
+    #[serde(default)]
+    in_flight: Option<PendingCounterRemovalInFlight>,
 }
 
 #[derive(Deserialize)]
@@ -5341,6 +5360,8 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
             effect_kind: wire.effect_kind,
             source_ability_id: wire.source_ability_id,
             total: wire.total,
+            applied_total: wire.applied_total,
+            in_flight: wire.in_flight,
         })
     }
 }
@@ -26983,6 +27004,8 @@ mod tests {
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(18),
             total: 2,
+            applied_total: 0,
+            in_flight: None,
         })
         .expect("current counter-removal queue serializes");
         legacy_wire["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
@@ -27002,6 +27025,14 @@ mod tests {
                 count: 2,
             }],
             "legacy entries inherit their queue's single source ID"
+        );
+        assert_eq!(
+            restored.applied_total, 0,
+            "queues persisted before applied-count tracking start at zero"
+        );
+        assert!(
+            restored.in_flight.is_none(),
+            "legacy queues never carry a replacement-pipeline in-flight removal"
         );
     }
 

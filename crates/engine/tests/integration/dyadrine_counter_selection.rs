@@ -33,6 +33,11 @@ fn dyadrine_attack_acceptance_selects_creatures_then_removes_draws_and_creates_r
         builder.with_plus_counters(1);
         builder.id()
     };
+    let third = {
+        let mut builder = scenario.add_creature(P0, "Third Counter Bearer", 1, 1);
+        builder.with_plus_counters(1);
+        builder.id()
+    };
     scenario.with_library_top(P0, &["Dyadrine Draw"]);
     let mut runner = scenario.build();
     let hand_before = runner.state().players[0].hand.len();
@@ -88,8 +93,21 @@ fn dyadrine_attack_acceptance_selects_creatures_then_removes_draws_and_creates_r
     );
     assert_eq!(
         eligible,
-        vec![TargetRef::Object(first), TargetRef::Object(second)],
+        vec![
+            TargetRef::Object(first),
+            TargetRef::Object(second),
+            TargetRef::Object(third),
+        ],
         "only creatures carrying removable +1/+1 counters are selectable"
+    );
+
+    assert!(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(first)],
+            })
+            .is_err(),
+        "an exact-two selection must reject a one-creature submission"
     );
 
     runner
@@ -110,6 +128,15 @@ fn dyadrine_attack_acceptance_selects_creatures_then_removes_draws_and_creates_r
             "each selected creature loses its +1/+1 counter"
         );
     }
+    assert_eq!(
+        runner.state().objects[&third]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or_default(),
+        1,
+        "the eligible but unselected third creature retains its counter"
+    );
     assert_eq!(
         runner.state().players[0].hand.len(),
         hand_before + 1,

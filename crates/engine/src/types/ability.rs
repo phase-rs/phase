@@ -57,7 +57,8 @@ pub enum Chooser {
     OwningPlayer,
 }
 
-/// CR 608.2c: A selection cardinality that must remain exact at resolution.
+/// CR 608.2d: Resolution-time choice cardinality.
+///
 /// Unlike the legacy `min`/`max` range, an exact selection is infeasible when
 /// fewer eligible objects exist and is therefore suitable for optional actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,7 +66,7 @@ pub enum ObjectSelectionCardinality {
     Exactly { count: u32 },
 }
 
-/// CR 122.1 + CR 101.2: Additional eligibility required before an object may
+/// CR 608.2d + CR 101.2: Additional eligibility required before an object may
 /// be selected for a counter-removal instruction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectSelectionEligibility {

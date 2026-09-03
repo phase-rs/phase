@@ -6611,6 +6611,8 @@ mod tests {
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
                 total: 0,
+                applied_total: 0,
+                in_flight: None,
             },
         ));
         assert!(counter_removals.active_counter_removals().is_none());
