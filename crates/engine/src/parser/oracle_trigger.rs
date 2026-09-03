@@ -7564,6 +7564,16 @@ fn try_extract_mana_spent_comparison_condition(
         preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
     })?;
 
+    // CR 603.4: intervening-if only binds when the "if" clause immediately
+    // follows the triggered ability's trigger event — a trailing "if" clause
+    // (e.g. "...put a counter on X if the amount of mana spent...") instead
+    // qualifies an effect and must be left for effect-chain parsing, not
+    // hoisted into a trigger-check condition (else the trigger itself is
+    // wrongly suppressed instead of the effect it was meant to gate).
+    if !before.trim().is_empty() {
+        return None;
+    }
+
     let rest_trimmed = rest.trim_start();
     if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
     {

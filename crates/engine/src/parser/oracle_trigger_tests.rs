@@ -23349,6 +23349,24 @@ fn extract_mana_spent_comparison_condition_source_toughness_less_than() {
     );
 }
 
+/// Trailing "if" clause after an effect must NOT be hoisted into an
+/// intervening-if `TriggerCondition` — only a leading clause (immediately
+/// after the trigger event, nothing before it in the effect text) is a true
+/// CR 603.4 intervening-if. A trailing form like this instead qualifies the
+/// effect and belongs to effect-chain parsing, so the extractor must return
+/// `None` and leave the whole clause untouched for downstream handling.
+#[test]
+fn mana_spent_comparison_after_effect_is_not_intervening_if() {
+    let (cleaned, cond) = extract_if_condition(
+        "put a +1/+1 counter on it if the amount of mana spent to cast it is greater than ~'s power",
+    );
+    assert_eq!(cond, None);
+    assert_eq!(
+        cleaned,
+        "put a +1/+1 counter on it if the amount of mana spent to cast it is greater than ~'s power"
+    );
+}
+
 // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to
 // be at the start of the text. Covers the same positional flexibility the
 // word-form Adamant extractor already relies on.
