@@ -5,7 +5,9 @@ use engine::ai_support::{
     TargetedExchangeVerdict,
 };
 use engine::game::combat::AttackTarget;
-use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
+use engine::types::ability::{
+    AbilityCondition, ActivationRestriction, CostCategory, Effect, PtValue, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -25,6 +27,7 @@ use crate::policies::effect_classify::{
 };
 use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
 use crate::policies::strategy_helpers::can_pay_ward_cost;
+use crate::search::ability_is_temporary_combat_modifier;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
 
@@ -338,6 +341,32 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
             if facts.pass_preserves_stronger_window && !facts.live_stack_response {
                 return GateDecision::AllowWithPenalty(-1.0);
             }
+        } else if let Some(source_id) = activated_ueot_pump_source(ctx) {
+            // CR 514.2: an "until end of turn" pump ends at cleanup, so an
+            // activation outside a live combat/stack window buys nothing —
+            // the same waste the spell branch above rejects. Complementary to
+            // `search::empty_stack_activation_is_low_value`, which only lets
+            // the priority fast path skip searching when EVERY candidate is
+            // low value; this is the per-candidate bound.
+            let facts = TacticalFacts::derive(ctx.state, ctx.ai_player);
+            // A repeatable mana-sink pump on our own unblocked attacker after
+            // blockers are declared is a value judgment (how much face damage
+            // is this mana worth?), not a provable waste — leave it to policy
+            // scoring rather than the categorical gate.
+            let mana_sink_into_open_board = power_bonus > 0
+                && matches!(
+                    facts.window,
+                    TacticalWindow::CombatAfterBlocks | TacticalWindow::CombatDamage
+                )
+                && self_pump_on_unblocked_attacker(ctx.state, ctx.ai_player, source_id, &effects);
+            if !mana_sink_into_open_board {
+                if should_reject_pump_window(ctx, &facts, power_bonus, toughness_bonus) {
+                    return GateDecision::Reject;
+                }
+                if facts.pass_preserves_stronger_window && !facts.live_stack_response {
+                    return GateDecision::AllowWithPenalty(-1.0);
+                }
+            }
         }
     }
 
@@ -521,6 +550,110 @@ fn pure_fixed_pump_bonus(effects: &[&Effect]) -> Option<(i32, i32)> {
         toughness_bonus += *toughness;
     }
     Some((power_bonus, toughness_bonus))
+}
+
+/// The activated ability behind an in-class temporary-pump candidate, or
+/// `None` when the candidate is not one. Returns the ability's source object
+/// id (the permanent whose ability is being activated).
+///
+/// `ability_is_temporary_combat_modifier` reads the DEFINITION — `ctx.effects()`
+/// flattens the chain and drops `duration`, so a permanent pump would be
+/// indistinguishable from an "until end of turn" one there.
+///
+/// Every check here is card-local and runs BEFORE `TacticalFacts::derive`, so a
+/// candidate outside the class costs one map lookup and a cost-category walk.
+/// The exclusions:
+/// - sacrifice / loyalty / discard costs: the activation's payoff is the cost
+///   itself (a sacrifice outlet, a planeswalker's loyalty economy, a discard
+///   enabler), priced by `free_outlet_activation` / `self_cost_value`, so the
+///   pump window is the wrong lens.
+/// - `AsSorcery`: there is no later, stronger window to save the ability for.
+///
+/// PayLife stays in class — Desolation Prowler is the reported card, and its
+/// life cost is priced separately by the self-cost policies.
+fn activated_ueot_pump_source(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
+    let GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+    } = &ctx.candidate.action
+    else {
+        return None;
+    };
+    let ability = ctx
+        .state
+        .objects
+        .get(source_id)?
+        .abilities
+        .get(*ability_index)?;
+    if !ability_is_temporary_combat_modifier(ability) {
+        return None;
+    }
+    let cost_is_its_own_payoff = ability.cost.as_ref().is_some_and(|cost| {
+        cost.categories().iter().any(|category| {
+            matches!(
+                category,
+                CostCategory::SacrificesPermanent
+                    | CostCategory::PaysLoyalty
+                    | CostCategory::Discards
+            )
+        })
+    });
+    if cost_is_its_own_payoff
+        || ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery)
+    {
+        return None;
+    }
+    Some(*source_id)
+}
+
+/// Whether the pump lands on the ability's own source (`SelfRef`) and that
+/// permanent is one of the AI's unblocked attackers — CR 509.1h: an attacking
+/// creature no blocker was assigned to remains unblocked.
+///
+/// CR 510.3: once combat damage has been dealt the active player gets priority
+/// again while still inside the combat phase, and `Phase::EndCombat` maps to
+/// `CombatAfterBlocks` too. Extra power at that point buys nothing, so
+/// `regular_damage_done` closes the stand-down.
+fn self_pump_on_unblocked_attacker(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effects: &[&Effect],
+) -> bool {
+    if !effects.iter().all(|effect| {
+        matches!(
+            effect,
+            Effect::Pump {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        )
+    }) {
+        return false;
+    }
+    if state
+        .objects
+        .get(&source_id)
+        .is_none_or(|source| source.controller != ai_player)
+    {
+        return false;
+    }
+    let Some(combat) = &state.combat else {
+        return false;
+    };
+    if combat.regular_damage_done {
+        return false;
+    }
+    combat.attackers.iter().any(|attacker| {
+        attacker.object_id == source_id
+            && !attacker.blocked
+            && combat
+                .blocker_assignments
+                .get(&source_id)
+                .is_none_or(|blockers| blockers.is_empty())
+    })
 }
 
 fn should_reject_pump_window(
@@ -773,6 +906,7 @@ mod tests {
     use engine::types::keywords::WardCost;
     use engine::types::mana::ManaCost;
     use engine::types::replacements::ReplacementEvent;
+    use std::sync::Arc;
 
     #[test]
     fn rejects_pump_after_combat_without_live_threat() {
@@ -1936,5 +2070,290 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    // ---------------------------------------------------------------------
+    // S7: temporary-combat-modifier ACTIVATIONS outside a live combat window.
+    // ---------------------------------------------------------------------
+
+    /// Desolation Prowler's real Oracle text, verified against
+    /// `data/card-data.json`: it parses to `Pump { Fixed 2, Fixed 2, SelfRef }`
+    /// with cost `PayLife 2`, `duration: UntilEndOfTurn` and restriction
+    /// `OnlyOnceEachTurn`.
+    const PROWLER_ORACLE: &str =
+        "Pay 2 life: This creature gets +2/+2 until end of turn. Activate only once each turn.";
+
+    /// Nantuko Husk's real Oracle text (sacrifice outlet — the payoff IS the
+    /// cost, so the pump window must not gate it).
+    const HUSK_ORACLE: &str = "Sacrifice a creature: This creature gets +2/+2 until end of turn.";
+
+    /// Shivan Dragon's firebreathing (repeatable mana sink).
+    const FIREBREATHING_ORACLE: &str = "{R}: This creature gets +1/+0 until end of turn.";
+
+    /// Non-vacuity guard: every fixture below depends on its Oracle text still
+    /// parsing to an "until end of turn" pump. Without this, a parser change
+    /// would silently turn the `assert_ne!(.., Reject)` tests green for the
+    /// wrong reason.
+    fn assert_parses_as_temporary_pump(state: &GameState, source_id: ObjectId) {
+        let ability = &state.objects.get(&source_id).unwrap().abilities[0];
+        assert!(
+            ability_is_temporary_combat_modifier(ability),
+            "fixture Oracle text no longer parses to an until-end-of-turn pump"
+        );
+    }
+
+    fn gate_activation(state: &GameState, source_id: ObjectId) -> GateDecision {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+        };
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Put the AI at priority in `phase` on `active_player`'s turn.
+    fn set_priority_window(state: &mut GameState, phase: Phase, active_player: PlayerId) {
+        state.phase = phase;
+        state.active_player = active_player;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    /// CR 514.2: the +2/+2 ends at cleanup, and no combat or stack window can
+    /// consume it from the opponent's end step — the 2 life buys nothing.
+    #[test]
+    fn activated_ueot_pump_rejected_at_opponents_end_step() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::End, P1);
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_eq!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    #[test]
+    fn activated_ueot_pump_rejected_in_own_postcombat_main_with_no_combat() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::PostCombatMain, P0);
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_eq!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// After blockers are declared, a 2/2 blocked by a 3/3 dies and kills
+    /// nothing; +2/+2 flips both halves of the exchange, so the activation is a
+    /// real play and must reach scoring.
+    #[test]
+    fn activated_ueot_pump_allowed_after_blocks_when_it_changes_the_outcome() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let blocker = scenario.add_creature(P1, "Blocker", 3, 3).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::DeclareBlockers, P0);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(prowler, P1)],
+            blocker_assignments: [(prowler, vec![blocker])].into_iter().collect(),
+            blocker_to_attacker: [(blocker, vec![prowler])].into_iter().collect(),
+            ..Default::default()
+        });
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_ne!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// The mirror of the case above, and the proof that the new branch is a
+    /// real gate rather than a blanket allow inside combat: blocked by a 6/6,
+    /// +2/+2 neither saves the Prowler nor kills the blocker, so the 2 life is
+    /// still wasted.
+    #[test]
+    fn activated_ueot_pump_rejected_after_blocks_when_outcome_is_unchanged() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let blocker = scenario.add_creature(P1, "Colossus", 6, 6).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::DeclareBlockers, P0);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(prowler, P1)],
+            blocker_assignments: [(prowler, vec![blocker])].into_iter().collect(),
+            blocker_to_attacker: [(blocker, vec![prowler])].into_iter().collect(),
+            ..Default::default()
+        });
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_eq!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// A pump whose definition carries no `UntilEndOfTurn` duration outlives
+    /// the combat window, so "no live window" proves nothing about its value.
+    #[test]
+    fn activated_pump_without_ueot_duration_not_gated() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::End, P1);
+        let object = state.objects.get_mut(&prowler).unwrap();
+        Arc::make_mut(&mut object.abilities)[0].duration = None;
+
+        assert_ne!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// The reactive exception carried over from the spell path: with a 3-damage
+    /// burn spell on the stack aimed at the 2/2 Prowler, +2/+2 saves it.
+    #[test]
+    fn activated_pump_in_response_to_burn_allowed() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::PostCombatMain, P1);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(300),
+            source_id: ObjectId(301),
+            controller: P1,
+            kind: StackEntryKind::Spell {
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                        excess: None,
+                    },
+                    vec![TargetRef::Object(prowler)],
+                    ObjectId(301),
+                    P1,
+                ))),
+                card_id: CardId(301),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_ne!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// Sacrifice-outlet shape (Nantuko Husk): the sacrifice IS the payoff, and
+    /// `free_outlet_activation` / `self_cost_value` own that judgment, so the
+    /// pump window must not veto it even at the opponent's end step.
+    #[test]
+    fn activated_sacrifice_outlet_pump_not_gated() {
+        let mut scenario = GameScenario::new();
+        let husk = scenario
+            .add_creature_from_oracle(P0, "Nantuko Husk", 2, 2, HUSK_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::End, P1);
+
+        assert_parses_as_temporary_pump(state, husk);
+        assert_ne!(gate_activation(state, husk), GateDecision::Reject);
+    }
+
+    /// A sorcery-speed-only pump has no later, stronger window to be saved
+    /// for, so "pass and use it in combat instead" is not available advice.
+    /// No printed card carries this shape today, so the restriction is
+    /// synthesized onto the Prowler ability.
+    #[test]
+    fn activated_as_sorcery_pump_not_gated() {
+        let mut scenario = GameScenario::new();
+        let prowler = scenario
+            .add_creature_from_oracle(P0, "Desolation Prowler", 2, 2, PROWLER_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::PostCombatMain, P0);
+        let object = state.objects.get_mut(&prowler).unwrap();
+        Arc::make_mut(&mut object.abilities)[0]
+            .activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+
+        assert_parses_as_temporary_pump(state, prowler);
+        assert_ne!(gate_activation(state, prowler), GateDecision::Reject);
+    }
+
+    /// CR 509.1h: with no blocker declared for it the Dragon is an unblocked
+    /// creature, and CR 510.1b assigns its combat damage to the defending
+    /// player — so a repeatable mana sink still pays off even when it changes
+    /// no combat outcome the gate can prove. How much that mana is worth is a
+    /// policy judgment, so the activated branch stands down here.
+    #[test]
+    fn firebreathing_unblocked_attacker_is_not_gated() {
+        let mut scenario = GameScenario::new();
+        let dragon = scenario
+            .add_creature_from_oracle(P0, "Shivan Dragon", 5, 5, FIREBREATHING_ORACLE)
+            .id();
+        scenario.with_life(P1, 20);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::DeclareBlockers, P0);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(dragon, P1)],
+            ..Default::default()
+        });
+
+        assert_parses_as_temporary_pump(state, dragon);
+        assert_ne!(gate_activation(state, dragon), GateDecision::Reject);
+    }
+
+    /// CR 510.3: the active player gets priority again after combat damage is
+    /// dealt, still inside a window that maps to `CombatAfterBlocks`. The same
+    /// unblocked attacker has already connected, so the mana-sink stand-down
+    /// must not apply — pumping now is pure waste.
+    #[test]
+    fn activated_pump_on_unblocked_attacker_after_damage_is_rejected() {
+        let mut scenario = GameScenario::new();
+        let dragon = scenario
+            .add_creature_from_oracle(P0, "Shivan Dragon", 5, 5, FIREBREATHING_ORACLE)
+            .id();
+        scenario.with_life(P1, 20);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        set_priority_window(state, Phase::DeclareBlockers, P0);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(dragon, P1)],
+            regular_damage_done: true,
+            ..Default::default()
+        });
+
+        assert_parses_as_temporary_pump(state, dragon);
+        assert_eq!(gate_activation(state, dragon), GateDecision::Reject);
     }
 }

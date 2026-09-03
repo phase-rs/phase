@@ -23,5 +23,11 @@ spec:
       targetPort: logs
       protocol: TCP
     {{- end }}
+    {{- if .Values.web.enabled }}
+    - name: web
+      port: {{ .Values.web.server.port }}
+      targetPort: web
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "phase-server.selectorLabels" . | nindent 4 }}

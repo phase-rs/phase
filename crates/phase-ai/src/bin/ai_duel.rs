@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
     PlayerDeckPayload,
 };
 use engine::types::format::FormatConfig;
@@ -429,7 +429,7 @@ fn run_single(
         }
 
         let start = Instant::now();
-        let (winner, turns) = run_game(&payload, game_seed, difficulty, verbose, is_batch);
+        let (winner, turns) = run_game(db, &payload, game_seed, difficulty, verbose, is_batch);
         let elapsed = start.elapsed().as_millis();
 
         match winner {
@@ -476,6 +476,7 @@ fn run_single(
 }
 
 fn run_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -483,7 +484,10 @@ fn run_game(
     silent: bool,
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    // Canonical init path (shared with engine-wasm / server-core): hydrates
+    // dual-faced back faces and the `#[serde(skip)]` card-name pool that
+    // `NamedChoice { CardName, .. }` prompts (Pithing Needle) validate against.
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -512,7 +516,10 @@ fn run_game(
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
-            eprintln!("Warning: no AI actions and game not over — breaking");
+            eprintln!(
+                "Warning: no AI actions and game not over — breaking (turn {}, waiting_for: {:?})",
+                state.turn_number, state.waiting_for
+            );
             break;
         }
         total_actions += results.len();
@@ -952,8 +959,9 @@ struct CommanderGameResult {
 /// Single authority for the setup sequence: `run_commander_game` and the setup
 /// regression test below both call it, so the two cannot drift apart.
 ///
-/// Populates `state.all_card_names` (a `#[serde(skip)]` field, so deserialization
-/// never restores it) right after deck loading, mirroring `ai_commander`'s
+/// Uses `load_and_hydrate_decks`, the canonical initializer that populates
+/// `state.all_card_names` (a `#[serde(skip)]` field, so deserialization never
+/// restores it) while also hydrating dual-faced cards, mirroring `ai_commander`'s
 /// `build_game_state` and every other game-construction site
 /// (`engine-wasm/src/lib.rs`, `replay.rs`, `server-core/src/session.rs`).
 /// Without it, `NamedChoice { choice_type: CardName, .. }` candidate generation
@@ -970,8 +978,7 @@ fn build_commander_state(
     seed: u64,
 ) -> GameState {
     let mut state = GameState::new(FormatConfig::commander(), players, seed);
-    load_deck_into_state(&mut state, payload);
-    state.all_card_names = db.card_names().into();
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     state
 }
 

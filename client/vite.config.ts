@@ -267,6 +267,14 @@ export default defineConfig(({ mode }) => ({
           "**/draft_wasm_bg-*.wasm",
           "**/changelog.json",
           "**/changelog-meta.json",
+          // config.js is per-deployment: a self-hoster serves their own copy
+          // over the placeholder shipped in the bundle. `.js` is in
+          // globPatterns, so precaching it would pin the BUILD-TIME copy for
+          // every client that already has a service worker, and the deployed
+          // one would never be read. Same mechanism as the wasm entries above,
+          // different motive: those are fetched by a runtime rule, this one
+          // must always come from the network.
+          "**/config.js",
         ],
         runtimeCaching: [
           {

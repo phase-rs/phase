@@ -44,11 +44,10 @@
 //! `find_legal_targets` — nothing this policy touches is on the documented
 //! inner-loop landmine list.
 
-use engine::game::ability_utils::modal_spell_mode_ability_refs;
 use engine::game::combat::AttackTarget;
 use engine::types::ability::AbilityDefinition;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
@@ -59,7 +58,7 @@ use crate::features::poison::{
 };
 use crate::features::DeckFeatures;
 
-use super::context::PolicyContext;
+use super::context::{selected_mode_abilities, PolicyContext};
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX, STRONG_MAX,
 };
@@ -113,11 +112,8 @@ impl PoisonClockPolicy {
             // the candidate selects, so a poison mode and a non-poison mode of
             // the same card score differently.
             GameAction::SelectModes { indices } => {
-                let modes = pending_mode_abilities(ctx.state, &ctx.decision.waiting_for);
-                let selected: Vec<&AbilityDefinition> = indices
-                    .iter()
-                    .filter_map(|index| modes.get(*index).copied())
-                    .collect();
+                let selected =
+                    selected_mode_abilities(ctx.state, &ctx.decision.waiting_for, indices);
                 classify_abilities(selected.iter().copied())
             }
             GameAction::DeclareAttackers { attacks, .. } => combat_contribution(ctx, attacks),
@@ -142,26 +138,6 @@ where
         PoisonContribution::Proliferate
     } else {
         PoisonContribution::None
-    }
-}
-
-/// CR 700.2: the modes a pending `SelectModes` decision is choosing among.
-/// A modal SPELL carries them as the spell-kind abilities of the object being
-/// cast (`modal_spell_mode_ability_refs`, the engine's authority, which
-/// `handle_select_modes` indexes with the same `indices`); a modal activated or
-/// triggered ABILITY carries them on the waiting payload.
-fn pending_mode_abilities<'a>(
-    state: &'a GameState,
-    waiting_for: &'a WaitingFor,
-) -> Vec<&'a AbilityDefinition> {
-    match waiting_for {
-        WaitingFor::ModeChoice { pending_cast, .. } => state
-            .objects
-            .get(&pending_cast.object_id)
-            .map(|obj| modal_spell_mode_ability_refs(obj).collect())
-            .unwrap_or_default(),
-        WaitingFor::AbilityModeChoice { mode_abilities, .. } => mode_abilities.iter().collect(),
-        _ => Vec::new(),
     }
 }
 

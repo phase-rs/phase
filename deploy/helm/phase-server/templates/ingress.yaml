@@ -22,10 +22,28 @@
      can be excluded from it alone), and the backup API. Only the first
      carries the cert-manager annotation so ingress-shim manages one
      Certificate for the shared secret. */}}
-{{- range $i, $route := list
-      (dict "suffix" "" "paths" (list "/health") "mw" $common)
-      (dict "suffix" "-ws" "paths" (list "/ws") "mw" $wsMw)
-      (dict "suffix" "-backup" "paths" (list "/p2p-draft-backup") "mw" $backupMw) }}
+{{- /* The SPA's catch-all. Last in the list so the three endpoint routes above
+     keep their positions; ordering between Ingress objects does not decide
+     matching anyway — the Ingress spec is longest-prefix, so /health, /ws and
+     /p2p-draft-backup still win over "/". Without this route the default
+     topology would render a web sidecar and a Service port with nothing
+     pointing at them. */}}
+{{- /* `/admin/*` is deliberately absent. It is mounted by the server only when an
+     admin token is set, and its bearer guard is authentication, not a reason to
+     move the documented network boundary: the chart keeps it reachable only
+     through `kubectl port-forward`. With the SPA on the catch-all an /admin
+     request therefore lands on the site and 404s, which is the intended answer
+     from the public edge. `tests/assert-web-routing.sh` asserts its absence with
+     a token configured, in both topologies. */}}
+{{- $routes := list
+      (dict "suffix" "" "paths" (list "/health") "mw" $common "port" "http")
+      (dict "suffix" "-ws" "paths" (list "/ws") "mw" $wsMw "port" "http")
+      (dict "suffix" "-backup" "paths" (list "/p2p-draft-backup") "mw" $backupMw "port" "http") }}
+{{- if .Values.web.enabled }}
+{{- $webMw := include "phase-server.commonMiddlewares" (dict "ctx" . "excludeCompress" false "excludeRateLimit" true) }}
+{{- $routes = append $routes (dict "suffix" "-web" "paths" (list "/") "mw" $webMw "port" "web") }}
+{{- end }}
+{{- range $i, $route := $routes }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -62,7 +80,7 @@ spec:
               service:
                 name: {{ $fullname }}
                 port:
-                  name: http
+                  name: {{ $route.port }}
           {{- end }}
 {{- end }}
 {{- end }}

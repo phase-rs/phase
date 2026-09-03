@@ -10,6 +10,7 @@
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 
+use crate::cast_facts::is_cast_family_action;
 use crate::policies::registry::DecisionKind;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -58,18 +59,41 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // Priority — dispatch on the action being scored.
         WaitingFor::Priority { .. } => match action {
             GameAction::PlayLand { .. } => DecisionKind::PlayLand,
-            GameAction::CastSpell { .. } => DecisionKind::CastSpell,
             GameAction::ActivateAbility { .. } => DecisionKind::ActivateAbility,
             GameAction::TapLandForMana { .. }
             | GameAction::ActivateManaSource { .. }
             | GameAction::UntapLandForMana { .. } => {
                 DecisionKind::ActivateManaAbility
             }
+            // CR 601.2 + CR 118.9: the plain announcement AND every dedicated
+            // alternative/free-cast variant put a spell on the stack, so they
+            // all belong to the cast policy population. Leaving the alternative
+            // variants in the catch-all below made every cast policy blind to
+            // them (they scored as activations).
+            action if is_cast_family_action(action) => DecisionKind::CastSpell,
             // Default: any other priority-time action (PassPriority, special
             // actions, etc.) routes to ActivateAbility — these are activation-
             // adjacent decisions that the same policy population evaluates.
             _ => DecisionKind::ActivateAbility,
         },
+        // CR 702.94a + CR 603.11: Miracle reveal, and CR 715.3a + CR 702.35a +
+        // CR 702.85a + CR 701.57a: the cast offers. Each of these prompts mixes
+        // a real cast candidate with a decline candidate, so route on the ACTION
+        // rather than the prompt: `CastSpellAsMiracle` / `CastSpellAsMadness`
+        // are casts and reach the cast policies, while the shared decline
+        // (`DecideOptionalEffect { accept: false }`) and the non-family offer
+        // responses (Adventure's `ChooseAdventureFace`, Cascade/Discover/Ripple's
+        // `*Choice`, Paradigm's `CastParadigmCopy`, the free-cast window's
+        // `FreeCastWindowChoice`) stay in the ability catch-all. (The Pass
+        // handicap on the decline is keyed on `TacticalClass::Pass` in the
+        // planner, independent of this routing.)
+        WaitingFor::MiracleReveal { .. } | WaitingFor::CastOffer { .. } => {
+            if is_cast_family_action(action) {
+                DecisionKind::CastSpell
+            } else {
+                DecisionKind::ActivateAbility
+            }
+        }
         // All other WaitingFor states are mechanical/forced choices that no
         // tactical policy currently routes on. Map them to ActivateAbility as
         // the catch-all bucket so policies that explicitly opt in still run.
@@ -118,10 +142,6 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::AbilityModeChoice { .. }
-        // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
-        // Adventure / Miracle / Madness / Cascade / Discover / Paradigm cast
-        // offers are modeled as ability-style opt-in decisions.
-        | WaitingFor::CastOffer { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::CastingVariantChoice { .. }
@@ -188,9 +208,6 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // mid-resolution choices; route to ActivateAbility as a catch-all.
         | WaitingFor::PayAmountChoice { .. }
         | WaitingFor::GameOver { .. }
-        // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
-        // ability-offer bucket so activation policies evaluate the candidates.
-        | WaitingFor::MiracleReveal { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
@@ -358,6 +375,130 @@ mod tests {
                 }
             ),
             DecisionKind::ActivateManaAbility
+        );
+    }
+
+    /// CR 601.2 + CR 118.9: every cast-family action reaches the cast policy
+    /// population, from Priority and from the two opt-in cast prompts alike;
+    /// the shared decline stays in the ability catch-all so the Pass handicap
+    /// keeps applying to it.
+    #[test]
+    fn cast_family_actions_route_to_cast_spell() {
+        let object_id = ObjectId(3);
+        let card_id = CardId(3);
+        let family: Vec<GameAction> = vec![
+            GameAction::CastSpell {
+                object_id,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellForFree {
+                object_id,
+                card_id,
+                source_id: ObjectId(9),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsMiracle {
+                object_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsMadness {
+                object_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsSneak {
+                hand_object: object_id,
+                card_id,
+                creature_to_return: ObjectId(9),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsWebSlinging {
+                hand_object: object_id,
+                card_id,
+                creature_to_return: ObjectId(9),
+                payment_mode: CastPaymentMode::Auto,
+            },
+        ];
+
+        let priority = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        for action in &family {
+            assert_eq!(
+                classify(&priority, action),
+                DecisionKind::CastSpell,
+                "{action:?} under Priority"
+            );
+        }
+
+        let miracle_reveal = WaitingFor::MiracleReveal {
+            player: PlayerId(0),
+            object_id,
+            cost: engine::types::mana::ManaCost::generic(1),
+        };
+        assert_eq!(
+            classify(
+                &miracle_reveal,
+                &GameAction::CastSpellAsMiracle {
+                    object_id,
+                    card_id,
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            ),
+            DecisionKind::CastSpell
+        );
+        assert_eq!(
+            classify(
+                &miracle_reveal,
+                &GameAction::DecideOptionalEffect { accept: false }
+            ),
+            DecisionKind::ActivateAbility
+        );
+
+        let madness_offer = WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: engine::types::game_state::CastOfferKind::Madness {
+                object_id,
+                cost: engine::types::mana::ManaCost::generic(1),
+            },
+        };
+        assert_eq!(
+            classify(
+                &madness_offer,
+                &GameAction::CastSpellAsMadness {
+                    object_id,
+                    card_id,
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            ),
+            DecisionKind::CastSpell
+        );
+        assert_eq!(
+            classify(
+                &madness_offer,
+                &GameAction::DecideOptionalEffect { accept: false }
+            ),
+            DecisionKind::ActivateAbility
+        );
+
+        // A non-family offer response keeps its catch-all routing.
+        let adventure_offer = WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: engine::types::game_state::CastOfferKind::Adventure {
+                object_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+        };
+        assert_eq!(
+            classify(
+                &adventure_offer,
+                &GameAction::ChooseAdventureFace { creature: true }
+            ),
+            DecisionKind::ActivateAbility
         );
     }
 }

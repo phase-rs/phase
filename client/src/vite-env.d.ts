@@ -7,6 +7,24 @@ declare const __ENGINE_FINGERPRINT__: string | undefined;
 declare const __ENGINE_WASM_URL__: string | undefined;
 declare const __OFFICIAL_MULTIPLAYER_SERVER_URL__: string;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
+
+/**
+ * Per-deployment configuration, set by `/config.js` before the app bundle runs.
+ *
+ * Everything here is optional and untrusted: the file is written by whoever
+ * deployed the bundle (the helm chart renders it from values), so readers
+ * validate rather than assume. In official builds the file is an empty
+ * placeholder and the build-time defines are used unchanged.
+ */
+interface PhaseRuntimeConfig {
+  /** `ws://`/`wss://` address new profiles default to. Ignored if malformed. */
+  multiplayerServerUrl?: string;
+}
+
+interface Window {
+  __PHASE_CONFIG__?: PhaseRuntimeConfig;
+}
+
 declare const __CARD_DATA_URL__: string;
 declare const __CARD_DATA_LOCALE_URL_TEMPLATE__: string;
 declare const __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: string;
