@@ -502,9 +502,11 @@ pub fn info_url(url: &AnnouncedUrl) -> String {
 mod tests {
     use super::*;
 
-    /// The composition the wasm boundary export uses: normalise a raw string,
-    /// and derive an info URL only if it survived. Written here so the two
-    /// entry points cannot drift.
+    /// Mirrors the composition the wasm export uses — normalise a raw string,
+    /// and derive an info URL only if it survived — so this file's hostile set
+    /// covers it too; the export itself is pinned by broker-wasm's V10. This is
+    /// a re-implementation in a different crate, so it cannot by itself stop
+    /// the export from drifting away from these rules.
     fn directory_info_url_equivalent(raw: &str) -> Option<String> {
         normalize_announced_url(raw).ok().map(|url| info_url(&url))
     }

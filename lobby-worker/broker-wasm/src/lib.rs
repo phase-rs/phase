@@ -99,18 +99,27 @@ enum ValidationDto {
 
 /// Verdict of [`directory_compare_announcement_to_info`].
 ///
-/// Its `Invalid` arm is **wider** than [`ValidationDto`]'s: the comparison must
-/// go through `RawAnnouncement` -> `validate_announcement` to obtain the
-/// `&ServerAnnouncement` the core function takes (that type deliberately has no
-/// `Deserialize`), so it re-validates and `Invalid` carries validation failures
-/// as well as JSON-parse failures. The shell cannot distinguish them and has no
-/// reason to.
+/// Its `Invalid` arm is **wider** than [`ValidationDto`]'s, and has exactly
+/// three sources:
 ///
-/// The contract that creates: an announcement that passed
+///   1. `announcement_json` does not parse as a `RawAnnouncement`;
+///   2. it parses but fails `validate_announcement` — the comparison has to
+///      re-validate, because the core function takes a `&ServerAnnouncement`
+///      and that type deliberately has no `Deserialize`;
+///   3. `info_json` does not parse as a [`ServerInfoDocument`].
+///
+/// The shell cannot distinguish the three and has no reason to. A reader of
+/// this verdict must not, though: source 3 is **not** an announcer's fault. The
+/// info document is fetched from the *announced host*, so "the host served
+/// garbage at the info path" is a first-class production case for the
+/// verify-by-fetch caller, and attributing it to a bad announcement would
+/// blame the wrong party.
+///
+/// *From the announcement side*, an announcement that passed
 /// [`directory_validate_announcement`] serializes — via the `Valid` arm's
 /// `announcement` payload — to a body that re-validates identically, so
-/// `Invalid` here is reachable only from a body that never passed validation in
-/// the first place.
+/// sources 1 and 2 are reachable only from a body that never passed validation
+/// in the first place.
 #[derive(Serialize)]
 #[serde(tag = "kind")]
 enum ComparisonDto {
@@ -592,12 +601,21 @@ mod tests {
             parse(directory_compare_announcement_to_info("{", &matching))["kind"],
             "Invalid"
         );
+        // Source 3: a VALID announcement whose info document is unparseable —
+        // the announced host served garbage. Distinct from the two cases above
+        // in who is at fault, identical in verdict, and the case the `Invalid`
+        // arm's "only from the announcement side" wording is scoped around.
+        assert_eq!(
+            parse(directory_compare_announcement_to_info(&raw_json, "{"))["kind"],
+            "Invalid"
+        );
 
         // Round-trip: the `Valid` arm's `announcement` payload, fed back to the
         // compare export, must Match. This is the assertion that would catch a
         // future normalisation change making validation non-idempotent — the
-        // one way `Invalid` could start appearing for a body that DID pass
-        // announce-time validation.
+        // one way the ANNOUNCEMENT side could start returning `Invalid` for a
+        // body that DID pass announce-time validation. (An unparseable info
+        // document is the other, unrelated source, asserted just above.)
         let round_trip = verdict["announcement"].to_string();
         assert_eq!(
             parse(directory_compare_announcement_to_info(
