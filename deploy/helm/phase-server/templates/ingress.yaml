@@ -18,9 +18,9 @@
 {{- if .Values.traefik.middlewares.enabled }}
 {{- $backupMw = printf "%s,%s,%s" (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-ratelimit")) (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-buffering")) $common }}
 {{- end }}
-{{- /* One Ingress per middleware set: /health, /ws (its own set so compress
-     can be excluded from it alone), and the backup API. Only the first
-     carries the cert-manager annotation so ingress-shim manages one
+{{- /* One Ingress per middleware set: /health and /info, /ws (its own set so
+     compress can be excluded from it alone), and the backup API. Only the
+     first carries the cert-manager annotation so ingress-shim manages one
      Certificate for the shared secret. */}}
 {{- /* The SPA's catch-all. Last in the list so the three endpoint routes above
      keep their positions; ordering between Ingress objects does not decide
@@ -36,7 +36,7 @@
      from the public edge. `tests/assert-web-routing.sh` asserts its absence with
      a token configured, in both topologies. */}}
 {{- $routes := list
-      (dict "suffix" "" "paths" (list "/health") "mw" $common "port" "http")
+      (dict "suffix" "" "paths" (list "/health" "/info") "mw" $common "port" "http")
       (dict "suffix" "-ws" "paths" (list "/ws") "mw" $wsMw "port" "http")
       (dict "suffix" "-backup" "paths" (list "/p2p-draft-backup") "mw" $backupMw "port" "http") }}
 {{- if .Values.web.enabled }}

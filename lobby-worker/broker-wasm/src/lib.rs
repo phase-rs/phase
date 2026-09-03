@@ -13,8 +13,10 @@
 //! [`ConnState`] rides in the WebSocket attachment, round-tripped as JSON.
 
 use lobby_broker::{
-    parse_lobby_client_message, Broker, BrokerEnv, ConnState, LobbyClientMessage,
-    LobbyServerMessage, Outbound, ParsedFrame, PROTOCOL_VERSION,
+    compare_announcement_to_info, info_url, normalize_announced_url, parse_lobby_client_message,
+    validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
+    LobbyClientMessage, LobbyServerMessage, Outbound, ParsedFrame, RawAnnouncement,
+    ServerAnnouncement, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH, PROTOCOL_VERSION,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -79,6 +81,71 @@ impl From<Outbound> for OutboundDto {
 
 fn to_dtos(outs: Vec<Outbound>) -> Vec<OutboundDto> {
     outs.into_iter().map(OutboundDto::from).collect()
+}
+
+/// Verdict of [`directory_validate_announcement`], flattened for the TS shell
+/// the same way [`OutboundDto`] is: purely a boundary concern, so it lives here
+/// rather than in the core.
+///
+/// The `Invalid` arm exists for the same reason `CallResult.reject` does — a
+/// malformed body must produce a verdict, never a panic, because a panic in
+/// wasm aborts the Durable Object.
+#[derive(Serialize)]
+#[serde(tag = "kind")]
+enum ValidationDto {
+    Valid { announcement: ServerAnnouncement },
+    Invalid { error: String },
+}
+
+/// Verdict of [`directory_compare_announcement_to_info`].
+///
+/// Its `Invalid` arm is **wider** than [`ValidationDto`]'s: the comparison must
+/// go through `RawAnnouncement` -> `validate_announcement` to obtain the
+/// `&ServerAnnouncement` the core function takes (that type deliberately has no
+/// `Deserialize`), so it re-validates and `Invalid` carries validation failures
+/// as well as JSON-parse failures. The shell cannot distinguish them and has no
+/// reason to.
+///
+/// The contract that creates: an announcement that passed
+/// [`directory_validate_announcement`] serializes — via the `Valid` arm's
+/// `announcement` payload — to a body that re-validates identically, so
+/// `Invalid` here is reachable only from a body that never passed validation in
+/// the first place.
+#[derive(Serialize)]
+#[serde(tag = "kind")]
+enum ComparisonDto {
+    Match,
+    Mismatch { field: InfoMismatchField },
+    Invalid { error: String },
+}
+
+fn comparison_dto(announcement_json: &str, info_json: &str) -> ComparisonDto {
+    let raw = match serde_json::from_str::<RawAnnouncement>(announcement_json) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return ComparisonDto::Invalid {
+                error: error.to_string(),
+            }
+        }
+    };
+    let announcement = match validate_announcement(&raw) {
+        Ok(announcement) => announcement,
+        Err(error) => return ComparisonDto::Invalid { error },
+    };
+    let info = match serde_json::from_str::<ServerInfoDocument>(info_json) {
+        Ok(info) => info,
+        Err(error) => {
+            return ComparisonDto::Invalid {
+                error: error.to_string(),
+            }
+        }
+    };
+    // Exhaustive: a future `InfoMatch` variant must force a deliberate
+    // classification here rather than falling into a wildcard.
+    match compare_announcement_to_info(&announcement, &info) {
+        InfoMatch::Match => ComparisonDto::Match,
+        InfoMatch::Mismatch { field } => ComparisonDto::Mismatch { field },
+    }
 }
 
 /// Single `Error` reply for a frame rejected at the parse/validation boundary.
@@ -290,6 +357,62 @@ pub fn min_supported_lobby_protocol() -> u32 {
     lobby_broker::MIN_SUPPORTED_LOBBY_PROTOCOL
 }
 
+/// Version of the server-directory announcement shape
+/// (`lobby_broker::directory::DIRECTORY_VERSION`). An announcement declaring a
+/// different value is refused by [`directory_validate_announcement`].
+#[wasm_bindgen]
+pub fn directory_version() -> u32 {
+    DIRECTORY_VERSION
+}
+
+/// The HTTP path every phase server kind answers with its info document. The
+/// shell routes on this rather than on a literal of its own.
+#[wasm_bindgen]
+pub fn directory_info_path() -> String {
+    INFO_PATH.to_string()
+}
+
+/// Validate an announcement body, returning a `{ kind, ... }` verdict as JSON.
+///
+/// Parses [`RawAnnouncement`], not `ServerAnnouncement`: the latter has no
+/// `Deserialize` by design, so routing through the validator is enforced by the
+/// compiler here rather than by convention.
+#[wasm_bindgen]
+pub fn directory_validate_announcement(json: &str) -> String {
+    let dto = match serde_json::from_str::<RawAnnouncement>(json) {
+        Ok(raw) => match validate_announcement(&raw) {
+            Ok(announcement) => ValidationDto::Valid { announcement },
+            Err(error) => ValidationDto::Invalid { error },
+        },
+        Err(error) => ValidationDto::Invalid {
+            error: error.to_string(),
+        },
+    };
+    serde_json::to_string(&dto).expect("validation verdict always serializes")
+}
+
+/// Confront an announcement body with the info document fetched from the host
+/// it announced, returning a `{ kind, ... }` verdict as JSON. Re-validates the
+/// announcement on the way in — see [`ComparisonDto`].
+#[wasm_bindgen]
+pub fn directory_compare_announcement_to_info(announcement_json: &str, info_json: &str) -> String {
+    serde_json::to_string(&comparison_dto(announcement_json, info_json))
+        .expect("comparison verdict always serializes")
+}
+
+/// The `https://` info-document URL for an announced `wss://` address, or
+/// `None` when the address is not one the directory would accept.
+///
+/// Normalises internally, so this raw-string entry point and the typed
+/// `info_url` are literally the same authority — the outbound fetch cannot be
+/// pointed anywhere the storage path would have refused.
+#[wasm_bindgen]
+pub fn directory_info_url(announced_url: &str) -> Option<String> {
+    normalize_announced_url(announced_url)
+        .ok()
+        .map(|url| info_url(&url))
+}
+
 fn result_json(r: CallResult) -> String {
     serde_json::to_string(&r).expect("call result always serializes")
 }
@@ -297,7 +420,7 @@ fn result_json(r: CallResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lobby_broker::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use lobby_broker::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, ServerMode};
 
     /// The classification is the whole contract, and getting it wrong is
     /// SILENT: a mutating frame classified `false` leaves the shell skipping
@@ -369,5 +492,127 @@ mod tests {
         assert!(!mutates_lobby(&LobbyClientMessage::SubscribeLobby));
         assert!(!mutates_lobby(&LobbyClientMessage::UnsubscribeLobby));
         assert!(!mutates_lobby(&LobbyClientMessage::Ping { timestamp: 1 }));
+    }
+
+    fn raw_announcement() -> RawAnnouncement {
+        RawAnnouncement {
+            directory_version: DIRECTORY_VERSION,
+            // Deliberately spelled non-canonically so the round-trip below
+            // proves the export normalises rather than echoes.
+            url: "wss://Play.Example.com:443/ws/".to_string(),
+            name: "play.example.com".to_string(),
+            mode: ServerMode::Full,
+            server_version: "0.9.1".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: lobby_broker::LOBBY_PROTOCOL_VERSION,
+            current_players: 2,
+        }
+    }
+
+    fn info_json(mode: ServerMode, server_version: &str) -> String {
+        serde_json::to_string(&ServerInfoDocument {
+            mode,
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: lobby_broker::LOBBY_PROTOCOL_VERSION,
+            server_version: server_version.to_string(),
+            build_commit: None,
+            public_url: None,
+        })
+        .expect("info document serializes")
+    }
+
+    fn parse(json: String) -> serde_json::Value {
+        serde_json::from_str(&json).expect("every export returns JSON")
+    }
+
+    /// V10. The boundary exports must agree with the core functions they wrap,
+    /// and must answer malformed input with a verdict rather than a panic — a
+    /// panic in wasm aborts the Durable Object.
+    ///
+    /// Note this test lives OUTSIDE `lobby_broker::directory`, so it cannot
+    /// build a `ServerAnnouncement` by struct literal (every field is private).
+    /// It obtains one the only way anyone outside that module can: by calling
+    /// `validate_announcement` on a `RawAnnouncement`.
+    #[test]
+    fn directory_exports_match_the_core_verdicts() {
+        assert_eq!(directory_version(), DIRECTORY_VERSION);
+        assert_eq!(directory_info_path(), INFO_PATH);
+
+        let raw = raw_announcement();
+        let raw_json = serde_json::to_string(&raw).expect("raw announcement serializes");
+
+        // Valid: the export's payload is exactly the core function's value.
+        let verdict = parse(directory_validate_announcement(&raw_json));
+        assert_eq!(verdict["kind"], "Valid");
+        let core = validate_announcement(&raw).expect("the core accepts this fixture");
+        assert_eq!(
+            verdict["announcement"],
+            serde_json::to_value(&core).expect("core value serializes")
+        );
+        assert_eq!(verdict["announcement"]["url"], "wss://play.example.com/ws");
+
+        // Invalid, paired with the valid case above so a hard-coded verdict
+        // fails one of the two.
+        let mut hostile = raw_announcement();
+        hostile.url = "wss://evil@real.example/ws".to_string();
+        let hostile_json = serde_json::to_string(&hostile).expect("raw announcement serializes");
+        assert_eq!(
+            parse(directory_validate_announcement(&hostile_json))["kind"],
+            "Invalid"
+        );
+        assert_eq!(
+            parse(directory_validate_announcement("{"))["kind"],
+            "Invalid"
+        );
+
+        // The comparison export, both directions.
+        let matching = info_json(ServerMode::Full, "0.9.1");
+        assert_eq!(
+            parse(directory_compare_announcement_to_info(&raw_json, &matching))["kind"],
+            "Match"
+        );
+        let other_mode = info_json(ServerMode::LobbyOnly, "0.9.1");
+        let mismatch = parse(directory_compare_announcement_to_info(
+            &raw_json,
+            &other_mode,
+        ));
+        assert_eq!(mismatch["kind"], "Mismatch");
+        assert_eq!(mismatch["field"], "Mode");
+
+        // A body whose `url` never passed validation, and malformed JSON: both
+        // land in the wider `Invalid` arm rather than panicking.
+        assert_eq!(
+            parse(directory_compare_announcement_to_info(
+                &hostile_json,
+                &matching
+            ))["kind"],
+            "Invalid"
+        );
+        assert_eq!(
+            parse(directory_compare_announcement_to_info("{", &matching))["kind"],
+            "Invalid"
+        );
+
+        // Round-trip: the `Valid` arm's `announcement` payload, fed back to the
+        // compare export, must Match. This is the assertion that would catch a
+        // future normalisation change making validation non-idempotent — the
+        // one way `Invalid` could start appearing for a body that DID pass
+        // announce-time validation.
+        let round_trip = verdict["announcement"].to_string();
+        assert_eq!(
+            parse(directory_compare_announcement_to_info(
+                &round_trip,
+                &matching
+            ))["kind"],
+            "Match"
+        );
+
+        // The info-URL export, hostile and valid paired.
+        assert_eq!(directory_info_url("wss://evil@real.example/ws"), None);
+        assert_eq!(directory_info_url("wss://localhost/ws"), None);
+        assert_eq!(
+            directory_info_url("wss://Host.Example:443/ws/"),
+            Some(format!("https://host.example{INFO_PATH}"))
+        );
     }
 }
