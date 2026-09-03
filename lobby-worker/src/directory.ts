@@ -667,6 +667,14 @@ export interface MetricsFold {
  * had a game finish in it. `connect_*` reports are deliberately exempt: a
  * failed connect is precisely the case where nobody was ever online.
  *
+ * That guard reads the CURRENT bucket only, and the sole writer of
+ * `announced_players_max` is the announce path at its 60 s heartbeat. A game
+ * finishing in the first ~60 s of a new bucket — before that bucket's first
+ * announce lands — is therefore dropped: roughly 1-in-60 of completion
+ * reports, biased towards games ending at a bucket boundary. It is fail-safe
+ * (it depresses `completion_rate`, never inflates it) and unreachable while no
+ * client produces game outcomes at all.
+ *
  * `bucketMs`, `windowMs` and `edgesMs` are Rust's constants, passed in by the
  * DO from the wasm exports. They are parameters rather than module constants
  * so that there is no second declaration of them anywhere — and so a test can
@@ -690,7 +698,15 @@ export function foldMetricReports(
     let entry = counters.get(url);
     if (!entry) {
       const existing = known.get(url) ?? { buckets: [] };
-      entry = { buckets: liveBuckets(existing.buckets, nowMs, windowMs).map((b) => ({ ...b })) };
+      // `rtt_histogram` is copied explicitly: a spread copies it by reference,
+      // and it is the one field this fold mutates in place, so a shallow copy
+      // would count latencies into the caller's own map.
+      entry = {
+        buckets: liveBuckets(existing.buckets, nowMs, windowMs).map((b) => ({
+          ...b,
+          rtt_histogram: [...b.rtt_histogram],
+        })),
+      };
       counters.set(url, entry);
     }
     let bucket = entry.buckets.find((b) => b.start_ms === startMs);

@@ -47,13 +47,17 @@ usage() {
 # constant out of the source and fail loudly if the grep comes back empty,
 # because an empty value would silently probe `https://host` and compare
 # against nothing.
+# `|| true` on each capture is what lets the guard below run at all: under
+# `set -euo pipefail` a non-matching grep makes the ASSIGNMENT non-zero, and
+# the script would abort before reaching the `if` — failing closed, but with a
+# bare exit instead of the diagnostic.
 read_constants() {
   INFO_PATH="$(grep -oE 'pub const INFO_PATH: &str = "[^"]+"' \
-    "$ROOT/crates/lobby-broker/src/directory.rs" | grep -oE '"[^"]+"' | tr -d '"')"
+    "$ROOT/crates/lobby-broker/src/directory.rs" | grep -oE '"[^"]+"' | tr -d '"')" || true
   TREE_PROTOCOL="$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
-    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
+    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')" || true
   TREE_LOBBY_PROTOCOL="$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
-    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
+    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')" || true
   if [ -z "$INFO_PATH" ] || [ -z "$TREE_PROTOCOL" ] || [ -z "$TREE_LOBBY_PROTOCOL" ]; then
     echo "error: could not read INFO_PATH / protocol constants from the tree." >&2
     exit 1

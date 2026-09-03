@@ -180,6 +180,13 @@ export interface DirectorySource {
    *  `null` when it can. Computed once here, from `serverProtocolRejection` —
    *  the single protocol-window authority — and thereafter only READ. */
   rejection: string | null;
+  /** The same verdict for the FULL-GAME surface, which is the one a hosted
+   *  match runs on. Separate from {@link DirectorySource.rejection} because the
+   *  two windows are versioned independently: a `Full` server whose full-game
+   *  protocol has drifted browses correctly and can still run no match.
+   *  Computed once here, from the same single authority, and thereafter only
+   *  READ. */
+  fullRejection: string | null;
 }
 
 /** A listing's health, as a reader of its raw score components would describe
@@ -365,6 +372,10 @@ export function projectDirectoryRow(value: unknown): DirectorySource | null {
     // has drifted is still perfectly browsable, and the browse socket carries
     // no `GameState`.
     rejection: serverProtocolRejection(info, "lobby"),
+    // The FULL-GAME surface, for the one consumer that places a match on this
+    // server rather than browsing it. Same authority, same object, different
+    // surface argument — nothing here compares a version number.
+    fullRejection: serverProtocolRejection(info, "full"),
   };
 }
 

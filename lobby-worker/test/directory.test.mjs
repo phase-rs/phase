@@ -541,6 +541,44 @@ test("V-U13a: reports fold into the current bucket's counters", () => {
   assert.deepEqual(coarse.counters.get(KNOWN_URL).buckets[0].rtt_histogram, [2, 1]);
 });
 
+test("V-U13h: the fold does not write through to the caller's counters", () => {
+  const now = 10 * WINDOW_MS + 45 * 60_000;
+  const startMs = now - (now % BUCKET_MS);
+  // A LIVE current bucket with an already-populated histogram — the only shape
+  // that can alias, since a fold over an empty `known` has nothing to copy.
+  const existing = {
+    buckets: [
+      {
+        start_ms: startMs,
+        connect_attempts: 1,
+        connect_successes: 1,
+        games_started: 0,
+        games_completed: 0,
+        rtt_histogram: [0, 1, 0, 0],
+        announced_players_max: 2,
+      },
+    ],
+  };
+  const known = new Map([[KNOWN_URL, existing]]);
+  const reports = sanitizeMetricsBatch(
+    batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: 42 }]),
+  );
+
+  const first = foldMetricReports(reports, known, now, BUCKET_MS, WINDOW_MS, EDGES);
+  // Reach-guard: the report really landed in the pre-existing bucket, so the
+  // assertions below are about a copy and not about a fold that did nothing.
+  assert.deepEqual(first.counters.get(KNOWN_URL).buckets[0].rtt_histogram, [0, 2, 0, 0]);
+
+  // `known` is INPUT. `rtt_histogram` is the one field the fold mutates in
+  // place, which is exactly the one the defensive copy has to reach.
+  assert.deepEqual(existing.buckets[0].rtt_histogram, [0, 1, 0, 0]);
+  assert.equal(existing.buckets[0].connect_attempts, 1);
+
+  // A second fold over the same input is the same fold, never a double count.
+  const second = foldMetricReports(reports, known, now, BUCKET_MS, WINDOW_MS, EDGES);
+  assert.deepEqual(second.counters.get(KNOWN_URL).buckets[0].rtt_histogram, [0, 2, 0, 0]);
+});
+
 test("V-U13b: a report for a URL with no row is dropped", () => {
   const now = 10 * WINDOW_MS + 45 * 60_000;
   const known = new Map([[KNOWN_URL, { buckets: [] }]]);

@@ -177,6 +177,7 @@ describe("LobbyView", () => {
         score: rowScore,
       },
       rejection: null,
+      fullRejection: null,
     };
   }
 

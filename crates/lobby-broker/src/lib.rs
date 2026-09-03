@@ -25,8 +25,8 @@ pub use broker::{
 };
 pub use directory::{
     compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,
-    AnnouncedUrl, CounterBucket, DirectoryEntry, InfoMatch, InfoMismatchField, RawAnnouncement,
-    Score, ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
+    AnnouncedUrl, CounterBucket, InfoMatch, InfoMismatchField, RawAnnouncement, Score,
+    ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
     MAX_ANNOUNCED_PLAYERS, MAX_SERVER_NAME_LEN, MAX_SERVER_URL_LEN, RTT_BUCKET_EDGES_MS,
     SCORE_BUCKET_MS, SCORE_MIN_SAMPLES, SCORE_WINDOW_MS,
 };

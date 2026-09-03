@@ -141,10 +141,17 @@ describe("HostSetup", () => {
   const FAST = "wss://fast.example/ws";
   const SLOW = "wss://slow.example/ws";
   const BROKER = "wss://broker.example/ws";
+  const BAD_LOBBY = "wss://badlobby.example/ws";
+  const BAD_FULL = "wss://badfull.example/ws";
 
-  /** Two hostable servers and one high-scoring `LobbyOnly` broker. The broker's
-   * score is the HIGHEST of the three on purpose: it is what proves the filter
-   * is on the announced mode and not on the rank. */
+  /** Two hostable servers, one high-scoring `LobbyOnly` broker, and the two
+   * `Full` servers this client cannot handshake with — one on each surface.
+   *
+   * The broker's score is HIGHER than either hostable server on purpose: it is
+   * what proves the mode filter is on the announced mode and not on the rank.
+   * The two incompatible servers score higher still, which is what proves the
+   * protocol verdict is not on the rank either — each of them would otherwise
+   * be the default submission. */
   function seedCandidates(): void {
     const scored = (value: number) => ({
       value,
@@ -155,15 +162,33 @@ describe("HostSetup", () => {
     });
     useMultiplayerStore.setState({
       directorySources: directoryEntries(
+        // Fails the LOBBY window: below the lobby protocol floor, so
+        // `ensureSubscriptionSocket` refuses it the browse socket.
+        {
+          url: BAD_LOBBY,
+          name: "badlobby.example",
+          mode: "Full",
+          lobby_protocol_version: 0,
+          score: scored(99),
+        },
+        // Passes the lobby window (a floor with no ceiling) and fails the
+        // FULL-GAME one, which is exact-match, so it browses and hosts nothing.
+        {
+          url: BAD_FULL,
+          name: "badfull.example",
+          mode: "Full",
+          protocol_version: PROTOCOL_VERSION + 5,
+          score: scored(95),
+        },
         { url: FAST, name: "fast.example", mode: "Full", score: scored(80) },
         { url: SLOW, name: "slow.example", mode: "Full", score: scored(20) },
-        { url: BROKER, name: "broker.example", mode: "LobbyOnly", score: scored(99) },
+        { url: BROKER, name: "broker.example", mode: "LobbyOnly", score: scored(90) },
       ),
     });
   }
 
   // V-U15a
-  it("lists the Full servers in score order and omits a LobbyOnly broker", async () => {
+  it("lists the Full servers in score order, omits a LobbyOnly broker, and marks the ones it cannot handshake with", async () => {
     const user = userEvent.setup();
     seedCandidates();
 
@@ -171,13 +196,60 @@ describe("HostSetup", () => {
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     const options = screen.getAllByRole("option");
+    // The two incompatible servers are LISTED, in rank order with the rest,
+    // and carry `serverPicker.incompatibleVersion` off their announced version
+    // in place of a rank they cannot be chosen on.
     expect(options.map((option) => option.textContent)).toEqual([
+      "badlobby.example — Incompatible — server version 0.71.0",
+      "badfull.example — Incompatible — server version 0.71.0",
       "fast.example — health 80",
       "slow.example — health 20",
     ]);
     // A LobbyOnly server brokers peer ids; it cannot run a match however well
-    // it scores, and it scores highest here.
+    // it scores, and it outscores both hostable servers here.
     expect(screen.queryByRole("option", { name: /broker\.example/ })).not.toBeInTheDocument();
+  });
+
+  // V-U15j — the two incompatible rows are inert, not merely labelled. Each is
+  // better-scored than every usable candidate, so either one becoming the
+  // submission is the failure this pins.
+  it("never submits a server it has already decided it cannot handshake with", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    // Half ONE: the default skips both, so the best-scored USABLE server is
+    // what an untouched form submits.
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), FAST);
+
+    // Half TWO: picking one explicitly does not take. Reach-guard first — the
+    // option really is in the open menu, so the assertion below is about the
+    // selection being refused and not about an absent row.
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    expect(screen.getByRole("option", { name: /badlobby\.example/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /badlobby\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), FAST);
+
+    // And the same for the row whose LOBBY window is fine and whose FULL-GAME
+    // one is not — the half no verdict on the browse surface can catch.
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    await user.click(screen.getByRole("option", { name: /badfull\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), FAST);
+
+    // Paired positive: a USABLE row picked the same way does take, so the two
+    // assertions above are not passing on a picker that ignores every click.
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
   });
 
   // V-U15b

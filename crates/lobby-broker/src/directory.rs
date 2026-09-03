@@ -10,9 +10,8 @@
 //!
 //! Like the rest of this crate it holds **no I/O, no `SystemTime`, no `rand`
 //! and no tokio**, so it compiles to `wasm32-unknown-unknown`. Timestamps
-//! arrive as arguments (see [`DirectoryEntry::from_announcement`]) rather than
-//! being read from a clock, mirroring the [`crate::env::BrokerEnv`] injection
-//! pattern.
+//! arrive as arguments (see [`score`]) rather than being read from a clock,
+//! mirroring the [`crate::env::BrokerEnv`] injection pattern.
 //!
 //! Like [`crate::validation`], this module does **size/shape/reachability
 //! policy only** and never content moderation: it will refuse a name that is
@@ -223,75 +222,6 @@ pub struct ServerInfoDocument {
     /// advertisable public URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
-}
-
-/// A directory row: the stored projection of an announcement plus the
-/// directory's own bookkeeping.
-///
-/// It *does* derive `Deserialize`, because rows are read back out of storage.
-/// Its `url` re-validates on every row read (via [`AnnouncedUrl`]'s
-/// `try_from`), which is the field the reachability and identity arguments
-/// turn on; its label fields do not. That is the correct, weaker guarantee: a
-/// row's `name` was validated when the announcement that wrote it was
-/// accepted, and this type is a storage projection, not a validation
-/// authority.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DirectoryEntry {
-    pub url: AnnouncedUrl,
-    pub name: String,
-    pub mode: ServerMode,
-    pub server_version: String,
-    pub protocol_version: u32,
-    pub lobby_protocol_version: u32,
-    pub current_players: u32,
-    pub first_seen_ms: u64,
-    pub last_seen_ms: u64,
-    /// Health score, 0–100. `None` is "not yet measured", never `0`.
-    pub score: Option<u8>,
-}
-
-impl DirectoryEntry {
-    /// Project a validated announcement into a storage row.
-    ///
-    /// Timestamps are arguments, not clock reads, so this module stays
-    /// WASM-safe and clock-free.
-    ///
-    /// Reachability note, now SETTLED: **no wasm export reaches this, and the
-    /// upsert phase deliberately did not add one.** It takes a
-    /// `&ServerAnnouncement`, which the Worker cannot construct (that type has
-    /// no `Deserialize`). Of the two resolutions the previous phase left open,
-    /// the upsert phase chose the second: the Durable Object shapes its
-    /// storage row in TypeScript from the validation DTO's `announcement`
-    /// payload — which IS this crate's own serialisation of a value that has
-    /// already passed [`validate_announcement`], so TypeScript projects
-    /// columns and never validates. The row-shaping call is also absent from
-    /// the wasm calls the shell is chartered to own.
-    ///
-    /// So this constructor has no caller outside this module's tests today.
-    /// It is kept, not deleted, because it is the typed statement of what a
-    /// directory row IS, and because a native (non-Worker) directory shell
-    /// would reach for exactly it. A reader looking for the production
-    /// projection should read `lobby-worker/src/directory.ts`'s
-    /// `storedRowFromAnnouncement`, whose column list this mirrors minus
-    /// `score` (computed at read time, never stored).
-    pub fn from_announcement(
-        announcement: &ServerAnnouncement,
-        first_seen_ms: u64,
-        last_seen_ms: u64,
-    ) -> Self {
-        DirectoryEntry {
-            url: announcement.url.clone(),
-            name: announcement.name.clone(),
-            mode: announcement.mode,
-            server_version: announcement.server_version.clone(),
-            protocol_version: announcement.protocol_version,
-            lobby_protocol_version: announcement.lobby_protocol_version,
-            current_players: announcement.current_players,
-            first_seen_ms,
-            last_seen_ms,
-            score: None,
-        }
-    }
 }
 
 /// Verdict of comparing an announcement's claim against the info document
@@ -577,8 +507,10 @@ pub const SCORE_WINDOW_MS: u64 = 24 * SCORE_BUCKET_MS;
 /// the two apart. See [`Score::value`].
 pub const SCORE_MIN_SAMPLES: u32 = 20;
 
-/// Upper edges of the RTT histogram's first seven cells, in ms. The eighth
-/// cell is the overflow (`>= 3200`), reported as `3200`.
+/// Upper edges of the RTT histogram's first seven cells, in ms. A latency
+/// lands in the first cell whose edge it does not EXCEED, so exactly `3200`
+/// lands in the seventh; the eighth cell is the overflow (`> 3200`), reported
+/// as `3200`.
 ///
 /// A histogram rather than a mean because one 30 s outlier destroys a mean,
 /// and rather than a raw sample list because the store has to be aggregatable
@@ -1251,30 +1183,6 @@ mod tests {
         // cannot leave this function stale.
         let url = normalize_announced_url("wss://host.example/ws").expect("valid");
         assert!(info_url(&url).ends_with(INFO_PATH));
-    }
-
-    /// V9. The row mirrors the announcement, carries injected timestamps, and
-    /// starts unscored.
-    #[test]
-    fn directory_entry_carries_the_announcement_and_no_score() {
-        let announcement = valid_announcement();
-        // Distinct values, asserted separately, so a copy-paste assigning one
-        // to both fields fails.
-        let entry = DirectoryEntry::from_announcement(&announcement, 1_000, 2_000);
-
-        assert_eq!(&entry.url, announcement.url());
-        assert_eq!(entry.name, announcement.name());
-        assert_eq!(entry.mode, announcement.mode());
-        assert_eq!(entry.server_version, "0.9.1");
-        assert_eq!(entry.protocol_version, 55);
-        assert_eq!(entry.lobby_protocol_version, 4);
-        assert_eq!(entry.current_players, announcement.current_players());
-        assert_eq!(entry.first_seen_ms, 1_000);
-        assert_eq!(entry.last_seen_ms, 2_000);
-        assert_eq!(
-            entry.score, None,
-            "a fresh row is unscored, not zero-scored"
-        );
     }
 
     /// One hour-bucket of connect evidence, all RTTs landing in one cell.

@@ -143,16 +143,6 @@ type ValidationVerdict =
  *  fact: no usable document came back. */
 type InfoFetch = { kind: "ok"; text: string } | { kind: "unreachable" } | { kind: "too_large" };
 
-/** UTF-8 byte length of a string the Worker has already read.
- *
- *  `text.length` counts UTF-16 code units, and the caps it would be compared
- *  against are byte caps enforced in bytes everywhere else (`Content-Length`
- *  in `index.ts`, chunk lengths in `readBoundedText`). Re-encoding is what
- *  keeps the same number meaning the same thing at all three sites. */
-function utf8Bytes(text: string): number {
-  return new TextEncoder().encode(text).byteLength;
-}
-
 /** A refusal from a directory write endpoint.
  *
  *  The `reason` is a typed token, never prose: an announcer parses it, and a
@@ -505,7 +495,8 @@ export class LobbyDO {
    *  the directory endpoints, for the same reason both directory bindings are
    *  optional.
    *
-   *  Column set is `lobby_broker::directory::DirectoryEntry` minus `score`:
+   *  Column set is `StoredServerRow` (`./directory.ts`) — the shape
+   *  `storedRowFromAnnouncement` builds — i.e. `DirectoryRow` minus `score`:
    *  the score is computed from the counters at read time, so a stored copy
    *  would be a staler second authority for the same number. */
   private ensureServersTable(): void {
@@ -637,10 +628,17 @@ export class LobbyDO {
    *  host's own info document, compare, upsert. */
   private async announceResponse(request: Request): Promise<Response> {
     this.ensureServersTable();
-    // The length actually READ, not the header: `Content-Length` is supplied
-    // by the announcer, and `index.ts` already refused the ones that admit it.
-    const text = await request.text();
-    if (utf8Bytes(text) > MAX_ANNOUNCE_BYTES) return directoryError(413, "too_large");
+    // Bounded as it arrives, exactly as the outbound `/info` read is. Reading
+    // the whole body first and measuring afterwards buffers an unbounded string
+    // in the isolate, and `Content-Length` cannot be the bound: `index.ts`
+    // refuses only the bodies that admit it, and a request without the header
+    // is precisely the case `readBoundedText` exists for. A `null` body is a
+    // POST with nothing in it, which the validator refuses as empty text.
+    const text =
+      request.body === null
+        ? ""
+        : await readBoundedText(request.body, MAX_ANNOUNCE_BYTES);
+    if (text === null) return directoryError(413, "too_large");
 
     const verdict = JSON.parse(directory_validate_announcement(text)) as ValidationVerdict;
     if (verdict.kind !== "Valid") return directoryError(400, "invalid");
@@ -732,8 +730,13 @@ export class LobbyDO {
     const ok = () => new Response(null, { status: 204, headers: DIRECTORY_WRITE_CORS });
     try {
       this.ensureServersTable();
-      const text = await request.text();
-      if (utf8Bytes(text) > MAX_METRICS_BYTES) return ok();
+      // Bounded as it arrives — see `announceResponse`. An over-cap batch is
+      // dropped silently, like every other metrics ingest failure.
+      const text =
+        request.body === null
+          ? ""
+          : await readBoundedText(request.body, MAX_METRICS_BYTES);
+      if (text === null) return ok();
 
       let body: unknown = null;
       try {

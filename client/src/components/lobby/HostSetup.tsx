@@ -84,6 +84,15 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
+/** One row of the host-target picker: the source, paired with the directory
+ *  listing that announced it, or `null` for a preset or hand-added source the
+ *  directory has never described. The listing is what carries the protocol
+ *  verdicts. */
+interface HostCandidate {
+  source: LobbySource;
+  listing: DirectorySource | null;
+}
+
 /**
  * The servers this client may place a hosted game on, best-evidenced first.
  *
@@ -92,20 +101,42 @@ const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
  * peer ids — it cannot run a match however well it scores, which is why the
  * filter is on the mode and never on the rank.
  *
+ * A candidate this client cannot handshake with is KEPT and rendered with its
+ * reason, the way `ServerPicker` renders an incompatible listing, rather than
+ * dropped: a server missing from the list reads as "not announced", while a
+ * greyed one with its version reads as what it is. {@link hostRejection} is
+ * what keeps it out of the submission.
+ *
  * Ordering matches `compareLobbyGameEntries`' convention (`?? -1`), so an
  * unranked server sorts last rather than first.
  */
 function fullHostCandidates(
   state: Parameters<typeof lobbySources>[0] & { directorySources: DirectorySource[] },
-): LobbySource[] {
-  const announcedModes = new Map(
-    state.directorySources.map((entry) => [entry.source.url, entry.row.mode]),
+): HostCandidate[] {
+  const listings = new Map(
+    state.directorySources.map((entry) => [entry.source.url, entry]),
   );
   return lobbySources(state)
+    .map((source) => ({ source, listing: listings.get(source.url) ?? null }))
     .filter(
-      (source) => source.kind === "Full" || announcedModes.get(source.url) === "Full",
+      ({ source, listing }) => source.kind === "Full" || listing?.row.mode === "Full",
     )
-    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+    .sort((a, b) => (b.source.score ?? -1) - (a.source.score ?? -1));
+}
+
+/**
+ * Why this client cannot place a hosted game on `listing`, or `null` when it
+ * can.
+ *
+ * BOTH surfaces, because hosting uses both: the parent opens the browse socket
+ * (`ensureSubscriptionSocket`, LOBBY surface) before it hosts, and
+ * `openServerHostSocket` then dials the same server on the FULL surface.
+ * Neither verdict is computed here — both were produced by
+ * `serverProtocolRejection` in `projectDirectoryRow` and are only read.
+ */
+function hostRejection(listing: DirectorySource | null): string | null {
+  if (!listing) return null;
+  return listing.rejection ?? listing.fullRejection;
 }
 
 /** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
@@ -616,6 +647,13 @@ export function HostSetup({
     [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
   );
 
+  /** The candidates this submit may actually use. A rejected row stays in
+   *  `hostCandidates` — it is still rendered, with its reason — but it is never
+   *  seeded, never selectable and never submitted. */
+  const selectableCandidates = hostCandidates.filter(
+    (candidate) => hostRejection(candidate.listing) === null,
+  );
+
   /**
    * The user's explicit pick, when they have made one. Session-local: choosing
    * a game server for one match must not repoint `hostingServer`, which is the
@@ -624,8 +662,9 @@ export function HostSetup({
    */
   const [hostServerUrl, setHostServerUrl] = useState<string>(
     () =>
-      hostCandidates.find((candidate) => candidate.url === hostingServer)?.url
-      ?? hostCandidates[0]?.url
+      selectableCandidates.find((candidate) => candidate.source.url === hostingServer)
+        ?.source.url
+      ?? selectableCandidates[0]?.source.url
       ?? DEFAULT_MULTIPLAYER_SERVER_URL,
   );
 
@@ -643,16 +682,16 @@ export function HostSetup({
    * which the parent's mode probe would then route down the P2P branch while
    * the user is looking at a list of Full servers.
    *
-   * So: honour the explicit pick only while it is still a candidate, and
-   * otherwise fall back to the best-evidenced one that currently exists. This
-   * re-resolves as the directory lands, and it still terminates in a non-null
-   * constant, which is what makes the server leg's value a `string` by
-   * construction rather than by assumption.
+   * So: honour the explicit pick only while it is still a selectable
+   * candidate, and otherwise fall back to the best-evidenced selectable one
+   * that currently exists. This re-resolves as the directory lands, and it
+   * still terminates in a non-null constant, which is what makes the server
+   * leg's value a `string` by construction rather than by assumption.
    */
   const selected =
-    hostCandidates.some((candidate) => candidate.url === hostServerUrl)
+    selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
       ? hostServerUrl
-      : (hostCandidates[0]?.url ?? DEFAULT_MULTIPLAYER_SERVER_URL);
+      : (selectableCandidates[0]?.source.url ?? DEFAULT_MULTIPLAYER_SERVER_URL);
 
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
@@ -981,23 +1020,41 @@ export function HostSetup({
               <MenuSelect
                 ariaLabel={t("hostSetup.hostServer")}
                 label={
-                  hostCandidates.find((candidate) => candidate.url === selected)?.name
+                  hostCandidates.find((candidate) => candidate.source.url === selected)
+                    ?.source.name
                   ?? selected
                 }
                 selectedValue={selected}
                 items={hostCandidates.map((candidate) => ({
-                  value: candidate.url,
-                  // The score is the directory's own 0–100 rank, rendered
-                  // rather than recomputed; `undefined` is its "unranked".
-                  label:
-                    candidate.score === undefined
-                      ? t("hostSetup.hostServerUnscored", { name: candidate.name })
+                  value: candidate.source.url,
+                  // A rejected candidate reads as `ServerPicker` renders one —
+                  // the same `serverPicker.incompatibleVersion` line, off the
+                  // same announced version — in place of a rank it cannot be
+                  // chosen on. Otherwise the score is the directory's own
+                  // 0–100 rank, rendered rather than recomputed; `undefined` is
+                  // its "unranked".
+                  label: hostRejection(candidate.listing) !== null
+                    ? `${candidate.source.name} — ${t("serverPicker.incompatibleVersion", {
+                        version: candidate.listing?.row.server_version,
+                      })}`
+                    : candidate.source.score === undefined
+                      ? t("hostSetup.hostServerUnscored", { name: candidate.source.name })
                       : t("hostSetup.hostServerScore", {
-                          name: candidate.name,
-                          score: candidate.score,
+                          name: candidate.source.name,
+                          score: candidate.source.score,
                         }),
                 }))}
-                onSelect={setHostServerUrl}
+                // A rejected row is inert rather than absent: it is listed so
+                // the user can see why, and selecting it does nothing, which is
+                // the same affordance `ServerPicker` gives by withholding the
+                // toggle.
+                onSelect={(url) => {
+                  const picked = hostCandidates.find(
+                    (candidate) => candidate.source.url === url,
+                  );
+                  if (picked && hostRejection(picked.listing) !== null) return;
+                  setHostServerUrl(url);
+                }}
                 menuLayout="dropdown"
                 fitContainer
                 wrapperClassName="w-full min-w-0"

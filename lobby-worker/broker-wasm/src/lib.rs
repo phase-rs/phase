@@ -372,8 +372,10 @@ pub fn directory_version() -> u32 {
     DIRECTORY_VERSION
 }
 
-/// The HTTP path every phase server kind answers with its info document. The
-/// shell routes on this rather than on a literal of its own.
+/// The HTTP path every phase server kind answers with its info document.
+///
+/// No TypeScript consumer: [`directory_info_url`] returns the whole probe URL
+/// and subsumes it, and the Durable Object routes on literals of its own.
 #[wasm_bindgen]
 pub fn directory_info_path() -> String {
     INFO_PATH.to_string()
