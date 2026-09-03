@@ -18,7 +18,9 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsStop};
-use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
+use phase_ai::config::{
+    create_config_for_players, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
+};
 use phase_ai::duel_suite::compare::{
     compare as compare_reports, emit_gate_verdict, load_report, render_error_markdown,
     CompareOptions,
@@ -48,6 +50,17 @@ const DUEL_STALL_ACTIONS: usize = 40_000;
 /// Seats in a 1v1 Commander run. `FormatConfig::commander()` declares
 /// `min_players: 2`, so two seats is a configuration the engine already supports.
 const DUEL_SEATS: u8 = 2;
+
+/// Actions the next driver step may take: the step size, clamped to whatever the
+/// whole-game action cap still allows.
+///
+/// Without the clamp the cap is not the hard bound `GameBudget` documents: the
+/// pre-step check passes at 199 of 200, then a full 16-action step runs to 215.
+/// Mirrors the exact-cap contract `auto_play::run_driver_loop` states for the
+/// same arithmetic — bound each batch to `cap - total`, not to a fixed step.
+fn step_budget(max_actions: usize, total_actions: usize) -> usize {
+    DRIVER_STEP_ACTIONS.min(max_actions.saturating_sub(total_actions))
+}
 
 /// Actions per driver step. The budget is re-checked between steps, so this is
 /// how far a game can overrun its wall budget: `run_ai_actions` on its own takes
@@ -286,8 +299,17 @@ fn take_value<'a>(
     args: &mut impl Iterator<Item = &'a String>,
     flag: &str,
 ) -> Result<&'a String, String> {
-    args.next()
-        .ok_or_else(|| format!("{flag} requires a value"))
+    match args.next() {
+        // A `--`-prefixed token is the next OPTION, not this flag's value.
+        // Swallowing it loses both: `--feed --commander-suite` would set the feed
+        // string to "--commander-suite" and silently leave the mode at its
+        // default, running a different experiment than the one requested.
+        Some(value) if value.starts_with("--") => Err(format!(
+            "{flag} requires a value, but the next argument is the option '{value}'"
+        )),
+        Some(value) => Ok(value),
+        None => Err(format!("{flag} requires a value")),
+    }
 }
 
 /// Consumes and parses the value token belonging to `flag`.
@@ -305,6 +327,51 @@ fn parse_value<'a, T: std::str::FromStr>(
         .map_err(|_| format!("{flag} expects {expected}, got '{raw}'"))
 }
 
+/// Consumes a game count, which must be at least 1.
+///
+/// Zero is not a harmless no-op. `run_single` divides its aggregate metrics by
+/// the game count, so `--batch 0` reports `NaN%` win rates, and a zero-game run
+/// in any mode writes a report describing an experiment that never happened —
+/// which is worse than an error, because it looks like a result.
+fn parse_count<'a>(
+    args: &mut impl Iterator<Item = &'a String>,
+    flag: &str,
+) -> Result<usize, String> {
+    let count: usize = parse_value(args, flag, "a positive game count")?;
+    if count == 0 {
+        return Err(format!("{flag} must be at least 1"));
+    }
+    Ok(count)
+}
+
+/// Parses a difficulty label, rejecting anything `AiDifficulty::from_label`
+/// would silently downgrade.
+///
+/// `from_label` maps an unknown label to `Medium` deliberately: it is a
+/// transport mapping, and a live game must not fail because a config file
+/// carries a preset this build does not know. A measurement harness has the
+/// opposite requirement — `--difficulty Hardd` reporting a Medium run under the
+/// name of the requested one corrupts the experiment silently, and every number
+/// downstream inherits the lie. `config::ACCEPTED_DIFFICULTY_LABELS` is that
+/// module's own validation authority, published for transports that must reject
+/// rather than downgrade; it is referenced here rather than restated so the two
+/// cannot drift.
+fn parse_difficulty_checked(flag: &str, label: &str) -> Result<AiDifficulty, String> {
+    let trimmed = label.trim();
+    if ACCEPTED_DIFFICULTY_LABELS
+        .iter()
+        .any(|accepted| accepted.eq_ignore_ascii_case(trimmed))
+    {
+        // Matched the authority, so `from_label` cannot reach its default arm.
+        Ok(AiDifficulty::from_label(trimmed))
+    } else {
+        Err(format!(
+            "{flag} expects one of {}, got '{label}'",
+            ACCEPTED_DIFFICULTY_LABELS.join(", ")
+        ))
+    }
+}
+
 /// Parses argv (without the program name) into typed options.
 ///
 /// Rejects unknown flags and any positional beyond the data root: with several
@@ -316,14 +383,19 @@ fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--verbose" => cli.verbose = true,
-            "--batch" => cli.batch = Some(parse_value(&mut args, "--batch", "a game count")?),
+            "--batch" => cli.batch = Some(parse_count(&mut args, "--batch")?),
             "--seed" => cli.seed = Some(parse_value(&mut args, "--seed", "an integer seed")?),
             "--difficulty" => {
-                cli.difficulty = parse_difficulty(take_value(&mut args, "--difficulty")?)
+                cli.difficulty = parse_difficulty_checked(
+                    "--difficulty",
+                    take_value(&mut args, "--difficulty")?,
+                )?;
             }
             "--baseline-difficulty" => {
-                cli.baseline_difficulty =
-                    parse_difficulty(take_value(&mut args, "--baseline-difficulty")?);
+                cli.baseline_difficulty = parse_difficulty_checked(
+                    "--baseline-difficulty",
+                    take_value(&mut args, "--baseline-difficulty")?,
+                )?;
             }
             "--matchup" => cli.matchup = take_value(&mut args, "--matchup")?.clone(),
             "--suite" => cli.mode = Mode::Suite,
@@ -340,7 +412,7 @@ fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
             }
             "--p0" => cli.duel_p0 = Some(take_value(&mut args, "--p0")?.clone()),
             "--p1" => cli.duel_p1 = Some(take_value(&mut args, "--p1")?.clone()),
-            "--games" => cli.games = Some(parse_value(&mut args, "--games", "a game count")?),
+            "--games" => cli.games = Some(parse_count(&mut args, "--games")?),
             "--output" => cli.output = Some(PathBuf::from(take_value(&mut args, "--output")?)),
             "--suite-filter" => {
                 cli.suite_filter = Some(take_value(&mut args, "--suite-filter")?.clone());
@@ -1074,13 +1146,15 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
             break Some(reason);
         }
 
+        // `budget.exceeded` has already refused to reach here at or past the cap,
+        // so the remaining budget is at least one action.
         let run = run_ai_actions_bounded(
             &mut state,
             &ai_players,
             &ai_configs,
             &mut ai_rng,
             &ai_session,
-            DRIVER_STEP_ACTIONS,
+            step_budget(budget.max_actions, total_actions),
         );
         // The per-action ring is filled first: `driver_step` consumes the batch,
         // and its own contract asks callers to process the individual results
@@ -1558,11 +1632,6 @@ fn validate_deck(payload: &PlayerDeckPayload, expected: usize, label: &str) {
     }
 }
 
-fn parse_difficulty(s: &str) -> AiDifficulty {
-    // Single authority for the label → enum mapping lives on `AiDifficulty`.
-    AiDifficulty::from_label(s)
-}
-
 fn print_usage() {
     eprintln!("Usage: ai-duel <data-root> [OPTIONS]");
     eprintln!("  <data-root> is the single positional argument (the directory holding");
@@ -1833,6 +1902,141 @@ mod tests {
                 panic!("{flag} at the end of argv must be refused");
             };
             assert!(err.contains(flag), "{err}");
+        }
+    }
+
+    /// A value-taking flag immediately followed by another flag has no value.
+    /// Swallowing the next option loses the option AND silently reconfigures the
+    /// run: `--feed --commander-suite` used to set the feed string to
+    /// "--commander-suite" and leave the mode at its default.
+    #[test]
+    fn a_flag_followed_by_another_flag_is_not_given_it_as_a_value() {
+        let err = parse_cli(&args(&["--feed", "--commander-suite"])).expect_err("rejects");
+        assert!(err.contains("--feed"), "{err}");
+        assert!(err.contains("--commander-suite"), "{err}");
+
+        for flag in ["--p0", "--p1", "--output", "--matchup", "--suite-filter"] {
+            let Err(err) = parse_cli(&args(&[flag, "--suite"])) else {
+                panic!("{flag} must not swallow the following option");
+            };
+            assert!(err.contains(flag), "{err}");
+        }
+    }
+
+    /// `AiDifficulty::from_label` maps an unknown label to `Medium` by design.
+    /// That is right for a live transport and wrong for a measurement harness:
+    /// the run would be reported under the name of a configuration that never
+    /// ran.
+    #[test]
+    fn an_unknown_difficulty_label_is_rejected_not_downgraded_to_medium() {
+        assert_eq!(
+            AiDifficulty::from_label("Hardd"),
+            AiDifficulty::Medium,
+            "the transport mapping downgrades — which is exactly why the CLI \
+             must not lean on it"
+        );
+
+        for flag in ["--difficulty", "--baseline-difficulty"] {
+            let Err(err) = parse_cli(&args(&[flag, "Hardd"])) else {
+                panic!("{flag} must reject an unknown label");
+            };
+            assert!(err.contains(flag), "{err}");
+            assert!(err.contains("Hardd"), "{err}");
+            assert!(
+                err.contains("VeryHard"),
+                "the error must name the accepted labels: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_accepted_difficulty_label_parses_on_both_flags() {
+        for label in ACCEPTED_DIFFICULTY_LABELS {
+            for flag in ["--difficulty", "--baseline-difficulty"] {
+                let cli = parse_cli(&args(&[flag, label]))
+                    .unwrap_or_else(|err| panic!("{flag} {label} must parse: {err}"));
+                let parsed = if flag == "--difficulty" {
+                    cli.difficulty
+                } else {
+                    cli.baseline_difficulty
+                };
+                assert_eq!(parsed, AiDifficulty::from_label(label), "{flag} {label}");
+            }
+        }
+        // Case and surrounding whitespace follow `from_label`'s own normalisation.
+        assert_eq!(
+            parse_cli(&args(&["--difficulty", " veryhard "]))
+                .expect("parses")
+                .difficulty,
+            AiDifficulty::VeryHard
+        );
+    }
+
+    /// `run_single` divides its aggregate metrics by the game count, so a zero
+    /// count reports `NaN%` rather than failing.
+    #[test]
+    fn a_zero_game_count_is_rejected_on_every_count_flag() {
+        for flag in ["--batch", "--games"] {
+            let Err(err) = parse_cli(&args(&[flag, "0"])) else {
+                panic!("{flag} 0 must be refused");
+            };
+            assert!(err.contains(flag), "{err}");
+        }
+        assert_eq!(
+            parse_cli(&args(&["--batch", "1"])).expect("parses").batch,
+            Some(1)
+        );
+        assert_eq!(
+            parse_cli(&args(&["--games", "1"])).expect("parses").games,
+            Some(1)
+        );
+    }
+
+    // ------------------------------------------------------- exact action cap
+
+    #[test]
+    fn a_driver_step_never_reaches_past_the_action_cap() {
+        assert_eq!(step_budget(200, 0), DRIVER_STEP_ACTIONS);
+        assert_eq!(step_budget(200, 190), 10);
+        assert_eq!(
+            step_budget(200, 199),
+            1,
+            "one action still fits under the cap"
+        );
+        assert_eq!(step_budget(200, 200), 0);
+        assert_eq!(step_budget(200, 999), 0, "an overshoot cannot ask for more");
+    }
+
+    /// Worst case: every step takes every action it is allowed. The cap is
+    /// documented as hard, so the running total must land on it exactly rather
+    /// than overshoot by a step. A cap that is not a multiple of the step size
+    /// is what discriminates — a fixed 16-action step runs 200 to 208.
+    #[test]
+    fn the_action_cap_is_never_overshot_by_a_full_driver_step() {
+        for max_actions in [200usize, 205, 17, 1] {
+            let budget = GameBudget {
+                max_actions,
+                wall: None,
+                stall_actions: None,
+            };
+            let mut total = 0usize;
+            while budget.exceeded(Duration::ZERO, total, 0).is_none() {
+                let step = step_budget(max_actions, total);
+                assert!(
+                    step > 0,
+                    "a step allowed to take nothing would spin at {total}/{max_actions}"
+                );
+                total += step;
+                assert!(
+                    total <= max_actions,
+                    "overshot the hard cap: {total} > {max_actions}"
+                );
+            }
+            assert_eq!(total, max_actions, "the cap must be reached exactly");
+            assert_eq!(
+                budget.exceeded(Duration::ZERO, total, 0),
+                Some(StopReason::ActionCap)
+            );
         }
     }
 
