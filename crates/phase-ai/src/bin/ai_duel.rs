@@ -372,6 +372,34 @@ fn parse_difficulty_checked(flag: &str, label: &str) -> Result<AiDifficulty, Str
     }
 }
 
+/// Records the requested mode, refusing a second, different mode flag.
+///
+/// Every mode flag used to assign `cli.mode` directly, so the last one on the
+/// line won: `--commander-1v1 --p0 A --p1 B --commander-suite` ran the suite and
+/// ignored the named decks entirely. Two different mode flags are not a
+/// preference order — the request is ambiguous, and the run that followed was
+/// one the caller never asked for and could not tell apart from one they did.
+///
+/// A repeat of the SAME flag is accepted: redundant, but unambiguous.
+fn select_mode(
+    mode: &mut Mode,
+    selected_by: &mut Option<&'static str>,
+    requested: Mode,
+    flag: &'static str,
+) -> Result<(), String> {
+    match *selected_by {
+        Some(first) if first == flag => Ok(()),
+        Some(first) => Err(format!(
+            "{first} and {flag} select different modes; pass exactly one mode flag"
+        )),
+        None => {
+            *mode = requested;
+            *selected_by = Some(flag);
+            Ok(())
+        }
+    }
+}
+
 /// Parses argv (without the program name) into typed options.
 ///
 /// Rejects unknown flags and any positional beyond the data root: with several
@@ -379,6 +407,9 @@ fn parse_difficulty_checked(flag: &str, label: &str) -> Result<AiDifficulty, Str
 /// a data root and silently changes which card database is loaded.
 fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
     let mut cli = CliOptions::default();
+    // Which mode flag claimed `cli.mode`, so a second one can be refused rather
+    // than silently overwriting the requested experiment.
+    let mut mode_flag: Option<&'static str> = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -398,10 +429,25 @@ fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
                 )?;
             }
             "--matchup" => cli.matchup = take_value(&mut args, "--matchup")?.clone(),
-            "--suite" => cli.mode = Mode::Suite,
-            "--commander-suite" => cli.mode = Mode::CommanderSuite,
-            "--commander-1v1" => cli.mode = Mode::CommanderDuel,
-            "--list-matchups" => cli.mode = Mode::ListMatchups,
+            "--suite" => select_mode(&mut cli.mode, &mut mode_flag, Mode::Suite, "--suite")?,
+            "--commander-suite" => select_mode(
+                &mut cli.mode,
+                &mut mode_flag,
+                Mode::CommanderSuite,
+                "--commander-suite",
+            )?,
+            "--commander-1v1" => select_mode(
+                &mut cli.mode,
+                &mut mode_flag,
+                Mode::CommanderDuel,
+                "--commander-1v1",
+            )?,
+            "--list-matchups" => select_mode(
+                &mut cli.mode,
+                &mut mode_flag,
+                Mode::ListMatchups,
+                "--list-matchups",
+            )?,
             "--trace" => cli.trace = true,
             "--game-timeout" => {
                 let secs: u64 = parse_value(&mut args, "--game-timeout", "seconds")?;
@@ -1432,6 +1478,91 @@ fn duel_game_disposition<'a>(
     }
 }
 
+/// Running totals for a duel.
+///
+/// One place where a game's outcome becomes a number, so the report cannot count
+/// a run as both drawn and incomplete, or as neither, and cannot disagree with
+/// the per-game rows beside it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DuelTally {
+    p0_wins: usize,
+    p1_wins: usize,
+    draws: usize,
+    incomplete: usize,
+    /// Games the ENGINE put each deck on the play for — counted, not assumed.
+    p0_on_the_play: usize,
+    p1_on_the_play: usize,
+}
+
+impl DuelTally {
+    /// Records one finished game. `deck0_seat` is the seat deck 0 occupied, and
+    /// `starting_player` is the seat the CR 103.1 contest actually chose.
+    fn record(&mut self, outcome: GameOutcome, deck0_seat: PlayerId, starting_player: PlayerId) {
+        match outcome {
+            GameOutcome::Decided(winner) if winner == deck0_seat => self.p0_wins += 1,
+            GameOutcome::Decided(_) => self.p1_wins += 1,
+            GameOutcome::Draw => self.draws += 1,
+            GameOutcome::Stopped(_) => self.incomplete += 1,
+        }
+        if starting_player == deck0_seat {
+            self.p0_on_the_play += 1;
+        } else {
+            self.p1_on_the_play += 1;
+        }
+    }
+
+    fn decided(&self) -> usize {
+        self.p0_wins + self.p1_wins
+    }
+
+    /// Deck 0's share of the DECIDED games. Draws and abandoned runs are not
+    /// losses, so they are excluded from the denominator rather than counted
+    /// against a deck that did not lose.
+    fn p0_win_rate(&self) -> f64 {
+        if self.decided() == 0 {
+            0.0
+        } else {
+            rounded(self.p0_wins as f64 / self.decided() as f64)
+        }
+    }
+}
+
+/// Builds the duel's JSON report.
+///
+/// Records BOTH difficulties. `run_commander_game` gives the candidate deck
+/// `difficulty` and the opposing seat `baseline_difficulty`, so a report naming
+/// only one describes a configuration that did not run: a
+/// `--difficulty Hard --baseline-difficulty Easy` duel was indistinguishable in
+/// JSON from an all-Hard one. The field names match the sibling
+/// `--commander-suite` report, which already emits both.
+fn build_duel_report(
+    options: &CommanderDuelOptions<'_>,
+    tally: DuelTally,
+    rows: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "mode": "commander_duel",
+        "feed": options.feed,
+        "p0": options.p0,
+        "p1": options.p1,
+        "games": options.games,
+        "base_seed": options.base_seed,
+        "seed_schedule": "paired: games 2k and 2k+1 share base_seed+k with the seats reversed",
+        "on_the_play_source": "engine CR 103.1 starting-player contest, not seat order",
+        "candidate_difficulty": format!("{:?}", options.difficulty),
+        "baseline_difficulty": format!("{:?}", options.baseline_difficulty),
+        "p0_on_the_play": tally.p0_on_the_play,
+        "p1_on_the_play": tally.p1_on_the_play,
+        "p0_wins": tally.p0_wins,
+        "p1_wins": tally.p1_wins,
+        "draws": tally.draws,
+        "incomplete": tally.incomplete,
+        "p0_win_rate": tally.p0_win_rate(),
+        "games_detail": rows,
+    })
+}
+
 /// Head-to-head Commander between two decks from a feed, identified by commander name.
 ///
 /// Seats alternate every game, and an odd `--games` is rejected, so each deck occupies each
@@ -1467,12 +1598,7 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         std::process::exit(1);
     };
 
-    let mut p0_wins = 0usize;
-    let mut p1_wins = 0usize;
-    let mut draws = 0usize;
-    let mut incomplete = 0usize;
-    let mut p0_on_the_play = 0usize;
-    let mut p1_on_the_play = 0usize;
+    let mut tally = DuelTally::default();
     let mut rows = Vec::new();
 
     for game_idx in 0..options.games {
@@ -1508,22 +1634,10 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
             trace: options.trace.as_ref(),
         });
 
-        // One exhaustive match over the outcome: a run can no longer be counted
-        // as both incomplete and drawn, or as neither.
-        match result.outcome {
-            GameOutcome::Decided(winner) if winner == deck0_seat => p0_wins += 1,
-            GameOutcome::Decided(_) => p1_wins += 1,
-            GameOutcome::Draw => draws += 1,
-            GameOutcome::Stopped(_) => incomplete += 1,
-        }
+        tally.record(result.outcome, deck0_seat, result.starting_player);
         let winner_label = duel_result_label(result.outcome, deck0_seat, options.p0, options.p1);
         let stop_reason = result.outcome.stop_reason();
         let on_play = on_the_play_label(result.starting_player, deck0_seat, options.p0, options.p1);
-        if result.starting_player == deck0_seat {
-            p0_on_the_play += 1;
-        } else {
-            p1_on_the_play += 1;
-        }
         rows.push(serde_json::json!({
             "game": game_idx,
             "seed": seed,
@@ -1543,40 +1657,27 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         );
     }
 
-    let decided = p0_wins + p1_wins;
     eprintln!(
         "{} {}-{} {} ({} decided, {} drawn, {} incomplete of {})",
-        options.p0, p0_wins, p1_wins, options.p1, decided, draws, incomplete, options.games
+        options.p0,
+        tally.p0_wins,
+        tally.p1_wins,
+        options.p1,
+        tally.decided(),
+        tally.draws,
+        tally.incomplete,
+        options.games
     );
     eprintln!(
         "  on the play (engine CR 103.1 contest): {} {}, {} {}",
-        options.p0, p0_on_the_play, options.p1, p1_on_the_play
+        options.p0, tally.p0_on_the_play, options.p1, tally.p1_on_the_play
+    );
+    eprintln!(
+        "  difficulty: {} {:?}, {} {:?}",
+        options.p0, options.difficulty, options.p1, options.baseline_difficulty
     );
 
-    let report = serde_json::json!({
-        "schema_version": 1,
-        "mode": "commander_duel",
-        "feed": options.feed,
-        "p0": options.p0,
-        "p1": options.p1,
-        "games": options.games,
-        "base_seed": options.base_seed,
-        "seed_schedule": "paired: games 2k and 2k+1 share base_seed+k with the seats reversed",
-        "on_the_play_source": "engine CR 103.1 starting-player contest, not seat order",
-        "p0_on_the_play": p0_on_the_play,
-        "p1_on_the_play": p1_on_the_play,
-        "difficulty": format!("{:?}", options.difficulty),
-        "p0_wins": p0_wins,
-        "p1_wins": p1_wins,
-        "draws": draws,
-        "incomplete": incomplete,
-        "p0_win_rate": if decided > 0 {
-            rounded(p0_wins as f64 / decided as f64)
-        } else {
-            0.0
-        },
-        "games_detail": rows,
-    });
+    let report = build_duel_report(&options, tally, rows);
     if let Some(path) = options.output {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1903,6 +2004,189 @@ mod tests {
             };
             assert!(err.contains(flag), "{err}");
         }
+    }
+
+    fn duel_options<'a>(
+        p0: &'a str,
+        p1: &'a str,
+        difficulty: AiDifficulty,
+        baseline_difficulty: AiDifficulty,
+    ) -> CommanderDuelOptions<'a> {
+        CommanderDuelOptions {
+            cards_root: std::path::Path::new("."),
+            feed: "feeds/test.json",
+            p0,
+            p1,
+            games: 2,
+            base_seed: 42,
+            difficulty,
+            baseline_difficulty,
+            output: None,
+            budget: duel_budget(None),
+            trace: None,
+        }
+    }
+
+    // ------------------------------------------------------ conflicting modes
+
+    /// A later mode flag used to overwrite the earlier one, so this invocation
+    /// ran the SUITE and silently ignored the two named decks.
+    #[test]
+    fn a_second_different_mode_flag_is_rejected() {
+        let err = parse_cli(&args(&[
+            "--commander-1v1",
+            "--p0",
+            "A",
+            "--p1",
+            "B",
+            "--commander-suite",
+        ]))
+        .expect_err("conflicting modes must be refused");
+        assert!(err.contains("--commander-1v1"), "{err}");
+        assert!(err.contains("--commander-suite"), "{err}");
+
+        // Order must not matter, and every pair must conflict.
+        let flags = [
+            "--suite",
+            "--commander-suite",
+            "--commander-1v1",
+            "--list-matchups",
+        ];
+        for first in flags {
+            for second in flags {
+                let result = parse_cli(&args(&[first, second]));
+                if first == second {
+                    continue;
+                }
+                let Err(err) = result else {
+                    panic!("{first} {second} must be refused as conflicting");
+                };
+                assert!(err.contains(first) && err.contains(second), "{err}");
+            }
+        }
+    }
+
+    /// Redundant but unambiguous: the caller asked for one experiment twice.
+    #[test]
+    fn a_repeated_identical_mode_flag_is_accepted() {
+        for (flag, expected) in [
+            ("--suite", Mode::Suite),
+            ("--commander-suite", Mode::CommanderSuite),
+            ("--commander-1v1", Mode::CommanderDuel),
+            ("--list-matchups", Mode::ListMatchups),
+        ] {
+            let cli = parse_cli(&args(&[flag, flag]))
+                .unwrap_or_else(|err| panic!("{flag} twice must parse: {err}"));
+            assert_eq!(cli.mode, expected, "{flag}");
+        }
+    }
+
+    #[test]
+    fn each_mode_flag_selects_its_own_mode_and_none_defaults_to_single() {
+        assert_eq!(parse_cli(&args(&[])).expect("parses").mode, Mode::Single);
+        for (flag, expected) in [
+            ("--suite", Mode::Suite),
+            ("--commander-suite", Mode::CommanderSuite),
+            ("--commander-1v1", Mode::CommanderDuel),
+            ("--list-matchups", Mode::ListMatchups),
+        ] {
+            assert_eq!(
+                parse_cli(&args(&[flag])).expect("parses").mode,
+                expected,
+                "{flag}"
+            );
+        }
+    }
+
+    // --------------------------------------------------- report configuration
+
+    /// The duel runs two difficulties — the candidate deck's and the opposing
+    /// seat's — so a report naming one describes a configuration that did not
+    /// run, and cannot be reproduced from.
+    #[test]
+    fn the_duel_report_records_both_difficulties() {
+        let options = duel_options("deck0", "deck1", AiDifficulty::Hard, AiDifficulty::Easy);
+        let report = build_duel_report(&options, DuelTally::default(), Vec::new());
+
+        assert_eq!(report["candidate_difficulty"], "Hard");
+        assert_eq!(report["baseline_difficulty"], "Easy");
+        assert!(
+            report.get("difficulty").is_none(),
+            "one ambiguous `difficulty` field must not survive beside the two \
+             explicit ones: {report}"
+        );
+    }
+
+    #[test]
+    fn the_duel_report_carries_the_tally_and_the_measured_play_split() {
+        let options = duel_options("deck0", "deck1", AiDifficulty::Medium, AiDifficulty::Medium);
+        let tally = DuelTally {
+            p0_wins: 3,
+            p1_wins: 1,
+            draws: 1,
+            incomplete: 2,
+            p0_on_the_play: 4,
+            p1_on_the_play: 3,
+        };
+        let report = build_duel_report(&options, tally, Vec::new());
+
+        assert_eq!(report["p0_wins"], 3);
+        assert_eq!(report["p1_wins"], 1);
+        assert_eq!(report["draws"], 1);
+        assert_eq!(report["incomplete"], 2);
+        assert_eq!(report["p0_on_the_play"], 4);
+        assert_eq!(report["p1_on_the_play"], 3);
+        assert_eq!(report["p0_win_rate"], 0.75, "3 of 4 DECIDED games");
+    }
+
+    #[test]
+    fn the_tally_counts_each_outcome_exactly_once() {
+        let deck0_seat = PlayerId(0);
+        let mut tally = DuelTally::default();
+        tally.record(GameOutcome::Decided(PlayerId(0)), deck0_seat, PlayerId(0));
+        tally.record(GameOutcome::Decided(PlayerId(1)), deck0_seat, PlayerId(1));
+        tally.record(GameOutcome::Draw, deck0_seat, PlayerId(0));
+        tally.record(
+            GameOutcome::Stopped(StopReason::WallTimeout),
+            deck0_seat,
+            PlayerId(1),
+        );
+
+        assert_eq!(tally.p0_wins, 1);
+        assert_eq!(tally.p1_wins, 1);
+        assert_eq!(tally.draws, 1);
+        assert_eq!(tally.incomplete, 1);
+        assert_eq!(
+            tally.decided(),
+            2,
+            "a draw and an abandoned run are not decided"
+        );
+        assert_eq!(tally.p0_on_the_play, 2);
+        assert_eq!(tally.p1_on_the_play, 2);
+    }
+
+    #[test]
+    fn the_win_rate_is_zero_rather_than_nan_when_nothing_was_decided() {
+        let mut tally = DuelTally::default();
+        tally.record(
+            GameOutcome::Stopped(StopReason::ActionCap),
+            PlayerId(0),
+            PlayerId(0),
+        );
+        assert_eq!(tally.decided(), 0);
+        assert_eq!(tally.p0_win_rate(), 0.0);
+    }
+
+    /// A deck in seat 1 that wins as seat 1 is a deck-0 win only when deck 0 sat
+    /// there — the tally must key on the seat, like the labels do.
+    #[test]
+    fn the_tally_follows_the_seat_the_deck_occupied() {
+        let mut tally = DuelTally::default();
+        // Odd game: deck 0 is in seat 1 and wins there.
+        tally.record(GameOutcome::Decided(PlayerId(1)), PlayerId(1), PlayerId(1));
+        assert_eq!(tally.p0_wins, 1);
+        assert_eq!(tally.p1_wins, 0);
+        assert_eq!(tally.p0_on_the_play, 1);
     }
 
     /// A value-taking flag immediately followed by another flag has no value.
