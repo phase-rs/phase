@@ -213,6 +213,31 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
+impl SideboardPolicy {
+    /// CR 100.4 / CR 100.4a / CR 903.5e: whether `self` can never admit a
+    /// larger sideboard than `ceiling` would. `Forbidden` (no sideboard at
+    /// all) permits no more than anything; `Unlimited` permits no more than
+    /// `Unlimited` only; `Limited(n)` permits no more than any equal-or-looser
+    /// ceiling. A pure permissiveness comparison — never use it to decide
+    /// "which format is bigger" in any other sense.
+    ///
+    /// The single authority `built_in_axes_no_looser_than_rules` uses to
+    /// reject a built-in format's payload from declaring a sideboard
+    /// allowance looser than `GameFormat::sideboard_policy()` actually
+    /// permits. `Forbidden` is the bottom element, which is exactly
+    /// `default_sideboard_policy_fallback()` — so a payload serialized
+    /// before that field existed is admitted rather than hard-rejected.
+    pub fn permits_no_more_than(self, ceiling: Self) -> bool {
+        match (self, ceiling) {
+            (SideboardPolicy::Forbidden, _) => true,
+            (_, SideboardPolicy::Unlimited) => true,
+            (SideboardPolicy::Unlimited, _) => false,
+            (SideboardPolicy::Limited(_), SideboardPolicy::Forbidden) => false,
+            (SideboardPolicy::Limited(n), SideboardPolicy::Limited(m)) => n <= m,
+        }
+    }
+}
+
 /// A deck-construction copy ceiling for one card name: either unbounded or
 /// capped at `n`. Used at both levels of the rule — the format's default
 /// (see [`GameFormat::default_deck_copy_limit`]) and a card's printed override.
@@ -499,6 +524,209 @@ impl Serialize for FormatConfig {
     }
 }
 
+/// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
+/// format's rules are fixed by the Comprehensive Rules and the engine
+/// registry, not by the payload. Re-derive the authoritative config with
+/// `FormatConfig::for_format` and check every one of this struct's 17 fields
+/// against it under one of four verdicts:
+///
+/// - Locked: must equal the registry value exactly.
+/// - NoLooserThan: must be no more permissive than the registry value,
+///   under that axis's own permissiveness order whose BOTTOM element is
+///   that axis's `#[serde(default…)]` fallback. That is what keeps legacy
+///   payloads (saves, replays, persisted game states) deserializing: they
+///   resolve to the bottom, which is never looser.
+/// - Derived: a function of Locked fields; re-derived and compared.
+/// - HostChoice: a per-session capability orthogonal to format; free.
+///
+/// The Custom counterpart is the `Some(rules)` arm below, which can demand
+/// blanket equality because no Custom payload has ever been accepted at this
+/// boundary and there are therefore no legacy Custom payloads to keep
+/// compatible with. This function is the built-in half of the same idea.
+fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), String> {
+    let rules = FormatConfig::for_format(config.format).map_err(|e| e.0)?;
+
+    // format: Locked — discharged by construction. `config.format` is the
+    // very key `for_format` was looked up by, so equality is tautological.
+
+    // starting_life: Locked — no serde default, so mandatory in every
+    // payload; equality cannot break a legacy payload.
+    if config.starting_life != rules.starting_life {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, but {} requires exactly {} — a built-in format's \
+             starting life total is fixed by the Comprehensive Rules",
+            config.starting_life, config.format, rules.starting_life,
+        ));
+    }
+
+    // min_players: Locked — no serde default.
+    if config.min_players != rules.min_players {
+        return Err(format!(
+            "FormatConfig.min_players is {}, but {} requires exactly {} — a built-in format's \
+             player-count floor is fixed by the Comprehensive Rules",
+            config.min_players, config.format, rules.min_players,
+        ));
+    }
+
+    // max_players: Locked — no serde default.
+    if config.max_players != rules.max_players {
+        return Err(format!(
+            "FormatConfig.max_players is {}, but {} requires exactly {} — a built-in format's \
+             player-count ceiling is fixed by the Comprehensive Rules",
+            config.max_players, config.format, rules.max_players,
+        ));
+    }
+
+    // deck_size: Locked — CR 100.5 / CR 903.5a. No default. Deliberately NOT
+    // NoLooserThan: Minimum(60) and Exactly(100) are not comparable under any
+    // sound permissiveness order (CR 903.13f(1) is a minimum with no
+    // maximum), so equality is the only honest verdict.
+    if config.deck_size != rules.deck_size {
+        return Err(format!(
+            "FormatConfig.deck_size is {:?}, but {} requires exactly {:?} — a built-in format's \
+             deck-size rule is fixed by the Comprehensive Rules",
+            config.deck_size, config.format, rules.deck_size,
+        ));
+    }
+
+    // singleton: Locked — no serde default.
+    if config.singleton != rules.singleton {
+        return Err(format!(
+            "FormatConfig.singleton is {}, but {} requires exactly {} — a built-in format's \
+             singleton rule is fixed by the Comprehensive Rules",
+            config.singleton, config.format, rules.singleton,
+        ));
+    }
+
+    // command_zone: Locked — CR 408.1. No default.
+    if config.command_zone != rules.command_zone {
+        return Err(format!(
+            "FormatConfig.command_zone is {}, but {} requires exactly {} — a built-in format's \
+             command-zone usage is fixed by the Comprehensive Rules",
+            config.command_zone, config.format, rules.command_zone,
+        ));
+    }
+
+    // commander_damage_threshold: Locked — CR 903.10a. No default.
+    if config.commander_damage_threshold != rules.commander_damage_threshold {
+        return Err(format!(
+            "FormatConfig.commander_damage_threshold is {:?}, but {} requires exactly {:?} — a \
+             built-in format's commander-damage threshold is fixed by the Comprehensive Rules",
+            config.commander_damage_threshold, config.format, rules.commander_damage_threshold,
+        ));
+    }
+
+    // range_of_influence: Locked (None) — has a default (None) but every
+    // built-in is None, so the default agrees everywhere and equality is
+    // legacy-safe. Independently corroborated by engine-wasm's
+    // reject_unimplemented_range_of_influence, which already refuses any
+    // Some at the session boundary.
+    if config.range_of_influence.is_some() || rules.range_of_influence.is_some() {
+        return Err(format!(
+            "FormatConfig.range_of_influence is set, but {} does not support a range of \
+             influence override — this axis is fixed by the Comprehensive Rules for built-in \
+             formats",
+            config.format,
+        ));
+    }
+
+    // team_based: Locked — no serde default.
+    if config.team_based != rules.team_based {
+        return Err(format!(
+            "FormatConfig.team_based is {}, but {} requires exactly {} — a built-in format's \
+             team structure is fixed by the Comprehensive Rules",
+            config.team_based, config.format, rules.team_based,
+        ));
+    }
+
+    // archenemy_player: NoLooserThan over Option<PlayerId>'s bottom-lifted
+    // flat order: None <= Some(x) for all x, and Some(a) <= Some(b) iff
+    // a == b. None is the bottom, i.e. the serde fallback. CR 904.2a /
+    // CR 904.6.
+    match (config.archenemy_player, rules.archenemy_player) {
+        (None, _) => {}
+        (Some(declared), Some(expected)) if declared == expected => {}
+        (Some(declared), expected) => {
+            return Err(format!(
+                "FormatConfig.archenemy_player is {declared:?}, but {} requires {expected:?} — a \
+                 built-in format's archenemy designation is fixed by the Comprehensive Rules; a \
+                 payload may omit it but never declare a different one",
+                config.format,
+            ));
+        }
+    }
+
+    // uses_commander: Derived — command_zone && commander_damage_threshold
+    // is_some(), both Locked above, so for a built-in the derivation
+    // coincides with registry equality. No serde default, so no legacy
+    // concern.
+    let derived_uses_commander = config.command_zone && config.commander_damage_threshold.is_some();
+    if config.uses_commander != derived_uses_commander {
+        return Err(format!(
+            "FormatConfig.uses_commander is {}, but command_zone ({}) and \
+             commander_damage_threshold ({:?}) derive {} — uses_commander must always equal that \
+             derivation",
+            config.uses_commander,
+            config.command_zone,
+            config.commander_damage_threshold,
+            derived_uses_commander,
+        ));
+    }
+
+    // supplies_fixed_deck: NoLooserThan over false <= true. true is the
+    // permissive value (it bypasses deck-selection gates); false demands
+    // more of the player. Fallback false is the bottom, so this is
+    // migratable now.
+    if config.supplies_fixed_deck && !rules.supplies_fixed_deck {
+        return Err(format!(
+            "FormatConfig.supplies_fixed_deck is true, but {} does not supply a fixed deck — a \
+             built-in format's fixed-deck status is fixed by the Comprehensive Rules; a payload \
+             may declare false but never true",
+            config.format,
+        ));
+    }
+
+    // sideboard_policy: NoLooserThan over Forbidden < Limited(n) <=
+    // Limited(m>=n) < Unlimited. Fallback Forbidden is the bottom, so this
+    // is migratable now. CR 100.4 / CR 100.4a / CR 903.5e.
+    if !config
+        .sideboard_policy
+        .permits_no_more_than(rules.sideboard_policy)
+    {
+        return Err(format!(
+            "FormatConfig.sideboard_policy is {:?}, which is more permissive than {} allows \
+             ({:?}) — a built-in format's sideboard policy is fixed by the Comprehensive Rules; \
+             a payload may declare an equal-or-stricter value but never a looser one",
+            config.sideboard_policy, config.format, rules.sideboard_policy,
+        ));
+    }
+
+    // default_deck_copy_limit: NoLooserThan via the existing
+    // DeckCopyLimit::permits_no_more_than. Fallback UpTo(1) is the bottom.
+    // CR 100.2a / CR 100.2b / CR 903.5b.
+    if !config
+        .default_deck_copy_limit
+        .permits_no_more_than(rules.default_deck_copy_limit)
+    {
+        return Err(format!(
+            "FormatConfig.default_deck_copy_limit is {:?}, which is more permissive than {} \
+             allows ({:?}) — a built-in format's default copy limit is fixed by the \
+             Comprehensive Rules; a payload may declare an equal-or-stricter value but never a \
+             looser one",
+            config.default_deck_copy_limit, config.format, rules.default_deck_copy_limit,
+        ));
+    }
+
+    // allow_debug_actions: HostChoice — session capability, orthogonal to
+    // format. Free.
+
+    // custom_rules: Locked (None) — the built-in arm is defined by
+    // custom_rules == None; the biconditional is established upstream by
+    // validate_custom_rules_consistency.
+
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for FormatConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -572,45 +800,16 @@ impl<'de> Deserialize<'de> for FormatConfig {
                     )));
                 }
             }
+            // A built-in format's rules are fixed by the Comprehensive Rules
+            // and the engine registry, not by the payload.
+            // `built_in_axes_no_looser_than_rules` re-derives the
+            // authoritative config via `FormatConfig::for_format` and checks
+            // every one of this struct's 17 fields against it — absorbing
+            // what was previously a single ad hoc `default_deck_copy_limit`
+            // check as one of its 17 rows, rather than adding a parallel
+            // second check.
             None => {
-                // CR 100.2a / CR 100.2b / CR 903.5b: a built-in format's
-                // default deck-copy ceiling is fixed by the Comprehensive
-                // Rules, not by the payload. Reject a declared value more
-                // permissive than GameFormat::default_deck_copy_limit() —
-                // without this, a client could submit
-                // {"format":"Standard","default_deck_copy_limit":{"type":"Unlimited"},...}
-                // and have every consumer that reads this stored field
-                // (starting with max_deck_copies, and after this same PR's
-                // admission fix, every evaluate_*/quick_* dispatch function
-                // too) disclose or enforce that forged, looser ceiling.
-                //
-                // Deliberately NOT a strict-equality check:
-                // default_deck_copy_limit ships its own
-                // #[serde(default = "default_deck_copy_limit_fallback")]
-                // fallback (UpTo(1)) for payloads serialized before this
-                // field existed. UpTo(1) is never looser than any real format
-                // default, so permits_no_more_than accepts it — a
-                // strict-equality reject would instead turn every legacy
-                // Standard/Pioneer/.../Planechase/Archenemy save, replay, or
-                // persisted game state into a hard deserialize failure, which
-                // is worse than the bug this check exists to close. (The
-                // Custom branch above CAN demand strict equality: no Custom
-                // FormatConfig has ever been accepted at this boundary, so
-                // there are no legacy Custom payloads to keep compatible
-                // with.)
-                let real_limit = config.format.default_deck_copy_limit();
-                if !config
-                    .default_deck_copy_limit
-                    .permits_no_more_than(real_limit)
-                {
-                    return Err(serde::de::Error::custom(format!(
-                        "FormatConfig.default_deck_copy_limit is {:?}, which is more permissive \
-                         than {} allows ({real_limit:?}) — a built-in format's default copy limit \
-                         is fixed by the Comprehensive Rules; a payload may declare an \
-                         equal-or-stricter value but never a looser one",
-                        config.default_deck_copy_limit, config.format,
-                    )));
-                }
+                built_in_axes_no_looser_than_rules(&config).map_err(serde::de::Error::custom)?
             }
         }
         Ok(config)
@@ -629,6 +828,87 @@ impl FormatTopology {
                 ..
             }
         )
+    }
+}
+
+/// The format a deck-compatibility request is being validated against.
+///
+/// Wire-Inertness Invariant — the load-bearing security property of this
+/// type, stated here as four checkable clauses:
+///
+/// (1) This type's wire form is the bare `GameFormat` tag in BOTH
+///     directions. `Resolved` has no JSON representation. `Serialize`
+///     delegates to `self.tag().serialize(s)`; `Deserialize` is
+///     `GameFormat::deserialize(d).map(SelectedFormat::Tag)`. Both impls are
+///     hand-written, never derived, so serde never emits or accepts an
+///     externally-tagged `{"Tag":…}` / `{"Resolved":…}` envelope.
+///
+/// (2) The complete, exhaustive list of places `SelectedFormat::Resolved` is
+///     constructed is exactly one: `validate_name_deck_for_format_full` in
+///     `game::deck_validation`, trusted Rust that already holds a
+///     `&FormatConfig` supplied by its caller. Re-run
+///     `grep -rn "SelectedFormat::Resolved" --include=*.rs crates/ | grep -v
+///     "tests/\|#\[cfg(test)\]"` after any change touching this type — it
+///     must return exactly one production line.
+///
+/// (3) The gate `built_in_axes_no_looser_than_rules` runs at every
+///     `FormatConfig` construction site with no exceptions, because every
+///     `FormatConfig` an in-memory `Resolved` can carry was itself produced
+///     by `FormatConfig::for_format` (registry-authored) or
+///     `FormatConfig::deserialize` (the gated ingress).
+///
+/// (4) Therefore every untrusted `DeckCompatibilityRequest` WASM boundary
+///     can only ever receive `SelectedFormat::Tag` — safe by construction,
+///     not by the absence of a test failure. A `Tag(Custom(_))` arriving
+///     there yields `rules() == Err`, which every consumer already handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedFormat {
+    /// A format NAME, and nothing more. The only variant any deserializer
+    /// can ever produce.
+    Tag(GameFormat),
+    /// A fully-resolved rule set, constructible ONLY by trusted Rust — see
+    /// the Wire-Inertness Invariant above. Boxed for the same
+    /// `large_enum_variant` reason `custom_rules` and `range_of_influence`
+    /// are (`:463-473` above).
+    Resolved(Box<FormatConfig>),
+}
+
+impl SelectedFormat {
+    /// The format name, regardless of whether this is a bare tag or a fully
+    /// resolved config.
+    pub fn tag(&self) -> GameFormat {
+        match self {
+            SelectedFormat::Tag(format) => *format,
+            SelectedFormat::Resolved(config) => config.format,
+        }
+    }
+
+    /// `Err` only for `Tag(Custom(_))`: a bare tag cannot resolve a custom
+    /// format's rules. `Resolved` is always `Ok`, INCLUDING for Custom —
+    /// that is the entire point of the variant.
+    pub fn rules(&self) -> Result<Cow<'_, FormatConfig>, FormatConfigError> {
+        match self {
+            SelectedFormat::Tag(format) => FormatConfig::for_format(*format).map(Cow::Owned),
+            SelectedFormat::Resolved(config) => Ok(Cow::Borrowed(config)),
+        }
+    }
+}
+
+impl Serialize for SelectedFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.tag().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SelectedFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        GameFormat::deserialize(deserializer).map(SelectedFormat::Tag)
     }
 }
 
@@ -1819,6 +2099,75 @@ mod tests {
         assert!(UpTo(1).permits_no_more_than(UpTo(4)));
         assert!(UpTo(4).permits_no_more_than(UpTo(4)));
         assert!(!UpTo(5).permits_no_more_than(UpTo(4)));
+    }
+
+    #[test]
+    fn sideboard_policy_permits_no_more_than_is_a_sound_permissiveness_order() {
+        use SideboardPolicy::*;
+        assert!(Forbidden.permits_no_more_than(Forbidden));
+        assert!(Forbidden.permits_no_more_than(Limited(15)));
+        assert!(Forbidden.permits_no_more_than(Unlimited));
+        assert!(!Limited(15).permits_no_more_than(Forbidden));
+        assert!(Limited(1).permits_no_more_than(Limited(15)));
+        assert!(Limited(15).permits_no_more_than(Limited(15)));
+        assert!(!Limited(16).permits_no_more_than(Limited(15)));
+        assert!(Limited(15).permits_no_more_than(Unlimited));
+        assert!(Unlimited.permits_no_more_than(Unlimited));
+        assert!(!Unlimited.permits_no_more_than(Limited(15)));
+        assert!(!Unlimited.permits_no_more_than(Forbidden));
+    }
+
+    /// V1 (Verification Matrix): `SelectedFormat`'s wire form is the bare
+    /// `GameFormat` tag in BOTH directions.
+    #[test]
+    fn selected_format_tag_round_trips_as_a_bare_game_format_string() {
+        let from_wire: SelectedFormat =
+            serde_json::from_value(serde_json::json!("Standard")).unwrap();
+        assert_eq!(from_wire, SelectedFormat::Tag(GameFormat::Standard));
+
+        let to_wire = serde_json::to_value(SelectedFormat::Tag(GameFormat::Standard)).unwrap();
+        assert_eq!(to_wire, serde_json::json!("Standard"));
+
+        let custom: SelectedFormat =
+            serde_json::from_value(serde_json::json!("Custom:7")).unwrap();
+        assert_eq!(
+            custom,
+            SelectedFormat::Tag(GameFormat::Custom(crate::types::custom_format::CustomFormatId(
+                7
+            )))
+        );
+
+        assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!("Nonsense")).is_err());
+    }
+
+    /// V2: `Resolved` has NO JSON representation — it serializes to exactly
+    /// the bare tag, and round-tripping it back always yields `Tag`, never
+    /// `Resolved`. This is the structural half of the Wire-Inertness
+    /// Invariant: the resolved payload cannot survive a wire round-trip.
+    #[test]
+    fn selected_format_resolved_serializes_to_the_bare_tag_and_returns_as_tag() {
+        let mut config = FormatConfig::standard();
+        config.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+        let resolved = SelectedFormat::Resolved(Box::new(config));
+
+        let wire = serde_json::to_value(&resolved).unwrap();
+        assert_eq!(wire, serde_json::json!("Standard"));
+
+        let round_tripped: SelectedFormat = serde_json::from_value(wire).unwrap();
+        assert_eq!(round_tripped, SelectedFormat::Tag(GameFormat::Standard));
+    }
+
+    /// V3: neither externally-tagged envelope shape deserializes.
+    #[test]
+    fn selected_format_rejects_both_externally_tagged_envelopes() {
+        assert!(serde_json::from_value::<SelectedFormat>(
+            serde_json::json!({"Tag": "Standard"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!({
+            "Resolved": serde_json::to_value(FormatConfig::standard()).unwrap()
+        }))
+        .is_err());
     }
 
     #[test]

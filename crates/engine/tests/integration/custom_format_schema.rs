@@ -13,8 +13,9 @@ use engine::types::custom_format::{
     WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
-    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, SideboardPolicy,
+    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
 };
+use engine::types::player::PlayerId;
 
 fn sample_structural() -> StructuralRules {
     StructuralRules {
@@ -452,7 +453,7 @@ fn custom_format_deck_compatibility_summary_reports_no_opinion() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         summary_only: true,
         ..Default::default()
     };
@@ -468,7 +469,7 @@ fn custom_format_deck_compatibility_reports_no_opinion() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         summary_only: false,
         ..Default::default()
     };
@@ -520,7 +521,7 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         ..Default::default()
     };
     // Exercises the exact guard added to companion_candidates: without it,
@@ -792,6 +793,205 @@ fn format_config_deserialization_accepts_a_stricter_than_truth_copy_limit() {
     stricter.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
     let json = serde_json::to_value(&stricter).unwrap();
     assert!(serde_json::from_value::<FormatConfig>(json).is_ok());
+}
+
+/// V5 (Verification Matrix): `built_in_axes_no_looser_than_rules` rejects a
+/// forged looser `sideboard_policy` on a built-in Commander-family format —
+/// the newly-found live hole from Step 3.5 finding 1 (CR 903.5e: Commander
+/// games do not use sideboards).
+#[test]
+fn format_config_deserialization_rejects_a_forged_looser_sideboard_policy() {
+    let mut forged = FormatConfig::commander();
+    forged.sideboard_policy = SideboardPolicy::Limited(15);
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Commander payload forging a 15-card sideboard must be rejected");
+    assert!(
+        error.to_string().contains("sideboard_policy"),
+        "expected the sideboard_policy rejection message, got: {error}"
+    );
+}
+
+/// V6: `built_in_axes_no_looser_than_rules` rejects a forged
+/// `supplies_fixed_deck: true` on formats that don't supply one — the
+/// pre-existing live hole this phase's gate closes.
+#[test]
+fn format_config_deserialization_rejects_forged_supplies_fixed_deck() {
+    for builder in [FormatConfig::standard, FormatConfig::commander, FormatConfig::archenemy] {
+        let mut forged = builder();
+        forged.supplies_fixed_deck = true;
+        let json = serde_json::to_value(&forged).unwrap();
+        let error = serde_json::from_value::<FormatConfig>(json)
+            .expect_err("a payload forging supplies_fixed_deck: true must be rejected");
+        assert!(
+            error.to_string().contains("supplies_fixed_deck"),
+            "expected the supplies_fixed_deck rejection message, got: {error}"
+        );
+    }
+}
+
+/// V7: `archenemy_player` follows the bottom-lifted flat order — `None` is
+/// always admitted (the fallback/bottom), a mismatched `Some` is rejected,
+/// and a built-in that is never Archenemy (e.g. Standard) rejects any
+/// declared `Some` at all (CR 904.2a / CR 904.6).
+#[test]
+fn format_config_deserialization_archenemy_player_follows_the_bottom_lifted_order() {
+    let mut none_declared = FormatConfig::archenemy();
+    none_declared.archenemy_player = None;
+    let json = serde_json::to_value(&none_declared).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "None must be admitted as the bottom element of the order"
+    );
+
+    let mut mismatched = FormatConfig::archenemy();
+    mismatched.archenemy_player = Some(PlayerId(3));
+    let json = serde_json::to_value(&mismatched).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a mismatched archenemy_player must be rejected");
+    assert!(
+        error.to_string().contains("archenemy_player"),
+        "expected the archenemy_player rejection message, got: {error}"
+    );
+
+    let mut forged_on_standard = FormatConfig::standard();
+    forged_on_standard.archenemy_player = Some(PlayerId(0));
+    let json = serde_json::to_value(&forged_on_standard).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Standard never designates an archenemy; any declared Some must be rejected"
+    );
+}
+
+/// V8: positive control — every registry built-in's untouched, real config
+/// must still round-trip through the gate. Iterates `GameFormat::registry()`
+/// dynamically so this stays correct as formats are added.
+#[test]
+fn format_config_deserialization_accepts_every_builtin_untouched() {
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: an untouched, real config must always be accepted",
+            meta.format
+        );
+    }
+}
+
+/// V9: legacy compatibility (D4) — a hand-built payload omitting every
+/// `#[serde(default...)]` field must still deserialize, with each field
+/// resolving to its documented fallback. The same payload with one of those
+/// fallbacks overridden to a looser value must be rejected.
+#[test]
+fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    for field in [
+        "sideboard_policy",
+        "supplies_fixed_deck",
+        "archenemy_player",
+        "range_of_influence",
+        "allow_debug_actions",
+        "custom_rules",
+        "default_deck_copy_limit",
+    ] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    let restored: FormatConfig = serde_json::from_value(legacy.clone())
+        .expect("a legacy payload omitting every defaulted field must still deserialize");
+    assert_eq!(restored.sideboard_policy, SideboardPolicy::Forbidden);
+    assert!(!restored.supplies_fixed_deck);
+    assert_eq!(restored.archenemy_player, None);
+    assert_eq!(restored.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
+
+    // The same payload, but now ALSO declaring a looser sideboard_policy
+    // than the omitted fallback would have given, must still be rejected.
+    legacy.as_object_mut().unwrap().insert(
+        "sideboard_policy".to_string(),
+        serde_json::to_value(SideboardPolicy::Unlimited).unwrap(),
+    );
+    assert!(
+        serde_json::from_value::<FormatConfig>(legacy).is_err(),
+        "a looser explicit value must still be rejected even alongside other omitted fields"
+    );
+}
+
+/// V10: every `NoLooserThan` axis admits a stricter-than-truth value —
+/// paired positive control for V5/V6's negatives.
+#[test]
+fn format_config_deserialization_accepts_stricter_than_truth_on_every_no_looser_than_axis() {
+    let mut stricter_sideboard = FormatConfig::standard();
+    stricter_sideboard.sideboard_policy = SideboardPolicy::Limited(1);
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut forbidden_sideboard = FormatConfig::standard();
+    forbidden_sideboard.sideboard_policy = SideboardPolicy::Forbidden;
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&forbidden_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut stricter_copies = FormatConfig::standard();
+    stricter_copies.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&stricter_copies).unwrap())
+            .is_ok()
+    );
+}
+
+/// V11: `Locked` axes reject any inequality against the registry value,
+/// even when the declared value is not obviously "looser" — equality is
+/// the only honest verdict for these axes (see `built_in_axes_no_looser_than_rules`).
+#[test]
+fn format_config_deserialization_rejects_any_inequality_on_locked_axes() {
+    let mut wrong_life = FormatConfig::standard();
+    wrong_life.starting_life = 40;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_life).unwrap())
+            .is_err(),
+        "starting_life is Locked; any declared inequality must be rejected"
+    );
+
+    let mut wrong_deck_size = FormatConfig::standard();
+    wrong_deck_size.deck_size = DeckSizeRule::Exactly(100);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_deck_size).unwrap())
+            .is_err(),
+        "deck_size is Locked; Minimum(60) vs Exactly(100) must be rejected, not compared"
+    );
+
+    let mut wrong_singleton = FormatConfig::standard();
+    wrong_singleton.singleton = true;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_singleton).unwrap())
+            .is_err(),
+        "singleton is Locked; any declared inequality must be rejected"
+    );
+}
+
+/// V19: the gate is exhaustive over all 17 `FormatConfig` fields — a
+/// regenerable guard so a future 18th field cannot be silently unclassified.
+/// Field count is derived from the live JSON object rather than hardcoded,
+/// so this test itself fails loudly (rather than silently under-counting)
+/// the moment a field is added or removed.
+#[test]
+fn format_config_has_exactly_seventeen_fields() {
+    let json = serde_json::to_value(FormatConfig::standard()).unwrap();
+    let object = json.as_object().unwrap();
+    // `archenemy_player` and `custom_rules` are both
+    // `skip_serializing_if = "Option::is_none"` and both `None` for
+    // Standard, so they are absent from this object — account for them
+    // explicitly rather than undercounting the true field set.
+    let visible_field_count = object.len();
+    assert_eq!(
+        visible_field_count + 2,
+        17,
+        "FormatConfig's field count changed — re-audit built_in_axes_no_looser_than_rules' \
+         17-row field walk against the current struct definition before trusting this count"
+    );
 }
 
 #[test]

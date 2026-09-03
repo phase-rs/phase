@@ -23,7 +23,7 @@ use engine::game::{
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::{FormatConfig, GameFormat, SelectedFormat};
 use engine::types::keywords::{Keyword, PartnerType};
 use engine::types::mana::ManaColor;
 
@@ -111,7 +111,7 @@ fn request(main_deck: Vec<String>, commander: Vec<String>) -> DeckCompatibilityR
     DeckCompatibilityRequest {
         main_deck,
         commander,
-        selected_format: Some(GameFormat::CommanderDraft),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::CommanderDraft)),
         ..DeckCompatibilityRequest::default()
     }
 }
@@ -227,7 +227,7 @@ fn commander_draft_suppresses_the_singleton_rule() {
         );
 
         let constructed = DeckCompatibilityRequest {
-            selected_format: Some(GameFormat::Commander),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             summary_only,
             ..request(main.clone(), vec![COMMANDER.to_string()])
         };
@@ -257,7 +257,7 @@ fn commander_draft_consults_no_constructed_legality_table() {
     );
 
     let constructed = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Commander),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
         ..request(main, vec![COMMANDER.to_string()])
     };
     let (compatible, _) = verdict(&db, &constructed);
@@ -345,7 +345,7 @@ fn constructed_commander_keeps_its_own_axes() {
     // CR 903.5a: exactly 100, so a 60-card deck is rejected — the same deck
     // Commander Draft accepts above.
     let sixty = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Commander),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
         ..request(deck(60, 0), vec![COMMANDER.to_string()])
     };
     let (compatible, reasons) = verdict(&db, &sixty);
