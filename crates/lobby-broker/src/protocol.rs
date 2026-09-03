@@ -38,11 +38,50 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 55 — `DerivedViews::room_half_identities` publishes both halves of every
+///      battlefield Room in printed order, resolved through the COPIED halves
+///      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+///      special action's offer names the half and shows its unlock cost
+///      (CR 709.5e) from this map; an enter-as-copy recipient carries neither
+///      on its own printed card, and printed order is engine work. The field
+///      is serde-additive, but the client renders the map directly rather than
+///      deriving halves from raw state; a v54 host would silently label every
+///      offered door "Tap for Mana" again. Full-game handshakes must refuse
+///      that capability mismatch. Lobby messages are unchanged.
+/// 54 — `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
+///      A Chaos client sends only candidate set codes; the Full server resolves
+///      and persists the private seat-by-round assignment matrix. This changes
+///      a Full-server client message, so the full handshake refuses stale
+///      peers. Lobby messages are unchanged.
+/// 53 — `DraftPlayerView::launch_capability` publishes the engine-authorized
+///      post-draft multiplayer launch. The client renders this procedure-owned
+///      capability instead of inferring it from `DraftKind`; an older server
+///      would omit it and silently hide a completed Commander pod's launch.
+///      Full-game handshakes must refuse that capability mismatch. Lobby
+///      messages are unchanged.
+/// 52 — `DerivedViews::storm_count` publishes the engine-owned number of
+///      copies a current Storm trigger will create, or a newly cast Storm spell
+///      would create. The field is serde-additive, but the client renders this
+///      scalar directly rather than deriving Storm from raw state; a v51 host
+///      would therefore silently omit the HUD status. Full-game handshakes
+///      must refuse that capability mismatch. Lobby messages are unchanged.
 /// Note: renaming or removing a variant silently fails at JSON parse time
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 51 — Casting permissions gained a typed lifetime. Two parts:
+///      (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration` and
+///      `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+///      `duration` it already carried. `source_id` is the granting permanent
+///      that bounds a host-lifetime duration — additive behind serde defaults.
+///      (b) `Duration` gained the `WhileControllingHost` ("for as long as you
+///      control ~") and `WhileHostOnBattlefield` ("for as long as ~ remains on
+///      the battlefield") variants (CR 611.2b). Each new tag is a ONE-WAY
+///      parse break like entry 46: a v50 peer cannot deserialize a `GameState`
+///      containing it, and no serde default can rescue an unknown variant, so
+///      the full-game handshake must refuse the pairing. Lobby messages are
+///      unchanged.
 /// 50 — `FormatConfig` gained `default_deck_copy_limit`, the resolved
 ///      per-format deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b)
 ///      `max_deck_copies` and the deck-compatibility admission path now both
@@ -221,7 +260,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 50;
+pub const PROTOCOL_VERSION: u32 = 55;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -248,6 +287,29 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 4 — The tournament-organizer message set: seven [`LobbyClientMessage`]
+///     variants (`CreateTournament`, `JoinTournament`, `GetTournament`,
+///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament`,
+///     `EndTournament`) and five [`LobbyServerMessage`] variants
+///     (`TournamentCreated`, `TournamentJoined`, `TournamentUpdate`,
+///     `TournamentRemoved`, `TournamentListUpdate`). "A lobby variant is
+///     added" is the first of the four triggers listed above, so this bump is
+///     required by this constant's own documented policy.
+///
+///     Purely ADDITIVE, which is why [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does
+///     **not** move alongside it — the asymmetry with 2 is deliberate. Bump 2
+///     retyped a field three existing carriers already held in both
+///     directions, so a v1 peer could neither send nor interpret a frame it
+///     routinely exchanged; only a floor move could say that out loud. Nothing
+///     here changes any existing variant's shape. A v2 client keeps parsing
+///     every frame it already understood, never sends a tournament variant,
+///     and — for the broker → client half where `JSON.parse` validates nothing
+///     — receives no tournament frame at all unless it first subscribed to a
+///     surface it has no code for. Raising the floor would evict that entire
+///     cohort's lobby session to protect it from messages it cannot receive.
+///     On the client → broker half a v4-only tag reaching a v2 broker is
+///     already answered per-frame by [`ParsedFrame::UnknownTag`], which is the
+///     stated reason no upper bound exists either.
 /// 3 — `FormatConfig` gained `default_deck_copy_limit` (see `PROTOCOL_VERSION`
 ///     50 for the full entry). Same three carriers as 2:
 ///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
@@ -287,7 +349,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 3;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 4;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -388,6 +450,154 @@ pub struct DraftLobbyMetadata {
     pub cube_name: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Tournament wire views
+// ---------------------------------------------------------------------------
+//
+// Projections of `crate::tournament`'s durable types onto the wire, populated
+// by the server and never by clients — the same framing [`LobbyGame`] carries.
+// They exist for exactly one reason: `TournamentMeta` and `TournamentPlayer`
+// hold `organizer_token`/`player_token`, and those two secrets must never
+// reach a client that does not already own them. Serializing the domain types
+// directly would leak every player's token to every subscriber, so the token
+// fields are dropped by construction here rather than by a
+// `skip_serializing_if` a later edit could quietly remove.
+//
+// Domain types that carry no secret (`MatchArity`, `BracketShape`,
+// `TournamentStatus`, `PairingOutcome`, `TournamentStanding`) are reused
+// directly as field types rather than mirrored, so a change to one of them
+// cannot leave a parallel wire copy behind.
+
+/// One entrant, as any client may see them. The token-free half of
+/// [`crate::tournament::TournamentPlayer`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSummary {
+    pub player_key: String,
+    pub display_name: String,
+    pub dropped: bool,
+}
+
+impl From<&crate::tournament::TournamentPlayer> for PlayerSummary {
+    fn from(player: &crate::tournament::TournamentPlayer) -> Self {
+        Self {
+            player_key: player.player_key.clone(),
+            display_name: player.display_name.clone(),
+            dropped: player.dropped,
+        }
+    }
+}
+
+/// One pairing, with its seats resolved from bare `player_key`s to full
+/// [`PlayerSummary`]s so a client can render it without a second lookup.
+///
+/// `players` is a `Vec`, not a `player_a`/`player_b` pair: the same shape
+/// carries a head-to-head pairing, a full or short pod at any
+/// [`crate::tournament::MatchArity`], and a one-seat bye.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingView {
+    pub id: crate::tournament::PairingId,
+    pub round: u32,
+    pub players: Vec<PlayerSummary>,
+    /// `None` while the pairing is still pending.
+    pub outcome: Option<crate::tournament::PairingOutcome>,
+}
+
+/// One row of the tournament list — enough to render a lobby listing without
+/// fetching the full [`TournamentView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentSummary {
+    pub code: String,
+    pub name: String,
+    pub arity: crate::tournament::MatchArity,
+    pub bracket: crate::tournament::BracketShape,
+    pub status: crate::tournament::TournamentStatus,
+    /// **Active** entrants — `TournamentMeta::active_player_count`, not
+    /// `players.len()`. A listing answers "how many players are still in this
+    /// event", which is what a browsing client is deciding on; a dropped
+    /// player is not one of them. [`TournamentView::players`] still carries
+    /// every registered entrant, dropped ones included, so the detail view
+    /// never loses history this row summarizes away.
+    pub player_count: u32,
+    pub current_round: u32,
+    /// The scheduled length, read through
+    /// [`crate::tournament::TournamentMeta::total_rounds`] — the single
+    /// authority that resolves the organizer override, the latched default,
+    /// and the live default in that order.
+    pub total_rounds: u32,
+    pub created_at: u64,
+}
+
+impl From<&crate::tournament::TournamentMeta> for TournamentSummary {
+    fn from(meta: &crate::tournament::TournamentMeta) -> Self {
+        Self {
+            code: meta.code.clone(),
+            name: meta.name.clone(),
+            arity: meta.arity,
+            bracket: meta.bracket,
+            status: meta.status,
+            player_count: meta.active_player_count(),
+            current_round: meta.current_round,
+            total_rounds: meta.total_rounds(),
+            created_at: meta.created_at,
+        }
+    }
+}
+
+/// The full detail view of one tournament: its summary row plus every
+/// registered entrant, the complete pairing history, and the standings
+/// recomputed fresh from that history.
+///
+/// `players`/`pairings` map 1:1 from
+/// [`crate::tournament::TournamentMeta::players`]/`.pairings` — a full view,
+/// never a filtered subset. Dropped players stay listed (their `dropped` flag
+/// is the distinction a client renders), and every round's pairings stay
+/// present, because the standings are only interpretable against the history
+/// that produced them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TournamentView {
+    pub summary: TournamentSummary,
+    pub players: Vec<PlayerSummary>,
+    pub pairings: Vec<PairingView>,
+    pub standings: Vec<crate::tournament::TournamentStanding>,
+}
+
+impl From<&crate::tournament::TournamentMeta> for TournamentView {
+    fn from(meta: &crate::tournament::TournamentMeta) -> Self {
+        let player_summary = |key: &String| {
+            meta.player(key)
+                .map(PlayerSummary::from)
+                .unwrap_or_else(|| {
+                    // A pairing seat naming a player the field does not hold is
+                    // unreachable through `TournamentManager` (pairings are built
+                    // from the standings order, itself derived from `players`).
+                    // Rendering the bare key rather than dropping the seat keeps a
+                    // corrupted snapshot legible instead of silently shrinking a
+                    // pairing to fewer seats than it was played with.
+                    PlayerSummary {
+                        player_key: key.clone(),
+                        display_name: key.clone(),
+                        dropped: false,
+                    }
+                })
+        };
+        Self {
+            summary: TournamentSummary::from(meta),
+            players: meta.players.iter().map(PlayerSummary::from).collect(),
+            pairings: meta
+                .pairings
+                .iter()
+                .map(|pairing| PairingView {
+                    id: pairing.id,
+                    round: pairing.round,
+                    players: pairing.players.iter().map(player_summary).collect(),
+                    outcome: pairing.outcome.clone(),
+                })
+                .collect(),
+            standings: meta.standings(),
+        }
+    }
+}
+
 /// The lobby subset of `server_core::protocol::ClientMessage`. Wire-compatible:
 /// the `type`/`data` tags and field shapes match the canonical enum exactly.
 ///
@@ -465,6 +675,63 @@ pub enum LobbyClientMessage {
     },
     UnregisterLobby {
         game_code: String,
+    },
+
+    // --- Tournament organizer (lobby protocol 4) --------------------------
+    //
+    // Authority on every gated variant below is the TOKEN carried in the
+    // payload, compared against the stored `organizer_token`/`player_token` —
+    // never the socket's `ConnState`. That is the whole point of the model:
+    // closing and reopening a connection must not cost an organizer their
+    // event or a player their standing.
+    /// Create a tournament. The broker mints the code and the
+    /// `organizer_token`; the client chooses only the shape.
+    CreateTournament {
+        name: String,
+        arity: crate::tournament::MatchArity,
+        scoring: crate::tournament::ScoringPolicy,
+        bracket: crate::tournament::BracketShape,
+        /// Organizer override for the scheduled round count. `None` uses the
+        /// bracket- and arity-selected default.
+        #[serde(default)]
+        total_rounds: Option<u32>,
+    },
+    /// Register as an entrant. `player_key` is **client-supplied** and opaque
+    /// to the broker — the stable per-entrant identity, following
+    /// `host_peer_id`'s precedent. The `player_token` that authorizes this
+    /// entrant's later actions is minted by the broker in reply.
+    JoinTournament {
+        code: String,
+        player_key: String,
+        display_name: String,
+    },
+    /// Read one tournament's current view. Ungated: a tournament is public
+    /// once its code is known, exactly like a lobby listing.
+    GetTournament {
+        code: String,
+    },
+    /// Organizer-gated: pair the next round.
+    StartTournamentRound {
+        code: String,
+        organizer_token: String,
+    },
+    /// Player-gated: report a played pairing's result. The token must belong
+    /// to a player seated in THIS pairing, not merely to some entrant.
+    ReportMatchResult {
+        code: String,
+        pairing_id: crate::tournament::PairingId,
+        player_token: String,
+        outcome: crate::tournament::PodOutcome,
+    },
+    /// Player-gated: drop the token's owner from the event.
+    DropFromTournament {
+        code: String,
+        player_token: String,
+    },
+    /// Organizer-gated: freeze the event as `Completed`.
+    EndTournament {
+        code: String,
+        organizer_token: String,
     },
 }
 
@@ -551,6 +818,43 @@ pub enum LobbyServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
+
+    // --- Tournament organizer (lobby protocol 4) --------------------------
+    //
+    // `TournamentCreated`/`TournamentJoined` are the ONLY two variants that
+    // carry a token, and both are point replies to the caller who just earned
+    // it. Every broadcast variant below carries a [`TournamentView`] or
+    // [`TournamentSummary`], neither of which has a token field to leak.
+    /// Point reply to `CreateTournament`. Carries the minted `organizer_token`
+    /// — never broadcast.
+    TournamentCreated {
+        code: String,
+        organizer_token: String,
+        view: TournamentView,
+    },
+    /// Point reply to `JoinTournament`. Carries this entrant's minted
+    /// `player_token` — never broadcast.
+    TournamentJoined {
+        code: String,
+        player_token: String,
+        view: TournamentView,
+    },
+    /// One tournament's detail view changed. Also the point reply to
+    /// `GetTournament`.
+    TournamentUpdate {
+        code: String,
+        view: TournamentView,
+    },
+    /// A tournament record is gone (a stale `Registration`, or a terminal
+    /// event past its retention window).
+    TournamentRemoved {
+        code: String,
+    },
+    /// The full list of tournaments this broker holds. Emitted once per
+    /// list-affecting change, and once on `SubscribeLobby`.
+    TournamentListUpdate {
+        tournaments: Vec<TournamentSummary>,
+    },
 }
 
 impl LobbyServerMessage {
@@ -601,6 +905,14 @@ pub enum ParsedFrame {
 /// The set of `type` tags this broker recognizes. Kept as a function (not a
 /// const slice match) so it stays trivially in sync with the enum variants —
 /// every arm of [`deserialize_variant`] has a matching entry here.
+///
+/// **This gate is NOT compile-checked.** Unlike the exhaustive `match`es over
+/// [`LobbyClientMessage`] elsewhere in this crate, a variant added to the enum
+/// without an entry here still compiles — and then every frame carrying it is
+/// answered [`ParsedFrame::UnknownTag`], as if a client had invented the tag.
+/// `every_client_variant_tag_is_known` in this module's tests is the standing
+/// guard: it asserts a representative frame for each variant round-trips
+/// rather than enumerating the strings a second time.
 fn is_known_lobby_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -613,6 +925,13 @@ fn is_known_lobby_tag(tag: &str) -> bool {
             | "Ping"
             | "UpdateLobbyMetadata"
             | "UnregisterLobby"
+            | "CreateTournament"
+            | "JoinTournament"
+            | "GetTournament"
+            | "StartTournamentRound"
+            | "ReportMatchResult"
+            | "DropFromTournament"
+            | "EndTournament"
     )
 }
 
@@ -664,7 +983,10 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 3);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 4);
+        // Deliberately still 2, not 4: lobby versions 3 and 4 are purely
+        // additive, so a version-2 client parses every frame it already
+        // understood and is not evicted. See the constant's own changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
             LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
@@ -684,12 +1006,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 50);
+        assert_eq!(PROTOCOL_VERSION, 55);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 49);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 54);
     }
 
     #[test]
@@ -741,6 +1063,356 @@ mod tests {
             parse_lobby_client_message(frame),
             ParsedFrame::Malformed(_)
         ));
+    }
+
+    // --- Tournament wire surface (lobby protocol 4) -----------------------
+
+    use crate::tournament::{
+        BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentMeta,
+        TournamentPairing, TournamentPlayer, TournamentStatus,
+    };
+
+    /// The two secrets this whole surface must never broadcast. Used as
+    /// needles in the leak assertions below, so a leak is caught by the token
+    /// VALUE appearing in the bytes, not by a field name a rename could dodge.
+    const ORGANIZER_SECRET: &str = "organizer-secret-do-not-leak";
+    const PLAYER_A_SECRET: &str = "player-a-secret-do-not-leak";
+    const PLAYER_B_SECRET: &str = "player-b-secret-do-not-leak";
+
+    /// A tournament with real tokens, two entrants (one dropped), and a
+    /// resolved round-1 pairing — enough shape that a projection which merely
+    /// forgot to populate a field cannot pass the leak tests vacuously.
+    fn meta_fixture() -> TournamentMeta {
+        TournamentMeta {
+            code: "TOUR01".to_string(),
+            name: "Friday Night".to_string(),
+            organizer_token: ORGANIZER_SECRET.to_string(),
+            arity: MatchArity::HEAD_TO_HEAD,
+            scoring: ScoringPolicy::default(),
+            bracket: BracketShape::Swiss,
+            total_rounds_override: Some(3),
+            resolved_total_rounds: None,
+            current_round: 1,
+            status: TournamentStatus::InProgress,
+            players: vec![
+                TournamentPlayer {
+                    player_key: "key-a".to_string(),
+                    player_token: PLAYER_A_SECRET.to_string(),
+                    display_name: "Alice".to_string(),
+                    dropped: false,
+                },
+                TournamentPlayer {
+                    player_key: "key-b".to_string(),
+                    player_token: PLAYER_B_SECRET.to_string(),
+                    display_name: "Bob".to_string(),
+                    dropped: true,
+                },
+            ],
+            pairings: vec![TournamentPairing {
+                id: 0,
+                round: 1,
+                players: vec!["key-a".to_string(), "key-b".to_string()],
+                outcome: Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                    winner: "key-a".to_string(),
+                    game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 1u8)]
+                        .into_iter()
+                        .collect(),
+                })),
+            }],
+            created_at: 1_000,
+            last_activity_at: 2_000,
+        }
+    }
+
+    /// The tournament additions follow the existing `FormatConfig` capability
+    /// bump, so they consume the next independent lobby wire version.
+    #[test]
+    fn tournament_lobby_version_follows_the_format_config_bump() {
+        const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, PRE_TOURNAMENT_LOBBY_VERSION + 1);
+    }
+
+    /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
+    /// therefore NOT compile-checked against the enum. A variant added without
+    /// a tag entry parses to `UnknownTag` and is silently never dispatched;
+    /// this test is the only thing that catches that.
+    #[test]
+    fn every_client_variant_tag_is_known() {
+        // One representative frame per tournament variant, as a client would
+        // actually send it.
+        let frames = [
+            (
+                "CreateTournament",
+                r#"{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3}}"#,
+            ),
+            (
+                "JoinTournament",
+                r#"{"type":"JoinTournament","data":{"code":"TOUR01","player_key":"key-a","display_name":"Alice"}}"#,
+            ),
+            (
+                "GetTournament",
+                r#"{"type":"GetTournament","data":{"code":"TOUR01"}}"#,
+            ),
+            (
+                "StartTournamentRound",
+                r#"{"type":"StartTournamentRound","data":{"code":"TOUR01","organizer_token":"tok"}}"#,
+            ),
+            (
+                "ReportMatchResult",
+                r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}}}}"#,
+            ),
+            (
+                "DropFromTournament",
+                r#"{"type":"DropFromTournament","data":{"code":"TOUR01","player_token":"tok"}}"#,
+            ),
+            (
+                "EndTournament",
+                r#"{"type":"EndTournament","data":{"code":"TOUR01","organizer_token":"tok"}}"#,
+            ),
+        ];
+
+        for (tag, frame) in frames {
+            match parse_lobby_client_message(frame) {
+                ParsedFrame::Message(_) => {}
+                other => panic!(
+                    "{tag} must parse to a Message — an UnknownTag here means \
+                     is_known_lobby_tag was not extended: {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// Discriminates the test above from a vacuous pass: an invented tag with
+    /// the same shape must still be refused, so `every_client_variant_tag_is_known`
+    /// cannot be satisfied by removing the gate entirely.
+    #[test]
+    fn an_invented_tournament_tag_is_still_unknown() {
+        let frame = r#"{"type":"CancelTournament","data":{"code":"TOUR01"}}"#;
+        match parse_lobby_client_message(frame) {
+            ParsedFrame::UnknownTag(tag) => assert_eq!(tag, "CancelTournament"),
+            other => panic!("expected UnknownTag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tournament_client_variants_round_trip_through_serde() {
+        let messages = vec![
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".to_string(),
+                arity: MatchArity::COMMANDER_POD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD),
+                bracket: BracketShape::Swiss,
+                total_rounds: Some(4),
+            },
+            LobbyClientMessage::JoinTournament {
+                code: "TOUR01".to_string(),
+                player_key: "key-a".to_string(),
+                display_name: "Alice".to_string(),
+            },
+            LobbyClientMessage::GetTournament {
+                code: "TOUR01".to_string(),
+            },
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+            },
+            LobbyClientMessage::ReportMatchResult {
+                code: "TOUR01".to_string(),
+                pairing_id: 7,
+                player_token: "tok".to_string(),
+                outcome: PodOutcome::Draw,
+            },
+            LobbyClientMessage::DropFromTournament {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+            },
+            LobbyClientMessage::EndTournament {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+            },
+        ];
+
+        for msg in messages {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            match parse_lobby_client_message(&json) {
+                ParsedFrame::Message(parsed) => {
+                    // Compare through the serialized form: `LobbyClientMessage`
+                    // is deliberately not `PartialEq` (`DeckData` is not).
+                    assert_eq!(
+                        serde_json::to_string(&*parsed).expect("re-serializes"),
+                        json
+                    );
+                }
+                other => panic!("{json} did not round-trip: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tournament_server_variants_round_trip_through_serde() {
+        let view = TournamentView::from(&meta_fixture());
+        let messages = vec![
+            LobbyServerMessage::TournamentCreated {
+                code: "TOUR01".to_string(),
+                organizer_token: ORGANIZER_SECRET.to_string(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentJoined {
+                code: "TOUR01".to_string(),
+                player_token: PLAYER_A_SECRET.to_string(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentUpdate {
+                code: "TOUR01".to_string(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentRemoved {
+                code: "TOUR01".to_string(),
+            },
+            LobbyServerMessage::TournamentListUpdate {
+                tournaments: vec![view.summary.clone()],
+            },
+        ];
+
+        for msg in messages {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            let back: LobbyServerMessage = serde_json::from_str(&json).expect("deserializes");
+            assert_eq!(back, msg);
+        }
+    }
+
+    /// The whole reason the view types exist. A structural assertion on the
+    /// serialized BYTES: neither token value may appear anywhere in a view,
+    /// however deeply nested.
+    #[test]
+    fn tournament_views_never_carry_a_token() {
+        let meta = meta_fixture();
+        let view = TournamentView::from(&meta);
+        let json = serde_json::to_string(&view).expect("serializes");
+
+        for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
+            assert!(
+                !json.contains(secret),
+                "TournamentView leaked {secret}: {json}"
+            );
+        }
+        // Non-vacuity: the view really did carry this tournament's content,
+        // so the assertion above ran against a populated projection.
+        assert!(json.contains("Alice") && json.contains("Bob"));
+        assert!(json.contains("Friday Night"));
+        assert_eq!(view.players.len(), 2);
+        assert_eq!(view.pairings.len(), 1);
+        assert_eq!(view.pairings[0].players.len(), 2);
+        assert_eq!(view.standings.len(), 2);
+    }
+
+    /// The broadcast path specifically: a `TournamentListUpdate` and a
+    /// `TournamentUpdate` are fanned out to every subscriber, so neither may
+    /// carry a secret even though `TournamentCreated`/`TournamentJoined`
+    /// (point replies) legitimately do.
+    #[test]
+    fn broadcast_tournament_messages_never_carry_a_token() {
+        let meta = meta_fixture();
+        let view = TournamentView::from(&meta);
+        let broadcasts = [
+            LobbyServerMessage::TournamentUpdate {
+                code: meta.code.clone(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentListUpdate {
+                tournaments: vec![TournamentSummary::from(&meta)],
+            },
+            LobbyServerMessage::TournamentRemoved {
+                code: meta.code.clone(),
+            },
+        ];
+
+        for msg in broadcasts {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
+                assert!(!json.contains(secret), "{json} leaked {secret}");
+            }
+        }
+    }
+
+    /// `player_count` on a list row counts ACTIVE entrants, and the detail
+    /// view still carries the dropped one. Pins the documented choice so a
+    /// later edit cannot silently swap it for `players.len()`.
+    #[test]
+    fn summary_counts_active_players_while_the_view_keeps_dropped_ones() {
+        let meta = meta_fixture();
+        let summary = TournamentSummary::from(&meta);
+        assert_eq!(summary.player_count, 1, "Bob dropped, so one active");
+        assert_eq!(meta.players.len(), 2);
+
+        let view = TournamentView::from(&meta);
+        assert_eq!(view.players.len(), 2, "the detail view keeps history");
+        assert!(view.players.iter().any(|p| p.dropped));
+    }
+
+    /// Hostile fixture for Verification Matrix row 9's `PairingView` case:
+    /// every `PairingOutcome` shape must survive projection and serde without
+    /// collapsing to a default.
+    #[test]
+    fn every_pairing_outcome_survives_the_view_projection() {
+        let mut meta = meta_fixture();
+        meta.pairings = vec![
+            TournamentPairing {
+                id: 0,
+                round: 1,
+                players: vec!["key-a".to_string()],
+                outcome: Some(PairingOutcome::Bye),
+            },
+            TournamentPairing {
+                id: 1,
+                round: 1,
+                players: vec!["key-a".to_string(), "key-b".to_string()],
+                outcome: Some(PairingOutcome::Forfeit {
+                    winner: "key-a".to_string(),
+                }),
+            },
+            TournamentPairing {
+                id: 2,
+                round: 1,
+                players: vec!["key-a".to_string(), "key-b".to_string()],
+                outcome: Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                    winner: "key-b".to_string(),
+                    game_wins: [("key-a".to_string(), 1u8), ("key-b".to_string(), 2u8)]
+                        .into_iter()
+                        .collect(),
+                })),
+            },
+            TournamentPairing {
+                id: 3,
+                round: 1,
+                players: vec!["key-a".to_string(), "key-b".to_string()],
+                outcome: Some(PairingOutcome::Reported(PodOutcome::Draw)),
+            },
+            TournamentPairing {
+                id: 4,
+                round: 2,
+                players: vec!["key-a".to_string(), "key-b".to_string()],
+                outcome: None,
+            },
+        ];
+
+        let view = TournamentView::from(&meta);
+        let json = serde_json::to_string(&view).expect("serializes");
+        let back: TournamentView = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, view);
+
+        let outcomes: Vec<_> = view.pairings.iter().map(|p| p.outcome.clone()).collect();
+        assert_eq!(outcomes[0], Some(PairingOutcome::Bye));
+        assert!(matches!(outcomes[1], Some(PairingOutcome::Forfeit { .. })));
+        assert!(matches!(
+            outcomes[2],
+            Some(PairingOutcome::Reported(PodOutcome::Decisive { .. }))
+        ));
+        assert_eq!(
+            outcomes[3],
+            Some(PairingOutcome::Reported(PodOutcome::Draw))
+        );
+        assert_eq!(outcomes[4], None, "a pending pairing stays pending");
     }
 
     #[test]

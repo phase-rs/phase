@@ -2,11 +2,93 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
+// A real `localStorage` for the store's `persist` middleware and for the
+// saved-custom-format service, installed before the modules under test are
+// imported. Mirrors the stub `multiplayerStore.test.ts` already uses: on some
+// Node versions a built-in WebStorage global shadows the DOM environment's
+// `localStorage` with a method-less object, and zustand's persist then throws
+// "storage.setItem is not a function" on the first `setState`.
+const localStorageItems = vi.hoisted(() => {
+  const items = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        items.set(key, value);
+      },
+      removeItem: (key: string) => {
+        items.delete(key);
+      },
+      clear: () => {
+        items.clear();
+      },
+      key: (index: number) => [...items.keys()][index] ?? null,
+      get length() {
+        return items.size;
+      },
+    },
+  });
+  return items;
+});
+
+// The saved-format select flow resolves through the WASM adapter. No real
+// engine runs in this environment; stub the one method HostSetup calls.
+vi.mock("../../../adapter/wasm-adapter", () => ({
+  getHostAdapter: () => ({
+    formatConfigForCustomRules: vi.fn().mockResolvedValue({
+      format: "Custom:0",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: { type: "Minimum", data: 60 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Limited", data: 15 },
+      default_deck_copy_limit: { type: "UpTo", data: 4 },
+      allow_debug_actions: false,
+      custom_rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 2,
+          max_players: 4,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+    }),
+  }),
+}));
+
 import { HostSetup } from "../HostSetup";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
+import { saveCustomFormat } from "../../../services/customFormats";
 
 describe("HostSetup", () => {
   beforeEach(() => {
+    localStorageItems.clear();
     useMultiplayerStore.setState({
       displayName: "",
       formatConfig: null,
@@ -136,6 +218,7 @@ describe("HostSetup", () => {
       lastHostConfig: {
         format: "TwoHeadedGiant",
         formatConfig: FORMAT_DEFAULTS.TwoHeadedGiant,
+        savedCustomFormatId: null,
         playerCount: 4,
         matchType: "Bo1",
         loopDetection: { type: "Off" },
@@ -232,5 +315,190 @@ describe("HostSetup", () => {
         }),
       }),
     );
+  });
+
+  /**
+   * `FORMAT_DEFAULTS` is built from the BUILT-IN registry and has no entry for
+   * any `Custom:<id>` key. The seat-ceiling check used to index it directly
+   * with the remembered format, so `FORMAT_DEFAULTS["Custom:0"]` was
+   * `undefined` and reading `.min_players` off it threw — a hard crash on
+   * mount for anyone whose last hosted game used a custom format.
+   *
+   * Rendering IS the assertion: revert the `isKnownFormat` guard and this test
+   * throws "Cannot read properties of undefined (reading 'min_players')"
+   * before any query runs. Both connection modes are exercised because only
+   * the P2P branch performs the lookup.
+   */
+  describe.each(["p2p", "server"] as const)(
+    "with a remembered custom format (%s mode)",
+    (connectionMode) => {
+      const customFormatConfig = {
+        format: "Custom:0" as const,
+        starting_life: 20,
+        min_players: 2,
+        max_players: 4,
+        deck_size: { type: "Minimum" as const, data: 60 },
+        singleton: false,
+        command_zone: false,
+        commander_damage_threshold: null,
+        range_of_influence: null,
+        team_based: false,
+        uses_commander: false,
+        supplies_fixed_deck: false,
+        sideboard_policy: { type: "Limited" as const, data: 15 },
+        default_deck_copy_limit: { type: "UpTo" as const, data: 4 },
+        allow_debug_actions: false,
+      };
+
+      it("mounts and seeds the form from the format's own resolved config", () => {
+        useMultiplayerStore.setState({
+          lastHostConfig: {
+            format: "Custom:0",
+            formatConfig: customFormatConfig,
+            savedCustomFormatId: "saved-1",
+            playerCount: 3,
+            matchType: "Bo1",
+            loopDetection: { type: "Off" },
+            isPublic: true,
+            startWhenFull: true,
+            ranked: false,
+            aiSeats: [],
+          },
+        });
+
+        render(
+          <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />,
+        );
+
+        // Reached the rendered form at all — i.e. the seat-ceiling lookup did
+        // not throw — and read the custom format's own starting life rather
+        // than a registry default that does not exist for it.
+        expect(screen.getByLabelText("Starting Life")).toHaveValue(20);
+      });
+    },
+  );
+
+  /**
+   * No `CustomFormatRules` deck-validation resolver exists yet (Phase 1d) —
+   * `validate_deck_for_format` (the authoritative game-creation gate)
+   * unconditionally rejects every Custom-format deck. Before this test, a
+   * host could select a saved custom format, fill in a deck, and click Host
+   * Game, only to have that submission deterministically fail at engine
+   * init with no warning beforehand. The Host action must be unavailable for
+   * that selection instead of walking the user into a guaranteed dead end.
+   */
+  it("disables the Host action once a saved custom format is selected", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    const saved = saveCustomFormat("Grandpa's House Rules", {
+      rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 2,
+          max_players: 4,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+      label: "Grandpa's House Rules",
+      short_label: "GRA",
+      description: "60-card minimum, 2–4 players",
+      reprint_policy: null,
+      printing_fidelity: "NotApplicable",
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    const hostButton = await screen.findByRole("button", { name: "Host Game" });
+    expect(hostButton).toBeDisabled();
+    expect(
+      screen.getByText(/Hosting with a custom format isn't supported yet/),
+    ).toBeInTheDocument();
+
+    await user.click(hostButton);
+    expect(onHost).not.toHaveBeenCalled();
+
+    const selectedConfig = useMultiplayerStore.getState().formatConfig;
+    if (selectedConfig == null) throw new Error("saved custom format did not resolve");
+    useMultiplayerStore.getState().rememberHostConfig({
+      format: selectedConfig.format,
+      formatConfig: selectedConfig,
+      savedCustomFormatId: saved.id,
+      playerCount: 2,
+      matchType: "Bo1",
+      loopDetection: { type: "Off" },
+      isPublic: true,
+      startWhenFull: true,
+      ranked: false,
+      aiSeats: [],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(useMultiplayerStore.getState().lastHostConfig).toBeNull();
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+  });
+
+  it("hides saved formats whose minimum exceeds the P2P ceiling", () => {
+    const saved = saveCustomFormat("Eight-seat format", {
+      rules: {
+        id: 0,
+        structural: {
+          starting_life: 20,
+          min_players: 7,
+          max_players: 8,
+          deck_size: { type: "Minimum", data: 60 },
+          singleton: false,
+          command_zone_mode: "Disabled",
+          range_of_influence: null,
+          team_based: false,
+          sideboard_policy: { type: "Limited", data: 15 },
+          default_deck_copy_limit: { type: "UpTo", data: 4 },
+        },
+        legality: {
+          legal_sets: null,
+          banned: [],
+          restricted: [],
+          legacy: {
+            mana_burn: "Modern",
+            damage_timing: "Modern",
+            wish_scope: "PostM10SideboardOnly",
+            legend_rule_scope: "Modern",
+          },
+        },
+      },
+      label: "Eight-seat format",
+      short_label: "EIG",
+      description: "Seven to eight players",
+      reprint_policy: null,
+      printing_fidelity: "NotApplicable",
+    });
+
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+
+    expect(screen.queryByText(saved.name)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
   });
 });

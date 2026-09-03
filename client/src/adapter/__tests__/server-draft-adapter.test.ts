@@ -62,6 +62,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
   return {
     status: "Drafting",
     kind: "Premier",
+    launch_capability: "None",
     current_pack_number: 0,
     pick_number: 0,
     pass_direction: "Left",
@@ -154,6 +155,52 @@ describe("ServerDraftAdapter", () => {
       JSON.stringify({
         type: "DraftCreated",
         data: { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 },
+      }),
+    );
+    await createPromise;
+  });
+
+  it("sends a tagged Uniform source instead of legacy set codes", () => {
+    const create = ws.send.mock.calls
+      .map(([frame]) => JSON.parse(frame as string))
+      .find((frame) => frame.type === "CreateDraftWithSettings");
+
+    expect(create).toMatchObject({
+      data: {
+        source: { type: "Uniform", data: { set_codes: ["MKM"] } },
+      },
+    });
+    expect(create.data).not.toHaveProperty("set_codes");
+  });
+
+  it("sends Chaos candidates without a client assignment schedule", async () => {
+    MockWebSocket.last = null;
+    const chaos = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const createPromise = chaos.createDraft({
+      displayName: "Alice",
+      source: { type: "Chaos", data: { candidate_codes: ["AAA", "BBB"] } },
+      kind: "Premier",
+      public: true,
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      podSize: 8,
+    });
+    const chaosWs = await completeHandshake();
+    const create = chaosWs.send.mock.calls
+      .map(([frame]) => JSON.parse(frame as string))
+      .find((frame) => frame.type === "CreateDraftWithSettings");
+
+    expect(create).toMatchObject({
+      data: {
+        source: { type: "Chaos", data: { candidate_codes: ["AAA", "BBB"] } },
+      },
+    });
+    expect(JSON.stringify(create)).not.toContain("assignments");
+    chaosWs.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftCreated",
+        data: { draft_code: "CHAOS1", player_token: "tok", seat_index: 0 },
       }),
     );
     await createPromise;

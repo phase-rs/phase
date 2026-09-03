@@ -453,8 +453,8 @@ fn parse_until_next_turn(input: &str) -> OracleResult<'_, Duration> {
 /// - "[subject] remains tapped" → `ForAsLongAs(SourceIsTapped)` for source
 ///   subjects, `ForAsLongAs(IsTapped { scope: Target })` for demonstrative
 ///   subjects (see `parse_remains_tapped`)
-/// - "you control [subject]" → `UntilHostLeavesPlay`
-/// - "[subject] remains on the battlefield" → `UntilHostLeavesPlay`
+/// - "you control [subject]" → `WhileControllingHost`
+/// - "[subject] remains on the battlefield" → `WhileHostOnBattlefield`
 /// - "[subject] has [N] [type] counter(s) on it" → `ForAsLongAs(HasCounters)`
 /// - any whole-clause condition `parse_inner_condition` recognizes →
 ///   `ForAsLongAs(condition)`
@@ -481,15 +481,27 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         // plane-face-up-gated continuous-effect duration. Kept adjacent to
         // `parse_remains_tapped` (the sibling source-status "remains X" family).
         parse_remains_face_up,
-        // "you control [subject]" → host-control lifetime, modeled with the
-        // existing UntilHostLeavesPlay variant.
+        // CR 611.2b: "you control [subject]" → the CONTROL-bound host lifetime.
+        // Kept distinct from the presence-bound reading below because the two
+        // end at different moments and both are printed: a control change with
+        // the permanent still on the battlefield ends this one (CR 611.2b's own
+        // Master Thief example is this duration CLASS — it illustrates the
+        // duration failing to START, not this end, which is read off the
+        // wording) and leaves the other running.
         value(
-            Duration::UntilHostLeavesPlay,
+            Duration::WhileControllingHost,
             preceded(tag("you control "), rest),
         ),
-        // "[subject] remains on the battlefield" → UntilHostLeavesPlay.
+        // CR 611.2b + CR 702.26f: "[subject] remains on the battlefield" → the
+        // PRESENCE-bound host lifetime, a stated "for as long as . . ."
+        // duration. Intet, the Dreamer and The Day of the Doctor print this
+        // wording on a play permission, Sower of Temptation on a control
+        // effect. A control change does not end it; a phase-out of the host
+        // does, which is why it is a separate variant from the
+        // `UntilHostLeavesPlay` event deadline parsed in `parse_duration`
+        // (CR 702.26d: a phase-out is not the host leaving the battlefield).
         value(
-            Duration::UntilHostLeavesPlay,
+            Duration::WhileHostOnBattlefield,
             verify(rest, |tail: &str| {
                 scan_contains(tail, "remains on the battlefield")
             }),
@@ -680,12 +692,33 @@ fn parse_compound_for_as_long_as(input: &str) -> OracleResult<'_, Duration> {
 }
 
 /// Convert a `Duration` back into a `StaticCondition` for compound "and"
-/// clauses. `UntilHostLeavesPlay` maps to `IsPresent { filter: None }`
-/// (source must remain on the battlefield).
+/// clauses. The host-lifetime readings map to `IsPresent { filter: None }` —
+/// which is NOT a runtime presence test (it evaluates to `true`; the arm's
+/// comment below says exactly what it is and is not).
 fn duration_to_condition(dur: Duration) -> StaticCondition {
     match dur {
         Duration::ForAsLongAs { condition } => condition,
-        Duration::UntilHostLeavesPlay => StaticCondition::IsPresent { filter: None },
+        // CR 611.2a + CR 611.2b: all three host-lifetime readings map to the
+        // value this conversion produced for the "you control ~" wording
+        // BEFORE the readings were split. The explicit arm exists for parity:
+        // the compound "and" form must not change because of either split.
+        //
+        // What it is NOT: a presence test. `IsPresent { filter: None }`
+        // evaluates to `true` (`layers::evaluate_condition_with_context`), the
+        // same answer the `_` arm's `StaticCondition::None` gives; the two
+        // differ only in which characteristic changes re-invalidate the layer
+        // cache (`CONTROLLER` vs. nothing). Neither carries the host leg, and
+        // the control leg cannot be carried at all here —
+        // `StaticCondition::SourceControllerEquals` stores a concrete
+        // `PlayerId` and the parser has no player.
+        //
+        // Printed compounds reaching here — Helm of Possession, Hivis of the
+        // Scale, Rubinia Soulsinger, Seasinger, Willow Satyr — all pair the
+        // wording with "… and ~ remains tapped", and THAT leg is carried
+        // exactly, so each of them stays gated on its tapped condition.
+        Duration::UntilHostLeavesPlay
+        | Duration::WhileControllingHost
+        | Duration::WhileHostOnBattlefield => StaticCondition::IsPresent { filter: None },
         _ => StaticCondition::None,
     }
 }
@@ -1024,17 +1057,55 @@ mod tests {
         }
     }
 
+    /// CR 611.2a vs CR 611.2b: the two host-lifetime wordings are DIFFERENT
+    /// durations and must not collapse onto one variant.
+    ///
+    /// All three are printed on play permissions or effects, so the differences
+    /// are observable at runtime rather than cosmetic: Gwen Stacy and Hama, the
+    /// Bloodbender print "for as long as you control ~" (ends on a control
+    /// change, CR 611.2b's own Master Thief example); Intet, the Dreamer and
+    /// The Day of the Doctor print "for as long as ~ remains on the
+    /// battlefield" (CR 611.2b — a control change leaves it running, a
+    /// phase-out ends it, CR 702.26f); the event deadline "until ~ leaves the
+    /// battlefield" is ended by neither a control change nor a phase-out
+    /// (CR 702.26d).
+    ///
+    /// Revert-to-red: mapping "you control" back onto a presence variant fails
+    /// the first assertion; collapsing "remains on the battlefield" back into
+    /// the event deadline fails the second and would keep Sower of
+    /// Temptation's steal running across a phase-out; mapping it onto the
+    /// control-bound variant would revoke Intet's permission on a control
+    /// change that does not end it.
     #[test]
-    fn test_for_as_long_as_you_control_maps_to_until_host_leaves() {
-        let (rest, d) = parse_duration("for as long as you control ~").unwrap();
-        assert_eq!(d, Duration::UntilHostLeavesPlay);
+    fn test_the_three_host_lifetime_wordings_do_not_collapse() {
+        let (rest, control_bound) = parse_duration("for as long as you control ~").unwrap();
         assert_eq!(rest, "");
-    }
+        assert_eq!(control_bound, Duration::WhileControllingHost);
 
-    #[test]
-    fn test_for_as_long_as_remains_on_battlefield_maps_to_until_host_leaves() {
-        let (_, d) = parse_duration("for as long as ~ remains on the battlefield").unwrap();
-        assert_eq!(d, Duration::UntilHostLeavesPlay);
+        let (rest, presence_bound) =
+            parse_duration("for as long as ~ remains on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(presence_bound, Duration::WhileHostOnBattlefield);
+
+        let (rest, event_bound) = parse_duration("until ~ leaves the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(event_bound, Duration::UntilHostLeavesPlay);
+
+        assert_ne!(
+            control_bound, presence_bound,
+            "CR 611.2b: continued control and continued presence end at different \
+             moments; one variant cannot carry both"
+        );
+        assert_ne!(
+            presence_bound, event_bound,
+            "CR 702.26f vs CR 702.26d: a phase-out ends the presence reading but \
+             not the event deadline; one variant cannot carry both"
+        );
+        // All three still end when the host leaves the battlefield — that leg
+        // is shared, and every battlefield-exit consumer asks this predicate.
+        assert!(control_bound.ends_when_host_leaves_play());
+        assert!(presence_bound.ends_when_host_leaves_play());
+        assert!(event_bound.ends_when_host_leaves_play());
     }
 
     #[test]

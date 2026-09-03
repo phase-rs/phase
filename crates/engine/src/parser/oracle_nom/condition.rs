@@ -9862,9 +9862,9 @@ pub fn parse_you_put_onto_battlefield_this_way_clause(
     Ok((rest, (filter, false)))
 }
 
-/// CR 603.12 + CR 701.9a: Parse "you discard [quantifier] [type] card[s] this
-/// way" — the active-voice reflexive gate created by a preceding "discard a
-/// card" instruction in the same ability (Talion's Messenger: "draw a card,
+/// CR 701.9a: Parse "you discard [quantifier] [type] card[s] this way" — the
+/// active-voice condition following a preceding "discard a card" instruction
+/// in the same ability (Talion's Messenger: "draw a card,
 /// then discard a card. When you discard a card this way, put a +1/+1 counter
 /// on target Faerie you control"; The Ancient One: "Draw a card, then discard
 /// a card. When you discard a card this way, target player mills cards equal to
@@ -9902,9 +9902,9 @@ pub fn parse_you_discard_this_way_clause(input: &str) -> OracleResult<'_, (Targe
     Ok((rest, (filter, false)))
 }
 
-/// CR 603.12 + CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" —
-/// the active-voice reflexive gate created by a preceding "sacrifice [quantifier]
-/// [type]" instruction in the same ability (Nyssa of Traken: "sacrifice any
+/// CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" — the
+/// active-voice condition following a preceding "sacrifice [quantifier] [type]"
+/// instruction in the same ability (Nyssa of Traken: "sacrifice any
 /// number of artifacts. When you sacrifice one or more artifacts this way, tap
 /// up to that many target creatures and draw that many cards").
 ///
@@ -10434,7 +10434,7 @@ mod tests {
         assert_eq!(cond, StaticCondition::SourceIsSaddled);
     }
 
-    /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
+    /// CR 701.21a: the active-voice sacrifice condition
     /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
     /// every quantifier form, mirroring the discard/put combinators.
     #[test]

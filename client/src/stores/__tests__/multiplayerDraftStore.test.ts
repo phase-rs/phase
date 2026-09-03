@@ -147,6 +147,7 @@ function mockView(status: string): DraftPlayerView {
   return {
     status: status as DraftPlayerView["status"],
     kind: "Premier",
+    launch_capability: "None",
     current_pack_number: 1,
     pick_number: 1,
     pass_direction: "Left",

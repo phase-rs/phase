@@ -70,7 +70,7 @@ pub fn resolve(
         // Contracts; Llanowar Greenwidow; Realmbreaker; Spirit-Sister's Call)
         // must last as long as the affected object exists, so promote that def to
         // Duration::Permanent. It then survives its granting source leaving
-        // (`prune_host_left_effects` only prunes UntilHostLeavesPlay) and is
+        // (`prune_host_left_effects` prunes all three host-lifetime readings) and is
         // cleaned up when the reanimated object itself leaves
         // (`prune_affected_object_left_effects`). A STATED duration arrives on the
         // wrapper (Elemental Expressionist's "Until end of turn" lives on the

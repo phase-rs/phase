@@ -5,11 +5,10 @@
 //! through `lobby_broker::validate_lobby_message`, so client-supplied names,
 //! codes, passwords, and tokens must be bounded before clone-heavy work.
 
-use draft_core::types::{DraftKind, MAX_PACK_COUNT};
+use draft_core::types::{DraftKind, TournamentFormat, MAX_PACK_COUNT};
 use lobby_broker::validation::{
     validate_optional_token, validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN,
-    MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_PLAYER_COUNT,
-    MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
+    MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
 };
 
 /// Validate `CreateDraftWithSettings` wire fields before pool lookup and lobby
@@ -21,10 +20,12 @@ pub fn guard_create_draft_with_settings(
     timer_seconds: Option<u32>,
     pod_size: u8,
     kind: DraftKind,
+    tournament_format: TournamentFormat,
 ) -> Result<(), String> {
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
-    // Bound the sequence before its entries, and its entries before any pool
-    // lookup: each code costs a map probe and a pool clone on the accept path.
+    // Bound the source's set tokens before any pool lookup: each code costs a
+    // map probe and a pool clone on the accept path. Chaos carries candidates
+    // here, never the server-owned assignment matrix.
     if !(1..=usize::from(MAX_PACK_COUNT)).contains(&set_codes.len()) {
         return Err(format!(
             "set_codes must name between 1 and {MAX_PACK_COUNT} packs"
@@ -34,10 +35,13 @@ pub fn guard_create_draft_with_settings(
         validate_token("set_code", code, MAX_DRAFT_SET_CODE_LEN)?;
     }
     validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-    let minimum_pod_size = kind.procedure().min_pod_size;
-    if !(minimum_pod_size..=MAX_PLAYER_COUNT).contains(&pod_size) {
+    let procedure = kind.procedure();
+    if !procedure.allows_pod_size(tournament_format, pod_size) {
+        let allowed = procedure.allowed_pod_size_range(tournament_format);
         return Err(format!(
-            "pod_size must be between {minimum_pod_size} and {MAX_PLAYER_COUNT}"
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end(),
         ));
     }
     if let Some(secs) = timer_seconds {
@@ -74,7 +78,7 @@ pub fn guard_draft_action(draft_code: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use draft_core::types::{DraftKind, MAX_PACK_COUNT};
+    use draft_core::types::{DraftKind, TournamentFormat, MAX_PACK_COUNT};
     use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN};
 
     use super::{
@@ -90,7 +94,8 @@ mod tests {
             &None,
             None,
             4,
-            DraftKind::Premier
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
         )
         .is_ok());
     }
@@ -110,7 +115,8 @@ mod tests {
             &None,
             None,
             4,
-            DraftKind::CommanderDraft
+            DraftKind::CommanderDraft,
+            TournamentFormat::Swiss,
         )
         .is_ok());
     }
@@ -127,6 +133,7 @@ mod tests {
             None,
             2,
             DraftKind::CommanderDraft,
+            TournamentFormat::Swiss,
         )
         .unwrap_err();
         assert!(err.contains("pod_size"), "unexpected rejection: {err}");
@@ -134,6 +141,27 @@ mod tests {
             err.contains('3'),
             "the floor must name the CR 800.1 minimum: {err}"
         );
+    }
+
+    #[test]
+    fn wire_guard_keeps_remote_quick_drafts_inside_the_public_range() {
+        for pod_size in [1, 9] {
+            let err = guard_create_draft_with_settings(
+                "Alice",
+                &["TST".to_string()],
+                &None,
+                None,
+                pod_size,
+                DraftKind::Quick,
+                TournamentFormat::Swiss,
+            )
+            .expect_err("remote Quick Draft must use the public 2..=8 range");
+            assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+            assert!(
+                err.contains('2') && err.contains('8'),
+                "unexpected range: {err}"
+            );
+        }
     }
 
     /// The multi-set claim at the guard: an ordered, repeating sequence is a
@@ -147,7 +175,8 @@ mod tests {
             &None,
             None,
             8,
-            DraftKind::Premier
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
         )
         .is_ok());
     }
@@ -168,6 +197,7 @@ mod tests {
                 None,
                 8,
                 DraftKind::Premier,
+                TournamentFormat::Swiss,
             )
             .unwrap_err();
             assert!(err.contains("set_codes"), "unexpected rejection: {err}");
@@ -185,9 +215,37 @@ mod tests {
             None,
             8,
             DraftKind::Premier,
+            TournamentFormat::Swiss,
         )
         .unwrap_err();
         assert!(err.contains("set_code"), "unexpected rejection: {err}");
+    }
+
+    #[test]
+    fn create_draft_validates_chaos_candidates_before_pool_lookup() {
+        let accepted = ["AAA".to_string(), "BBB".to_string()];
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &accepted,
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_ok());
+
+        let rejected = ["A".repeat(MAX_DRAFT_SET_CODE_LEN + 1)];
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &rejected,
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+            TournamentFormat::Swiss,
+        )
+        .is_err());
     }
 
     #[test]
@@ -199,9 +257,52 @@ mod tests {
             None,
             4,
             DraftKind::Premier,
+            TournamentFormat::Swiss,
         )
         .unwrap_err();
         assert!(err.contains("display_name"));
+    }
+
+    #[test]
+    fn wire_guard_uses_the_procedure_for_ceiling_and_pairing_bracket() {
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["CMM".to_string()],
+            &None,
+            None,
+            3,
+            DraftKind::CommanderDraft,
+            TournamentFormat::SingleElimination,
+        )
+        .is_ok());
+
+        for (pod_size, tournament_format) in [
+            (9, TournamentFormat::Swiss),
+            (7, TournamentFormat::SingleElimination),
+        ] {
+            let err = guard_create_draft_with_settings(
+                "Alice",
+                &["TST".to_string()],
+                &None,
+                None,
+                pod_size,
+                DraftKind::Premier,
+                tournament_format,
+            )
+            .unwrap_err();
+            assert!(err.contains("pod_size"), "unexpected rejection: {err}");
+        }
+
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            &["TST".to_string()],
+            &None,
+            None,
+            1,
+            DraftKind::Quick,
+            TournamentFormat::Swiss,
+        )
+        .is_err());
     }
 
     #[test]

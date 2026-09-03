@@ -472,6 +472,15 @@ function isPoolInput(value: unknown): value is PoolInput {
     if (isSetPackSequence(value.data)) return true;
     return typeof value.data.set_pool_json === "string" && isJsonRecord(value.data.set_pool_json);
   }
+  if (value.type === "Chaos") {
+    return (
+      Array.isArray(value.data.pools) &&
+      value.data.pools.every(isRecord) &&
+      Array.isArray(value.data.candidate_codes) &&
+      value.data.candidate_codes.length > 0 &&
+      value.data.candidate_codes.every(isNonEmptyString)
+    );
+  }
   if (value.type !== "Cube") return false;
   const settings = value.data.cube_draft_settings;
   return (

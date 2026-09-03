@@ -6,15 +6,22 @@ name: Helm chart
 #
 # No secrets, no cluster: this only runs `helm lint` and `helm template`.
 
+# `crates/phase-server/src/main.rs` is here because tests/assert-web-routing.sh
+# reads the axum router out of it to derive the routes the chart must expose. A
+# router-only change is exactly the case that assertion exists to catch, so
+# without this path the check would not run when it matters most. The script
+# asserts its own inputs are listed here, so the two cannot drift apart.
 on:
   pull_request:
     paths:
       - 'deploy/helm/**'
+      - 'crates/phase-server/src/main.rs'
       - '.github/workflows/helm-chart.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/helm/**'
+      - 'crates/phase-server/src/main.rs'
       - '.github/workflows/helm-chart.yml'
 
 permissions:
@@ -35,6 +42,15 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.16.3
+
+      - name: assert web routing
+        # Renders what it needs itself: the SPA topology is several distinct
+        # value combinations, and one leg reads the axum router to check that
+        # every path the server mounts is still routed around the site's
+        # catch-all. Placed before the render steps rather than after them so
+        # that independence is structural — reordering or breaking them cannot
+        # stop this assertion running.
+        run: deploy/helm/phase-server/tests/assert-web-routing.sh
 
       - name: helm lint (default values)
         run: helm lint deploy/helm/phase-server
@@ -84,6 +100,9 @@ jobs:
           grep -q 'kind: PodMonitor' /tmp/scaleout-render.yaml
           grep -q 'kind: ServiceMonitor' /tmp/scaleout-render.yaml
 
+      - name: assert compression boundary
+        run: deploy/helm/phase-server/tests/assert-compression-boundary.sh /tmp/default.yaml /tmp/scaleout-render.yaml
+
       # With no prometheus-operator CRDs the operator path must FAIL rather than
       # render: hpa.yaml would otherwise install an HPA whose only producer of
       # `phase:wanted_replicas` — the PrometheusRule — was silently skipped.
@@ -124,6 +143,117 @@ jobs:
           grep -q 'replicas: 1' /tmp/default.yaml
           grep -q 'volumeClaimTemplates' /tmp/scaleout-render.yaml
           if grep -q 'kind: Deployment' /tmp/scaleout-render.yaml; then echo "unexpected 'kind: Deployment' in /tmp/scaleout-render.yaml"; exit 1; fi
+
+      # `logging.enabled` defaults to false (values.yaml), so the default
+      # render must carry none of the logging surface — a regression in any
+      # of the `if .Values.logging.enabled` gates would otherwise ship an
+      # opt-in component on by default with every check above staying green.
+      - name: assert logging is absent by default
+        run: |
+          if grep -q 'kind: ConfigMap' /tmp/default.yaml; then echo "unexpected 'kind: ConfigMap' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'PHASE_LOG_DIR' /tmp/default.yaml; then echo "unexpected 'PHASE_LOG_DIR' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'nginxinc/nginx-unprivileged' /tmp/default.yaml; then echo "unexpected 'nginxinc/nginx-unprivileged' in /tmp/default.yaml"; exit 1; fi
+          if grep -q 'targetPort: logs' /tmp/default.yaml; then echo "unexpected 'targetPort: logs' in /tmp/default.yaml"; exit 1; fi
+
+      # The read-only logs sidecar (PHASE_LOG_DIR, its ConfigMap, and the
+      # `logs` Service port) is entirely gated on `logging.enabled`, so none
+      # of the renders above ever touch it — assert it explicitly, in both
+      # the default and scale-out shapes.
+      - name: helm template (logging enabled)
+        run: |
+          # The security-relevant mount is the *combination* of subPath and
+          # read-only, not either alone: a generic `readOnly` grep can match
+          # an unrelated mount (the ConfigMap's is read-only too) and would
+          # stay green even if `readOnly: true` were dropped from this one,
+          # granting the sidecar write access to the logs subtree. Match the
+          # exact contiguous block instead of two independent greps.
+          data_mount_ro='- name: data\n\s+mountPath: /var/lib/phase-server/logs\n\s+subPath: logs\n\s+readOnly: true'
+
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase --set logging.enabled=true > /tmp/logging-default.yaml
+          grep -q 'kind: ConfigMap' /tmp/logging-default.yaml
+          grep -q 'name: PHASE_LOG_DIR' /tmp/logging-default.yaml
+          grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-default.yaml
+          grep -Pzoq -- "$data_mount_ro" /tmp/logging-default.yaml
+          # Only the entry Service in the default (non-scale-out) shape.
+          test "$(grep -c 'targetPort: logs' /tmp/logging-default.yaml)" -eq 1
+          # Operator-only must not depend on networkPolicy.enabled: the sidecar
+          # binds loopback-only regardless, so the Service/pod-IP path is dead
+          # even if NetworkPolicy is off or the CNI doesn't enforce it.
+          grep -q 'listen 127.0.0.1:' /tmp/logging-default.yaml
+          # No freshness policy otherwise, so a cached file or autoindex
+          # response could persist across port-forward targets.
+          grep -q 'add_header Cache-Control no-store always;' /tmp/logging-default.yaml
+
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml --set logging.enabled=true \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/logging-scaleout.yaml
+          grep -q 'kind: ConfigMap' /tmp/logging-scaleout.yaml
+          grep -q 'name: PHASE_LOG_DIR' /tmp/logging-scaleout.yaml
+          grep -q 'nginxinc/nginx-unprivileged' /tmp/logging-scaleout.yaml
+          grep -Pzoq -- "$data_mount_ro" /tmp/logging-scaleout.yaml
+          # Entry + headless + one per ordinal, at scaleOut.replicaMax 3 above.
+          test "$(grep -c 'targetPort: logs' /tmp/logging-scaleout.yaml)" -eq 5
+          grep -q 'listen 127.0.0.1:' /tmp/logging-scaleout.yaml
+          grep -q 'add_header Cache-Control no-store always;' /tmp/logging-scaleout.yaml
+
+      # Pins the chosen invariant for the reported unsafe combination: with
+      # NetworkPolicy off, nothing in the chart restricts ingress by policy,
+      # so the sidecar's own loopback-only bind must be the thing that keeps
+      # it operator-only. Rendered with the ingress/scale-out values too, so
+      # the Service actually carries `targetPort: logs` while this holds.
+      - name: helm template (logging enabled, networkPolicy disabled) stays loopback-only
+        run: |
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set logging.enabled=true --set networkPolicy.enabled=false \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/logging-no-netpol.yaml
+          if grep -q 'kind: NetworkPolicy' /tmp/logging-no-netpol.yaml; then echo "unexpected 'kind: NetworkPolicy' in /tmp/logging-no-netpol.yaml"; exit 1; fi
+          grep -q 'targetPort: logs' /tmp/logging-no-netpol.yaml
+          grep -q 'listen 127.0.0.1:' /tmp/logging-no-netpol.yaml
+
+      # Regression pin: a `logging.dir` that string-prefix-matches
+      # PHASE_DATA_DIR but trims to an empty (or `..`-containing) subPath
+      # would mount the *entire* data PVC — games.db and its WAL included —
+      # read-only into the autoindexed sidecar, not just the logs subtree.
+      # Both must-fail cases are paired with the must-succeed render above,
+      # so the guard is proven to track the value, not to refuse the
+      # feature outright.
+      - name: helm template (logging enabled, unsafe logging.dir) must fail
+        run: |
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/ \
+               > /tmp/logging-root.yaml 2>/tmp/logging-root.err; then
+            echo "expected the render to fail for logging.dir at the PVC root"; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-root.err
+
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/logs/../../etc \
+               > /tmp/logging-traversal.yaml 2>/tmp/logging-traversal.err; then
+            echo "expected the render to fail for a logging.dir containing '..'"; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-traversal.err
+
+          # A trailing `.` string-prefix-matches PHASE_DATA_DIR just like the
+          # empty-subPath case above, and kubelet's subPath join treats a
+          # bare `.` segment as the volume root too -- reproducing the same
+          # exposure under a different disguise.
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase --set logging.enabled=true \
+               --set logging.dir=/var/lib/phase-server/. \
+               > /tmp/logging-dot.yaml 2>/tmp/logging-dot.err; then
+            echo "expected the render to fail for logging.dir=/var/lib/phase-server/."; exit 1
+          fi
+          grep -q 'traversal-free descendant' /tmp/logging-dot.err
 
       # `scaleOut.scheme` names the URL each ordinal advertises, and the client
       # turns that string into the "CODE@host" share link a friend dials. Every

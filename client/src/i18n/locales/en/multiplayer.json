@@ -220,7 +220,17 @@
     "back": "Back",
     "opening": "Opening…",
     "hostP2PGame": "Host P2P Game",
-    "hostGame": "Host Game"
+    "hostGame": "Host Game",
+    "savedFormats": "Saved Custom Formats",
+    "saveAsCustomFormat": "Save format",
+    "customFormatNamePlaceholder": "Name this format",
+    "useCustomFormat": "Use",
+    "customFormatInUse": "In use",
+    "deleteCustomFormat": "Delete",
+    "loadingCustomFormat": "Loading format…",
+    "noSavedCustomFormats": "No saved custom formats yet.",
+    "customFormatResolveFailed": "Could not load that saved format.",
+    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",

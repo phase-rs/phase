@@ -605,6 +605,8 @@
     "chooseXInputAria": "Inserisci il valore di X",
     "decreaseX": "Diminuisci il valore di X",
     "increaseX": "Aumenta il valore di X",
+    "maximum": "Max",
+    "setXToMaximum": "Imposta X al massimo",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
     "amountOutOfRange": "Inserisci un numero intero tra {{min}} e {{max}}",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Tempesta: {{count}} copia",
-    "copies_other": "Tempesta: {{count}} copie"
+    "copies_other": "Tempesta: {{count}} copie",
+    "count_one": "Contatore tempesta: {{count}} copia",
+    "count_other": "Contatore tempesta: {{count}} copie"
   },
   "opponentHud": {
     "ally": "Alleato",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Registro di gioco",
+    "dockLeft": "Ancora il registro a sinistra",
+    "dockRight": "Ancora il registro a destra",
     "noEvents": "Nessun evento ancora",
     "closeLog": "Chiudi il registro di gioco",
     "verbosityFull": "completo",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "Lanciare la magia preparata?",
       "subtitleActivate": "Attivare questa abilità?",
       "subtitlePlay": "Scegli come giocare questa carta",
-      "subtitleChoose": "Scegli un'abilità da attivare"
+      "subtitleChoose": "Scegli un'abilità da attivare",
+      "unlockThisDoor": "Sblocca questa porta",
+      "unlockHalf": "Sblocca {{name}}",
+      "unlockHalfWithCost": "Sblocca {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tappa per mana",
@@ -1616,6 +1625,9 @@
       "selectAll": "Tutti",
       "invert": "Inverti",
       "clear": "Cancella",
+      "searchLabel": "Filtra",
+      "searchPlaceholder": "Nome della carta",
+      "searchCardsAria": "Filtra le carte per nome",
       "sortLabel": "Ordina",
       "groupLabel": "Raggruppa",
       "optNone": "Nessuno",

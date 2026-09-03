@@ -452,8 +452,10 @@ pub fn resolve_all(
 /// `CounterSourceRider::LosesAbilities` static.
 ///
 /// The effect targets the countered ability's source permanent and persists
-/// for the rider's `duration` (Tishana: `Duration::UntilHostLeavesPlay`, i.e.
-/// as long as the counter source remains on the battlefield — CR 611.2a).
+/// for the rider's `duration` (Tishana: `Duration::WhileHostOnBattlefield` —
+/// "for as long as this creature remains on the battlefield", a CR 611.2b
+/// state reading that a phase-out of the counter source also ends,
+/// CR 702.26f).
 fn apply_source_static(
     state: &mut GameState,
     counter_source_id: ObjectId,

@@ -236,6 +236,36 @@ describe("AmountInput — rendered contract", () => {
     expect(onRawChange).toHaveBeenLastCalledWith("5");
   });
 
+  it("renders the maximum shortcut only when opted in and writes the raw maximum", () => {
+    const onRawChange = vi.fn();
+    const { rerender } = render(
+      <AmountInput
+        raw="2"
+        onRawChange={onRawChange}
+        min={0}
+        max={5}
+        onSubmit={vi.fn()}
+        labels={LABELS}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Set amount to maximum" })).toBeNull();
+
+    rerender(
+      <AmountInput
+        raw="2"
+        onRawChange={onRawChange}
+        min={0}
+        max={5}
+        onSubmit={vi.fn()}
+        labels={{ ...LABELS, setMaximum: "Set amount to maximum" }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Set amount to maximum" }));
+    expect(onRawChange).toHaveBeenLastCalledWith("5");
+  });
+
   it("N5/recover-junk: steppers stay LIVE on an unreadable entry and re-enter the window", () => {
     const onRawChange = vi.fn();
     render(

@@ -45,11 +45,12 @@ pub const MAX_DRAFT_SET_CODE_LEN: usize = 32;
 ///
 /// Not one set code: a multi-set draft joins its distinct set codes with `+`
 /// into a single label (`draft_core::types::DraftSource::set_code`, e.g.
-/// `"ISD+DKA+AVR"`), so a listing may name one code per pack the event opens.
-/// The multiplier is `draft_core`'s `MAX_PACK_COUNT`, inlined because the
-/// broker deliberately carries no draft-core dependency — it validates the
-/// shape of a listing, never the rules of a draft.
-pub const MAX_DRAFT_SET_LABEL_LEN: usize = 8 * (MAX_DRAFT_SET_CODE_LEN + 1);
+/// `"ISD+DKA+AVR"`), while a Chaos listing prefixes its candidate intent with
+/// `"Chaos:"` so it never exposes the private resolved assignment union. The
+/// multiplier is `draft_core`'s `MAX_PACK_COUNT`, inlined because the broker
+/// deliberately carries no draft-core dependency — it validates the shape of
+/// a listing, never the rules of a draft.
+pub const MAX_DRAFT_SET_LABEL_LEN: usize = 6 + 8 * (MAX_DRAFT_SET_CODE_LEN + 1);
 /// Max draft kind label length, in bytes.
 pub const MAX_DRAFT_KIND_LEN: usize = 32;
 
@@ -229,6 +230,132 @@ pub fn validate_unregister_lobby_fields(game_code: &str) -> Result<(), String> {
     validate_token("game_code", game_code, MAX_GAME_CODE_LEN)
 }
 
+// ---------------------------------------------------------------------------
+// Tournament organizer
+// ---------------------------------------------------------------------------
+//
+// Size/shape only, exactly like every function above: these bound what a
+// client may *send*, never whether the request is legal for the tournament's
+// state. Status gating, token authority, duplicate-join rejection and result
+// legality all stay in `crate::tournament`, which is the single authority for
+// them; duplicating any of that here would create a second gate to drift.
+
+/// Max entries in a [`crate::tournament::PodOutcome::Decisive`] `game_wins`
+/// map — one per pod seat.
+///
+/// `MatchArity::new` caps a pairing at 128 seats (the largest `n` for which
+/// the MSTR win-point formula `2n - 1` still fits `u8`), so a client claiming
+/// more distinct game-win entries than the largest legal pod is malformed, not
+/// merely unusual. Declared here rather than imported because `MatchArity`
+/// exposes no public maximum — only `HEAD_TO_HEAD` and `COMMANDER_POD` — and
+/// inventing a public `MatchArity::MAX` would be a change to PR1's reviewed
+/// surface for the sake of one bound. `matches_match_arity_ceiling` below pins
+/// the two together so the derivation cannot silently drift.
+///
+/// This is a resource bound, not a rules check: `validate_match_result`
+/// remains the authority on which keys a legal report may carry (at
+/// head-to-head, exactly the two participants).
+pub const MAX_GAME_WINS_ENTRIES: usize = 128;
+
+pub struct CreateTournamentFields<'a> {
+    pub name: &'a str,
+}
+
+pub fn validate_create_tournament_fields(fields: CreateTournamentFields<'_>) -> Result<(), String> {
+    // A tournament name is a display label broadcast to every subscriber in
+    // `TournamentSummary`, so it gets the same treatment as a room name.
+    validate_required_label("name", fields.name, MAX_ROOM_NAME_LEN)?;
+    // `total_rounds` is deliberately unbounded here beyond PR1's own
+    // `Some(0)` rejection in `TournamentManager::create_tournament`. It is a
+    // `u32` (no unbounded allocation to guard) and nothing loops over it: the
+    // round ceiling is compared against, never counted to, so even `u32::MAX`
+    // costs a comparison. A ceiling would be a tournament-policy judgment,
+    // which is `crate::tournament`'s to make, not this module's.
+    Ok(())
+}
+
+pub struct JoinTournamentFields<'a> {
+    pub code: &'a str,
+    pub player_key: &'a str,
+    pub display_name: &'a str,
+}
+
+pub fn validate_join_tournament_fields(fields: JoinTournamentFields<'_>) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    // Client-supplied opaque identity, same treatment as `host_peer_id`.
+    validate_token("player_key", fields.player_key, MAX_TOKEN_LEN)?;
+    validate_required_label("display_name", fields.display_name, MAX_DISPLAY_NAME_LEN)?;
+    Ok(())
+}
+
+pub fn validate_get_tournament_fields(code: &str) -> Result<(), String> {
+    validate_token("code", code, MAX_GAME_CODE_LEN)
+}
+
+pub struct StartTournamentRoundFields<'a> {
+    pub code: &'a str,
+    pub organizer_token: &'a str,
+}
+
+pub fn validate_start_tournament_round_fields(
+    fields: StartTournamentRoundFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("organizer_token", fields.organizer_token, MAX_TOKEN_LEN)?;
+    Ok(())
+}
+
+pub struct ReportMatchResultFields<'a> {
+    pub code: &'a str,
+    pub player_token: &'a str,
+    pub outcome: &'a crate::tournament::PodOutcome,
+}
+
+pub fn validate_report_match_result_fields(
+    fields: ReportMatchResultFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("player_token", fields.player_token, MAX_TOKEN_LEN)?;
+    // `PodOutcome::Draw` carries no client-supplied strings at all; only the
+    // `Decisive` arm has anything to bound.
+    if let crate::tournament::PodOutcome::Decisive { winner, game_wins } = fields.outcome {
+        validate_token("outcome.winner", winner, MAX_TOKEN_LEN)?;
+        if game_wins.len() > MAX_GAME_WINS_ENTRIES {
+            return Err(format!(
+                "outcome.game_wins must contain at most {MAX_GAME_WINS_ENTRIES} entries"
+            ));
+        }
+        for player_key in game_wins.keys() {
+            validate_token("outcome.game_wins key", player_key, MAX_TOKEN_LEN)?;
+        }
+    }
+    Ok(())
+}
+
+pub struct DropFromTournamentFields<'a> {
+    pub code: &'a str,
+    pub player_token: &'a str,
+}
+
+pub fn validate_drop_from_tournament_fields(
+    fields: DropFromTournamentFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("player_token", fields.player_token, MAX_TOKEN_LEN)?;
+    Ok(())
+}
+
+pub struct EndTournamentFields<'a> {
+    pub code: &'a str,
+    pub organizer_token: &'a str,
+}
+
+pub fn validate_end_tournament_fields(fields: EndTournamentFields<'_>) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("organizer_token", fields.organizer_token, MAX_TOKEN_LEN)?;
+    Ok(())
+}
+
 /// Validate every client-supplied field of a parsed lobby message against the
 /// size/shape bounds above. Returns the first violation as a human-readable
 /// reason suitable for an `Error` reply. Server-populated reply types
@@ -308,6 +435,56 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
         }
         M::UnregisterLobby { game_code } => {
             validate_unregister_lobby_fields(game_code)?;
+        }
+        M::CreateTournament { name, .. } => {
+            validate_create_tournament_fields(CreateTournamentFields { name })?;
+        }
+        M::JoinTournament {
+            code,
+            player_key,
+            display_name,
+        } => {
+            validate_join_tournament_fields(JoinTournamentFields {
+                code,
+                player_key,
+                display_name,
+            })?;
+        }
+        M::GetTournament { code } => {
+            validate_get_tournament_fields(code)?;
+        }
+        M::StartTournamentRound {
+            code,
+            organizer_token,
+        } => {
+            validate_start_tournament_round_fields(StartTournamentRoundFields {
+                code,
+                organizer_token,
+            })?;
+        }
+        M::ReportMatchResult {
+            code,
+            player_token,
+            outcome,
+            ..
+        } => {
+            validate_report_match_result_fields(ReportMatchResultFields {
+                code,
+                player_token,
+                outcome,
+            })?;
+        }
+        M::DropFromTournament { code, player_token } => {
+            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })?;
+        }
+        M::EndTournament {
+            code,
+            organizer_token,
+        } => {
+            validate_end_tournament_fields(EndTournamentFields {
+                code,
+                organizer_token,
+            })?;
         }
         // No client-supplied bounded fields.
         M::SubscribeLobby | M::UnsubscribeLobby | M::Ping { .. } => {}
@@ -569,5 +746,218 @@ mod tests {
         }
         let err = guard_inbound(&msg).unwrap_err();
         assert!(err.contains("scheme_deck[0]"));
+    }
+
+    // -- Tournament organizer ----------------------------------------------
+
+    use crate::tournament::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use std::collections::HashMap;
+
+    fn create_tournament_with(name: &str) -> M {
+        M::CreateTournament {
+            name: name.to_string(),
+            arity: MatchArity::HEAD_TO_HEAD,
+            scoring: ScoringPolicy::default(),
+            bracket: BracketShape::Swiss,
+            total_rounds: None,
+        }
+    }
+
+    fn join_tournament_with(code: &str, player_key: &str, display_name: &str) -> M {
+        M::JoinTournament {
+            code: code.to_string(),
+            player_key: player_key.to_string(),
+            display_name: display_name.to_string(),
+        }
+    }
+
+    fn report_with(code: &str, player_token: &str, outcome: PodOutcome) -> M {
+        M::ReportMatchResult {
+            code: code.to_string(),
+            pairing_id: 0,
+            player_token: player_token.to_string(),
+            outcome,
+        }
+    }
+
+    fn decisive(winner: &str, game_wins: HashMap<String, u8>) -> PodOutcome {
+        PodOutcome::Decisive {
+            winner: winner.to_string(),
+            game_wins,
+        }
+    }
+
+    /// The bound's own derivation, pinned. `MatchArity` caps a pairing at 128
+    /// seats; if that ceiling ever moves, this assertion fails rather than
+    /// letting `MAX_GAME_WINS_ENTRIES` silently mean something else.
+    #[test]
+    fn max_game_wins_entries_matches_match_arity_ceiling() {
+        assert!(MatchArity::new(128).is_ok());
+        assert!(MatchArity::new(129).is_err());
+        assert_eq!(MAX_GAME_WINS_ENTRIES, 128);
+    }
+
+    /// Acceptance half of Verification Matrix row 12 — one valid message per
+    /// new variant. Without this, every rejection test below could be
+    /// satisfied by a function that rejected everything.
+    #[test]
+    fn tournament_messages_accept_valid() {
+        let valid = [
+            create_tournament_with("Friday Night"),
+            join_tournament_with("TOUR01", "key-a", "Alice"),
+            M::GetTournament {
+                code: "TOUR01".into(),
+            },
+            M::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+            report_with(
+                "TOUR01",
+                "tok",
+                decisive("key-a", [("key-a".to_string(), 2u8)].into_iter().collect()),
+            ),
+            report_with("TOUR01", "tok", PodOutcome::Draw),
+            M::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+            },
+            M::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+        ];
+        for msg in valid {
+            assert!(
+                validate_lobby_message(&msg).is_ok(),
+                "valid message rejected: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_tournament_rejects_oversized_name() {
+        let msg = create_tournament_with(&"a".repeat(MAX_ROOM_NAME_LEN + 1));
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    #[test]
+    fn create_tournament_rejects_blank_name() {
+        assert!(validate_lobby_message(&create_tournament_with("   ")).is_err());
+    }
+
+    #[test]
+    fn join_tournament_rejects_oversized_code() {
+        let msg = join_tournament_with(&"c".repeat(MAX_GAME_CODE_LEN + 1), "key-a", "Alice");
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    #[test]
+    fn join_tournament_rejects_oversized_player_key() {
+        let msg = join_tournament_with("TOUR01", &"k".repeat(MAX_TOKEN_LEN + 1), "Alice");
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    #[test]
+    fn join_tournament_rejects_oversized_display_name() {
+        let msg = join_tournament_with("TOUR01", "key-a", &"a".repeat(MAX_DISPLAY_NAME_LEN + 1));
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    #[test]
+    fn get_tournament_rejects_oversized_code() {
+        let msg = M::GetTournament {
+            code: "c".repeat(MAX_GAME_CODE_LEN + 1),
+        };
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    #[test]
+    fn organizer_gated_messages_reject_oversized_organizer_token() {
+        let long = "t".repeat(MAX_TOKEN_LEN + 1);
+        for msg in [
+            M::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: long.clone(),
+            },
+            M::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: long.clone(),
+            },
+        ] {
+            assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn player_gated_messages_reject_oversized_player_token() {
+        let long = "t".repeat(MAX_TOKEN_LEN + 1);
+        for msg in [
+            report_with("TOUR01", &long, PodOutcome::Draw),
+            M::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: long.clone(),
+            },
+        ] {
+            assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn report_match_result_rejects_oversized_winner() {
+        let msg = report_with(
+            "TOUR01",
+            "tok",
+            decisive(&"w".repeat(MAX_TOKEN_LEN + 1), HashMap::new()),
+        );
+        assert!(validate_lobby_message(&msg).is_err());
+    }
+
+    /// The collection-bound hostile fixture, mirroring
+    /// `update_metadata_rejects_too_many_tokens` for a different oversized
+    /// collection: more distinct `game_wins` entries than the largest legal
+    /// pod could ever have seats.
+    #[test]
+    fn report_match_result_rejects_oversized_game_wins_map() {
+        let game_wins: HashMap<String, u8> = (0..=MAX_GAME_WINS_ENTRIES)
+            .map(|i| (format!("key-{i}"), 1u8))
+            .collect();
+        assert_eq!(game_wins.len(), MAX_GAME_WINS_ENTRIES + 1);
+        let msg = report_with("TOUR01", "tok", decisive("key-0", game_wins));
+        let err = validate_lobby_message(&msg).unwrap_err();
+        assert!(err.contains("game_wins"), "unexpected reason: {err}");
+
+        // Exactly at the ceiling is accepted (off-by-one guard).
+        let at_limit: HashMap<String, u8> = (0..MAX_GAME_WINS_ENTRIES)
+            .map(|i| (format!("key-{i}"), 1u8))
+            .collect();
+        assert!(
+            validate_lobby_message(&report_with("TOUR01", "tok", decisive("key-0", at_limit)))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn report_match_result_rejects_oversized_game_wins_key() {
+        let game_wins: HashMap<String, u8> =
+            [("k".repeat(MAX_TOKEN_LEN + 1), 1u8)].into_iter().collect();
+        let msg = report_with("TOUR01", "tok", decisive("key-a", game_wins));
+        let err = validate_lobby_message(&msg).unwrap_err();
+        assert!(err.contains("game_wins key"), "unexpected reason: {err}");
+    }
+
+    /// Control characters are rejected on tournament fields too — the same
+    /// primitive every other variant uses, not a parallel check.
+    #[test]
+    fn tournament_fields_reject_control_characters() {
+        assert!(validate_lobby_message(&create_tournament_with("Bad\u{0007}Name")).is_err());
+        assert!(
+            validate_lobby_message(&join_tournament_with("TOUR01", "key\u{0007}a", "Alice"))
+                .is_err()
+        );
+        assert!(validate_lobby_message(&M::GetTournament {
+            code: "TOUR\n01".into()
+        })
+        .is_err());
     }
 }

@@ -288,4 +288,32 @@ describe("DraftProgress — per-pack booster shape", () => {
 
     expect(screen.queryByText("ISD")).not.toBeInTheDocument();
   });
+
+  it("labels only the current Chaos booster from the redacted source view", () => {
+    render(
+      <DraftProgress
+        view={progressView({
+          current_pack_number: 1,
+          pack_set_codes: [],
+          source: {
+            type: "Set",
+            data: {
+              layout: {
+                Chaos: {
+                  candidate_codes: ["ISD", "DKA", "AVR"],
+                  current_pack_code: "DKA",
+                  completed_own_pack_codes: null,
+                  actual_set_codes: null,
+                },
+              },
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("DKA")).toBeInTheDocument();
+    expect(screen.queryByText("ISD")).not.toBeInTheDocument();
+    expect(screen.queryByText("AVR")).not.toBeInTheDocument();
+  });
 });

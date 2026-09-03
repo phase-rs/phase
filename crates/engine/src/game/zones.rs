@@ -550,6 +550,14 @@ pub(crate) fn apply_zone_exit_cleanup(
         // re-enter still treated as having dealt damage and never regain hexproof.
         state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
+        // CR 611.2a + CR 400.7: `prune_host_left_effects` above covers only
+        // `transient_continuous_effects`. A play/cast permission whose duration
+        // `ends_when_host_leaves_play` — the event deadline and both state
+        // readings — lives on the exiled object instead, so it is revoked here
+        // at the same lifecycle point; otherwise a card exiled by "you may play
+        // that card for as long as [this permanent] remains on the battlefield"
+        // stays playable after its host is gone.
+        super::layers::prune_host_left_casting_permissions(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         // CR 611.2b + CR 400.7: the captured source leaving play, OR the host
         // leaving and re-entering as a new object (same storage ObjectId), ends

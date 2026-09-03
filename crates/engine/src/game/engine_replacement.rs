@@ -1708,16 +1708,24 @@ fn handle_persist_chosen_attribute_choice(
                     .to_string(),
             )
         })?;
+    let duration_subject = crate::types::identifiers::ObjectIncarnationRef::from_object(
+        state.objects.get(&host_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "PersistChosenAttribute copy choice resolved after its Aura host left the game"
+                    .to_string(),
+            )
+        })?,
+    );
 
     // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
     // continuous effect sourced from the Aura, applied to the host, ending
     // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
-    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // `tce.source_id` leaving — the Aura). `duration_subject` tracks the
     // host for any recipient-relative duration reads (harmless here).
     let copy = super::effects::become_copy::PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject_id: host_id,
+        duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
         display_source,
@@ -2950,13 +2958,27 @@ pub(crate) fn apply_pending_spell_resolution(
         }
     }
 
-    super::room::unlock_door_designation(
-        state,
-        ctx.object_id,
-        ctx.controller,
-        crate::game::game_object::RoomDoor::Left,
-        events,
-    );
+    // CR 709.5d: the replacement-choice resume path delivers the same entry as
+    // the ordinary resolution tail in `stack.rs`, so it asks the same single
+    // authority. Previously it granted `RoomDoor::Left` unconditionally — no
+    // door check and no Room check: every permanent spell that paused for a
+    // replacement choice and then entered as a copy of a Room (Copy
+    // Enchantment, Mirrormade, Estrid's Invocation) was handed a designation
+    // although neither of ITS halves was cast, which is exactly the case
+    // CR 709.5d's last sentence covers.
+    if let Some(cast_door) = state
+        .objects
+        .get(&ctx.object_id)
+        .and_then(super::room::cast_half_designation)
+    {
+        super::room::unlock_door_designation(
+            state,
+            ctx.object_id,
+            ctx.controller,
+            cast_door,
+            events,
+        );
+    }
 
     // CR 702.185a: Warp delayed trigger setup.
     if ctx.casting_variant == CastingVariant::Warp {
@@ -3080,7 +3102,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-pub(super) fn find_copy_targets(
+pub fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,

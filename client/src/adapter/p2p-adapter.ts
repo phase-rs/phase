@@ -1849,24 +1849,33 @@ export class P2PHostAdapter implements EngineAdapter {
       if (this.pregameSeatState.seats[pid]?.type !== "JoinedHuman") return;
 
       try {
-        // Validate against the worker engine's already-resident card DB
-        // (`checkDeckCompatibility` self-ensures it). Using the main-thread
-        // `engineRuntime` instance instead would parse a SECOND full ~93 MB
-        // card DB into the page — doubling host footprint past iOS Safari's
-        // per-tab memory ceiling and silently OOM-reloading the host tab.
-        const result = await this.wasm.checkDeckCompatibility({
+        // This is a SECURITY GATE, not a UI hint: a guest whose deck fails is
+        // kicked. It therefore uses the dedicated `evaluateDeckFormatGate`,
+        // which always returns a definite verdict, and never the shared
+        // `checkDeckCompatibility`. The shared one deliberately answers "no
+        // opinion" (`selected_format_compatible: null`) for a Custom format —
+        // correct for the lobby's legality chip, but here it would read as
+        // "not false", silently admitting every Custom-format guest deck and
+        // disabling this check for exactly the case it cannot evaluate.
+        //
+        // Still routed through the WORKER engine's already-resident card DB
+        // (the adapter self-ensures it), not the main-thread `engineRuntime`
+        // instance: that would parse a SECOND full ~93 MB card DB into the
+        // page, doubling host footprint past iOS Safari's per-tab memory
+        // ceiling and silently OOM-reloading the host tab.
+        const result = await this.wasm.evaluateDeckFormatGate({
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
           companion: deck.companion ?? [],
           signature_spell: deck.signature_spell ?? [],
           selected_format: this.formatConfig!.format,
-        }) as { selected_format_compatible?: boolean | null; selected_format_reasons: string[] };
+        }) as { compatible: boolean; reasons: string[] };
 
         if (!this.ownsAuthority()) return;
         if (this.gameStarted) return;
-        if (result.selected_format_compatible === false) {
-          const reason = result.selected_format_reasons[0]
+        if (!result.compatible) {
+          const reason = result.reasons[0]
             ?? `Deck is not legal in ${this.formatConfig!.format}.`;
           const session = this.guestSessions.get(pid);
           if (session) {

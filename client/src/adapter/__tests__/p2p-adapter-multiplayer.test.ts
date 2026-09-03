@@ -93,6 +93,15 @@ const mocks = vi.hoisted(() => {
     selected_format_compatible: true,
     selected_format_reasons: [] as string[],
   }));
+  // The ENFORCING gate the host's per-guest deck check uses. Deliberately a
+  // separate mock from `checkDeckCompatibility` above: the two return different
+  // shapes AND different verdicts for a Custom format (definite `false` here,
+  // "no opinion" there), so a test that mocks the wrong one would prove
+  // nothing about the kick path.
+  const evaluateDeckFormatGate = vi.fn(async () => ({
+    compatible: true,
+    reasons: [] as string[],
+  }));
   // Local monotonic stamp — the hoisted factory runs before imports, so it
   // can't call the adapter module's `nextSnapshotSeq`. Only ordering matters
   // to these assertions, and `seq` is never compared across clients.
@@ -102,6 +111,7 @@ const mocks = vi.hoisted(() => {
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
     submitInteraction: vi.fn(async (_submission: unknown) => ({ events: [] })),
     checkDeckCompatibility,
+    evaluateDeckFormatGate,
     getState,
     getLegalActions,
     /**
@@ -244,6 +254,7 @@ vi.mock("../ws-adapter", () => ({
 const mockSubmitAction = mocks.submitAction;
 const mockSubmitInteraction = mocks.submitInteraction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
+const mockEvaluateDeckFormatGate = mocks.evaluateDeckFormatGate;
 const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeHostGame = mocks.initializeMultiplayerHostGame;
@@ -327,6 +338,7 @@ vi.mock("../wasm-adapter", () => {
     submitAction: mocks.submitAction,
     submitInteraction: mocks.submitInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
+    evaluateDeckFormatGate: mocks.evaluateDeckFormatGate,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
     getSnapshot: mocks.getSnapshot,
@@ -362,6 +374,7 @@ beforeEach(() => {
   mockInitialize.mockClear();
   mockSubmitAction.mockClear();
   mockCheckDeckCompatibility.mockClear();
+  mockEvaluateDeckFormatGate.mockClear();
   mockGetViewerSnapshot.mockClear();
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
@@ -485,6 +498,59 @@ function twoHeadedGiantConfig(): FormatConfig {
     default_deck_copy_limit: { type: "Unlimited" },
     uses_commander: false,
     allow_debug_actions: false,
+  };
+}
+
+/**
+ * An active Custom-format config, shaped exactly as the engine's
+ * `FormatConfig::for_custom_rules` derives it from a saved Axis-A definition:
+ * `format` is the `"Custom:<id>"` wire string, and `custom_rules.id` matches.
+ * `CustomFormatId(0)` is the reserved lobby-save sentinel every Axis-A save
+ * carries.
+ */
+function customFormatConfig(): FormatConfig {
+  return {
+    format: "Custom:0",
+    starting_life: 20,
+    min_players: 2,
+    max_players: 2,
+    deck_size: { type: "Minimum", data: 60 },
+    singleton: false,
+    command_zone: false,
+    commander_damage_threshold: null,
+    range_of_influence: null,
+    team_based: false,
+    sideboard_policy: { type: "Limited", data: 15 },
+    default_deck_copy_limit: { type: "UpTo", data: 4 },
+    uses_commander: false,
+    supplies_fixed_deck: false,
+    allow_debug_actions: false,
+    custom_rules: {
+      id: 0,
+      structural: {
+        starting_life: 20,
+        min_players: 2,
+        max_players: 2,
+        deck_size: { type: "Minimum", data: 60 },
+        singleton: false,
+        command_zone_mode: "Disabled",
+        range_of_influence: null,
+        team_based: false,
+        sideboard_policy: { type: "Limited", data: 15 },
+        default_deck_copy_limit: { type: "UpTo", data: 4 },
+      },
+      legality: {
+        legal_sets: null,
+        banned: [],
+        restricted: [],
+        legacy: {
+          mana_burn: "Modern",
+          damage_timing: "Modern",
+          wish_scope: "PostM10SideboardOnly",
+          legend_rule_scope: "Modern",
+        },
+      },
+    },
   };
 }
 
@@ -1018,9 +1084,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   it("rejects a non-Oathbreaker guest signature spell before game setup", async () => {
-    mockCheckDeckCompatibility.mockResolvedValueOnce({
-      selected_format_compatible: false,
-      selected_format_reasons: ["Commander does not use a signature spell slot"],
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({
+      compatible: false,
+      reasons: ["Commander does not use a signature spell slot"],
     });
     const { adapter, emitConnection } = makeHost(2, 5_000, commanderConfig());
     await adapter.initialize();
@@ -1039,7 +1105,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
     await flushPromises(20);
 
-    expect(mockCheckDeckCompatibility).toHaveBeenCalledWith({
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith({
       main_deck: ["Plains"],
       sideboard: [],
       commander: ["Legal Commander"],
@@ -1047,6 +1113,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       signature_spell: ["Invalid Signature Spell"],
       selected_format: "Commander",
     });
+    // The UI-hint function must not be what decides a kick.
+    expect(mockCheckDeckCompatibility).not.toHaveBeenCalled();
     expect(mockInitializeHostGame).not.toHaveBeenCalled();
 
     const kicked = (await guest.getSentMessages()).find(
@@ -1061,6 +1129,101 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       format: "Commander",
     });
     expect(guest.open).toBe(false);
+  });
+
+  it("admits a legal guest deck through the format gate without kicking", async () => {
+    // Positive reach-guard for the two assertions below: it proves the guest
+    // actually reached `validateGuestDeck` (the gate was called with this
+    // deck), so the "not kicked" assertion cannot pass vacuously by the guest
+    // never being validated at all.
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({ compatible: true, reasons: [] });
+    const { adapter, emitConnection } = makeHost(2, 5_000, commanderConfig());
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: {
+          main_deck: ["Plains"],
+          sideboard: [],
+          commander: ["Legal Commander"],
+          companion: [],
+          signature_spell: [],
+        },
+      },
+    });
+    await flushPromises(20);
+
+    // The gate — NOT the shared UI-hint function — is what ran.
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith({
+      main_deck: ["Plains"],
+      sideboard: [],
+      commander: ["Legal Commander"],
+      companion: [],
+      signature_spell: [],
+      selected_format: "Commander",
+    });
+    expect(mockCheckDeckCompatibility).not.toHaveBeenCalled();
+
+    const messages = await guest.getSentMessages();
+    expect(messages.some((message) => (message as { type?: string }).type === "kick")).toBe(false);
+    expect(guest.open).toBe(true);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+    ]);
+  });
+
+  it("kicks a guest whose deck is for a Custom format the engine cannot evaluate", async () => {
+    // THE regression this whole split exists for. The shared
+    // `checkDeckCompatibility` deliberately answers "no opinion"
+    // (`selected_format_compatible: null`) for a Custom format, which the old
+    // `=== false` kick test would have read as "not illegal" — silently
+    // admitting every Custom-format guest deck. The dedicated gate returns a
+    // definite `false` instead, so the guest is kicked.
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({
+      compatible: false,
+      reasons: ["Custom format deck-compatibility checks are not yet supported."],
+    });
+    const { adapter, emitConnection } = makeHost(2, 5_000, customFormatConfig());
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: { main_deck: ["Plains"], sideboard: [] },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith({
+      main_deck: ["Plains"],
+      sideboard: [],
+      commander: [],
+      companion: [],
+      signature_spell: [],
+      selected_format: "Custom:0",
+    });
+    expect(mockCheckDeckCompatibility).not.toHaveBeenCalled();
+
+    const kicked = (await guest.getSentMessages()).find(
+      (message) =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "kick",
+    );
+    expect(kicked).toMatchObject({
+      type: "kick",
+      reason: "Deck rejected: Custom format deck-compatibility checks are not yet supported.",
+      format: "Custom:0",
+    });
+    // Session closed and the seat reverted to waiting.
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "WaitingHuman",
+    ]);
+    expect(mockInitializeHostGame).not.toHaveBeenCalled();
   });
 
   it("projects team metadata from wire SeatView into player slots", () => {
@@ -3631,14 +3794,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 37 → 36 and BOTH halves red: the v36 frame stops being
-  // refused, and the v37 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v36" is also satisfied by a client
+  // bump. Revert 40 → 39 and BOTH halves red: the v39 frame stops being
+  // refused, and the v40 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v39" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v36) and admits its own (v37)", async () => {
+  it("refuses the previous wire protocol (v39) and admits its own (v40)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(36));
+    await refusing.conn.simulateData(setupFrameAt(39));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3650,7 +3813,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(37));
+    await admitting.conn.simulateData(setupFrameAt(40));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

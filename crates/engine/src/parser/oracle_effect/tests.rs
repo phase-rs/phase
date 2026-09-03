@@ -7604,7 +7604,7 @@ fn opportunistic_dragon_loses_all_abilities_sibling_preserved() {
                 for modification in &static_def.modifications {
                     match modification {
                         ContinuousModification::RemoveAllAbilities
-                            if ability.duration == Some(Duration::UntilHostLeavesPlay) =>
+                            if ability.duration == Some(Duration::WhileHostOnBattlefield) =>
                         {
                             remove_all_abilities_with_host_duration = true;
                         }
@@ -7628,7 +7628,7 @@ fn opportunistic_dragon_loses_all_abilities_sibling_preserved() {
     assert!(has_gain_control, "expected GainControl in chain: {def:#?}");
     assert!(
             remove_all_abilities_with_host_duration,
-            "expected RemoveAllAbilities GenericEffect with UntilHostLeavesPlay (middle sibling dropped?): {def:#?}"
+            "expected RemoveAllAbilities GenericEffect with WhileHostOnBattlefield (middle sibling dropped?): {def:#?}"
         );
     assert!(
         has_cant_attack && has_cant_block,
@@ -28901,19 +28901,24 @@ fn for_as_long_as_remains_tapped() {
     );
 }
 
+/// CR 611.2b: the clause stripper keeps the host-lifetime wordings apart,
+/// because they end at different moments — continued control ends on a control
+/// change (CR 611.2b's own Master Thief example), continued presence does not,
+/// and both end on a phase-out (CR 702.26f) while the "until ~ leaves the
+/// battlefield" event deadline does not (CR 702.26d).
 #[test]
-fn for_as_long_as_you_control_maps_to_until_host_leaves() {
+fn for_as_long_as_you_control_is_the_control_bound_duration() {
     let (rest, dur) =
         strip_trailing_duration("target creature gets +2/+2 for as long as you control ~");
     assert_eq!(rest, "target creature gets +2/+2");
-    assert_eq!(dur, Some(Duration::UntilHostLeavesPlay));
+    assert_eq!(dur, Some(Duration::WhileControllingHost));
 }
 
 #[test]
-fn for_as_long_as_remains_on_battlefield_maps_to_until_host_leaves() {
+fn for_as_long_as_remains_on_battlefield_is_the_presence_bound_duration() {
     let (_, dur) =
         strip_trailing_duration("target gets +1/+1 for as long as ~ remains on the battlefield");
-    assert_eq!(dur, Some(Duration::UntilHostLeavesPlay));
+    assert_eq!(dur, Some(Duration::WhileHostOnBattlefield));
 }
 
 #[test]
@@ -30764,6 +30769,167 @@ fn effect_exchange_control_self_ref_slot() {
                 ),
                 "target_b should carry Non(Land) for 'nonland', got {:?}",
                 tf_b.type_filters
+            );
+        }
+        other => panic!("Expected ExchangeControl, got {other:?}"),
+    }
+}
+
+// =============================================================================
+// Cross-slot object-relative target binding (backlog root cause #27), Unit A —
+// T6a/T6b/T6c and T8's parser half.
+// =============================================================================
+
+#[test]
+fn t6a_puca_mischief_compound_rebinds_slot_b_referent_to_prior_target() {
+    // Puca's Mischief, verbatim Oracle text.
+    use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
+    let e = parse_effect(
+        "exchange control of target nonland permanent you control and target nonland \
+         permanent an opponent controls with equal or lesser mana value",
+    );
+    match e {
+        Effect::ExchangeControl { target_a, target_b } => {
+            let tf_a = match &target_a {
+                TargetFilter::Typed(tf) => tf,
+                _ => panic!("target_a should be Typed, got {target_a:?}"),
+            };
+            assert!(
+                tf_a.properties.is_empty(),
+                "target_a must carry NO Cmc prop — proves only slot B moved: {:?}",
+                tf_a.properties
+            );
+            let tf_b = match &target_b {
+                TargetFilter::Typed(tf) => tf,
+                _ => panic!("target_b should be Typed, got {target_b:?}"),
+            };
+            assert_eq!(
+                tf_b.properties,
+                vec![crate::types::ability::FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                }],
+                "target_b must carry Cmc{{LE, ObjectManaValue{{Target}}}} — the compound-slot \
+                 rebind — not the single-referent CostPaidObject default"
+            );
+        }
+        other => panic!("Expected ExchangeControl, got {other:?}"),
+    }
+}
+
+#[test]
+fn t6b_single_referent_relative_mana_value_outside_exchange_family_unaffected() {
+    // The dominant single-referent trigger/cost class (CR 608.2k) — NOT part
+    // of the exchange-control family — must keep defaulting to
+    // ObjectScope::CostPaidObject. Unit A's rebind is scoped to the compound
+    // exchange-control call site only.
+    use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
+    let e = parse_effect(
+        "return another target creature card with lesser mana value from your graveyard to the \
+         battlefield",
+    );
+    // Reach-guard (foot-gun #6): the effect must actually be the targeted
+    // ChangeZone, not a swallowed Unimplemented — otherwise the CostPaidObject
+    // assertion below would pass vacuously.
+    let Effect::ChangeZone {
+        target,
+        destination,
+        ..
+    } = &e
+    else {
+        panic!(
+            "expected Effect::ChangeZone, got {e:?} (parse likely fell through to Unimplemented)"
+        );
+    };
+    assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected a Typed target filter, got {target:?}");
+    };
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            crate::types::ability::FilterProp::Cmc {
+                comparator: Comparator::LT,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            }
+        )),
+        "single-referent class must still default to ObjectScope::CostPaidObject, got {:?}",
+        tf.properties
+    );
+}
+
+#[test]
+fn t6c_quantified_exchange_control_branch_does_not_rebind() {
+    // The quantified "two target Xs" branch clones ONE parsed filter for both
+    // slots; Unit A's rebind call site sits ONLY in the compound branch, so
+    // this shape must carry no Cmc prop introduced by the rebind machinery.
+    let e = parse_effect("exchange control of two target creatures");
+    match e {
+        Effect::ExchangeControl { target_a, target_b } => {
+            assert_eq!(
+                target_a, target_b,
+                "quantified shape: both filters identical"
+            );
+            let TargetFilter::Typed(tf) = &target_a else {
+                panic!("target_a should be Typed, got {target_a:?}");
+            };
+            assert!(
+                tf.properties.is_empty(),
+                "the quantified branch must introduce no Cmc/threshold prop: {:?}",
+                tf.properties
+            );
+            assert_ne!(target_a, TargetFilter::Any);
+        }
+        other => panic!("Expected ExchangeControl, got {other:?}"),
+    }
+}
+
+#[test]
+fn t8_self_ref_slot_a_guard_suppresses_the_compound_rebind() {
+    // Volatile Stormdrake / Avarice Totem shape with an explicit
+    // relative-mana-value suffix on slot B: "exchange control of this
+    // artifact and target nonland permanent with equal or lesser mana value".
+    // Slot A is SelfRef (no declared object target exists to bind to), so
+    // Unit A's guard must leave slot B's default CostPaidObject scope alone —
+    // rebinding it to ObjectScope::Target would make it resolve to slot B
+    // ITSELF (a self-referential, always-true-or-nonsensical comparison).
+    use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
+    let e = parse_effect(
+        "exchange control of this artifact and target nonland permanent with equal or lesser \
+         mana value",
+    );
+    match e {
+        Effect::ExchangeControl { target_a, target_b } => {
+            assert!(
+                matches!(target_a, TargetFilter::SelfRef),
+                "target_a (this artifact) should be SelfRef, got {target_a:?}"
+            );
+            let TargetFilter::Typed(tf_b) = &target_b else {
+                panic!("target_b should be Typed, got {target_b:?}");
+            };
+            assert!(
+                tf_b.properties.iter().any(|p| matches!(
+                    p,
+                    crate::types::ability::FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::CostPaidObject,
+                            },
+                        },
+                    }
+                )),
+                "with a SelfRef slot A, target_b must stay at the CostPaidObject default \
+                 (never rebound to Target), got {:?}",
+                tf_b.properties
             );
         }
         other => panic!("Expected ExchangeControl, got {other:?}"),

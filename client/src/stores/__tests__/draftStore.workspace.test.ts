@@ -99,6 +99,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
   return {
     status: "Drafting",
     kind: "Quick",
+    launch_capability: "None",
     pool,
     current_pack: [],
     draft_effects: [],

@@ -14,7 +14,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 584 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 3 | Anaphor bound to wrong referent | 403 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 238 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
@@ -38,7 +38,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
-| 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
+| 27 | Cross-target group / shared-quality constraint dropped | 19 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 13 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
@@ -1402,7 +1402,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (404 cards)
+### 3. Anaphor bound to wrong referent  (403 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k).
 
@@ -1736,7 +1736,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Soul Scourge
 - Soul Seizer
 - Spark of Creativity
-- Spawnbroker
 - Spectacular Showdown
 - Spectral Grasp
 - Spellbane Centaur
@@ -5004,7 +5003,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 27. Cross-target group / shared-quality constraint dropped  (16 cards)
+### 27. Cross-target group / shared-quality constraint dropped  (15 cards)
 
 **Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
 
@@ -5019,7 +5018,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Echoing Echo
 - Echoing Return
 - Eerie Ultimatum
-- Puca's Mischief
 - Rain of Riches
 - Rashmi, Eternities Crafter
 - Soundwave, Superior Captain

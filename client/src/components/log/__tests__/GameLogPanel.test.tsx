@@ -63,6 +63,15 @@ function setScrollMetrics(
   element.scrollTop = scrollTop;
 }
 
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+  window.dispatchEvent(new Event("resize"));
+}
+
 function snapshot(seq: number): EngineSnapshot {
   return {
     state: useGameStore.getState().gameState!,
@@ -73,14 +82,20 @@ function snapshot(seq: number): EngineSnapshot {
 
 describe("GameLogPanel", () => {
   beforeEach(() => {
+    setViewportWidth(1024);
     draggable.ref.current = null;
     useGameStore.getState().reset();
     useGameStore.setState({
       gameState: buildGameState({ waiting_for: buildPriorityWaitingFor() }),
       logHistory: [entry(0, "Initial event")],
     });
-    usePreferencesStore.setState({ logDefaultState: "closed" });
-    useUiStore.setState({ logPanelOpen: true, flexEditMode: false });
+    usePreferencesStore.setState({ logDefaultState: "closed", logDockSide: "right" });
+    useUiStore.setState({
+      logPanelOpen: true,
+      flexEditMode: false,
+      inspectedObjectId: null,
+      previewSticky: false,
+    });
   });
 
   afterEach(() => {
@@ -265,6 +280,63 @@ describe("GameLogPanel", () => {
     expect(useUiStore.getState().logPanelOpen).toBe(true);
     fireEvent.mouseDown(document.body);
     expect(useUiStore.getState().logPanelOpen).toBe(false);
+  });
+
+  it("persists a desktop dock-side swap and reserves the matching game rail", () => {
+    render(<GameLogPanel />);
+
+    const panel = screen.getByRole("region", { name: "Game log panel" });
+    expect(panel).toHaveClass("right-0", "border-l");
+    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("320px");
+    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dock game log on the left" }));
+
+    expect(usePreferencesStore.getState().logDockSide).toBe("left");
+    expect(panel).toHaveClass("left-0", "border-r");
+    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
+    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("320px");
+  });
+
+  it("keeps the narrow layout right-docked with its existing responsive width", () => {
+    setViewportWidth(800);
+    usePreferencesStore.setState({ logDockSide: "left" });
+
+    render(<GameLogPanel />);
+
+    const panel = screen.getByRole("region", { name: "Game log panel" });
+    expect(panel).toHaveClass("right-0", "border-l", "w-[min(20rem,100vw)]");
+    expect(screen.queryByRole("button", { name: /dock game log/i })).not.toBeInTheDocument();
+    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
+    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
+  });
+
+  it("clears both game-rail offsets when the panel unmounts", () => {
+    const { unmount } = render(<GameLogPanel />);
+
+    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("320px");
+    unmount();
+
+    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
+    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
+  });
+
+  it("opens a sticky preview when a card-name link is clicked", () => {
+    useGameStore.setState({
+      logHistory: [
+        entry(0, "", {
+          segments: [{ type: "CardName", value: { object_id: 42, name: "Pithing Needle" } }],
+        }),
+      ],
+    });
+    render(<GameLogPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Pithing Needle" }));
+
+    expect(useUiStore.getState()).toMatchObject({
+      inspectedObjectId: 42,
+      previewSticky: true,
+    });
   });
 
   it("copies filtered entries with their translated context and announces success", async () => {

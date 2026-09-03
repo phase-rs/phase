@@ -916,6 +916,55 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   /**
+   * ENFORCING deck/format check. Always returns a DEFINITE verdict —
+   * `{ compatible: boolean, reasons: string[] }`, never a tri-state — backed by
+   * the same authoritative `validate_deck_for_format` the engine runs at game
+   * creation.
+   *
+   * For gate callers only (today: the P2P host's per-guest deck-kick check).
+   * UI-hint callers must keep using {@link checkDeckCompatibility}: that one
+   * deliberately answers "no opinion" for a Custom format, because the engine
+   * genuinely cannot evaluate Custom legality yet — the honest answer for a
+   * legality chip, and an unacceptable one for a kick decision.
+   */
+  async evaluateDeckFormatGate(request: unknown): Promise<unknown> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (this.engine) {
+      return this.engine.evaluateDeckFormatGate(request);
+    }
+    return this.fallback!.evaluateDeckFormatGate(request);
+  }
+
+  /**
+   * Axis A: ask the ENGINE to capture a lobby `FormatConfig` as a saved
+   * custom-format definition. Rejects (with the engine's own message) for a
+   * source format whose behavior cannot be represented — Planechase, Archenemy,
+   * Momir, an already-Custom source, or an empty name. Needs no card database.
+   */
+  async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
+    await this.initialize();
+    if (this.engine) {
+      return this.engine.customFormatFromLobbyConfig(name, formatConfig);
+    }
+    return this.fallback!.customFormatFromLobbyConfig(name, formatConfig);
+  }
+
+  /**
+   * The single authoritative `CustomFormatRules -> FormatConfig` resolver.
+   * Total and infallible. Never assemble a Custom `FormatConfig` client-side:
+   * the engine re-derives it with this same function on deserialization and
+   * rejects anything that differs. Needs no card database.
+   */
+  async formatConfigForCustomRules(customRules: unknown): Promise<unknown> {
+    await this.initialize();
+    if (this.engine) {
+      return this.engine.formatConfigForCustomRules(customRules);
+    }
+    return this.fallback!.formatConfigForCustomRules(customRules);
+  }
+
+  /**
    * Display-only card queries share the authoritative engine worker and its
    * resident card database. Keeping these off the main-thread runtime avoids a
    * second WASM module + corpus allocation when card UI mounts during gameplay.
@@ -1143,6 +1192,9 @@ interface MainThreadFallback {
   ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
+  evaluateDeckFormatGate(request: unknown): Promise<unknown>;
+  customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown>;
+  formatConfigForCustomRules(customRules: unknown): Promise<unknown>;
   getCardFaceData(cardName: string): Promise<unknown>;
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
@@ -1376,6 +1428,17 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     // `ensureCardDatabase` (engineRuntime), so the query reads it directly.
     evaluateDeckCompatibility: (request: unknown) =>
       enqueue(() => wasm.evaluate_deck_compatibility_js(request)),
+
+    // The ENFORCING sibling — distinct binding, never the one above, so this
+    // fallback cannot silently inherit the UI-hint path's Custom downgrade.
+    evaluateDeckFormatGate: (request: unknown) =>
+      enqueue(() => wasm.evaluateDeckFormatGate(request)),
+
+    customFormatFromLobbyConfig: (name: string, formatConfig: unknown) =>
+      enqueue(() => wasm.customFormatFromLobbyConfig(name, formatConfig)),
+
+    formatConfigForCustomRules: (customRules: unknown) =>
+      enqueue(() => wasm.formatConfigForCustomRules(customRules)),
 
     getCardFaceData: (cardName: string) =>
       enqueue(() => wasm.get_card_face_data(cardName)),

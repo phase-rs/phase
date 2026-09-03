@@ -163,6 +163,7 @@ type BuilderView = NonNullable<NonNullable<Parameters<typeof LimitedDeckBuilder>
 const TEST_VIEW: BuilderView = {
   status: "Deckbuilding",
   kind: "Quick",
+  launch_capability: "None",
   current_pack_number: 1,
   pick_number: 1,
   pass_direction: "Left",

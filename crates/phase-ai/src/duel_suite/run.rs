@@ -8,14 +8,15 @@
 //! [`SuiteReport::deterministic_core`].
 
 use std::collections::{HashMap, HashSet};
-use std::io::BufWriter;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -146,6 +147,51 @@ impl SuiteReport {
                 .collect(),
         }
     }
+
+    /// Matchups that failed their own `Expected` check, judged without reference to any
+    /// baseline.
+    ///
+    /// This is a different question from `CompareReport::any_fail`, which asks "did this
+    /// change make things worse than the baseline". This one asks "is this run fit to
+    /// *become* the baseline" — and only `SuiteStatus::Fail` disqualifies it.
+    ///
+    /// `SuiteStatus::Open` does not, and it has two producers, not one: `Expected::Open`
+    /// is how a matchup declares it has no verdict yet, and `classify` also returns `Open`
+    /// for any matchup with zero games before it ever inspects `Expected`. Neither is a
+    /// failure, so anything keyed on `!= Pass` would conflate a declared no-verdict with a
+    /// regression. The zero-game case is disqualifying for a different reason and is caught
+    /// by `recorded_games`, not here.
+    pub fn failing_matchups(&self) -> impl Iterator<Item = &MatchupResult> {
+        self.results
+            .iter()
+            .filter(|result| result.status == SuiteStatus::Fail)
+    }
+
+    /// Games actually recorded across every matchup.
+    ///
+    /// A report with none is unfit to become a baseline whatever its statuses say:
+    /// comparison pairs by seed, so a baseline holding no games makes every later
+    /// comparison score zero on every axis and the drift signal dies silently — the same
+    /// false-green this guard exists to prevent, arrived at from the other side.
+    ///
+    /// Deliberately counts games rather than checking for all-`Open`: a suite whose
+    /// matchups are all declared `Expected::Open` still records real games, and such a
+    /// report *is* a usable baseline, because the paired-comparison arm decides on `games`,
+    /// not on `status` — an all-`Open` pair therefore still detects outcome drift. (Stated
+    /// as "decides on games" rather than "never reads status": the paired arm gained status
+    /// tiers in #7026, so the stronger wording would have been false the day that merged.)
+    /// Zero games is the property that makes a baseline inert; all-`Open` is not.
+    ///
+    /// Not an exhaustive list of routes, so it does not claim to be one: `--games 0` is
+    /// refused at parse time, a `--suite-filter` matching no matchups lands here, and
+    /// `failed_result` yields an empty `games` vector alongside `SuiteStatus::Fail`, which
+    /// `failing_matchups` reports first because it names the actual setup error. And this is
+    /// a `pub` method, so its audience includes library callers: `SuiteOptions::new` does not
+    /// validate `games_per_matchup`, so a caller can construct a zero-game run without going
+    /// through the CLI at all.
+    pub fn recorded_games(&self) -> usize {
+        self.results.iter().map(|result| result.games.len()).sum()
+    }
 }
 
 /// Controls decision-trace attribution capture during a suite run. When set
@@ -159,12 +205,28 @@ pub enum AttributionMode {
     Enabled,
 }
 
+/// Where a suite run's report is written.
+///
+/// `Reserved` exists because a path is not an identity: an entry that replaces the name after it
+/// was reserved would be followed (symlink) or shared (hard link) by a writer that reopens it.
+/// Holding the descriptor the reservation returned removes the question — the variant carries no
+/// path to reopen.
+#[derive(Debug)]
+pub enum ReportSink {
+    /// Create (truncating) at this path when the report is written.
+    Create(PathBuf),
+    /// Write through a descriptor the caller already opened, positioned at offset 0. The report
+    /// replaces whatever the handle refers to; the handle need not be empty.
+    Reserved(File),
+}
+
 #[derive(Debug)]
 pub struct SuiteOptions {
     pub difficulty: AiDifficulty,
     pub games_per_matchup: usize,
     pub base_seed: u64,
-    pub output_path: PathBuf,
+    /// Destination for the run's JSON report.
+    pub output: ReportSink,
     /// Comma-separated list of id substrings; a matchup is run if its id
     /// contains *any* of them (e.g. `"red-mirror,affinity-mirror"` runs both).
     /// `None` runs every matchup. A single substring keeps the legacy behavior.
@@ -184,7 +246,7 @@ impl SuiteOptions {
             difficulty,
             games_per_matchup,
             base_seed,
-            output_path: PathBuf::from("target/duel-suite-results.json"),
+            output: ReportSink::Create(PathBuf::from("target/duel-suite-results.json")),
             filter: None,
             attribution: AttributionMode::Disabled,
             git_sha: None,
@@ -194,7 +256,7 @@ impl SuiteOptions {
     }
 }
 
-/// Run every registered matchup, write the report to `options.output_path`,
+/// Run every registered matchup, write the report to `options.output`,
 /// and return the in-memory report for the caller to print.
 pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteReport, std::io::Error> {
     let capture = match options.attribution {
@@ -439,6 +501,7 @@ fn run_games_parallel(
                             // Parallel path never harvests (harvesting forces the
                             // sequential branch in `run_all_matchups`).
                             let (game, elapsed_ms) = play_reported_game(
+                                db,
                                 spec,
                                 payload,
                                 options,
@@ -505,7 +568,7 @@ fn finalize_report(
         results,
     };
 
-    write_report(&report, &options.output_path)?;
+    write_report(&report, &options.output)?;
     print_markdown_table(&report);
 
     Ok(report)
@@ -559,6 +622,7 @@ fn winner_label(winner: Option<PlayerId>) -> &'static str {
 /// this function itself makes scheduling-dependent, and it is excluded from
 /// [`SuiteReport::deterministic_core`].
 fn play_reported_game(
+    db: &CardDatabase,
     spec: &MatchupSpec,
     payload: &DeckPayload,
     options: &SuiteOptions,
@@ -582,9 +646,13 @@ fn play_reported_game(
         // records, partial buffer dropped with the harvester).
         let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game_observed(payload, seed, options.difficulty, &mut |state, session| {
-                harvester.observe(state, session)
-            })
+            run_game_observed(
+                db,
+                payload,
+                seed,
+                options.difficulty,
+                &mut |state, session| harvester.observe(state, session),
+            )
         }));
         let (winner, turns) = match outcome {
             Ok(result) => result,
@@ -602,7 +670,7 @@ fn play_reported_game(
         (winner, turns)
     } else {
         match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_game(payload, seed, options.difficulty)
+            run_game(db, payload, seed, options.difficulty)
         })) {
             Ok(result) => result,
             Err(_) => {
@@ -697,6 +765,7 @@ fn run_single_matchup(
     let mut total_duration_ms: u128 = 0;
     for game_idx in 0..options.games_per_matchup {
         let (game, elapsed_ms) = play_reported_game(
+            db,
             spec,
             &payload,
             options,
@@ -811,8 +880,13 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
     )
 }
 
-fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
-    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+fn run_game(
+    db: &CardDatabase,
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+) -> (Option<PlayerId>, u32) {
+    drive_game(Some(db), payload, seed, difficulty, MAX_TOTAL_ACTIONS)
 }
 
 /// [`run_game`]'s observing sibling — same `MAX_TOTAL_ACTIONS` cap, so harvested
@@ -820,22 +894,37 @@ fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Opti
 /// the action cap in lockstep with `run_game` is what guarantees no drift between
 /// the two paths.
 fn run_game_observed(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
     observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
 ) -> (Option<PlayerId>, u32) {
-    drive_game_observed(payload, seed, difficulty, MAX_TOTAL_ACTIONS, observe)
+    drive_game_observed(
+        Some(db),
+        payload,
+        seed,
+        difficulty,
+        MAX_TOTAL_ACTIONS,
+        observe,
+    )
 }
 
 /// Deterministic core game driver shared by the win-rate suite and the perf
-/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// gate. Builds the two-player state through the canonical
+/// [`load_and_hydrate_decks`] init path (the same one the WASM bridge and
+/// server-core use), so dual-faced cards get their back faces and the
+/// `#[serde(skip)]` card-name pool behind `NamedChoice { CardName, .. }` is
+/// populated — with the bare loader, a Pithing Needle prompt leaves the AI
+/// with zero legal actions and the game records a draw. `db` is `Option`
+/// only for db-free unit tests; every runner passes `Some`. Installs
+/// measurement-mode AI configs, and
 /// loops `run_ai_actions` until the action stream is empty or `action_cap` total
 /// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
 /// realized count may overshoot the cap within a batch — identical semantics to
 /// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
 /// result `(winner, turn_number)` is a function of
-/// `(binary, payload, seed, difficulty, action_cap)` and nothing this function
+/// `(binary, db, payload, seed, difficulty, action_cap)` and nothing this function
 /// itself reads. `projection.rs`'s wall-clock projection cap is now gated on
 /// measurement mode (`projection::projection_deadline` returns
 /// `Deadline::none()` under `ExecutionMode::Measurement`), so projections here
@@ -843,6 +932,7 @@ fn run_game_observed(
 /// targets. The remaining run-to-run caveat is `RandomState` iteration order
 /// (#4878) — see the notes at the top of [`super::perf`].
 pub(crate) fn drive_game(
+    db: Option<&CardDatabase>,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -852,7 +942,7 @@ pub(crate) fn drive_game(
     // per `run_ai_actions` *batch* (a batch spans many engine applies), so at
     // measurement granularity this is perf-neutral vs the historical body — the
     // unchanged `ai-perf-gate` baseline is the witness.
-    drive_game_observed(payload, seed, difficulty, action_cap, &mut |_, _| {})
+    drive_game_observed(db, payload, seed, difficulty, action_cap, &mut |_, _| {})
 }
 
 /// [`drive_game`] with an observer seam: `observe(&state, &ai_session)` fires
@@ -861,6 +951,7 @@ pub(crate) fn drive_game(
 /// planner consumes. With a no-op closure the results are byte-identical to the
 /// historical `drive_game` body.
 pub(crate) fn drive_game_observed(
+    db: Option<&CardDatabase>,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -868,7 +959,7 @@ pub(crate) fn drive_game_observed(
     observe: &mut dyn FnMut(&GameState, &std::sync::Arc<crate::session::AiSession>),
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    load_and_hydrate_decks(&mut state, payload, db);
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -906,13 +997,31 @@ pub(crate) fn drive_game_observed(
     (winner, state.turn_number)
 }
 
-fn write_report(report: &SuiteReport, path: &Path) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn write_report(report: &SuiteReport, sink: &ReportSink) -> Result<(), std::io::Error> {
+    match sink {
+        ReportSink::Create(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            write_through(&File::create(path)?, report)
+        }
+        ReportSink::Reserved(file) => write_through(file, report),
     }
-    let file = std::fs::File::create(path)?;
-    serde_json::to_writer_pretty(BufWriter::new(file), report).map_err(std::io::Error::other)?;
-    Ok(())
+}
+
+/// Serialize into an already-open handle and put it on disk.
+fn write_through(file: &File, report: &SuiteReport) -> Result<(), std::io::Error> {
+    // The report replaces the file's contents, so a shorter report must not leave the tail of a
+    // longer one behind. This is what lets any caller hand this function a destination rather
+    // than only an empty file.
+    file.set_len(0)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, report).map_err(std::io::Error::other)?;
+    // `BufWriter`'s drop-flush discards its error, so a short write would otherwise return Ok
+    // over a truncated report; and the bytes must be on disk before a caller renames this file
+    // into place.
+    writer.flush()?;
+    file.sync_all()
 }
 
 fn print_matchup_row(r: &MatchupResult) {
@@ -1082,6 +1191,128 @@ mod tests {
         }
     }
 
+    /// Reuses `report_with_timing`'s matchup as the field template so these tests state
+    /// only the axes they exercise: each matchup's status and reason.
+    fn report_with_statuses(statuses: &[(&str, SuiteStatus, Option<&str>)]) -> SuiteReport {
+        let mut report = report_with_timing(1, 100);
+        let template = report.results[0].clone();
+        report.results = statuses
+            .iter()
+            .map(|(id, status, reason)| MatchupResult {
+                matchup_id: (*id).to_string(),
+                status: *status,
+                fail_reason: reason.map(str::to_string),
+                ..template.clone()
+            })
+            .collect();
+        report
+    }
+
+    #[test]
+    fn a_clean_run_has_no_failing_matchups() {
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("affinity-mirror", SuiteStatus::Pass, None),
+        ]);
+
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
+    /// Transcribed from the recorded gate run that motivated this guard (`.ab/noC-1.json`,
+    /// the A+B+D leg of #6969): the statuses and the verbatim `fail_reason` are that run's,
+    /// not invented. Refreshing the baseline from this exact report is what would have
+    /// blessed a broken matchup permanently. The artifact is untracked, so it is
+    /// transcribed rather than loaded — a test that read the file would fail in CI.
+    #[test]
+    fn the_recorded_failing_run_is_disqualified_as_a_baseline() {
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("affinity-mirror", SuiteStatus::Pass, None),
+            (
+                "enchantress-mirror",
+                SuiteStatus::Fail,
+                Some("mirror imbalance: p0=0.10, Wilson 95% CI [0.02, 0.40] excludes 0.50"),
+            ),
+        ]);
+
+        let failing: Vec<_> = report.failing_matchups().collect();
+        assert_eq!(failing.len(), 1, "the one Fail, not every matchup");
+        assert_eq!(failing[0].matchup_id, "enchantress-mirror");
+        // The reason travels with the matchup: the refusal is only actionable if it can say
+        // *why* the run is unfit, not merely that it is.
+        assert_eq!(
+            failing[0].fail_reason.as_deref(),
+            Some("mirror imbalance: p0=0.10, Wilson 95% CI [0.02, 0.40] excludes 0.50")
+        );
+    }
+
+    /// The discriminating case for `recorded_games`: a suite whose matchups are all
+    /// declared `Expected::Open` still played real games, and that report IS a usable
+    /// baseline, because seed-paired drift detection never consults `status`. An
+    /// implementation that disqualified all-`Open` reports instead of gameless ones would
+    /// pass every other test here and fail this one.
+    #[test]
+    fn an_all_open_run_that_played_games_is_still_a_usable_baseline() {
+        let mut report = report_with_statuses(&[
+            ("experimental-a", SuiteStatus::Open, None),
+            ("experimental-b", SuiteStatus::Open, None),
+        ]);
+        // Uneven on purpose. With one game each, the total (2) equals the MATCHUP count, so
+        // "sum of games" and "number of matchups that played" are indistinguishable — two
+        // mutants with that wrong contract survived the earlier version of this test. Three
+        // games across two matchups separates them.
+        let extra = report.results[0].games[0].clone();
+        report.results[0].games.push(GameResult {
+            seed: extra.seed + 1,
+            ..extra
+        });
+
+        assert_eq!(report.failing_matchups().count(), 0);
+        assert_eq!(
+            report.recorded_games(),
+            3,
+            "two games in the first matchup plus one in the second — a SUM, not a matchup count"
+        );
+    }
+
+    #[test]
+    fn a_gameless_run_records_nothing_however_many_matchups_it_has() {
+        let mut report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Open, None),
+            ("affinity-mirror", SuiteStatus::Open, None),
+        ]);
+        // What `--games 0` produces: matchups exist, none of them played anything.
+        for result in &mut report.results {
+            result.games.clear();
+        }
+
+        assert_eq!(report.recorded_games(), 0);
+        // And it is NOT a failure — the two disqualifiers are independent, so a guard that
+        // conflated them would let one of the two holes back open.
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
+    #[test]
+    fn a_run_that_selected_no_matchups_records_nothing() {
+        // What a `--suite-filter` matching nothing produces: no matchups at all.
+        let report = report_with_statuses(&[]);
+
+        assert_eq!(report.recorded_games(), 0);
+    }
+
+    #[test]
+    fn an_open_matchup_is_not_a_failure() {
+        // `Expected::Open` classifies as `SuiteStatus::Open`: a matchup that has no verdict
+        // yet, which must not block a refresh. This is the test that dies if the filter is
+        // ever written as the plausible `!= SuiteStatus::Pass` — the other two survive it.
+        let report = report_with_statuses(&[
+            ("red-mirror", SuiteStatus::Pass, None),
+            ("experimental-mirror", SuiteStatus::Open, None),
+        ]);
+
+        assert_eq!(report.failing_matchups().count(), 0);
+    }
+
     #[test]
     fn deterministic_core_excludes_wall_clock_fields() {
         let first = report_with_timing(1, 100);
@@ -1243,11 +1474,118 @@ mod tests {
     fn observer_seam_is_inert_for_noop_observer() {
         let payload = DeckPayload::default();
         let seed = 4242;
-        let baseline = drive_game(&payload, seed, AiDifficulty::Easy, 200);
-        let observed = drive_game_observed(&payload, seed, AiDifficulty::Easy, 200, &mut |_, _| {});
+        let baseline = drive_game(None, &payload, seed, AiDifficulty::Easy, 200);
+        let observed = drive_game_observed(
+            None,
+            &payload,
+            seed,
+            AiDifficulty::Easy,
+            200,
+            &mut |_, _| {},
+        );
         assert_eq!(
             baseline, observed,
             "no-op observer must not perturb (winner, turns)"
         );
+    }
+
+    /// A reserved sink writes into the inode it was handed, never into whatever its former path
+    /// names now.
+    ///
+    /// Guards the finding that the writer reopened the staging path by name: an entry placed
+    /// there after the reservation was followed (symlink) or shared (hard link), so the report
+    /// landed on a file the run never chose.
+    #[cfg(unix)]
+    #[test]
+    fn a_reserved_sink_writes_through_its_descriptor_after_the_path_is_replaced() {
+        const VICTIM: &str = "VICTIM-BYTES";
+        let report = report_with_timing(1, 1);
+
+        for kind in ["symlink", "hardlink"] {
+            let dir = std::env::temp_dir()
+                .join(format!("phase-reserved-sink-{kind}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+
+            let victim = dir.join("victim.json");
+            std::fs::write(&victim, VICTIM).expect("seed victim");
+
+            let reserved_path = dir.join("report.staging.json");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&reserved_path)
+                .expect("reserve staging");
+            // A second name for the reserved inode, so it stays readable once its own name is
+            // taken away below.
+            let witness = dir.join("witness.json");
+            std::fs::hard_link(&reserved_path, &witness).expect("witness link");
+
+            std::fs::remove_file(&reserved_path).expect("drop the reserved name");
+            if kind == "symlink" {
+                std::os::unix::fs::symlink(&victim, &reserved_path).expect("symlink");
+            } else {
+                std::fs::hard_link(&victim, &reserved_path).expect("hard link");
+            }
+
+            // PREMISE: the replacement really does redirect that name at the victim, and the
+            // reserved inode is still empty — so neither assertion below can pass vacuously.
+            assert_eq!(
+                std::fs::read_to_string(&reserved_path).expect("read through replacement"),
+                VICTIM,
+                "{kind}: the replacement must resolve to the victim"
+            );
+            assert!(
+                std::fs::read_to_string(&witness)
+                    .expect("read witness")
+                    .is_empty(),
+                "{kind}: the reserved inode must still be empty"
+            );
+
+            write_report(&report, &ReportSink::Reserved(file)).expect("reserved write");
+
+            assert_eq!(
+                std::fs::read_to_string(&victim).expect("read victim"),
+                VICTIM,
+                "{kind}: the reserved sink followed its replaced path onto the victim"
+            );
+            let landed: SuiteReport =
+                serde_json::from_str(&std::fs::read_to_string(&witness).expect("read witness"))
+                    .expect("the reserved inode must hold the report");
+            assert_eq!(landed.results[0].matchup_id, "red-mirror");
+
+            // CONTROL, same fixture, other arm: opening that path by name DOES reach the victim,
+            // which is what makes the survival above a property of the retained descriptor
+            // rather than of an inert fixture.
+            write_report(&report, &ReportSink::Create(reserved_path)).expect("create write");
+            assert_ne!(
+                std::fs::read_to_string(&victim).expect("read victim"),
+                VICTIM,
+                "{kind}: the fixture is inert — writing by name did not reach the victim"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // A reserved handle is only positioned at offset 0, not necessarily empty. The report
+        // replaces the contents, so no tail of a longer predecessor may survive it.
+        let dir =
+            std::env::temp_dir().join(format!("phase-reserved-sink-padded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let padded = dir.join("padded.json");
+        std::fs::write(&padded, "A".repeat(64 * 1024)).expect("seed padding");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&padded)
+            .expect("open padded");
+
+        write_report(&report, &ReportSink::Reserved(file)).expect("reserved write");
+
+        let landed: SuiteReport =
+            serde_json::from_str(&std::fs::read_to_string(&padded).expect("read padded"))
+                .expect("the padded file must parse as the report, with no tail left behind");
+        assert_eq!(landed.results[0].matchup_id, "red-mirror");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

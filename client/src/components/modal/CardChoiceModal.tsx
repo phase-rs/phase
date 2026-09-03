@@ -74,6 +74,8 @@ import {
 } from "./cardChoice/shared.tsx";
 import { manaValueOfObject } from "./cardChoice/manaValue.ts";
 import SelectableCardGrid from "./cardChoice/SelectableCardGrid.tsx";
+import { CardOrganizerToolbar } from "./cardChoice/CardOrganizerToolbar.tsx";
+import { useCardOrganizer } from "./cardChoice/useCardOrganizer.ts";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -498,6 +500,11 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       )
     : data.cards;
   const selectableCards = new Set(data.cards);
+  const { sort, setSort, query, setQuery, ordered: visibleCards } =
+    useCardOrganizer({
+      cards: displayedCards,
+      objects: objects ?? {},
+    });
   const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedOrder.length <= data.count
     : selectedOrder.length === data.count;
@@ -505,7 +512,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
 
   useEffect(() => {
     setSelectedOrder([]);
-  }, [data]);
+    setQuery("");
+  }, [data, setQuery]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -539,49 +547,64 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       subtitle={subtitle}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
-      <ScrollableCardStrip>
-        {displayedCards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const selectedIndex = selectedOrder.indexOf(id);
-          const isSelected = selectedIndex >= 0;
-          const isSelectable = selectableCards.has(id);
-          return (
-            <motion.button
-              key={id}
-              disabled={!isSelectable}
-              className={`relative shrink-0 rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-emerald-400/80"
-                  : isSelectable
-                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-                    : "cursor-not-allowed opacity-40 grayscale"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
-              onClick={() => isSelectable && toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {isOrdered
-                      ? formatTopdeckOrderLabel(selectedIndex, t)
-                      : t("cardChoice.badges.choose")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <CardOrganizerToolbar
+          className="mx-auto flex items-center gap-2 text-xs text-slate-300"
+          sort={sort}
+          onSortChange={setSort}
+          query={query}
+          onQueryChange={setQuery}
+          showSort={false}
+          showQuery
+        />
+        <ScrollableCardStrip>
+          {visibleCards.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            const selectedIndex = selectedOrder.indexOf(id);
+            const isSelected = selectedIndex >= 0;
+            const isSelectable = selectableCards.has(id);
+            return (
+              <motion.button
+                key={id}
+                disabled={!isSelectable}
+                className={`relative shrink-0 rounded-lg transition ${
+                  isSelected
+                    ? "z-10 ring-2 ring-emerald-400/80"
+                    : isSelectable
+                      ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                      : "cursor-not-allowed opacity-40 grayscale"
+                }`}
+                initial={{ opacity: 0, y: 60, scale: 0.85 }}
+                animate={{
+                  opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4,
+                  y: 0,
+                  scale: 1,
+                }}
+                transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+                whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+                onClick={() => isSelectable && toggleSelect(id)}
+                {...hoverProps(id)}
+              >
+                <CardImage
+                  {...objectImageProps(obj)}
+                  size="normal"
+                  className={CHOICE_CARD_IMAGE_CLASS}
+                />
+                {isSelected && (
+                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                    <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                      {isOrdered
+                        ? formatTopdeckOrderLabel(selectedIndex, t)
+                        : t("cardChoice.badges.choose")}
+                    </span>
+                  </div>
+                )}
+              </motion.button>
+            );
+          })}
+        </ScrollableCardStrip>
+      </div>
     </ChoiceOverlay>
   );
 }
@@ -3051,7 +3074,7 @@ function ManaSingleColorChoiceModal({
           ? t("cardChoice.manaColor.subtitleBatch")
           : t("cardChoice.manaColor.subtitle")
       }
-      widthClassName="w-fit max-w-full"
+      widthClassName="w-full lg:w-fit"
       maxWidthClassName="max-w-md"
       footer={
         <ConfirmButton
@@ -3061,7 +3084,7 @@ function ManaSingleColorChoiceModal({
         />
       }
     >
-      <div className="mx-auto flex w-fit items-center justify-center gap-3 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
+      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit lg:flex-nowrap sm:gap-5 sm:px-6 sm:py-6">
         {options.map((color, index) => {
           const isSelected = selected === color;
           return (
@@ -3077,6 +3100,7 @@ function ManaSingleColorChoiceModal({
               transition={{ delay: 0.05 + index * 0.05, duration: 0.25 }}
               whileHover={{ scale: 1.1 }}
               onClick={() => setSelected(isSelected ? null : color)}
+              aria-label={color}
             >
               <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="lg" />
             </motion.button>

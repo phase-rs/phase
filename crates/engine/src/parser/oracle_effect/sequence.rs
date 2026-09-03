@@ -582,15 +582,25 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
             {
                 super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
-            } else if cursor.optional
-                && super::lower::is_exile_until_cast_bottom_cleanup(
-                    &head_effect,
-                    &cursor.effect,
-                    &next.effect,
-                )
-            {
+            } else if super::lower::is_exile_until_cast_bottom_cleanup(
+                &head_effect,
+                &cursor.effect,
+                &next.effect,
+            ) {
+                // CR 608.2c + CR 701.13a: "the rest of those exiled cards" excludes
+                // the hit whether the cast is a resolution-time offer or a standing
+                // permission — the rewrite is a property of the WORDING, not of the
+                // cast's optionality, so it runs either way.
                 super::lower::normalize_exile_until_cast_bottom_cleanup(&mut next.effect);
-                cursor.else_ability = Some(Box::new(next.clone()));
+                // CR 608.2d: the decline branch exists only where there is a
+                // decline — a resolution-time optional cast. A lingering permission
+                // (The Day of the Doctor: "for as long as this Saga remains on the
+                // battlefield") is never accepted or declined as the ability
+                // resolves, so stashing an else branch would publish a second,
+                // unreachable copy of the cleanup to the chain scanners.
+                if cursor.optional {
+                    cursor.else_ability = Some(Box::new(next.clone()));
+                }
             }
             cursor.sub_ability = Some(Box::new(next));
             break;
@@ -4074,11 +4084,14 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                // CR 611.2 + CR 611.2a: "that permanent loses all abilities for
-                // as long as this creature remains on the battlefield" rider.
+                // CR 611.2b + CR 702.26f: "that permanent loses all abilities
+                // for as long as this creature remains on the battlefield"
+                // rider (Tishana's Tidebinder) — the printed wording is the
+                // presence-bound state reading, so the rider's effect ends on
+                // a phase-out of this creature, not only on its exit.
                 *existing = Some(CounterSourceRider::LosesAbilities {
                     static_def: source_static,
-                    duration: Box::new(Duration::UntilHostLeavesPlay),
+                    duration: Box::new(Duration::WhileHostOnBattlefield),
                 });
             }
         }
@@ -10046,9 +10059,11 @@ mod tests {
         );
     }
 
-    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga remains.
+    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga
+    /// remains — the presence-bound state reading, so a phase-out of the Saga
+    /// ends it (CR 702.26f).
     #[test]
-    fn tokens_goaded_continuation_after_create_token_until_host_leaves_play() {
+    fn tokens_goaded_continuation_after_create_token_while_host_on_battlefield() {
         let token_effect = Effect::Token {
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
@@ -10072,7 +10087,7 @@ mod tests {
                 &mut ParseContext::default(),
             ),
             Some(ContinuationAst::GoadLastCreated {
-                duration: Some(Duration::UntilHostLeavesPlay),
+                duration: Some(Duration::WhileHostOnBattlefield),
             })
         );
     }
@@ -10159,7 +10174,7 @@ mod tests {
                 end_cost: _,
             } => {
                 assert_eq!(*target, Some(TargetFilter::LastCreated));
-                assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+                assert_eq!(*duration, Some(Duration::WhileHostOnBattlefield));
                 assert!(static_abilities[0].modifications.iter().any(|m| matches!(
                     m,
                     ContinuousModification::AddStaticMode {

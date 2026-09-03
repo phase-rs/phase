@@ -11,7 +11,8 @@ helm install phase-server deploy/helm/phase-server -n phase --create-namespace \
   --set networkPolicy.ingressNamespaceLabels."kubernetes\.io/metadata\.name"=kube-system  # your Traefik's namespace
 ```
 
-Players enter `wss://phase.example.com/ws` in the client's Server picker.
+Players enter `wss://phase.example.com/ws` in the client's Server picker, or you can
+serve them the client too — see [Serving the web client](#serving-the-web-client).
 
 ## What the chart assumes about the server
 
@@ -94,6 +95,37 @@ Also give Prometheus a `retentionSize`, not just a `retention`. With node-local
 storage (k3s `local-path`, hostPath) the volume is the node's root filesystem,
 and a retention window sized for a quiet week fills the disk during a busy one —
 which evicts pods, this chart's included.
+
+## Game logs
+
+`logging.enabled` sets `PHASE_LOG_DIR` to `logging.dir` (default
+`/var/lib/phase-server/logs`, a subdirectory of the existing `data` PVC — no
+second or shared volume needed) and adds a `logs` sidecar (a small
+`nginxinc/nginx-unprivileged` static file server, autoindex on) that mounts
+just that subdirectory, read-only, from the same volume: it can list and serve
+log files but never touch `games.db`. The server writes the main log
+(`phase-server.log`) and one file pair per game (`games/<code>.*`) there; the
+per-game format depends on the running image — commits before `e2e5f0ae8`
+write flat text `games/<code>.log`, that commit and later write JSON-Lines
+`games/<code>.session.jsonl` + `games/<code>.events.jsonl` instead.
+
+Like `/admin`, this is never routed through the Ingress and has no
+NetworkPolicy ingress rule. Unlike `/admin`, that policy isn't the only thing
+standing between it and other pods: the sidecar binds `127.0.0.1` only, so
+the Service/pod-IP path is refused outright even with `networkPolicy.enabled:
+false` or a CNI that doesn't enforce NetworkPolicy at all. It's reachable
+only from an operator with cluster access, via `kubectl port-forward` (which
+tunnels into the pod's own network namespace, so the loopback bind doesn't
+block it):
+
+```bash
+kubectl -n <namespace> port-forward svc/<release>[-<ordinal>] 8080:<logging.server.port>
+curl http://127.0.0.1:8080/games/
+```
+
+Under `scaleOut`, logs are per-replica (each ordinal owns its own `data` PVC),
+so port-forward the specific ordinal's Service (`<release>-<ordinal>`) — same
+as reaching that ordinal's games.
 
 ## Behind Cloudflare
 
@@ -273,6 +305,49 @@ Two things worth knowing before reading the graph:
   restores them if the ordinal returns, whereas a pod held drained loses
   disconnected players' games to the 120 s reaper.
 
+## Serving the web client
+
+`web.enabled=true` adds an nginx sidecar serving the phase web client from the
+same hostname as the server, turning one install into a complete site instead of
+an endpoint players need a separate client for.
+
+```bash
+helm upgrade phase-server deploy/helm/phase-server -n phase \
+  --set web.enabled=true \
+  --set web.image.digest=sha256:<the SPA image you deployed> \
+  --set web.defaultMultiplayerServerUrl=wss://phase.example.com/ws
+```
+
+The digest is required; see [Building the image](#building-the-image) for the
+one case where you trade it for `web.image.followServerTag: true` instead.
+
+The site is then at `https://phase.example.com/`, and `/ws`, `/health` and
+`/p2p-draft-backup` still reach the server. `/admin` is deliberately not routed
+with or without the SPA — it stays operator-only over `kubectl port-forward`, so
+a request for it from the public edge lands on the site and 404s there.
+Routing rests on longest-prefix matching for the plain Ingress and on Traefik's
+default rule-length ordering under `scaleOut`;
+[`tests/assert-web-routing.sh`](tests/assert-web-routing.sh) asserts that every
+route the server actually mounts stays reachable, reading the router itself so a
+new server endpoint cannot be silently swallowed by the site's catch-all.
+
+`web.defaultMultiplayerServerUrl` is what new players' Server picker starts on.
+The chart renders it into a `/config.js` the client reads at startup, so a single
+generic image points at any deployment with no rebuild. Leave it empty and the
+bundle keeps its build-time default (the public lobby). A malformed address is
+ignored rather than seeded into every profile.
+
+**Keep the two images on one version.** A client accepts a lobby only within one
+protocol version of its own build, and the server advertises its number without
+being asked — so a web image two releases from its server yields a site that
+loads and then cannot connect. `web.image.tag` defaults to `image.tag`, so
+pinning the server pins both; override it only together.
+
+Only `/config.js` differs between deployments, and nginx serves it
+`must-revalidate` while the service worker is told never to precache it —
+otherwise a returning player's browser would keep answering from the copy baked
+into the image and never see the deployment's own.
+
 ## Building the image
 
 `ghcr.io/phase-rs/phase-server` is published for linux/amd64 and linux/arm64.
@@ -289,6 +364,59 @@ docker buildx build --platform linux/arm64 --build-arg PHASE_CHANNEL=release \
 `PHASE_CHANNEL=release` is what lets an empty data volume self-bootstrap.
 Pin `image.digest` in your values; `:latest`-style tags resolve stale on some
 k3s nodes.
+
+**The SPA image must be immutable, or you must say otherwise.** The SPA shares
+the server's pod, so an image that resolves to something unpullable takes `/ws`
+and `/health` down with the site. With `web.enabled: true` the chart refuses to
+render unless you make one of two choices:
+
+| your situation | set | what you get |
+| --- | --- | --- |
+| you manage upgrades yourself | `web.image.digest: sha256:…` | the exact bytes you tested, until you change them |
+| something bumps `image.tag` for you (release automation, GitOps sync) | `web.image.followServerTag: true` | the SPA moves with the server, staying inside one protocol step by construction |
+
+`followServerTag` requires `image.tag`, and the render fails without it. It makes
+the SPA use the server's tag, and with `image.tag` empty that falls back to
+`v<Chart.appVersion>` — a constant this chart carries, not the release you are
+deploying — for which no `phase-web` image is published at all. Pin a digest
+instead if you deploy on chart defaults.
+
+They are mutually exclusive, and so are `followServerTag` and an explicit
+`web.image.tag`. A digest wins over a tag in an image reference, so allowing both
+would render `phase-web:v0.72.0@sha256:<the v0.71.0 image>` — a reference that
+names one version and runs another, which is the version-skew failure above
+wearing a correct-looking tag. The chart fails the render and says which one to
+drop rather than resolving it silently.
+
+If you pin a digest, **bump it when you bump `image.tag`.** Nothing does it for
+you: a digest does not move when the server does, and once the two drift past two
+releases the site loads and then cannot connect.
+
+`web.image.repository` defaults to `ghcr.io/phase-rs/phase-web`. The job that
+publishes it ships separately from this chart (touching a workflow makes a whole
+PR maintainer-only), so until that lands, point the value at your own build —
+`web.enabled` is false by default, so nothing resolves the image until you opt
+in. It is a static bundle over `nginx-unprivileged`, carrying no nginx.conf of
+its own because the chart mounts one, so building it is a client build plus a
+copy:
+
+```bash
+docker buildx create --use --driver docker-container --bootstrap   # once
+IMAGE=<you>/phase-web:v0.59.0 ./scripts/build-selfhost-web.sh --push
+```
+
+A `docker-container` builder is required: Docker's default driver cannot build
+multi-platform at all, and a two-platform result has nowhere to go locally, so
+`--push` is not optional either. The script checks both before it starts rather
+than after the client build.
+
+It sets the data-plane URLs, strips the JSONs it just pointed elsewhere, and
+builds both architectures. It bundles `client/public/card-data.json` when you have
+generated one, which is the pool your own engine parses. Without it the client
+reads the shared copy, which tracks upstream's releases rather than your checkout
+— and because that copy is not content-addressed, the service worker may serve a
+cached one for up to 30 days after upstream updates it. Generate your own if that
+matters to you.
 
 ## Values
 
