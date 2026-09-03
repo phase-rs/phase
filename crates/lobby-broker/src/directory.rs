@@ -631,8 +631,13 @@ pub struct CounterBucket {
     pub announced_players_max: u32,
 }
 
-/// Every live bucket for one server. Bounded at 24 entries by the window: the
-/// fold drops buckets that have decayed to zero weight.
+/// Every live bucket for one server.
+///
+/// Bounded at one window's worth of entries — 24 at the default hour-wide
+/// bucket — but only because the Worker's writers prune it: [`score`] itself
+/// merely SKIPS a decayed bucket, so the bound is a property of the write
+/// path, not of this type. Both TypeScript writers drop zero-weight buckets
+/// before storing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCounters {
     pub buckets: Vec<CounterBucket>,
@@ -1118,13 +1123,16 @@ mod tests {
             }
         );
 
-        // Two more multi-field documents, so the precedence is pinned across
+        // Three more multi-field documents, so the precedence is pinned across
         // the whole order rather than only at its head. Together with the
         // both-`mode`-and-`server_version` case above and the case
-        // immediately above, four of the six ordered pairs are asserted:
+        // immediately above, five of the six ordered pairs are asserted:
         // `mode` before `server_version`, `mode` before `protocol_version`,
-        // `server_version` before `lobby_protocol_version`, and
-        // `protocol_version` before `lobby_protocol_version`.
+        // `server_version` before `protocol_version`, `server_version` before
+        // `lobby_protocol_version`, and `protocol_version` before
+        // `lobby_protocol_version`. The sixth, `mode` before
+        // `lobby_protocol_version`, follows from the other five by
+        // transitivity, so the four `if`s admit exactly one ordering.
         let mut mode_and_protocol = matching_info();
         mode_and_protocol.mode = ServerMode::LobbyOnly;
         mode_and_protocol.protocol_version = 54;
@@ -1140,6 +1148,19 @@ mod tests {
         version_and_lobby_protocol.lobby_protocol_version = 3;
         assert_eq!(
             compare_announcement_to_info(&announcement, &version_and_lobby_protocol),
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::ServerVersion
+            }
+        );
+
+        // The adjacent pair the other cases leave open: without it, swapping
+        // the `server_version` and `protocol_version` arms passes every other
+        // assertion here.
+        let mut version_and_protocol = matching_info();
+        version_and_protocol.server_version = "0.9.0".to_string();
+        version_and_protocol.protocol_version = 54;
+        assert_eq!(
+            compare_announcement_to_info(&announcement, &version_and_protocol),
             InfoMatch::Mismatch {
                 field: InfoMismatchField::ServerVersion
             }

@@ -314,8 +314,14 @@ local_resource('pnpm-preflight',
 # a mktemp dir, so it cannot contend for a build lock.
 local_resource('lobby-servers',
     cmd = 'bash scripts/lib/lobby_servers_tests.sh',
+    # Every file the gate READS, not just the ones it tests: the delta
+    # computation greps protocol.rs and V-U8e greps the Helm chart, so editing
+    # the chart to drop "/info" must re-trigger this resource -- that reverse
+    # direction is the whole point of the assertion.
     deps = ['scripts/lobby-servers.sh', 'scripts/lib/lobby_servers_tests.sh',
-            'crates/lobby-broker/src/directory.rs'],
+            'crates/lobby-broker/src/directory.rs',
+            'crates/lobby-broker/src/protocol.rs',
+            'deploy/helm/phase-server/templates/ingress.yaml'],
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,

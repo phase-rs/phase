@@ -143,14 +143,16 @@ type ValidationVerdict =
  *  fact: no usable document came back. */
 type InfoFetch = { kind: "ok"; text: string } | { kind: "unreachable" } | { kind: "too_large" };
 
-/** Bindings the Durable Object reads. Declared here and inherited by the
- *  Worker entry's `Env`, so the binding list has one home.
+/** UTF-8 byte length of a string the Worker has already read.
  *
- *  Both are optional, and they fail in OPPOSITE directions on purpose:
- *  without `TELEMETRY` the Analytics Engine mirror no-ops (fail-open, as it
- *  already did for client telemetry), while without `SERVER_ALLOWLIST` the
- *  directory lists nobody (fail-closed — an unconfigured directory must not
- *  publish an unvetted list of everyone who announced). */
+ *  `text.length` counts UTF-16 code units, and the caps it would be compared
+ *  against are byte caps enforced in bytes everywhere else (`Content-Length`
+ *  in `index.ts`, chunk lengths in `readBoundedText`). Re-encoding is what
+ *  keeps the same number meaning the same thing at all three sites. */
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
 /** A refusal from a directory write endpoint.
  *
  *  The `reason` is a typed token, never prose: an announcer parses it, and a
@@ -162,6 +164,14 @@ function directoryError(status: number, reason: string): Response {
   return Response.json({ error: reason }, { status, headers: DIRECTORY_WRITE_CORS });
 }
 
+/** Bindings the Durable Object reads. Declared here and inherited by the
+ *  Worker entry's `Env`, so the binding list has one home.
+ *
+ *  Both are optional, and they fail in OPPOSITE directions on purpose:
+ *  without `TELEMETRY` the Analytics Engine mirror no-ops (fail-open, as it
+ *  already did for client telemetry), while without `SERVER_ALLOWLIST` the
+ *  directory lists nobody (fail-closed — an unconfigured directory must not
+ *  publish an unvetted list of everyone who announced). */
 export interface LobbyDoEnv {
   /** Directory allowlist. One key per canonical server URL; the VALUE is an
    *  operator-facing note the Worker never reads — membership is the whole
@@ -630,7 +640,7 @@ export class LobbyDO {
     // The length actually READ, not the header: `Content-Length` is supplied
     // by the announcer, and `index.ts` already refused the ones that admit it.
     const text = await request.text();
-    if (text.length > MAX_ANNOUNCE_BYTES) return directoryError(413, "too_large");
+    if (utf8Bytes(text) > MAX_ANNOUNCE_BYTES) return directoryError(413, "too_large");
 
     const verdict = JSON.parse(directory_validate_announcement(text)) as ValidationVerdict;
     if (verdict.kind !== "Valid") return directoryError(400, "invalid");
@@ -672,12 +682,15 @@ export class LobbyDO {
     this.upsertServerRow(plan.row);
     // The sole producer of `announced_players_max`, which the metrics
     // game-outcome guard reads. Without this write the guard drops every game
-    // outcome forever.
+    // outcome forever. It is also the counters' only WRITER until a client
+    // reporter exists, so it is what keeps the blob inside one decay window —
+    // hence `SCORE_WINDOW_MS`.
     const counters = recordAnnouncedPlayers(
       await this.readCounters(plan.row.url),
       plan.row.current_players,
       nowMs,
       SCORE_BUCKET_MS,
+      SCORE_WINDOW_MS,
       RTT_BUCKET_EDGES_MS,
     );
     await this.ctx.storage.put(`${COUNTERS_PREFIX}${plan.row.url}`, counters);
@@ -720,7 +733,7 @@ export class LobbyDO {
     try {
       this.ensureServersTable();
       const text = await request.text();
-      if (text.length > MAX_METRICS_BYTES) return ok();
+      if (utf8Bytes(text) > MAX_METRICS_BYTES) return ok();
 
       let body: unknown = null;
       try {

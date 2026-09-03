@@ -24,6 +24,13 @@
 import { EVENT_SCHEMAS, type SanitizedEvent } from "./telemetry";
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
+//
+// Every cap in this section counts BYTES of UTF-8, never characters, and
+// every enforcement site measures the same way: {@link readBoundedText} sums
+// the stream's chunk lengths before decoding, and the Durable Object's two
+// re-checks of a body it has already read encode it back. A `.length` check
+// on a decoded string would count UTF-16 code units, which for a body of
+// multi-byte text admits roughly three times the bytes the name promises.
 
 /** A row older than this is not listed and is reaped. Three minutes against
  *  phase-server's 60 s announce heartbeat: two heartbeats may be lost to a
@@ -273,19 +280,27 @@ export async function readBoundedText(
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let text = "";
+  let bytes = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (value) text += decoder.decode(value, { stream: true });
-      if (text.length > maxBytes) {
-        await reader.cancel();
-        return null;
+      if (value) {
+        // Counted BEFORE decoding, so an over-cap chunk is never appended to
+        // the string we are trying not to grow — and so the bound is bytes of
+        // UTF-8 rather than UTF-16 code units.
+        bytes += value.byteLength;
+        if (bytes > maxBytes) {
+          await reader.cancel();
+          return null;
+        }
+        text += decoder.decode(value, { stream: true });
       }
     }
-    // Flush any trailing partial code point.
+    // Flush any trailing partial code point. This can only add characters for
+    // bytes already counted above, so it cannot cross the bound.
     text += decoder.decode();
-    return text.length > maxBytes ? null : text;
+    return text;
   } finally {
     reader.releaseLock();
   }
@@ -518,7 +533,8 @@ export function sanitizeMetricsBatch(body: unknown): ServerProbeReport[] {
       report.rtt_ms = Math.round(Math.min(Math.max(rtt, 0), MAX_RTT_MS));
     }
     const gameCode = fields.game_code;
-    if (typeof gameCode === "string" && gameCode.length > 0) {
+    const isGameOutcome = outcome === "game_completed" || outcome === "game_abandoned";
+    if (isGameOutcome && typeof gameCode === "string" && gameCode.length > 0) {
       report.game_code = truncate(gameCode, MAX_GAME_CODE_LEN);
     }
 
@@ -545,9 +561,13 @@ function emptyBucket(startMs: number, cellCount: number): CounterBucket {
   };
 }
 
-/** Drop buckets that have decayed to zero weight, so storage stays bounded at
- *  one window's worth. Mirrors Rust's `bucket_weight`: age `>= windowMs` is
- *  weightless. */
+/** Drop buckets that have decayed to zero weight. Mirrors Rust's
+ *  `bucket_weight`: age `>= windowMs` is weightless.
+ *
+ *  Storage stays bounded at one window's worth only because EVERY writer of a
+ *  counter blob runs this — {@link foldMetricReports} and
+ *  {@link recordAnnouncedPlayers} both do. A writer that skipped it would grow
+ *  the blob without bound, and no reader prunes. */
 function liveBuckets(buckets: readonly CounterBucket[], nowMs: number, windowMs: number): CounterBucket[] {
   return buckets.filter((bucket) => nowMs - bucket.start_ms < windowMs);
 }
@@ -563,22 +583,32 @@ function rttCell(rttMs: number, edgesMs: readonly number[]): number {
   return edgesMs.length;
 }
 
-/** Raise the CURRENT bucket's announced-player peak to `players`.
+/** Raise the CURRENT bucket's announced-player peak to `players`, dropping
+ *  decayed buckets on the way through.
  *
  *  The sole writer of `announced_players_max`, called from the announce path
  *  after an accepted upsert. A raise, never an overwrite: a heartbeat that
  *  happens to catch an empty moment must not erase the peak the window already
- *  saw. It touches no other bucket — an older window's peak is a fact about
- *  that window. */
+ *  saw. It raises no other bucket — an older window's peak is a fact about
+ *  that window.
+ *
+ *  It ages buckets out for the same reason {@link foldMetricReports} does, and
+ *  the ageing is not optional here: until a client reporter exists this is the
+ *  counters' ONLY writer, so a version of it that merely appended would grow a
+ *  listed server's blob by one bucket per announce window forever, with
+ *  nothing else ever pruning it. */
 export function recordAnnouncedPlayers(
   counters: ServerCounters,
   players: number,
   nowMs: number,
   bucketMs: number,
+  windowMs: number,
   edgesMs: readonly number[],
 ): ServerCounters {
   const startMs = bucketStart(nowMs, bucketMs);
-  const buckets = counters.buckets.map((bucket) => ({ ...bucket }));
+  // Age out FIRST, so the returned value can never carry a bucket the window
+  // has already discarded.
+  const buckets = liveBuckets(counters.buckets, nowMs, windowMs).map((bucket) => ({ ...bucket }));
   let current = buckets.find((bucket) => bucket.start_ms === startMs);
   if (!current) {
     current = emptyBucket(startMs, edgesMs.length + 1);

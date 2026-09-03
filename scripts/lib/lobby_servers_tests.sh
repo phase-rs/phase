@@ -78,15 +78,17 @@ INFO_PATH="$(grep -oE 'pub const INFO_PATH: &str = "[^"]+"' \
   "$ROOT/crates/lobby-broker/src/directory.rs" | grep -oE '"[^"]+"' | tr -d '"')"
 TREE_LOBBY_PROTOCOL="$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
   "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
+TREE_PROTOCOL="$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
+  "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
 
 echo "lobby-servers tests"
 
 # The greps themselves must be non-empty, or every assertion below that uses
 # them is vacuously satisfiable.
-if [ -n "$INFO_PATH" ] && [ -n "$TREE_LOBBY_PROTOCOL" ]; then
-  ok "the tree's INFO_PATH and LOBBY_PROTOCOL_VERSION are readable ($INFO_PATH, $TREE_LOBBY_PROTOCOL)"
+if [ -n "$INFO_PATH" ] && [ -n "$TREE_LOBBY_PROTOCOL" ] && [ -n "$TREE_PROTOCOL" ]; then
+  ok "the tree's INFO_PATH and both protocol constants are readable ($INFO_PATH, $TREE_LOBBY_PROTOCOL, $TREE_PROTOCOL)"
 else
-  fail "could not read INFO_PATH / LOBBY_PROTOCOL_VERSION from the tree"
+  fail "could not read INFO_PATH / the protocol constants from the tree"
 fi
 
 # ── V-U8a: add and remove reach wrangler with the right key AND value ───────
@@ -106,6 +108,13 @@ esac
 case "$PUT_LINE" in
   *"--env preview"*) ok "add forwards --env preview" ;;
   *) fail "add forwards --env preview (got: $PUT_LINE)" ;;
+esac
+# Without --remote, wrangler 4 can write the LOCAL simulator instead of the
+# deployed namespace: the command succeeds, the operator sees "added", and the
+# directory never lists the server.
+case "$PUT_LINE" in
+  *"--remote"*) ok "add targets remote storage" ;;
+  *) fail "add targets remote storage (got: $PUT_LINE)" ;;
 esac
 # By REGEX, never a literal: a pinned timestamp is red one second after it is
 # written.
@@ -128,6 +137,10 @@ esac
 case "$DEL_LINE" in
   *"--env preview"*) ok "remove forwards --env preview" ;;
   *) fail "remove forwards --env preview (got: $DEL_LINE)" ;;
+esac
+case "$DEL_LINE" in
+  *"--remote"*) ok "remove targets remote storage" ;;
+  *) fail "remove targets remote storage (got: $DEL_LINE)" ;;
 esac
 rm -rf "$FIXTURE"
 
@@ -157,8 +170,10 @@ rm -rf "$FIXTURE"
 make_fixture
 printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
 printf '2026-09-02T21:14:07Z' > "$FIXTURE/kv_get.txt"
-printf '{"mode":"Full","protocol_version":55,"lobby_protocol_version":%d,"server_version":"0.9.1"}\n' \
-  "$((TREE_LOBBY_PROTOCOL - 2))" > "$FIXTURE/info.json"
+# The protocol half matches the tree and only the LOBBY half is behind, so the
+# two numbers are reported independently rather than one standing in for both.
+printf '{"mode":"Full","protocol_version":%d,"lobby_protocol_version":%d,"server_version":"0.9.1"}\n' \
+  "$TREE_PROTOCOL" "$((TREE_LOBBY_PROTOCOL - 2))" > "$FIXTURE/info.json"
 run_script list
 
 case "$OUT" in
@@ -170,8 +185,19 @@ case "$OUT" in
   *) fail "list prints the stored added-at value (got: $OUT)" ;;
 esac
 case "$OUT" in
-  *"behind by 2"*) ok "list reports the version delta against the tree" ;;
-  *) fail "list reports the version delta against the tree (got: $OUT)" ;;
+  *"lobby behind by 2"*) ok "list reports the lobby version delta against the tree" ;;
+  *) fail "list reports the lobby version delta against the tree (got: $OUT)" ;;
+esac
+# LOW-5's core: BOTH constants are compared per row. This fixture is behind on
+# one and level on the other, so a script reporting only one number cannot
+# satisfy both halves.
+case "$OUT" in
+  *"protocol up to date"*) ok "list reports the full-game version separately (level here)" ;;
+  *) fail "list reports the full-game version separately (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"protocol_version=$TREE_PROTOCOL"*) ok "list prints the remote's full-game version" ;;
+  *) fail "list prints the remote's full-game version (got: $OUT)" ;;
 esac
 # V-U8d: the probed path IS the Rust constant, and the grep above is non-empty.
 case "$(cat "$FIXTURE/curl.log")" in
@@ -191,11 +217,49 @@ rm -rf "$FIXTURE"
 make_fixture
 printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
 printf '2026-09-02T21:14:07Z' > "$FIXTURE/kv_get.txt"
-printf '{"lobby_protocol_version":%d}\n' "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
+printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+  "$TREE_PROTOCOL" "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
 run_script list
 case "$OUT" in
-  *"up to date"*) ok "list reports an up-to-date server as up to date" ;;
+  *"lobby up to date"*) ok "list reports an up-to-date server as up to date" ;;
   *) fail "list reports an up-to-date server as up to date (got: $OUT)" ;;
+esac
+rm -rf "$FIXTURE"
+
+# A remote AHEAD of the tree: this checkout is stale, not the server. The old
+# single-branch arithmetic printed "behind by -1" here, which reads as a bug in
+# the script rather than a fact about the deployment.
+make_fixture
+printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
+printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+  "$((TREE_PROTOCOL + 3))" "$((TREE_LOBBY_PROTOCOL + 1))" > "$FIXTURE/info.json"
+run_script list
+case "$OUT" in
+  *"lobby ahead by 1"*) ok "a remote ahead of the tree reads as ahead, not as a negative delta" ;;
+  *) fail "a remote ahead of the tree reads as ahead (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"protocol ahead by 3"*) ok "the full-game version reports its own ahead-by count" ;;
+  *) fail "the full-game version reports its own ahead-by count (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"by -"*) fail "no delta is printed as a negative number (got: $OUT)" ;;
+  *) ok "no delta is printed as a negative number" ;;
+esac
+rm -rf "$FIXTURE"
+
+# The skew the SPLIT constant exists to catch: the full-game number moved and
+# the lobby's did not. A row reporting one number for both would print the same
+# word twice here.
+make_fixture
+printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
+printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+  "$((TREE_PROTOCOL - 4))" "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
+run_script list
+case "$OUT" in
+  *"lobby up to date, protocol behind by 4"*)
+    ok "a full-game-only skew is reported on the full-game number alone" ;;
+  *) fail "a full-game-only skew is reported on the full-game number alone (got: $OUT)" ;;
 esac
 rm -rf "$FIXTURE"
 

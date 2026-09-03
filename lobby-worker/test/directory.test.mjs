@@ -20,13 +20,29 @@ import {
   storedRowFromAnnouncement,
 } from "../src/directory.ts";
 
-// Rust's constants arrive as arguments in production (read from the wasm
-// exports by lobby-do.ts). These are FIXTURE values, deliberately including
-// ones that differ from Rust's, so a fold that ignored its parameters and
-// reached for a literal would fail rather than coincide.
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
-const EDGES = [50, 100, 200, 400, 800, 1600, 3200];
+// Rust's constants arrive as arguments in production, read from the wasm
+// exports by lobby-do.ts. These fixture values are deliberately DIFFERENT
+// from Rust's in all three dimensions — a 45-minute bucket instead of an
+// hour, a 15-hour window instead of a day, and a 4-cell histogram instead of
+// an 8-cell one — so a fold that ignored its parameters and reached for a
+// literal produces different numbers here rather than coinciding with the
+// expectations.
+//
+// Differing constants are necessary but not sufficient, and two rows carry
+// the rest of that weight: V-U13a folds the same reports a second time
+// against `[100]`, and V-U13g folds them against `BUCKET_MS / 2`. Those two
+// comparisons are what prove the values are READ per call rather than
+// captured once; deleting either would leave the discrimination resting on
+// these constants alone.
+const BUCKET_MS = 2_700_000; // 45 min — Rust's SCORE_BUCKET_MS is 3_600_000
+const WINDOW_MS = 20 * BUCKET_MS; // 15 h — Rust's SCORE_WINDOW_MS is 24 h
+const EDGES = [25, 75, 150]; // 4 cells — Rust's RTT_BUCKET_EDGES_MS has 8
+
+/** A zeroed histogram of the fixture's cell count, so a hand-built bucket
+ *  cannot silently disagree with `EDGES` about its length. */
+function zeros() {
+  return new Array(EDGES.length + 1).fill(0);
+}
 
 /** A `Valid` verdict's announcement payload, with a distinct sentinel in every
  *  field so a transposition fails as loudly as a drop. */
@@ -212,12 +228,23 @@ test("V-U7g: readBoundedText bounds the decoded text and cancels the stream", as
   const euro = new TextEncoder().encode("€");
   const split = await readBoundedText(streamOf(euro.slice(0, 1), euro.slice(1)), 4096);
   assert.equal(split, "€");
+
+  // The cap is BYTES, not characters, and this is the pair that tells them
+  // apart: 2000 euro signs are 2000 UTF-16 code units but 6000 UTF-8 bytes,
+  // so a `.length` bound would accept nearly three times the bytes its name
+  // promises. Paired with a string of the same character count that fits.
+  const wide = new TextEncoder().encode("€".repeat(2000));
+  assert.equal(wide.byteLength, 6000);
+  assert.equal(await readBoundedText(streamOf(wide), 4096), null);
+  const narrow = new TextEncoder().encode("€".repeat(1000));
+  assert.equal(narrow.byteLength, 3000);
+  assert.equal((await readBoundedText(streamOf(narrow), 4096)).length, 1000);
 });
 
 // ── V-U16: liveness, reaping, alarm ────────────────────────────────────────
 
 test("V-U16a: the reaper fold splits on the announce timeout, both directions", () => {
-  const now = 10 * DAY_MS;
+  const now = 10 * WINDOW_MS;
   const fresh = row({ url: "wss://fresh.example/ws", last_seen_ms: now - (ANNOUNCE_TIMEOUT_MS - 1_000) });
   const stale = row({ url: "wss://stale.example/ws", last_seen_ms: now - (ANNOUNCE_TIMEOUT_MS + 1_000) });
   const { live, expired } = partitionServerRows([fresh, stale], now);
@@ -242,7 +269,7 @@ test("V-U16d: 'anything left to reap' is one predicate over both kinds", () => {
 // ── V-U17: GET /servers = live ∩ allowlist ─────────────────────────────────
 
 test("V-U16c + V-U17a/b: a row is listed only when it is BOTH live and allowed", () => {
-  const now = 10 * DAY_MS;
+  const now = 10 * WINDOW_MS;
   const listed = row({ url: "wss://listed.example/ws", last_seen_ms: now - 10_000 });
   const dead = row({ url: "wss://dead.example/ws", last_seen_ms: now - 200_000 });
   const unlisted = row({ url: "wss://unlisted.example/ws", last_seen_ms: now - 10_000 });
@@ -261,7 +288,7 @@ test("V-U16c + V-U17a/b: a row is listed only when it is BOTH live and allowed",
 });
 
 test("V-U17d: an absent allowlist lists nothing, not everything", () => {
-  const now = 10 * DAY_MS;
+  const now = 10 * WINDOW_MS;
   const rows = [
     row({ url: "wss://one.example/ws", last_seen_ms: now }),
     row({ url: "wss://two.example/ws", last_seen_ms: now }),
@@ -289,7 +316,7 @@ test("V-U17d: an absent allowlist lists nothing, not everything", () => {
 });
 
 test("V-U17c: the envelope carries the INJECTED version and the read CORS record", () => {
-  const now = 10 * DAY_MS;
+  const now = 10 * WINDOW_MS;
   const args = {
     rows: [row({ last_seen_ms: now })],
     allowlist: new Set(["wss://a.example/ws"]),
@@ -328,7 +355,7 @@ test("V-U17g: the write CORS record allows POST and the read record does not", (
 });
 
 test("V-U17f: a listed row's exact wire key set, with and without a score", () => {
-  const now = 10 * DAY_MS;
+  const now = 10 * WINDOW_MS;
   const score = {
     value: 84,
     samples: 110,
@@ -414,19 +441,17 @@ test("V-U13c: the sanitiser keeps exactly the allow-listed fields", () => {
         url: KNOWN_URL,
         outcome: "connect_ok",
         rtt_ms: 42,
-        game_code: "ABC123",
         admin: true,
         score: 100,
         blobs: ["nope"],
       },
     ]),
   );
-  assert.deepEqual(Object.keys(report).sort(), ["game_code", "outcome", "rtt_ms", "url"]);
+  assert.deepEqual(Object.keys(report).sort(), ["outcome", "rtt_ms", "url"]);
   assert.deepEqual(report, {
     url: KNOWN_URL,
     outcome: "connect_ok",
     rtt_ms: 42,
-    game_code: "ABC123",
   });
 
   // Envelope and per-report rejections.
@@ -450,12 +475,35 @@ test("V-U13c: the sanitiser keeps exactly the allow-listed fields", () => {
   );
   assert.equal("rtt_ms" in failed, false);
 
-  // Clamped and truncated, never trusted.
+  // `game_code` is gated the same way, on the two outcomes that can carry
+  // one. A code attached to a connect outcome describes no game — only the
+  // game-outcome guard ever reads the field, so keeping it elsewhere would
+  // store a value nothing can consume.
+  for (const outcome of ["connect_ok", "connect_fail"]) {
+    const [connect] = sanitizeMetricsBatch(
+      batch([{ url: KNOWN_URL, outcome, game_code: "ABC123" }]),
+    );
+    assert.equal("game_code" in connect, false, `${outcome} must not keep a game_code`);
+  }
+  // Paired positive: both game outcomes DO keep it, so the drops above are the
+  // gate rather than a sanitiser that lost the field entirely.
+  for (const outcome of ["game_completed", "game_abandoned"]) {
+    const [game] = sanitizeMetricsBatch(
+      batch([{ url: KNOWN_URL, outcome, game_code: "ABC123" }]),
+    );
+    assert.equal(game.game_code, "ABC123", `${outcome} must keep its game_code`);
+  }
+
+  // Clamped and truncated, never trusted. Split across two fixtures because
+  // the two fields are gated onto disjoint outcomes.
   const [clamped] = sanitizeMetricsBatch(
-    batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: 9_999_999, game_code: "X".repeat(40) }]),
+    batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: 9_999_999 }]),
   );
   assert.equal(clamped.rtt_ms, 60_000);
-  assert.equal(clamped.game_code.length, 16);
+  const [truncated] = sanitizeMetricsBatch(
+    batch([{ url: KNOWN_URL, outcome: "game_completed", game_code: "X".repeat(40) }]),
+  );
+  assert.equal(truncated.game_code.length, 16);
   const [negative] = sanitizeMetricsBatch(
     batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: -5 }]),
   );
@@ -463,7 +511,7 @@ test("V-U13c: the sanitiser keeps exactly the allow-listed fields", () => {
 });
 
 test("V-U13a: reports fold into the current bucket's counters", () => {
-  const now = 10 * DAY_MS + 45 * 60_000;
+  const now = 10 * WINDOW_MS + 45 * 60_000;
   const known = new Map([[KNOWN_URL, { buckets: [] }]]);
   const reports = sanitizeMetricsBatch(
     batch([
@@ -473,27 +521,28 @@ test("V-U13a: reports fold into the current bucket's counters", () => {
       { url: KNOWN_URL, outcome: "connect_fail" },
     ]),
   );
-  const fold = foldMetricReports(reports, known, now, HOUR_MS, DAY_MS, EDGES);
+  const fold = foldMetricReports(reports, known, now, BUCKET_MS, WINDOW_MS, EDGES);
 
   const [bucket] = fold.counters.get(KNOWN_URL).buckets;
   assert.equal(bucket.connect_attempts, 4);
   assert.equal(bucket.connect_successes, 3);
-  assert.equal(bucket.start_ms, now - (now % HOUR_MS));
-  // A latency lands in the first cell whose upper edge it does not exceed:
-  // 42 ms in cell 0 (<= 50), 1200 ms in cell 5 (<= 1600). Rust reads the
-  // histogram positionally and reports cell 5 as "1600".
-  assert.deepEqual(bucket.rtt_histogram, [2, 0, 0, 0, 0, 1, 0, 0]);
+  assert.equal(bucket.start_ms, now - (now % BUCKET_MS));
+  // A latency lands in the first cell whose upper edge it does not exceed.
+  // Against this fixture's EDGES ([25, 75, 150]): 42 ms in cell 1 (<= 75),
+  // 1200 ms in the overflow cell 3. Rust reads the histogram positionally, so
+  // the cell INDEX is the contract, not the millisecond value.
+  assert.deepEqual(bucket.rtt_histogram, [0, 2, 0, 1]);
   assert.equal(fold.accepted.length, 4);
   assert.equal(fold.dropped, 0);
 
   // The edge list is a PARAMETER, not a literal: a different list files the
   // same latencies into different cells and produces a different cell count.
-  const coarse = foldMetricReports(reports, known, now, HOUR_MS, DAY_MS, [100]);
+  const coarse = foldMetricReports(reports, known, now, BUCKET_MS, WINDOW_MS, [100]);
   assert.deepEqual(coarse.counters.get(KNOWN_URL).buckets[0].rtt_histogram, [2, 1]);
 });
 
 test("V-U13b: a report for a URL with no row is dropped", () => {
-  const now = 10 * DAY_MS + 45 * 60_000;
+  const now = 10 * WINDOW_MS + 45 * 60_000;
   const known = new Map([[KNOWN_URL, { buckets: [] }]]);
   const fold = foldMetricReports(
     sanitizeMetricsBatch(
@@ -506,8 +555,8 @@ test("V-U13b: a report for a URL with no row is dropped", () => {
     ),
     known,
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   assert.equal(fold.counters.has("wss://forged.example/ws"), false);
@@ -517,15 +566,15 @@ test("V-U13b: a report for a URL with no row is dropped", () => {
 });
 
 test("V-U13d: a game outcome needs a game code AND an announced-players window", () => {
-  const now = 10 * DAY_MS + 45 * 60_000;
-  const startMs = now - (now % HOUR_MS);
+  const now = 10 * WINDOW_MS + 45 * 60_000;
+  const startMs = now - (now % BUCKET_MS);
   const emptyWindow = {
     start_ms: startMs,
     connect_attempts: 0,
     connect_successes: 0,
     games_started: 0,
     games_completed: 0,
-    rtt_histogram: [0, 0, 0, 0, 0, 0, 0, 0],
+    rtt_histogram: zeros(),
     announced_players_max: 0,
   };
   const report = { url: KNOWN_URL, outcome: "game_completed", game_code: "ABC123" };
@@ -535,8 +584,8 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
     sanitizeMetricsBatch(batch([report])),
     new Map([[KNOWN_URL, { buckets: [emptyWindow] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   assert.equal(noPlayers.dropped, 1);
@@ -551,8 +600,8 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
     sanitizeMetricsBatch(batch([{ url: KNOWN_URL, outcome: "game_completed" }])),
     new Map([[KNOWN_URL, { buckets: [populated] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   assert.equal(noCode.dropped, 1);
@@ -562,8 +611,8 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
     sanitizeMetricsBatch(batch([report])),
     new Map([[KNOWN_URL, { buckets: [populated] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   const bucket = accepted.counters.get(KNOWN_URL).buckets[0];
@@ -577,8 +626,8 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
     sanitizeMetricsBatch(batch([{ ...report, outcome: "game_abandoned" }])),
     new Map([[KNOWN_URL, { buckets: [populated] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   const abandonedBucket = abandoned.counters.get(KNOWN_URL).buckets[0];
@@ -591,28 +640,28 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
     sanitizeMetricsBatch(batch([{ url: KNOWN_URL, outcome: "connect_fail" }])),
     new Map([[KNOWN_URL, { buckets: [emptyWindow] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   assert.equal(connectFail.dropped, 0);
 });
 
 test("V-U13f: the announce path RAISES the current window's player peak", () => {
-  const now = 10 * DAY_MS + 45 * 60_000;
-  const startMs = now - (now % HOUR_MS);
-  const staleStart = startMs - 5 * HOUR_MS;
+  const now = 10 * WINDOW_MS + 45 * 60_000;
+  const startMs = now - (now % BUCKET_MS);
+  const staleStart = startMs - 5 * BUCKET_MS;
   const stale = {
     start_ms: staleStart,
     connect_attempts: 0,
     connect_successes: 0,
     games_started: 0,
     games_completed: 0,
-    rtt_histogram: [0, 0, 0, 0, 0, 0, 0, 0],
+    rtt_histogram: zeros(),
     announced_players_max: 9,
   };
 
-  const afterFirst = recordAnnouncedPlayers({ buckets: [stale] }, 3, now, HOUR_MS, EDGES);
+  const afterFirst = recordAnnouncedPlayers({ buckets: [stale] }, 3, now, BUCKET_MS, WINDOW_MS, EDGES);
   const current = afterFirst.buckets.find((b) => b.start_ms === startMs);
   assert.equal(current.announced_players_max, 3);
   // An older window's peak is a fact about that window: a writer that touched
@@ -621,10 +670,33 @@ test("V-U13f: the announce path RAISES the current window's player peak", () => 
 
   // A raise, never an overwrite — a heartbeat catching an empty moment must
   // not erase the peak the window already saw.
-  const afterSecond = recordAnnouncedPlayers(afterFirst, 1, now, HOUR_MS, EDGES);
+  const afterSecond = recordAnnouncedPlayers(afterFirst, 1, now, BUCKET_MS, WINDOW_MS, EDGES);
   assert.equal(afterSecond.buckets.find((b) => b.start_ms === startMs).announced_players_max, 3);
-  const afterThird = recordAnnouncedPlayers(afterSecond, 8, now, HOUR_MS, EDGES);
+  const afterThird = recordAnnouncedPlayers(afterSecond, 8, now, BUCKET_MS, WINDOW_MS, EDGES);
   assert.equal(afterThird.buckets.find((b) => b.start_ms === startMs).announced_players_max, 8);
+
+  // This writer AGES OUT, and it has to: until a client reporter exists it is
+  // the counters' only writer, so an append-only version grows the stored blob
+  // by one bucket per announce window forever and nothing else prunes it. The
+  // pair is what makes the assertion about the window rather than about
+  // "drops something": one bucket just outside the window disappears, one just
+  // inside it survives the same call.
+  const expired = { ...stale, start_ms: startMs - (WINDOW_MS + BUCKET_MS), announced_players_max: 4 };
+  const surviving = { ...stale, start_ms: startMs - (WINDOW_MS - BUCKET_MS), announced_players_max: 5 };
+  const before = { buckets: [expired, surviving] };
+  assert.equal(before.buckets.length, 2, "both fixtures must be present BEFORE the write");
+
+  const aged = recordAnnouncedPlayers(before, 2, now, BUCKET_MS, WINDOW_MS, EDGES);
+  assert.equal(
+    aged.buckets.find((b) => b.start_ms === expired.start_ms),
+    undefined,
+    "a bucket past the decay window must not survive a write",
+  );
+  assert.equal(aged.buckets.find((b) => b.start_ms === surviving.start_ms).announced_players_max, 5);
+  assert.deepEqual(
+    aged.buckets.map((b) => b.start_ms).sort((a, b) => a - b),
+    [surviving.start_ms, startMs],
+  );
 
   // The producer and the guard, wired end to end: without this write the
   // guard drops every game outcome forever, while V-U13d — which injects the
@@ -635,58 +707,68 @@ test("V-U13f: the announce path RAISES the current window's player peak", () => 
     ),
     new Map([[KNOWN_URL, afterFirst]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   assert.equal(fold.accepted.length, 1);
 });
 
 test("V-U13g: the bucket width is a parameter, not a module literal", () => {
-  // 12:45 UTC. The fixture clock is load-bearing: `start = now - now %
-  // bucketMs` makes an hour bucket and a half-hour bucket AGREE whenever the
-  // clock is in the first half of the hour, so half of all clocks would make
-  // this row pass for a broken implementation.
-  const now = Date.parse("2026-09-02T12:45:00.000Z");
-  assert.ok(now % HOUR_MS >= HOUR_MS / 2, "the fixture clock must be past the half hour");
+  // The fixture clock is load-bearing: `start = now - now % bucketMs` makes a
+  // full-width and a half-width bucket AGREE whenever the clock sits in the
+  // first half of a bucket, so half of all clocks would make this row pass for
+  // a broken implementation. The precondition is asserted, not assumed —
+  // 2026-09-02T00:25:00Z is 1,500,000 ms into a 2,700,000 ms bucket.
+  //
+  // (Every wall-clock-round instant this test used while BUCKET_MS was an hour
+  // FAILS this precondition at 45 minutes, which is why the assertion below
+  // comes before the comparison rather than after it.)
+  const now = Date.parse("2026-09-02T00:25:00.000Z");
+  assert.ok(
+    now % BUCKET_MS >= BUCKET_MS / 2,
+    "the fixture clock must sit in the second half of a bucket",
+  );
 
   const known = new Map([[KNOWN_URL, { buckets: [] }]]);
   const reports = sanitizeMetricsBatch(batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: 10 }]));
 
-  const hourly = foldMetricReports(reports, known, now, HOUR_MS, DAY_MS, EDGES);
-  const halfHourly = foldMetricReports(reports, known, now, HOUR_MS / 2, DAY_MS, EDGES);
+  const wide = foldMetricReports(reports, known, now, BUCKET_MS, WINDOW_MS, EDGES);
+  const narrow = foldMetricReports(reports, known, now, BUCKET_MS / 2, WINDOW_MS, EDGES);
 
-  const hourlyStart = hourly.counters.get(KNOWN_URL).buckets[0].start_ms;
-  const halfHourlyStart = halfHourly.counters.get(KNOWN_URL).buckets[0].start_ms;
+  const wideStart = wide.counters.get(KNOWN_URL).buckets[0].start_ms;
+  const narrowStart = narrow.counters.get(KNOWN_URL).buckets[0].start_ms;
   // Paired reach-guard: both folds produced a bucket, so "different" is not
   // two empty results.
-  assert.equal(hourly.accepted.length, 1);
-  assert.equal(halfHourly.accepted.length, 1);
-  assert.notEqual(hourlyStart, halfHourlyStart);
-  assert.equal(hourlyStart, Date.parse("2026-09-02T12:00:00.000Z"));
-  assert.equal(halfHourlyStart, Date.parse("2026-09-02T12:30:00.000Z"));
+  assert.equal(wide.accepted.length, 1);
+  assert.equal(narrow.accepted.length, 1);
+  assert.notEqual(wideStart, narrowStart);
+  // Asserted as measured literals rather than as `now - now % BUCKET_MS`,
+  // which would just restate the implementation.
+  assert.equal(wideStart, 1_788_307_200_000);
+  assert.equal(narrowStart, 1_788_308_550_000);
 });
 
 test("the fold ages buckets out of the decay window", () => {
-  const now = 10 * DAY_MS + 45 * 60_000;
-  const startMs = now - (now % HOUR_MS);
+  const now = 10 * WINDOW_MS + 45 * 60_000;
+  const startMs = now - (now % BUCKET_MS);
   const ancient = {
-    start_ms: startMs - 25 * HOUR_MS,
+    start_ms: startMs - 25 * BUCKET_MS,
     connect_attempts: 100,
     connect_successes: 100,
     games_started: 0,
     games_completed: 0,
-    rtt_histogram: [100, 0, 0, 0, 0, 0, 0, 0],
+    rtt_histogram: zeros(),
     announced_players_max: 0,
   };
-  const recent = { ...ancient, start_ms: startMs - 2 * HOUR_MS };
+  const recent = { ...ancient, start_ms: startMs - 2 * BUCKET_MS };
 
   const fold = foldMetricReports(
     sanitizeMetricsBatch(batch([{ url: KNOWN_URL, outcome: "connect_ok", rtt_ms: 10 }])),
     new Map([[KNOWN_URL, { buckets: [ancient, recent] }]]),
     now,
-    HOUR_MS,
-    DAY_MS,
+    BUCKET_MS,
+    WINDOW_MS,
     EDGES,
   );
   const kept = fold.counters.get(KNOWN_URL).buckets.map((b) => b.start_ms).sort();

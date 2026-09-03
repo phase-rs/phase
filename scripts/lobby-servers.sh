@@ -155,8 +155,28 @@ cmd_remove() {
   echo "removed $URL"
 }
 
+# Describe one version number against the tree's. Both directions are named,
+# because a remote AHEAD of the tree is a real and different situation — this
+# checkout is stale, not the server — and printing it as "behind by -1" would
+# read as a bug in the script rather than a fact about the deployment.
+skew_of() { # $1 = remote value, $2 = tree value, $3 = label
+  local remote="$1" tree="$2" label="$3" diff
+  if [ -z "$remote" ]; then
+    printf '%s unknown' "$label"
+    return 0
+  fi
+  diff=$((tree - remote))
+  if [ "$diff" -eq 0 ]; then
+    printf '%s up to date' "$label"
+  elif [ "$diff" -gt 0 ]; then
+    printf '%s behind by %d' "$label" "$diff"
+  else
+    printf '%s ahead by %d' "$label" "$((-diff))"
+  fi
+}
+
 cmd_list() {
-  local keys key added authority info remote_lobby delta marker
+  local keys key added authority info remote_lobby remote_protocol skew marker
   keys="$(wrangler_kv key list | jq -r '.[].name')"
   if [ -z "$keys" ]; then
     echo "(the allowlist is empty — GET /servers lists nothing)"
@@ -172,19 +192,21 @@ cmd_list() {
     authority="$(authority_of "$key")"
     info="$(curl -sS -m 5 "https://${authority}${INFO_PATH}" 2>/dev/null || true)"
     remote_lobby="$(printf '%s' "$info" | jq -r '.lobby_protocol_version // empty' 2>/dev/null || true)"
-    if [ -z "$remote_lobby" ]; then
+    remote_protocol="$(printf '%s' "$info" | jq -r '.protocol_version // empty' 2>/dev/null || true)"
+    if [ -z "$remote_lobby" ] && [ -z "$remote_protocol" ]; then
       # No parseable info document means the verification fetch the Worker
       # makes on every announce would fail too, so the server cannot be listed
       # even though its key is here.
-      delta="no info document"
+      skew="no info document"
       marker=" DROPPED-BY-WORKER?"
-    elif [ "$remote_lobby" -eq "$TREE_LOBBY_PROTOCOL" ]; then
-      delta="up to date"
     else
-      delta="behind by $((TREE_LOBBY_PROTOCOL - remote_lobby))"
+      # BOTH constants, per row. They move independently — a full-game bump
+      # the lobby never parses slides one and not the other — so reporting
+      # only one hides exactly the skew the other is there to catch.
+      skew="$(skew_of "$remote_lobby" "$TREE_LOBBY_PROTOCOL" lobby), $(skew_of "$remote_protocol" "$TREE_PROTOCOL" protocol)"
     fi
-    printf '%s  added=%s  lobby_protocol_version=%s (%s)%s\n' \
-      "$key" "${added:-?}" "${remote_lobby:-?}" "$delta" "$marker"
+    printf '%s  added=%s  lobby_protocol_version=%s protocol_version=%s (%s)%s\n' \
+      "$key" "${added:-?}" "${remote_lobby:-?}" "${remote_protocol:-?}" "$skew" "$marker"
   done <<< "$keys"
 }
 
