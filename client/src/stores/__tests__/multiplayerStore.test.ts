@@ -33,11 +33,14 @@ import {
   adHocLobbySource,
   compareLobbyGameEntries,
   findLobbyGameByCode,
+  hostingLobbySource,
   isServerCompatible,
+  lobbySources,
   migrateLegacyLoopDetectionOn,
   migrateOfficialServerAddress,
   migratePersistedMultiplayerState,
   migrateServerAddressToSources,
+  normalizeDisabledDirectorySources,
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
   userLobbySource,
@@ -48,6 +51,12 @@ import {
   useMultiplayerStore,
 } from "../multiplayerStore";
 import { SERVER_PRESETS } from "../../services/serverDetection";
+import {
+  DIRECTORY_VERSION,
+  projectDirectoryBody,
+  type DirectoryRow,
+  type DirectorySource,
+} from "../../services/serverDirectory";
 import type { LobbyGame } from "../../adapter/types";
 import {
   LOBBY_PROTOCOL_VERSION,
@@ -329,6 +338,11 @@ describe("multiplayerStore", () => {
       hostingServer: "ws://localhost:8787",
       userLobbySources: [],
       sourceStatus: new Map(),
+      // Without these three a directory fixture leaks into every following
+      // test in this file.
+      directorySources: [],
+      directoryFetchedAtMs: null,
+      disabledDirectorySources: [],
     });
   });
 
@@ -1710,6 +1724,384 @@ describe("multiplayerStore", () => {
       origin: "user",
     });
     expect(userLobbySource("wss:")).toBeNull();
+  });
+
+  // ── Directory sources ───────────────────────────────────────────────────
+
+  function directoryRow(
+    overrides: Partial<DirectoryRow> & { url: string },
+  ): DirectoryRow {
+    return {
+      name: "listed",
+      mode: "LobbyOnly",
+      server_version: "0.71.0",
+      protocol_version: PROTOCOL_VERSION,
+      lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+      current_players: 0,
+      first_seen_ms: 1_700_000_000_000,
+      last_seen_ms: 1_700_000_060_000,
+      score: null,
+      ...overrides,
+    };
+  }
+
+  /** Project fixtures through the PRODUCTION projection, so a test row carries
+   * the same canonical URL and the same stored `rejection` a real listing
+   * would. */
+  function directoryEntries(
+    ...rows: (Partial<DirectoryRow> & { url: string })[]
+  ): DirectorySource[] {
+    return projectDirectoryBody({
+      directory_version: DIRECTORY_VERSION,
+      servers: rows.map(directoryRow),
+    })!;
+  }
+
+  const dialedUrls = () => lobbySources(useMultiplayerStore.getState()).map((s) => s.url);
+
+  // V-U11i
+  it("keeps a directory disable across the entry disappearing and returning", () => {
+    const URL_A = "wss://a.example/ws";
+    const URL_B = "wss://b.example/ws";
+    useMultiplayerStore.setState({ directorySources: directoryEntries({ url: URL_A }) });
+    expect(dialedUrls()).toContain(URL_A);
+
+    useMultiplayerStore.getState().setDirectorySourceEnabled(URL_A, false);
+    useMultiplayerStore.setState({ directorySources: [] });
+    expect(useMultiplayerStore.getState().disabledDirectorySources).toEqual([URL_A]);
+
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: URL_A }, { url: URL_B }),
+    });
+    expect(useMultiplayerStore.getState().disabledDirectorySources).toEqual([URL_A]);
+    expect(dialedUrls()).not.toContain(URL_A);
+    // Paired: a different URL seeded in the same step IS dialed, so the
+    // absence above is the disable and not an empty projection.
+    expect(dialedUrls()).toContain(URL_B);
+  });
+
+  // V-U11l
+  it("closes a directory source's channel when it is switched off", async () => {
+    const URL_A = "wss://a.example/ws";
+    const URL_B = "wss://b.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: URL_A }, { url: URL_B }),
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(URL_A)).toBe(true);
+    });
+
+    useMultiplayerStore.getState().setDirectorySourceEnabled(URL_A, false);
+
+    expect(useMultiplayerStore.getState().sourceStatus.has(URL_A)).toBe(false);
+    // Paired: the enabled sibling keeps its row, so the teardown was scoped.
+    expect(useMultiplayerStore.getState().sourceStatus.has(URL_B)).toBe(true);
+    detach?.();
+  });
+
+  // V-U11m
+  it("normalizes the persisted directory disable list", () => {
+    expect(normalizeDisabledDirectorySources(undefined)).toEqual([]);
+    expect(normalizeDisabledDirectorySources("nope")).toEqual([]);
+    expect(normalizeDisabledDirectorySources([1, null, {}])).toEqual([]);
+    expect(normalizeDisabledDirectorySources(["not a url"])).toEqual([]);
+    // Deduped THROUGH the canonicaliser: two spellings of one authority are
+    // one disable.
+    expect(
+      normalizeDisabledDirectorySources(["wss://a.example", "wss://a.example/"]),
+    ).toEqual(["wss://a.example/"]);
+    // The default is read from the initial state, never from a snapshot this
+    // file's `beforeEach` wrote itself.
+    expect(useMultiplayerStore.getInitialState().disabledDirectorySources).toEqual([]);
+  });
+
+  // V-U11n
+  it("lets a currently-listed server be pinned as a hand-added source", () => {
+    const URL_A = "wss://a.example/ws";
+    useMultiplayerStore.setState({ directorySources: directoryEntries({ url: URL_A }) });
+    expect(useMultiplayerStore.getState().addUserLobbySource(URL_A)).toMatchObject({
+      ok: true,
+    });
+
+    const listed = lobbySources(useMultiplayerStore.getState()).filter(
+      (s) => s.url === URL_A,
+    );
+    expect(listed).toHaveLength(1);
+    expect(listed[0].origin).toBe("user");
+    // Paired: a PRESET URL is still a duplicate — the rule was relaxed for
+    // directory listings only.
+    expect(useMultiplayerStore.getState().addUserLobbySource(PRESET_URL)).toEqual({
+      ok: false,
+      reason: "duplicate",
+    });
+  });
+
+  // V-U11o
+  it("keeps a removed user entry browsable while the directory still lists it", async () => {
+    const LISTED = "wss://listed.example/ws";
+    const LONE = "wss://lone.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: LISTED }),
+      userLobbySources: [userLobbySource(LISTED)!, userLobbySource(LONE)!],
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(LONE)).toBe(true);
+    });
+
+    useMultiplayerStore.getState().removeUserLobbySource(LISTED);
+    const stillListed = lobbySources(useMultiplayerStore.getState()).filter(
+      (s) => s.url === LISTED,
+    );
+    expect(stillListed).toHaveLength(1);
+    expect(stillListed[0].origin).toBe("directory");
+    expect(useMultiplayerStore.getState().sourceStatus.has(LISTED)).toBe(true);
+
+    // Paired: a user entry with no directory twin is removed AND torn down.
+    useMultiplayerStore.getState().removeUserLobbySource(LONE);
+    expect(dialedUrls()).not.toContain(LONE);
+    expect(useMultiplayerStore.getState().sourceStatus.has(LONE)).toBe(false);
+    detach?.();
+  });
+
+  // V-U11p — hosting placement over a directory listing is a later phase's
+  // decision; this pins today's fall-through.
+  it("never resolves a directory listing as the hosting source", () => {
+    // Pathful ON PURPOSE: a pathless announced URL projects to a DIFFERENT
+    // `source.url`, so a pathless fixture whose two spellings drift would make
+    // every `find` below return undefined and the row would pass whatever the
+    // filter does.
+    const URL_D = "wss://d.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({
+        url: URL_D,
+        score: {
+          value: 88,
+          samples: 50,
+          success_rate: 1,
+          completion_rate: 1,
+          median_rtt_ms: 20,
+        },
+      }),
+      // A leaked disable would void the fixture the same way a drifting URL
+      // would.
+      disabledDirectorySources: [],
+      userLobbySources: [],
+      hostingServer: URL_D,
+      sourceStatus: new Map(),
+    });
+    // Reach-guard, BEFORE the call: without it the negative half passes on an
+    // absent fixture.
+    expect(
+      lobbySources(useMultiplayerStore.getState()).some(
+        (s) => s.origin === "directory" && s.url === URL_D,
+      ),
+    ).toBe(true);
+
+    const resolved = hostingLobbySource(useMultiplayerStore.getState());
+    expect(resolved?.origin).toBe("user");
+    expect(resolved?.score).toBeUndefined();
+
+    // Discriminating control. `adHocLobbySource` IS `userLobbySource`, so a
+    // hand-added entry with no status row is deep-equal to the synthesis of
+    // the same URL — a control built that way would pass even against a filter
+    // that refused everything. Seeding a status row gives the FOUND source
+    // `kind: "Full"`, which the ad-hoc synthesis cannot produce, and `kind` is
+    // the only field that separates the two paths.
+    useMultiplayerStore.setState({
+      userLobbySources: [userLobbySource(URL_D)!],
+      sourceStatus: new Map([
+        [
+          URL_D,
+          {
+            state: "open" as const,
+            serverInfo: server("Full", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION),
+            playerCount: null,
+          },
+        ],
+      ]),
+    });
+    expect(hostingLobbySource(useMultiplayerStore.getState())?.kind).toBe("Full");
+  });
+
+  // ── U18: the dial gate ──────────────────────────────────────────────────
+
+  // V-U18a + V-U18b
+  it("refuses to dial a directory source below the lobby protocol floor", async () => {
+    const BAD_URL = "wss://old.example/ws";
+    const GOOD_URL = "wss://new.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries(
+        {
+          url: BAD_URL,
+          lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
+        },
+        { url: GOOD_URL },
+      ),
+      userLobbySources: [],
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+
+    // Reach-guards: the compatible sibling IS dialed, and the refused source
+    // is present in the derived list — the negative is not passing because the
+    // fixture was absent.
+    expect(openPhaseSocket).toHaveBeenCalledWith(GOOD_URL, { surface: "lobby" });
+    expect(dialedUrls()).toContain(BAD_URL);
+    expect(openPhaseSocket).not.toHaveBeenCalledWith(BAD_URL, expect.anything());
+
+    // V-U18b: the gate sits before `channelFor`, so a refused source writes no
+    // status row and cannot read as "offline"/degraded.
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(GOOD_URL)).toBe(true);
+    });
+    expect(useMultiplayerStore.getState().sourceStatus.has(BAD_URL)).toBe(false);
+    detach?.();
+  });
+
+  // V-U18c
+  it("gates the join path on the same verdict as the browse path", async () => {
+    const BAD_URL = "wss://old.example/ws";
+    const GOOD_URL = "wss://new.example/ws";
+    const entries = directoryEntries(
+      { url: BAD_URL, lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1 },
+      { url: GOOD_URL },
+    );
+    useMultiplayerStore.setState({ directorySources: entries, userLobbySources: [] });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    brokerMocks.lookupJoinTargetOver.mockResolvedValue({
+      ok: true,
+      info: { is_p2p: false, format_config: null },
+    });
+    const bad = entries.find((e) => e.source.url === BAD_URL)!.source;
+    const good = entries.find((e) => e.source.url === GOOD_URL)!.source;
+
+    const refused = await useMultiplayerStore.getState().lookupJoinTarget("ABCDE", bad);
+    expect(refused).toMatchObject({ ok: false, reason: "connection_lost" });
+    expect(openPhaseSocket).not.toHaveBeenCalledWith(BAD_URL, expect.anything());
+
+    // Paired: the compatible sibling reaches the RPC over a real socket.
+    const allowed = await useMultiplayerStore.getState().lookupJoinTarget("ABCDE", good);
+    expect(allowed).toMatchObject({ ok: true });
+    expect(brokerMocks.lookupJoinTargetOver).toHaveBeenCalled();
+  });
+
+  // V-U18e
+  it("takes the verdict on the lobby surface, not the full-game one", async () => {
+    const URL_F = "wss://fullstale.example/ws";
+    const entries = directoryEntries({
+      url: URL_F,
+      mode: "Full",
+      protocol_version: PROTOCOL_VERSION - 1,
+      lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+    });
+    // The full-game surface refuses exactly this identity
+    // (`isServerCompatible(server("Full", PROTOCOL_VERSION - 1, …)) === false`,
+    // asserted above in this file). The lobby surface must not.
+    expect(entries[0].rejection).toBeNull();
+
+    useMultiplayerStore.setState({ directorySources: entries, userLobbySources: [] });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    expect(openPhaseSocket).toHaveBeenCalledWith(URL_F, { surface: "lobby" });
+    detach?.();
+  });
+
+  // V-U18f
+  it("accepts a lobby version newer than this client's — no ceiling", async () => {
+    const URL_N = "wss://newer.example/ws";
+    const entries = directoryEntries({
+      url: URL_N,
+      lobby_protocol_version: LOBBY_PROTOCOL_VERSION + 5,
+    });
+    expect(entries[0].rejection).toBeNull();
+
+    useMultiplayerStore.setState({ directorySources: entries, userLobbySources: [] });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    expect(openPhaseSocket).toHaveBeenCalledWith(URL_N, { surface: "lobby" });
+    detach?.();
+  });
+
+  // V-U18h — the gate is keyed through the SHADOWING predicate, so a preset or
+  // hand-added URL the directory also lists is still judged at the handshake.
+  it("still dials a listed-but-incompatible server the user pinned as their own", async () => {
+    const URL_X = "wss://x.example/ws";
+    const belowFloor = (url: string) =>
+      directoryEntries({
+        url,
+        lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
+      });
+
+    async function dial(claim: Partial<Parameters<typeof useMultiplayerStore.setState>[0]>) {
+      useMultiplayerStore.getState().closeSubscriptionSocket();
+      vi.mocked(openPhaseSocket).mockClear();
+      useMultiplayerStore.setState({
+        userLobbySources: [],
+        sourceStatus: new Map(),
+        disabledDirectorySources: [],
+        ...claim,
+      });
+      driveReconnect();
+      vi.mocked(openPhaseSocket).mockImplementation(
+        async (url: string) =>
+          fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+      );
+      return useMultiplayerStore.getState().subscribeLobby(() => {});
+    }
+
+    // (i) A PURE directory listing at URL_X: gated, no socket, no status row.
+    let detach = await dial({ directorySources: belowFloor(URL_X) });
+    expect(openPhaseSocket).not.toHaveBeenCalledWith(URL_X, expect.anything());
+    expect(useMultiplayerStore.getState().sourceStatus.has(URL_X)).toBe(false);
+    detach?.();
+
+    // (ii) The SAME URL, the SAME below-floor row, now also hand-added. The
+    // user's explicit claim wins and the server is judged at the handshake —
+    // the only difference between the two halves is who claims the URL.
+    detach = await dial({
+      directorySources: belowFloor(URL_X),
+      userLobbySources: [userLobbySource(URL_X)!],
+    });
+    expect(openPhaseSocket).toHaveBeenCalledWith(URL_X, { surface: "lobby" });
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(URL_X)).toBe(true);
+    });
+    detach?.();
+
+    // Third leg, same shape: a preset URL the directory lists as incompatible
+    // is a preset, and presets are never gated.
+    detach = await dial({ directorySources: belowFloor(PRESET_URL) });
+    expect(openPhaseSocket).toHaveBeenCalledWith(PRESET_URL, { surface: "lobby" });
+    detach?.();
   });
 });
 

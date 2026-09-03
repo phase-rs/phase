@@ -9,6 +9,7 @@ import {
 } from "../../services/serverDetection";
 import {
   MAX_USER_LOBBY_SOURCES,
+  directoryLobbySources,
   lobbySources,
   useMultiplayerStore,
   type LobbySource,
@@ -31,9 +32,35 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
   const setHostingServer = useMultiplayerStore((s) => s.setHostingServer);
   const addUserLobbySource = useMultiplayerStore((s) => s.addUserLobbySource);
   const removeUserLobbySource = useMultiplayerStore((s) => s.removeUserLobbySource);
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore(
+    (s) => s.disabledDirectorySources,
+  );
+  const setDirectorySourceEnabled = useMultiplayerStore(
+    (s) => s.setDirectorySourceEnabled,
+  );
   const sources = useMemo(
-    () => lobbySources({ userLobbySources, sourceStatus }),
-    [userLobbySources, sourceStatus],
+    () =>
+      lobbySources({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+  /** The same unshadowed directory set, but including the DISABLED entries
+   * `lobbySources` omits — this list is the only place one can be switched back
+   * on. Single authority for every directory row rendered below. */
+  const directoryRows = useMemo(
+    () =>
+      directoryLobbySources({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
   );
   const [customUrl, setCustomUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -212,7 +239,13 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
           </label>
           <p className="mt-1 text-xs text-slate-500">{t("serverPicker.sourcesHelp")}</p>
           <ul className="mt-2 flex flex-col gap-2">
-            {sources.map((source: LobbySource) => {
+            {/* Presets and hand-added entries first. The `filter` is what stops
+                an ENABLED directory entry rendering twice — once from this
+                selector and once from `directoryRows` below, which is the
+                single authority for every directory row in this list. */}
+            {sources
+              .filter((source: LobbySource) => source.origin !== "directory")
+              .map((source: LobbySource) => {
               const preset = SERVER_PRESETS.find((p) => p.url === source.url);
               const status = statusLabel(sourceStatus.get(source.url)?.state);
               return (
@@ -252,6 +285,64 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
                           {t("serverPicker.remove")}
                         </button>
                       </>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+            {/* Directory listings, in the same list rather than a section of
+                their own: one list, distinguished by an origin badge. A row
+                this client cannot speak to has nothing to enable, so it carries
+                no control — the greyed line with the server's version is the
+                whole affordance. Directory rows never get `Remove` or `Use for
+                hosting`: nothing is stored to remove, and hosting placement
+                over a listing is a later phase's decision. */}
+            {directoryRows.map(({ entry, enabled }) => {
+              const incompatible = entry.rejection !== null;
+              const status = enabled
+                ? statusLabel(sourceStatus.get(entry.source.url)?.state)
+                : null;
+              return (
+                <li
+                  key={entry.source.url}
+                  className={
+                    "flex items-center justify-between gap-2 rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-gray-200"
+                    + (incompatible ? " opacity-60" : "")
+                  }
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate font-medium">{entry.source.name}</span>
+                    <span className="truncate font-mono text-[10px] text-slate-500">
+                      {entry.source.url.replace(/^wss?:\/\//, "")}
+                    </span>
+                    {incompatible && (
+                      <span className="truncate text-[10px] text-amber-300/80">
+                        {t("serverPicker.incompatibleVersion", {
+                          version: entry.row.server_version,
+                        })}
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500">
+                      {t("serverPicker.directoryOrigin")}
+                    </span>
+                    {entry.source.score !== undefined && (
+                      <span className="text-[10px] text-slate-400">
+                        {t("serverPicker.sourceScore", { score: entry.source.score })}
+                      </span>
+                    )}
+                    {status && <span className="text-[10px] text-slate-400">{status}</span>}
+                    {!incompatible && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDirectorySourceEnabled(entry.source.url, !enabled)
+                        }
+                        className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                      >
+                        {t(enabled ? "serverPicker.disable" : "serverPicker.enable")}
+                      </button>
                     )}
                   </span>
                 </li>

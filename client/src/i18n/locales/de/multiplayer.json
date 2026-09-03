@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Verbinde…",
     "sourceStatusDegraded": "Nicht erreichbar",
     "sourceDuplicate": "Dieser Server ist bereits eine Lobby-Quelle.",
-    "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden."
+    "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden.",
+    "directoryOrigin": "Verzeichnis",
+    "sourceScore": "Bewertung {{score}}",
+    "enable": "Aktivieren",
+    "disable": "Deaktivieren",
+    "incompatibleVersion": "Inkompatibel — Serverversion {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Keine Draft-Räume verfügbar",

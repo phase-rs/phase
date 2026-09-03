@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import type { LobbyGame } from "../../../adapter/types";
 import { LobbyView } from "../LobbyView";
 import { SERVER_PRESETS } from "../../../services/serverDetection";
+import type { DirectorySource } from "../../../services/serverDirectory";
 import {
   useMultiplayerStore,
   type AmbientLobbyFrame,
@@ -22,6 +23,18 @@ import {
  * function against empty channels, so the other cases are unaffected.
  */
 const storeMocks = vi.hoisted(() => ({ findLobbyGameByCode: vi.fn() }));
+/**
+ * This is the only test in the suite that mounts the real `LobbyView`, and the
+ * real `LobbyView` calls `refreshServerDirectory()` on mount. Without this mock
+ * the suite would issue a live `GET` to the official directory — a defect even
+ * on a run that passes.
+ */
+const directoryMocks = vi.hoisted(() => ({
+  refreshServerDirectory: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("../../../services/serverDirectory", () => ({
+  refreshServerDirectory: directoryMocks.refreshServerDirectory,
+}));
 vi.mock("../../../stores/multiplayerStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../stores/multiplayerStore")>()),
   findLobbyGameByCode: storeMocks.findLobbyGameByCode,
@@ -112,8 +125,32 @@ describe("LobbyView", () => {
       userLobbySources: [],
       sourceStatus: new Map(),
       toasts: new Map(),
+      directorySources: [],
+      directoryFetchedAtMs: null,
+      disabledDirectorySources: [],
     });
   });
+
+  /** A minimal projected listing. Built by hand rather than through
+   * `projectDirectoryBody`, whose module this file mocks away. */
+  function directoryEntry(url: string, score: number | undefined): DirectorySource {
+    return {
+      source: { url, name: url, origin: "directory", kind: "LobbyOnly", score },
+      row: {
+        url,
+        name: url,
+        mode: "LobbyOnly",
+        server_version: "0.71.0",
+        protocol_version: 55,
+        lobby_protocol_version: 4,
+        current_players: 0,
+        first_seen_ms: 1,
+        last_seen_ms: 2,
+        score: null,
+      },
+      rejection: null,
+    };
+  }
 
   afterEach(() => {
     cleanup();
@@ -552,5 +589,62 @@ describe("LobbyView", () => {
       listedOnA.format,
       listedOnA,
     );
+  });
+
+  // V-U11j
+  it("refreshes the server directory on mount, in server mode only", async () => {
+    useMultiplayerStore.setState({
+      subscribeLobby: vi.fn().mockResolvedValue(() => {}),
+      subscribeAmbientLobby: vi.fn(() => () => {}),
+    });
+    renderLobby({});
+    expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    directoryMocks.refreshServerDirectory.mockClear();
+    // Paired negative: P2P has no lobby to browse and no directory to read.
+    render(
+      <LobbyView
+        onHostGame={vi.fn()}
+        onHostP2P={vi.fn()}
+        onJoinGame={vi.fn()}
+        connectionMode="p2p"
+      />,
+    );
+    expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(0);
+  });
+
+  // V-U11k
+  it("re-subscribes on membership change, not on a score-only refresh", async () => {
+    const subscribeLobby = vi.fn().mockResolvedValue(() => {});
+    useMultiplayerStore.setState({
+      subscribeLobby,
+      subscribeAmbientLobby: vi.fn(() => () => {}),
+      directorySources: [directoryEntry("wss://d.example/ws", 40)],
+    });
+    renderLobby({});
+    await waitFor(() => {
+      expect(subscribeLobby).toHaveBeenCalledTimes(1);
+    });
+
+    // A refresh that only moves a score must not tear down and re-attach every
+    // channel's listener.
+    act(() => {
+      useMultiplayerStore.setState({
+        directorySources: [directoryEntry("wss://d.example/ws", 90)],
+      });
+    });
+    expect(subscribeLobby).toHaveBeenCalledTimes(1);
+
+    // Paired positive: a source at a NEW url does re-subscribe — otherwise the
+    // assertion above would only prove that nothing ever re-subscribes.
+    act(() => {
+      useMultiplayerStore.setState({
+        directorySources: [directoryEntry("wss://e.example/ws", 90)],
+      });
+    });
+    await waitFor(() => {
+      expect(subscribeLobby).toHaveBeenCalledTimes(2);
+    });
   });
 });

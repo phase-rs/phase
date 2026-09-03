@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Connexion…",
     "sourceStatusDegraded": "Injoignable",
     "sourceDuplicate": "Ce serveur est déjà une source de salon.",
-    "sourceCapReached": "Jusqu'à {{max}} sources peuvent être ajoutées."
+    "sourceCapReached": "Jusqu'à {{max}} sources peuvent être ajoutées.",
+    "directoryOrigin": "Annuaire",
+    "sourceScore": "Score {{score}}",
+    "enable": "Activer",
+    "disable": "Désactiver",
+    "incompatibleVersion": "Incompatible — version du serveur {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Aucune salle de draft disponible",

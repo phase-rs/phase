@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Connecting…",
     "sourceStatusDegraded": "Unreachable",
     "sourceDuplicate": "That server is already a lobby source.",
-    "sourceCapReached": "Up to {{max}} sources can be added."
+    "sourceCapReached": "Up to {{max}} sources can be added.",
+    "directoryOrigin": "Directory",
+    "sourceScore": "Score {{score}}",
+    "enable": "Enable",
+    "disable": "Disable",
+    "incompatibleVersion": "Incompatible — server version {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "No draft rooms available",

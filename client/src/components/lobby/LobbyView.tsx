@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { FormatGroup, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { flagForServer, parseJoinCode } from "../../services/serverDetection";
+import { refreshServerDirectory } from "../../services/serverDirectory";
 import {
   FORMAT_DEFAULTS,
   adHocLobbySource,
@@ -97,9 +98,32 @@ export function LobbyView({
   const showToast = useMultiplayerStore((s) => s.showToast);
   // Flag for the connected region, or null for self-hosted/custom servers.
   const serverFlag = flagForServer(hostingServer ?? "");
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore(
+    (s) => s.disabledDirectorySources,
+  );
   const sources = useMemo(
-    () => lobbySources({ userLobbySources, sourceStatus }),
-    [userLobbySources, sourceStatus],
+    () =>
+      lobbySources({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+  /**
+   * Membership, not decoration. A directory refresh that only moves a score
+   * must not tear down and re-attach every channel's listener — which sends
+   * `UnsubscribeLobby`/`SubscribeLobby` on every socket and blanks each cached
+   * snapshot. Same rule that keeps `sourceStatus` out of the subscription
+   * effect's dependency list, and a strict improvement on depending on
+   * `userLobbySources`: a no-op replacement of that array no longer churns
+   * subscriptions either.
+   */
+  const dialedSourceKey = useMemo(
+    () => sources.map((s) => s.url).join("|"),
+    [sources],
   );
   /** Latest snapshot per source URL, carrying the source it was delivered
    * with. Kept per-source rather than merged so a silent or degraded
@@ -219,9 +243,18 @@ export function LobbyView({
       detachAmbient();
       lobbyDetach?.();
     };
-    // Depends on `userLobbySources` (identity changes only on add/remove),
-    // never on `sourceStatus` — a status flap must not churn subscriptions.
-  }, [isP2P, userLobbySources, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
+    // Depends on the dialed set's MEMBERSHIP (`dialedSourceKey`), never on
+    // `sourceStatus` — a status flap must not churn subscriptions.
+  }, [isP2P, dialedSourceKey, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
+
+  useEffect(() => {
+    // Not at app boot, for the same reason the subscription sockets are not: a
+    // player who never opens multiplayer pays for nothing. Failures are silent
+    // by contract — the lobby simply lists presets and hand-added sources. The
+    // TTL in `serverDirectory.ts` is what makes a remount cheap.
+    if (isP2P) return;
+    void refreshServerDirectory();
+  }, [isP2P]);
 
   const handleJoinFromList = useCallback(
     (entry: LobbyGameEntry) => {

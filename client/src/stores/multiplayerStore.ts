@@ -50,6 +50,12 @@ import {
   parseWebSocketUrl,
   type ServerPreset,
 } from "../services/serverDetection";
+// TYPE-ONLY, and it must stay that way. `verbatimModuleSyntax` erases this
+// import entirely, so this module gains no runtime edge to `serverDirectory`.
+// A value import would put the whole fetching service into this store's module
+// evaluation graph, beside the `serverDetection` ⇄ `multiplayerStore` cycle
+// that already constrains what `create()`/`migrate`/`merge` may read.
+import type { DirectorySource } from "../services/serverDirectory";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
@@ -124,9 +130,9 @@ let hostReconnectAttempt = 0;
 let hostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const HOST_MAX_RECONNECT_ATTEMPTS = 3;
 
-/** Where a lobby source came from. `directory` is a typed member from day
- * one; no producer exists in this build (the official directory service
- * supplies them in a later phase). */
+/** Where a lobby source came from. `directory` entries are projected from the
+ * official directory by `services/serverDirectory.ts`; they are derived each
+ * session and never persisted. */
 export type LobbySourceOrigin = "official" | "directory" | "user";
 
 /**
@@ -143,8 +149,10 @@ export interface LobbySource {
   /** Learned from the handshake's `ServerHello`; undefined until this
    * source's socket has opened at least once. */
   readonly kind?: ServerInfo["mode"];
-  /** 0–100 health score. No producer in this build; the list comparator
-   * treats `undefined` as the lowest rank. */
+  /** 0–100 health score, produced by `services/serverDirectory.ts` from a
+   * listing's `score.value`; the list comparator treats `undefined` as the
+   * lowest rank. Never the whole `WireScore` — the components stay on
+   * `DirectorySource.row.score`. */
   readonly score?: number;
 }
 
@@ -181,10 +189,12 @@ export type AddLobbySourceResult =
 
 /**
  * Bound on hand-added (`user`) lobby sources. Built-in presets are not
- * counted — they are not user-removable, so the dialed total is at most
- * `SERVER_PRESETS.length + MAX_USER_LOBBY_SOURCES`. Hydration trims to the
- * same constant, so a persisted blob can never dial more than the add path
- * would allow.
+ * counted — they are not user-removable — and neither are directory listings,
+ * which carry their own bound, so the dialed total is at most
+ * `SERVER_PRESETS.length + MAX_USER_LOBBY_SOURCES +
+ * MAX_DIRECTORY_LOBBY_SOURCES` (`services/serverDirectory.ts`). Hydration trims
+ * to the same constant, so a persisted blob can never dial more than the add
+ * path would allow.
  */
 export const MAX_USER_LOBBY_SOURCES = 8;
 
@@ -227,19 +237,92 @@ export function adHocLobbySource(url: string): LobbySource | null {
  * the import cycle's temporal dead zone.
  */
 export function lobbySources(
-  state: Pick<MultiplayerState, "userLobbySources" | "sourceStatus">,
+  state: Pick<
+    MultiplayerState,
+    "userLobbySources" | "sourceStatus" | "directorySources" | "disabledDirectorySources"
+  >,
 ): LobbySource[] {
   const presets = SERVER_PRESETS.map(presetLobbySource);
   const presetUrls = new Set(presets.map((preset) => preset.url));
   // A hand-added URL that is also a preset is dropped here rather than at
   // hydration: `merge` runs while this module evaluates and must not read
   // `SERVER_PRESETS` (import cycle, temporal dead zone).
+  //
+  // Precedence is presets → user → directory. Order matters beyond looks:
+  // `findLobbyGameByCode` scans in derived order, so a code listed by both a
+  // preset and a directory server still resolves to the preset.
   return [
     ...presets,
     ...state.userLobbySources.filter((source) => !presetUrls.has(source.url)),
+    ...unshadowedDirectorySources(state)
+      .filter((entry) => !state.disabledDirectorySources.includes(entry.source.url))
+      .map((entry) => entry.source),
   ].map((source) => {
     const mode = state.sourceStatus.get(source.url)?.serverInfo?.mode;
     return mode === undefined ? source : { ...source, kind: mode };
+  });
+}
+
+/**
+ * Directory entries that are not already a preset or a hand-added source.
+ *
+ * Precedence is presets → user → directory, extending the existing
+ * preset-beats-user rule: a hand-added entry is an explicit, persisted claim
+ * and a listing is transient, so the user's own row wins and keeps its
+ * `Remove` / `Use for hosting` affordances.
+ *
+ * Reads `SERVER_PRESETS` at CALL TIME, exactly as {@link lobbySources} does and
+ * for the same reason — a build's preset set can move between releases, and
+ * reading the constant during module evaluation would hit the
+ * `serverDetection` ⇄ `multiplayerStore` cycle's temporal dead zone. All three
+ * callers (`lobbySources`, `directoryLobbySources`, `ensureSubscriptionSocket`)
+ * run after hydration; none is reachable from `create()`, `migrate` or `merge`.
+ *
+ * Both sides of every comparison are CANONICAL. A preset URL is a build-time
+ * define, spelled by hand; a directory URL has been through
+ * `parseWebSocketUrl(...).href`. Under every shipped define the two spellings
+ * coincide, so comparing raw would pass today — and would silently stop
+ * shadowing the official preset the day a pathless or otherwise non-canonical
+ * URL is configured, which is exactly the duplicate-preset failure this helper
+ * exists to prevent. `userUrls` needs no such call: every `userLobbySources`
+ * entry was minted by `userLobbySource`, and hydration rebuilds each one
+ * through the same function, so those URLs are canonical by construction.
+ */
+function unshadowedDirectorySources(
+  state: Pick<MultiplayerState, "userLobbySources" | "directorySources">,
+): DirectorySource[] {
+  const presetUrls = new Set(
+    SERVER_PRESETS.map((preset) => parseWebSocketUrl(preset.url)?.href ?? preset.url),
+  );
+  const userUrls = new Set(state.userLobbySources.map((source) => source.url));
+  return state.directorySources.filter(
+    (entry) => !presetUrls.has(entry.source.url) && !userUrls.has(entry.source.url),
+  );
+}
+
+/** Every unshadowed directory entry with its enabled flag — including the
+ * DISABLED ones, which {@link lobbySources} omits by construction. The picker
+ * is the only place a disabled entry can be switched back on, so it needs the
+ * set `lobbySources` filters away — but NOT the set it shadows: an entry a
+ * preset or a hand-added source already claims renders as that row, not as a
+ * second directory row. Built on `unshadowedDirectorySources`, the one
+ * shadowing predicate this file has, so the three consumers (this,
+ * `lobbySources`, and `ensureSubscriptionSocket`'s dial gate) cannot disagree
+ * about what is shadowed. */
+export function directoryLobbySources(
+  state: Pick<
+    MultiplayerState,
+    "userLobbySources" | "sourceStatus" | "directorySources" | "disabledDirectorySources"
+  >,
+): { entry: DirectorySource; enabled: boolean }[] {
+  return unshadowedDirectorySources(state).map((entry) => {
+    // Same kind-from-status decoration `lobbySources` applies, so a row's kind
+    // reads identically in both lists.
+    const mode = state.sourceStatus.get(entry.source.url)?.serverInfo?.mode;
+    return {
+      entry: mode === undefined ? entry : { ...entry, source: { ...entry.source, kind: mode } },
+      enabled: !state.disabledDirectorySources.includes(entry.source.url),
+    };
   });
 }
 
@@ -247,13 +330,26 @@ export function lobbySources(
  * direct-codes mode. A hosting server that is not (or no longer) a browsed
  * source still resolves, as an ad-hoc origin. */
 export function hostingLobbySource(
-  state: Pick<MultiplayerState, "hostingServer" | "userLobbySources" | "sourceStatus">,
+  state: Pick<
+    MultiplayerState,
+    | "hostingServer"
+    | "userLobbySources"
+    | "sourceStatus"
+    | "directorySources"
+    | "disabledDirectorySources"
+  >,
 ): LobbySource | null {
   const { hostingServer } = state;
   if (hostingServer === null) return null;
   return (
-    lobbySources(state).find((source) => source.url === hostingServer)
-    ?? adHocLobbySource(hostingServer)
+    // Hosting placement over a directory-listed server is a later phase's
+    // decision — it needs its own operator disclosure — so a `hostingServer`
+    // that happens to match a listing still falls through to
+    // `adHocLobbySource`, exactly as it does today. This phase changes nothing
+    // about where a game registers.
+    lobbySources(state).find(
+      (source) => source.origin !== "directory" && source.url === hostingServer,
+    ) ?? adHocLobbySource(hostingServer)
   );
 }
 
@@ -618,6 +714,19 @@ interface MultiplayerState {
   /** Hand-added lobby authorities. Persisted; built-in presets are derived
    * per session by {@link lobbySources} and are never stored here. */
   userLobbySources: LobbySource[];
+  /** Directory-listed authorities, as projected by
+   * `services/serverDirectory.ts`. Rebuilt each session and never persisted; a
+   * failed refresh leaves the last good list in place, which IS the last-good
+   * fallback. */
+  directorySources: DirectorySource[];
+  /** When the last directory read completed (any HTTP status), or `null` when
+   * none has. Owned here rather than in the service so tests reset it with the
+   * same `setState` they reset every other store field with. */
+  directoryFetchedAtMs: number | null;
+  /** Directory sources the player switched off, by client-canonical URL.
+   * PERSISTED: a disable is a preference, and it deliberately outlives the
+   * entry vanishing from the directory and coming back. */
+  disabledDirectorySources: string[];
   /** Per-source connection state, keyed by source URL. Ephemeral. */
   sourceStatus: Map<string, LobbySourceStatus>;
   connectionStatus: ConnectionStatus;
@@ -670,6 +779,10 @@ interface MultiplayerActions {
   addUserLobbySource: (url: string) => AddLobbySourceResult;
   /** Remove a hand-added lobby source and close its channel. */
   removeUserLobbySource: (url: string) => void;
+  /** Switch one directory listing on or off for this player. Disabling drops it
+   * from the dialed set and tears its channel down; it does NOT delete the
+   * listing, which the picker keeps showing so it can be switched back on. */
+  setDirectorySourceEnabled: (url: string, enabled: boolean) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setActivePlayerId: (id: PlayerId | null) => void;
   setOpponentDisplayName: (name: string | null) => void;
@@ -1207,6 +1320,29 @@ export function normalizeUserLobbySources(persisted: unknown): LobbySource[] {
   return sources;
 }
 
+/**
+ * Persisted disable preferences are external input, like every other persisted
+ * field: rebuild each entry through `userLobbySource` — the same canonicaliser
+ * the URLs were minted with — drop anything that is not a `ws(s)://` URL, and
+ * dedupe.
+ *
+ * Deliberately UNCAPPED, unlike `userLobbySources`: every entry requires a
+ * deliberate click on a row the directory listed, so the list is bounded by
+ * user action, and a cap would silently start re-enabling the oldest disabled
+ * server.
+ */
+export function normalizeDisabledDirectorySources(persisted: unknown): string[] {
+  if (!Array.isArray(persisted)) return [];
+  const urls: string[] = [];
+  for (const entry of persisted) {
+    if (typeof entry !== "string") continue;
+    const source = userLobbySource(entry);
+    if (!source || urls.includes(source.url)) continue;
+    urls.push(source.url);
+  }
+  return urls;
+}
+
 export function migratePersistedMultiplayerState(
   persisted: unknown,
   version: number,
@@ -1495,6 +1631,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       displayName: "",
       hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL as string | null,
       userLobbySources: [] as LobbySource[],
+      directorySources: [] as DirectorySource[],
+      directoryFetchedAtMs: null as number | null,
+      disabledDirectorySources: [] as string[],
       sourceStatus: new Map<string, LobbySourceStatus>(),
       connectionStatus: "disconnected",
       activePlayerId: null,
@@ -1538,10 +1677,18 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       addUserLobbySource: (url) => {
         const source = userLobbySource(url);
         if (!source) return { ok: false, reason: "invalid_url" };
-        // Duplicates are judged against the DERIVED list, so a preset URL
-        // cannot be re-added as a user entry; the cap counts user entries
-        // only, so the allowance does not shift with the preset count.
-        if (lobbySources(get()).some((existing) => existing.url === source.url)) {
+        // Duplicates are judged against presets and hand-added entries only,
+        // so a preset URL cannot be re-added as a user entry; the cap counts
+        // user entries only, so the allowance does not shift with the preset
+        // count. A directory listing is transient and is SHADOWED by a user
+        // entry (see `unshadowedDirectorySources`), so pinning a
+        // currently-listed server as your own is the intended use, not a
+        // duplicate.
+        if (
+          lobbySources(get()).some(
+            (existing) => existing.origin !== "directory" && existing.url === source.url,
+          )
+        ) {
           return { ok: false, reason: "duplicate" };
         }
         if (get().userLobbySources.length >= MAX_USER_LOBBY_SOURCES) {
@@ -1564,6 +1711,25 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         if (url === get().hostingServer) {
           get().setHostingServer(DEFAULT_MULTIPLAYER_SERVER_URL);
         }
+        // The URL may still be browsed as a directory listing once the user
+        // entry that shadowed it is gone; only tear the channel down when
+        // nothing lists it, or the source would survive in `lobbySources` with
+        // no socket until the next `LobbyView` mount.
+        if (!lobbySources(get()).some((s) => s.url === url)) closeChannel(set, get, url);
+      },
+
+      setDirectorySourceEnabled: (url, enabled) => {
+        const disabled = get().disabledDirectorySources;
+        if (enabled) {
+          set({ disabledDirectorySources: disabled.filter((entry) => entry !== url) });
+          return;
+        }
+        if (!disabled.includes(url)) {
+          set({ disabledDirectorySources: [...disabled, url] });
+        }
+        // A source the player switched off must stop holding a socket.
+        // `closeChannel` also drops its `sourceStatus` row, so the picker stops
+        // showing a stale status line for a source it is no longer dialing.
         closeChannel(set, get, url);
       },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -2089,6 +2255,30 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       ensureSubscriptionSocket: async (url) => {
         if (!isValidWebSocketUrl(url)) return null;
+        // The protocol window, decided before the socket. A directory-listed
+        // authority arrives with its versions already confirmed against that
+        // server's own `/info` at announce time, so a verdict exists before any
+        // handshake — and opening a socket to a server whose lobby version this
+        // client cannot speak can only produce a rejected handshake and a
+        // toast. The verdict is READ here, never recomputed:
+        // `serverProtocolRejection` stays the only protocol-window authority
+        // and `serverDirectory.ts` is the only place it is applied to a row.
+        //
+        // Keyed through `unshadowedDirectorySources`, NOT through the raw
+        // `directorySources` field. The field is the unfiltered projection, so
+        // a URL the user hand-added — or a preset URL — that the directory also
+        // lists would otherwise be matched here and refused a socket,
+        // contradicting the rule that preset and hand-added sources are judged
+        // at the handshake. Pinning a listed server as your own is the
+        // deliberate escape hatch: you opt back into the handshake's verdict,
+        // which is the same authority applied to the identity the server
+        // actually presents rather than the one it announced.
+        //
+        // Placed BEFORE `channelFor`: no channel is created and no
+        // `sourceStatus` row is written, so a gated server does not read as
+        // "offline" and does not light the degraded-sources chip.
+        const listed = unshadowedDirectorySources(get()).find((d) => d.source.url === url);
+        if (listed && listed.rejection !== null) return null;
         const channel = channelFor(url);
         // Fast path: handle is live and currently has a connected socket.
         const existing = channel.reconnect?.current();
@@ -2369,6 +2559,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
           userLobbySources: normalizeUserLobbySources(saved.userLobbySources),
+          disabledDirectorySources: normalizeDisabledDirectorySources(
+            saved.disabledDirectorySources,
+          ),
           // `null` is a meaningful stored value (direct-codes mode), so it is
           // honoured; anything else that is not a valid URL falls back to the
           // initial hosting server rather than leaving the store unusable.
@@ -2385,6 +2578,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         displayName: state.displayName,
         hostingServer: state.hostingServer,
         userLobbySources: state.userLobbySources,
+        // No persist version bump: an absent key hydrates through `merge` to
+        // the initial `[]`, and an older build reading a newer blob spreads a
+        // key it never reads and drops it on its next write. A bump would only
+        // force `migratePersistedMultiplayerState` to grow an arm that does
+        // nothing. `directorySources` / `directoryFetchedAtMs` stay out — the
+        // projection is rebuilt each session, never persisted.
+        disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
       }),
     },

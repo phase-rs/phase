@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Conectando…",
     "sourceStatusDegraded": "Inaccesible",
     "sourceDuplicate": "Ese servidor ya es una fuente de sala.",
-    "sourceCapReached": "Se pueden añadir hasta {{max}} fuentes."
+    "sourceCapReached": "Se pueden añadir hasta {{max}} fuentes.",
+    "directoryOrigin": "Directorio",
+    "sourceScore": "Puntuación {{score}}",
+    "enable": "Activar",
+    "disable": "Desactivar",
+    "incompatibleVersion": "Incompatible — versión del servidor {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "No hay salas de draft disponibles",

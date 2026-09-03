@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Connessione…",
     "sourceStatusDegraded": "Irraggiungibile",
     "sourceDuplicate": "Quel server è già una fonte lobby.",
-    "sourceCapReached": "Si possono aggiungere fino a {{max}} fonti."
+    "sourceCapReached": "Si possono aggiungere fino a {{max}} fonti.",
+    "directoryOrigin": "Directory",
+    "sourceScore": "Punteggio {{score}}",
+    "enable": "Attiva",
+    "disable": "Disattiva",
+    "incompatibleVersion": "Incompatibile — versione del server {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Nessuna stanza di draft disponibile",

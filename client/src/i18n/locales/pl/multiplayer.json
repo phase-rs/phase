@@ -147,7 +147,12 @@
     "sourceStatusConnecting": "Łączenie…",
     "sourceStatusDegraded": "Niedostępny",
     "sourceDuplicate": "Ten serwer jest już źródłem poczekalni.",
-    "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł."
+    "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł.",
+    "directoryOrigin": "Katalog",
+    "sourceScore": "Ocena {{score}}",
+    "enable": "Włącz",
+    "disable": "Wyłącz",
+    "incompatibleVersion": "Niezgodny — wersja serwera {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Brak dostępnych pokoi draftu",

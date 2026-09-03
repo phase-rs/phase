@@ -8,6 +8,18 @@ import {
   useMultiplayerStore,
   type LobbySource,
 } from "../../../stores/multiplayerStore";
+import {
+  DIRECTORY_VERSION,
+  projectDirectoryBody,
+  type DirectoryRow,
+  type DirectorySource,
+} from "../../../services/serverDirectory";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
+  PROTOCOL_VERSION,
+} from "../../../adapter/ws-adapter";
+import { lobbySources } from "../../../stores/multiplayerStore";
 import { ServerPicker } from "../ServerPicker";
 
 const PRESET_URL = SERVER_PRESETS[0].url;
@@ -42,8 +54,37 @@ describe("ServerPicker", () => {
       hostingServer: PRESET_URL,
       userLobbySources: [],
       sourceStatus: new Map(),
+      directorySources: [],
+      directoryFetchedAtMs: null,
+      disabledDirectorySources: [],
     });
   });
+
+  /** Project fixtures through the PRODUCTION projection, so a rendered row
+   * carries the same canonical URL and the same stored `rejection` a real
+   * listing would. */
+  function directoryEntries(
+    ...rows: (Partial<DirectoryRow> & { url: string })[]
+  ): DirectorySource[] {
+    return projectDirectoryBody({
+      directory_version: DIRECTORY_VERSION,
+      servers: rows.map((overrides) => ({
+        name: overrides.url.replace(/^wss:\/\//, "").replace(/\/.*$/, ""),
+        mode: "LobbyOnly",
+        server_version: "0.71.0",
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        current_players: 0,
+        first_seen_ms: 1_700_000_000_000,
+        last_seen_ms: 1_700_000_060_000,
+        score: null,
+        ...overrides,
+      })),
+    })!;
+  }
+
+  const dialedUrls = () =>
+    lobbySources(useMultiplayerStore.getState()).map((source) => source.url);
 
   afterEach(() => {
     cleanup();
@@ -176,5 +217,64 @@ describe("ServerPicker", () => {
 
     const row = screen.getByText("play.example.com").closest("li");
     expect(within(row as HTMLElement).getByText("Unreachable")).toBeInTheDocument();
+  });
+
+  // V-U11h
+  it("switches a directory source out of the dialed set without deleting it", async () => {
+    const URL_D = "wss://listed.example/ws";
+    useMultiplayerStore.setState({ directorySources: directoryEntries({ url: URL_D }) });
+    render(<ServerPicker onClose={vi.fn()} />);
+
+    // Reach-guard: the entry starts out dialed and rendered.
+    expect(dialedUrls()).toContain(URL_D);
+    const row = screen.getByText("listed.example").closest("li") as HTMLElement;
+    const user = userEvent.setup();
+    await user.click(within(row).getByRole("button", { name: "Disable" }));
+
+    expect(dialedUrls()).not.toContain(URL_D);
+    // Switched off, not deleted: the listing survives and the row is still
+    // rendered, now offering to switch it back on.
+    expect(
+      useMultiplayerStore.getState().directorySources.map((e) => e.source.url),
+    ).toEqual([URL_D]);
+    expect(useMultiplayerStore.getState().disabledDirectorySources).toEqual([URL_D]);
+    const enableButton = await within(
+      screen.getByText("listed.example").closest("li") as HTMLElement,
+    ).findByRole("button", { name: "Enable" });
+
+    // Paired: switching it back on restores it to the dialed set.
+    await user.click(enableButton);
+    expect(dialedUrls()).toContain(URL_D);
+    expect(useMultiplayerStore.getState().disabledDirectorySources).toEqual([]);
+  });
+
+  // V-U18d
+  it("greys an incompatible directory row, shows its version, and offers no toggle", () => {
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries(
+        { url: "wss://ok.example/ws" },
+        {
+          url: "wss://old.example/ws",
+          server_version: "0.42.0",
+          lobby_protocol_version: MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL - 1,
+        },
+      ),
+    });
+    render(<ServerPicker onClose={vi.fn()} />);
+
+    const badRow = screen.getByText("old.example").closest("li") as HTMLElement;
+    expect(
+      within(badRow).getByText(/Incompatible — server version 0\.42\.0/),
+    ).toBeInTheDocument();
+    expect(
+      within(badRow).queryByRole("button", { name: /Disable|Enable/ }),
+    ).toBeNull();
+
+    // Paired: the compatible sibling DOES carry a toggle, so "no button" is
+    // not "no rows rendered".
+    const goodRow = screen.getByText("ok.example").closest("li") as HTMLElement;
+    expect(
+      within(goodRow).getByRole("button", { name: "Disable" }),
+    ).toBeInTheDocument();
   });
 });
