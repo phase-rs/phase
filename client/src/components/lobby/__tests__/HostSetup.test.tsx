@@ -99,6 +99,7 @@ import {
   LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../../adapter/ws-adapter";
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../../config/multiplayerServer";
 
 describe("HostSetup", () => {
   beforeEach(() => {
@@ -250,6 +251,124 @@ describe("HostSetup", () => {
     await user.click(screen.getByRole("option", { name: /slow\.example/ }));
     await user.click(screen.getByRole("button", { name: "Host Game" }));
     expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
+  });
+
+  // V-U15k — a directory VERDICT may only come from a listing the directory
+  // owns. A preset (or hand-added) URL the directory also lists is SHADOWED:
+  // it is judged at its handshake, which is the escape hatch
+  // `ensureSubscriptionSocket`'s dial gate documents.
+  it("judges a shadowed preset at its handshake, not by the directory's listing", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    const officialHost = new URL(OFFICIAL_MULTIPLAYER_SERVER_URL).host;
+    useMultiplayerStore.setState({
+      hostingServer: OFFICIAL_MULTIPLAYER_SERVER_URL,
+      // A LIVE, fully compatible handshake for the official preset — the
+      // authority that actually decides whether this client can speak to it.
+      sourceStatus: new Map([
+        [
+          OFFICIAL_MULTIPLAYER_SERVER_URL,
+          {
+            state: "open" as const,
+            serverInfo: {
+              version: "0.71.0",
+              buildCommit: "",
+              protocolVersion: PROTOCOL_VERSION,
+              mode: "Full" as const,
+              lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+            },
+            playerCount: 0,
+          },
+        ],
+      ]),
+      directorySources: directoryEntries(
+        // A STALE row for the SAME URL, below the lobby floor. The preset
+        // shadows it, so its verdict is not this source's verdict.
+        {
+          url: OFFICIAL_MULTIPLAYER_SERVER_URL,
+          name: "stale.example",
+          mode: "Full",
+          lobby_protocol_version: 0,
+        },
+        // An unshadowed listing, so the fixture is not a single-row degenerate
+        // and the submission below has somewhere else it could land.
+        {
+          url: SLOW,
+          name: "slow.example",
+          mode: "Full",
+          score: {
+            value: 20,
+            samples: 40,
+            success_rate: 1,
+            completion_rate: 1,
+            median_rtt_ms: 50,
+          },
+        },
+      ),
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    // The preset renders as an ordinary unranked candidate — NOT as
+    // `serverPicker.incompatibleVersion` off the stale row's version.
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "slow.example — health 20",
+      `${officialHost} — not yet rated`,
+    ]);
+
+    // And it is selectable: the honoured pick is the preset, not the fallback.
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      OFFICIAL_MULTIPLAYER_SERVER_URL,
+    );
+
+    // Paired positive: the unshadowed listing is still pickable, so the
+    // assertions above are not passing on a picker that only ever offers the
+    // preset.
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
+  });
+
+  // V-U15l — the other half of V-U15k's seam. The `Full` mode hint is keyed on
+  // the RAW projection on purpose: an announcement that a URL runs games is
+  // true whoever owns the source, and it only ever ADMITS a candidate. Keying
+  // it on the shadowing-aware list instead drops a pinned row out of the
+  // picker entirely while it has no live `kind` to be admitted by.
+  it("keeps a pinned row the directory announces as Full in the picker before its handshake", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    const pinned = "wss://pinned.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: null,
+      // No live handshake, so `kind` is undefined and the announced mode is the
+      // only thing that can admit this row.
+      sourceStatus: new Map(),
+      userLobbySources: [{ url: pinned, name: "pinned.example", origin: "user" as const }],
+      directorySources: directoryEntries({
+        url: pinned,
+        name: "pinned.example",
+        mode: "Full",
+        // Drifted, so the row would be excluded if its verdict were applied —
+        // which it must not be, because the pinned source shadows it.
+        protocol_version: PROTOCOL_VERSION + 5,
+      }),
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "pinned.example — not yet rated",
+    ]);
+
+    await user.click(screen.getByRole("option", { name: /pinned\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), pinned);
   });
 
   // V-U15b

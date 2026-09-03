@@ -12,6 +12,7 @@ import type {
 import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
+  directoryLobbySources,
   FORMAT_DEFAULTS,
   isKnownFormat,
   lobbySources,
@@ -84,12 +85,15 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
-/** One row of the host-target picker: the source, paired with the directory
- *  listing that announced it, or `null` for a preset or hand-added source the
- *  directory has never described. The listing is what carries the protocol
- *  verdicts. */
+/** One row of the host-target picker. The two listing fields answer different
+ *  questions and are keyed differently on purpose. */
 interface HostCandidate {
   source: LobbySource;
+  /** The row announcing this URL, whoever owns the source. Supplies the `Full`
+   *  mode hint only. */
+  announced: DirectorySource | null;
+  /** The listing whose protocol verdict applies to this source, or `null` when
+   *  no directory listing owns it. */
   listing: DirectorySource | null;
 }
 
@@ -113,13 +117,27 @@ interface HostCandidate {
 function fullHostCandidates(
   state: Parameters<typeof lobbySources>[0] & { directorySources: DirectorySource[] },
 ): HostCandidate[] {
-  const listings = new Map(
+  // The mode hint reads the RAW projection: an announcement that a URL runs
+  // games is true whoever owns the source, and it only ever ADMITS a candidate.
+  const announced = new Map(
     state.directorySources.map((entry) => [entry.source.url, entry]),
   );
+  // The verdict reads the SHADOWING-AWARE list, because it EXCLUDES. A preset
+  // or hand-added URL the directory also lists is judged at its handshake —
+  // the same rule `ensureSubscriptionSocket`'s dial gate states, resolved
+  // through the same single shadowing predicate.
+  const owned = new Map(
+    directoryLobbySources(state).map(({ entry }) => [entry.source.url, entry]),
+  );
   return lobbySources(state)
-    .map((source) => ({ source, listing: listings.get(source.url) ?? null }))
+    .map((source) => ({
+      source,
+      announced: announced.get(source.url) ?? null,
+      listing: owned.get(source.url) ?? null,
+    }))
     .filter(
-      ({ source, listing }) => source.kind === "Full" || listing?.row.mode === "Full",
+      (candidate) =>
+        candidate.source.kind === "Full" || candidate.announced?.row.mode === "Full",
     )
     .sort((a, b) => (b.source.score ?? -1) - (a.source.score ?? -1));
 }
