@@ -6,6 +6,7 @@ import {
   HomeIcon,
   OnlineNavIcon,
   PlayNavIcon,
+  TournamentNavIcon,
 } from "./navIcons";
 
 export interface NavItem {
@@ -25,6 +26,7 @@ export const NAV_ITEMS: NavItem[] = [
   { key: "online", path: "/multiplayer", labelKey: "nav.online", Icon: OnlineNavIcon, match: (p) => p.startsWith("/multiplayer") },
   { key: "draft", path: "/draft", labelKey: "nav.draft", Icon: DraftNavIcon, match: (p) => p.startsWith("/draft") },
   { key: "decks", path: "/my-decks", labelKey: "nav.decks", Icon: DecksNavIcon, match: (p) => p.startsWith("/my-decks") || p.startsWith("/deck-builder") },
+  { key: "tournament", path: "/tournament", labelKey: "nav.tournament", Icon: TournamentNavIcon, match: (p) => p.startsWith("/tournament") },
 ];
 
 /** The key of the nav item that should appear active for a given pathname. */

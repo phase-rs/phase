@@ -15,14 +15,26 @@ import {
   arityLabel,
   decisiveGameWins,
   defaultScoringForArity,
+  failureLabel,
   formatTiebreakValue,
   gameWinsEntries,
+  isActiveEntrant,
   isReportable,
   myPairing,
   outcomeLabelKey,
   tiebreakCells,
+  viewerRelation,
   viewerRoles,
+  type ViewerRelation,
 } from "../tournamentPageState";
+
+/**
+ * The failure shape `failureLabel` accepts, read off the function itself
+ * rather than re-spelled: `TournamentFailure` is module-private, and a
+ * hand-written copy here would be a second declaration free to drift from the
+ * store's vocabulary.
+ */
+type TournamentFailureInput = Parameters<typeof failureLabel>[0];
 
 const seats: readonly PlayerSummary[] = [
   { player_key: "a", display_name: "Ann", dropped: false },
@@ -397,6 +409,149 @@ describe("arityLabel", () => {
 
   it.each([3, 4])("labels arity %i as a pod carrying its seat count", (arity) => {
     expect(arityLabel(arity)).toEqual({ key: "arity.pod", seats: arity });
+  });
+});
+
+// V7 (phase 5) — total over the credential shapes, and organizer-dominant.
+describe("viewerRelation", () => {
+  const now = 1_700_000_000_000;
+  const cases: [string, TournamentCredential | undefined, ViewerRelation][] = [
+    ["an organizer-only credential", { organizerToken: "o", updatedAt: now }, "organizer"],
+    ["a player-only credential", { playerToken: "p", updatedAt: now }, "entered"],
+    ["no credential at all", undefined, "spectating"],
+    // The playing organizer — phase 2 documents this as the NORMAL path, not
+    // an exotic one. Precedence resolves it to the stronger claim.
+    [
+      "a credential holding both tokens",
+      { organizerToken: "o", playerToken: "p", playerKey: "a", updatedAt: now },
+      "organizer",
+    ],
+  ];
+
+  it.each(cases)("resolves %s to %s", (_label, credential, expected) => {
+    expect(viewerRelation(viewerRoles(credential))).toBe(expected);
+  });
+
+  it("returns spectating for a credential carrying neither token", () => {
+    expect(viewerRelation(viewerRoles({ updatedAt: now }))).toBe("spectating");
+  });
+
+  // Reach-guard: a function that answered "spectating" unconditionally would
+  // satisfy two of the six assertions above. Pin that every member really is
+  // produced, so the matrix cannot pass degenerately.
+  it("produces every member of the union across those inputs", () => {
+    const produced = new Set(
+      cases.map(([, credential]) => viewerRelation(viewerRoles(credential))),
+    );
+    expect([...produced].sort()).toEqual(["entered", "organizer", "spectating"]);
+  });
+});
+
+// V8 (phase 5) — total over all six failure shapes, with the two
+// `not_authorized` roles landing on DIFFERENT keys (a mapping keyed on
+// `reason` alone would collapse them).
+describe("failureLabel", () => {
+  const cases: [string, TournamentFailureInput, string][] = [
+    [
+      "an organizer refusal",
+      { ok: false, reason: "not_authorized", role: "organizer", message: "nope" },
+      "errors.notOrganizer",
+    ],
+    [
+      "a player refusal",
+      { ok: false, reason: "not_authorized", role: "player", message: "nope" },
+      "errors.notEntered",
+    ],
+    [
+      "a broker rejection",
+      { ok: false, reason: "rejected", message: "Tournament not found: X" },
+      "errors.serverRejected",
+    ],
+    ["a timeout", { ok: false, reason: "timeout", message: "slow" }, "errors.timedOut"],
+    [
+      "a lost connection",
+      { ok: false, reason: "connection_lost", message: "gone" },
+      "errors.connectionLost",
+    ],
+    ["an abort", { ok: false, reason: "aborted", message: "cancelled" }, "errors.aborted"],
+  ];
+
+  it.each(cases)("maps %s to %s", (_label, failure, key) => {
+    expect(failureLabel(failure).key).toBe(key);
+  });
+
+  // The broker's text is passed through byte-identically. Translating it, or
+  // substituting client copy for it, would discard the only diagnostic the
+  // `Error` frame carries.
+  it("carries the broker's message verbatim on a rejection", () => {
+    const message = "Tournament not found: X";
+    const label = failureLabel({ ok: false, reason: "rejected", message });
+    expect(label).toEqual({ key: "errors.serverRejected", message });
+  });
+
+  // Exactly one arm carries an interpolation variable, so a consumer's
+  // `"message" in label` narrowing is total.
+  it("attaches a message to the rejection arm and to no other", () => {
+    const withMessage = cases.filter(([, failure]) => "message" in failureLabel(failure));
+    expect(withMessage.map(([, , key]) => key)).toEqual(["errors.serverRejected"]);
+  });
+
+  it("maps the two not_authorized roles to different keys", () => {
+    expect(
+      failureLabel({ ok: false, reason: "not_authorized", role: "organizer", message: "" }).key,
+    ).not.toBe(
+      failureLabel({ ok: false, reason: "not_authorized", role: "player", message: "" }).key,
+    );
+  });
+
+  // Every `errors.*` key this function claims really resolves in the catalog.
+  it.each(cases)("resolves %s's key in the English catalog", (_label, _failure, key) => {
+    expect(i18n.exists(`tournament:${key}`)).toBe(true);
+  });
+});
+
+// V22 (phase 5) — the client mirror of `authorize_player`'s C2 conjunct.
+describe("isActiveEntrant", () => {
+  const view: TournamentView = {
+    summary: {
+      code: "TOUR01",
+      name: "Friday Night Magic",
+      arity: 4,
+      bracket: "Swiss",
+      status: "InProgress",
+      player_count: 1,
+      current_round: 1,
+      total_rounds: 3,
+      created_at: 1_700_000_000,
+    },
+    // A full history: the dropped entrant STAYS listed, which is why absence
+    // from this array means "not an entrant here", never "dropped".
+    players: [
+      { player_key: "bob", display_name: "Bob", dropped: false },
+      { player_key: "alice", display_name: "Alice", dropped: true },
+    ],
+    pairings: [],
+    standings: [],
+  };
+
+  const cases: [string, string | undefined, boolean][] = [
+    ["an active entrant", "bob", true],
+    ["a dropped entrant", "alice", false],
+    // Discriminates the identity join from the flag: a function that only read
+    // `dropped` would answer `true` here.
+    ["a key belonging to no entrant of this view", "cara", false],
+    ["a spectator holding no player key", undefined, false],
+  ];
+
+  it.each(cases)("answers %s (key %s) with %s", (_label, playerKey, expected) => {
+    expect(isActiveEntrant(view, playerKey)).toBe(expected);
+  });
+
+  // Reach-guard: a constant `false` is the trivial way to pass a matrix of
+  // three falses. Pin that exactly one input is admitted.
+  it("admits exactly one of those four inputs", () => {
+    const admitted = cases.filter(([, playerKey]) => isActiveEntrant(view, playerKey));
+    expect(admitted.map(([label]) => label)).toEqual(["an active entrant"]);
   });
 });
 

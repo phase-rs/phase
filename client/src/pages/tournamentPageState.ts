@@ -24,7 +24,9 @@
  * `Tiebreaks`. Each terminates in a `const unreachable: never` binding rather
  * than a `default:` arm, so a fifth wire arm fails the build in every place
  * that must make a decision about it. Components never discriminate these
- * unions themselves; they call these functions.
+ * unions themselves; they call these functions. `failureLabel` is a further
+ * exhaustive walk of the same form, over the failure-reason union rather than
+ * a wire union.
  */
 
 import type {
@@ -38,6 +40,7 @@ import type {
   TournamentView,
 } from "../adapter/types";
 import type {
+  GatedTournamentRpcResult,
   TournamentCredential,
   TournamentRole,
 } from "../stores/multiplayerStore";
@@ -167,7 +170,13 @@ export function outcomeLabelKey(
  *
  * This answers "can this pairing be reported by anyone", NOT "may this viewer
  * report it". Authorization is a separate, orthogonal guard on the caller's
- * side ({@link viewerRoles}); both are required.
+ * side, and it is *three* conjuncts, mirroring the broker's own three
+ * refusals for a report — `authorize_player`'s token and dropped checks
+ * plus `handle_report_match_result`'s seat check
+ * (`crates/lobby-broker/src/broker.rs`): {@link viewerRoles} — is this viewer
+ * a player at all; {@link isActiveEntrant} — has that player not dropped; and
+ * {@link myPairing} — is that player seated in THIS pairing. This arm gate
+ * plus all three are required; none of the four is sufficient alone.
  */
 export function isReportable(outcome: PairingOutcome | null): boolean {
   if (outcome === null) return true; // pending — the broker's `None` arm
@@ -422,4 +431,154 @@ export function arityLabel(arity: MatchArity): ArityLabel {
  */
 export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
   return { win_points: 2 * arity - 1, draw_points: 1, loss_points: 0 };
+}
+
+/**
+ * How this browser relates to one tournament, for display.
+ *
+ * Three members, 1:1 with the catalog keys `labels.organizer` /
+ * `labels.entered` / `labels.spectating`, so `t(\`labels.${relation}\`)` is a
+ * direct index — the same licensed pattern as `status.*` and `bracket.*`
+ * (flat unions whose members ARE the key leaves), and NOT the forbidden
+ * `outcome.*` pattern (whose keys are not 1:1 with wire tags).
+ */
+export type ViewerRelation = "organizer" | "entered" | "spectating";
+
+/**
+ * The relation to render as a badge for a viewer holding `roles`.
+ *
+ * Organizer-dominant precedence, because a playing organizer holds BOTH
+ * tokens under one code and that is the normal path rather than an exotic one
+ * (`CreateTournament` does not auto-join the creator). Two badges on one row
+ * is noise; the organizer relation is the stronger claim and subsumes the
+ * weaker one for display.
+ *
+ * **This is a display precedence only — it must never be read as an authority
+ * decision.** Authority stays with {@link viewerRoles} (a *set*, precisely
+ * because a boolean cannot express the both-tokens case) and, for acting, with
+ * the store's `runGatedTournamentRpc` alone. In particular, a viewer resolving
+ * to `"organizer"` here may still hold a player token, and one resolving to
+ * `"entered"` may have dropped — see {@link isActiveEntrant}.
+ */
+export function viewerRelation(
+  roles: ReadonlySet<TournamentRole>,
+): ViewerRelation {
+  if (roles.has("organizer")) return "organizer";
+  if (roles.has("player")) return "entered";
+  return "spectating";
+}
+
+/**
+ * A catalog key for a failed tournament action, carried with the
+ * interpolation variable that key needs. Key and vars travel as one value so
+ * "called a key without its variable" is unrepresentable — the same shape as
+ * {@link OutcomeLabel} and {@link ArityLabel} in this module.
+ */
+export type FailureLabel =
+  | { readonly key: "errors.notOrganizer" }
+  | { readonly key: "errors.notEntered" }
+  | { readonly key: "errors.timedOut" }
+  | { readonly key: "errors.connectionLost" }
+  | { readonly key: "errors.aborted" }
+  | { readonly key: "errors.serverRejected"; readonly message: string };
+
+/** The failure half of a gated action's result — also total over an ungated one. */
+type TournamentFailure = Extract<
+  GatedTournamentRpcResult<unknown>,
+  { ok: false }
+>;
+
+/**
+ * The copy to show for a failed tournament action.
+ *
+ * The `not_authorized` arm reads the store's **typed** `role` discriminator,
+ * never the English `message`: `TournamentNotAuthorized` exists precisely
+ * because a local refusal is undecidable from a wire
+ * `{ok:false, reason:"rejected"}`, and this is the single consumer that
+ * discriminator was built for. The `rejected` arm carries the broker's own
+ * text through **verbatim and untranslated** — `"the broker answered `Error`;
+ * `message` is its text verbatim"` (`services/tournamentClient.ts`) — which is
+ * why `errors.serverRejected` interpolates `{{message}}` rather than replacing
+ * it.
+ *
+ * `errors.notFound` is deliberately **not** in this map: no wire reason
+ * produces it. It is a client-known fact — a `TournamentRemoved` broadcast for
+ * the code currently being viewed — and is rendered by the detail page alone.
+ *
+ * Terminates in a `const unreachable: never` binding and has no `default:`
+ * arm, so a sixth failure member anywhere (a fifth
+ * `TournamentRpcFailureReason`, or a second store-level refusal) fails the
+ * build here rather than rendering a blank alert.
+ *
+ * The terminal binds the **discriminant** (`failure.reason`) rather than the
+ * value, and that is forced rather than stylistic: `TournamentFailure` is not
+ * a flat discriminated union. Its wire member declares
+ * `reason: TournamentRpcFailureReason` — a four-member union *inside one
+ * object type* — and TypeScript's narrowing can only eliminate whole union
+ * members, never shrink a property union in place, so `failure` itself is
+ * still that member after all four arms and `const unreachable: never =
+ * failure` does not compile. Narrowing the discriminant reference does work,
+ * and it is the same gate: any new `reason` literal, from either member, lands
+ * here as a `never` assignment error.
+ */
+export function failureLabel(failure: TournamentFailure): FailureLabel {
+  if (failure.reason === "not_authorized") {
+    if (failure.role === "organizer") return { key: "errors.notOrganizer" };
+    if (failure.role === "player") return { key: "errors.notEntered" };
+    // Nested terminal over the role union, mirroring `unreachablePod` above.
+    const unreachableRole: never = failure.role;
+    return unreachableRole;
+  }
+  if (failure.reason === "rejected") {
+    return { key: "errors.serverRejected", message: failure.message };
+  }
+  if (failure.reason === "timeout") return { key: "errors.timedOut" };
+  if (failure.reason === "connection_lost") {
+    return { key: "errors.connectionLost" };
+  }
+  if (failure.reason === "aborted") return { key: "errors.aborted" };
+  const unreachable: never = failure.reason;
+  return unreachable;
+}
+
+/**
+ * Whether `playerKey` names an entrant of `view` who has **not** dropped.
+ *
+ * This is the client-side mirror of the second conjunct `authorize_player`
+ * enforces (`crates/lobby-broker/src/broker.rs`): a token that resolves to an
+ * entrant is refused anyway once `player.dropped` is true
+ * (`"Player has dropped from tournament {code}"`). Token possession —
+ * {@link viewerRoles} — answers the *first* conjunct only, and the store
+ * clears a credential on `TournamentRemoved` alone, never on a drop, so
+ * `roles.has("player")` stays true forever after a drop. A gate written on
+ * possession alone therefore renders an affordance the broker refuses every
+ * time; both player affordances need this conjunct too.
+ *
+ * Positive polarity on purpose: callers write
+ * `roles.has("player") && isActiveEntrant(...)`, a plain conjunction, so no
+ * edit can silently lose a `!`.
+ *
+ * Fails closed in both directions. An absent `playerKey` (a spectator) is not
+ * active. A `playerKey` absent from `view.players` is not active either —
+ * and that is sound rather than merely cautious, because `players` is a full
+ * history that keeps dropped entrants listed (`adapter/types.ts`'s
+ * `TournamentView` doc: *"dropped players stay listed (their `dropped` flag
+ * is the distinction to render)"*), so absence means "not an entrant of the
+ * tournament this view describes" — a foreign or not-yet-seeded view — never
+ * "an entrant whose row was filtered out". If the broker ever did start
+ * filtering dropped entrants out of `players`, this still answers `false`,
+ * which is still the correct gate.
+ *
+ * "Active entrant" is the wire's own vocabulary for exactly this predicate,
+ * not a coinage: `TournamentSummary.player_count` is documented as
+ * "**Active** entrants — `TournamentMeta::active_player_count`", i.e. the
+ * count of entrants for which this function is true.
+ */
+export function isActiveEntrant(
+  view: TournamentView,
+  playerKey: string | undefined,
+): boolean {
+  if (playerKey === undefined) return false;
+  const entrant = view.players.find((p) => p.player_key === playerKey);
+  return entrant !== undefined && !entrant.dropped;
 }
