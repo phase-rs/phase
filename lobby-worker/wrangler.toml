@@ -228,7 +228,7 @@ dataset = "phase_telemetry_preview"
 # lists nothing and a rate limiter that never fires.
 [[env.preview.kv_namespaces]]
 binding = "SERVER_ALLOWLIST"
-id = "REPLACE_WITH_REAL_KV_NAMESPACE_ID"
+id = "febe7ebca1a14c30b7347e5b4e7c26f0"
 
 # Distinct namespace ids from production: a rate-limit counter space is
 # per-id, and sharing them would let preview traffic exhaust production's
