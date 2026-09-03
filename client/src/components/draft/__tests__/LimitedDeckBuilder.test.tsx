@@ -2438,6 +2438,140 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     },
   );
 
+  it("uses the engine count in the controlled builder independently of draft kind", async () => {
+    engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+    enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
+    const compatibilityResolvers: Array<(
+      result: ReturnType<typeof compatibleResult>,
+    ) => void> = [];
+    compatibilityHarness.evaluate.mockImplementation(() => new Promise((resolve) => {
+      compatibilityResolvers.push(resolve);
+    }));
+    const submitSpy = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        view={{
+          ...COMMANDER_VIEW,
+          kind: "Premier",
+          commanders_required: 2,
+          min_deck_size: 2,
+          pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER],
+        }}
+        mainDeck={["The Prismatic Piper", "The Prismatic Piper"]}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={submitSpy}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: ["The Prismatic Piper"] }),
+      { selectedFormat: "CommanderDraft" },
+    ));
+    await act(async () => {
+      compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
+    });
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    expect(submit).toBeDisabled();
+    fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        commander: ["The Prismatic Piper", "The Prismatic Piper"],
+      }),
+      { selectedFormat: "CommanderDraft" },
+    ));
+    await act(async () => {
+      compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
+    });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([
+      "The Prismatic Piper",
+      "The Prismatic Piper",
+    ]));
+  });
+
+  it.each(["controlled", "workspace"] as const)(
+    "fails closed when the engine requires more commanders than %s supports",
+    async (mode) => {
+      engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
+      enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
+      const compatibilityResolvers: Array<(
+        result: ReturnType<typeof compatibleResult>,
+      ) => void> = [];
+      compatibilityHarness.evaluate.mockImplementation(() => new Promise((resolve) => {
+        compatibilityResolvers.push(resolve);
+      }));
+      const submitSpy = vi.fn();
+      const view = {
+        ...COMMANDER_VIEW,
+        commanders_required: 3,
+        min_deck_size: 2,
+        pool: [PRISMATIC_PIPER, SECOND_PRISMATIC_PIPER],
+      };
+
+      render(mode === "controlled" ? (
+        <LimitedDeckBuilder
+          view={view}
+          mainDeck={["The Prismatic Piper", "The Prismatic Piper"]}
+          landCounts={NO_LANDS}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={submitSpy}
+          showSuggestions={false}
+        />
+      ) : (
+        <LimitedDeckBuilder
+          local={{
+            view,
+            workspace: {
+              schemaVersion: 1,
+              placements: {
+                "cmd-4": { zone: "deck", row: 0, column: 0, order: 0 },
+                "cmd-5": { zone: "deck", row: 0, column: 0, order: 1 },
+              },
+              virtualBasics: [],
+            },
+            preferences: createDefaultDraftWorkspacePreferences(),
+            interactionLocked: false,
+            capabilities: { kind: "editable-pool", suggestions: false },
+            onWorkspaceChange: () => {},
+            onPreferencesChange: () => {},
+            onSubmitDeck: submitSpy,
+            onAddBasicLand: () => {},
+            onRemoveBasicLand: () => {},
+          }}
+          responsiveLayout="desktop"
+          showSuggestions={false}
+        />
+      ));
+
+      fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+      fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
+      await waitFor(() => expect(
+        commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+      ).toHaveLength(2));
+      await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          commander: ["The Prismatic Piper", "The Prismatic Piper"],
+        }),
+        { selectedFormat: "CommanderDraft" },
+      ));
+      await act(async () => {
+        compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
+      });
+      const submit = screen.getByRole("button", { name: "Submit Deck" });
+      expect(submit).toBeDisabled();
+      fireEvent.click(submit);
+      expect(submitSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it("prunes duplicate designations to the currently backed copy count", async () => {
     engineEligible.mockImplementation(async (name: string) => name === "The Prismatic Piper");
     enginePartnerCandidates.mockResolvedValue(["The Prismatic Piper"]);
