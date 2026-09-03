@@ -4463,9 +4463,18 @@ fn resolve_enters_with_condition(
 /// that would trade a partial parse for no parse at all. Tracked separately.
 fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::Keyword> {
     let mut riders = Vec::new();
-    let mut remaining = text;
+    // CR 614.1c: the rider is part of the SAME sentence as the enters-with
+    // clause, so the scan is bounded to that sentence UP FRONT rather than
+    // per-candidate. Bounding only after a marker was found still let the very
+    // first `take_until` reach into a later sentence when the entering sentence
+    // carried no rider at all -- `work_text` routinely carries trailing
+    // sentences (Slumbering Trudge's "If X is 2 or less, it enters tapped."),
+    // so an unrelated later `" and with "` would be granted to this
+    // replacement. With the input clipped first, no marker outside the sentence
+    // is reachable by construction, and chaining within it still works.
+    let mut remaining = enters_with_rider_sentence(text);
 
-    while let Ok((after_rider, (candidate, terminator))) = preceded(
+    while let Ok((after_rider, candidate)) = preceded(
         (
             take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
             tag::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
@@ -4481,82 +4490,68 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
                 riders.push(keyword);
             }
         }
-        // CR 614.1c: the rider is part of THIS replacement's sentence. A rider
-        // bounded by the sentence period ends the clause, so the scan stops
-        // rather than walking into a later sentence to find another marker —
-        // otherwise a `" and with "` anywhere downstream would be attached to
-        // this replacement.
-        match terminator {
-            EntersWithRiderTerminator::SentenceEnd => break,
-            EntersWithRiderTerminator::ChainedMarker => remaining = after_rider,
-        }
+        remaining = after_rider;
     }
 
     riders
 }
 
-/// Which delimiter ended a rider — the discriminator that tells the scan whether
-/// another rider can still belong to this replacement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntersWithRiderTerminator {
-    /// Another `" and with "` follows in the SAME sentence: keep scanning.
-    ChainedMarker,
-    /// The sentence ended (a period, or the end of the input): stop.
-    SentenceEnd,
+/// The FIRST sentence of `text` -- the one carrying the enters-with clause, and
+/// therefore the only one whose `" and with "` riders belong to this replacement
+/// (CR 614.1c).
+///
+/// Clipping here is what makes the scan sentence-safe as a whole. Doing it only
+/// inside the per-rider candidate bound is not enough: that bound is applied
+/// after a marker has already been selected, so it cannot undo an initial search
+/// that already crossed a period.
+fn enters_with_rider_sentence(text: &str) -> &str {
+    terminated(
+        take_until::<_, _, OracleError<'_>>("."),
+        tag::<_, _, OracleError<'_>>("."),
+    )
+    .parse(text)
+    .map_or(text, |(_, sentence)| sentence)
 }
 
 /// The `" and with "` rider marker — both the scan anchor and one of the two
 /// candidate terminators, so the two can never disagree about where a rider ends.
 const ENTERS_WITH_KEYWORD_RIDER_MARKER: &str = " and with ";
 
-/// One rider's text plus the delimiter that ended it, bounded at the NEAREST
-/// terminator: the next `" and with "` marker, or the sentence period.
+/// One rider's text, bounded at the NEAREST terminator: the next `" and with "`
+/// marker, or the end of the sentence.
 ///
 /// `alt` is deliberately NOT used. `alt` commits to the first branch that
 /// SUCCEEDS, not to the one whose terminator is nearest, so a marker-first `alt`
-/// consumes straight through a period to reach a LATER sentence's marker. That
-/// is not caught downstream, because `parse_granted_keyword_fragment` is
-/// permissive by contract: handed "flying. when this creature dies, exile it" it
-/// returns `Flying` and silently discards the rest, so the over-long candidate
-/// still looks like a clean parse while the scan has been left standing in the
-/// next sentence. Both terminators are therefore tried and the SHORTEST result
-/// wins, mirroring [`take_damage_source_subject_clause`].
+/// would read past a nearer period to reach a further marker. That mistake is
+/// invisible downstream, because `parse_granted_keyword_fragment` is permissive
+/// by contract: handed "flying. exile it" it returns `Flying` and discards the
+/// rest, so an over-long candidate still looks like a clean parse. Both
+/// terminators are therefore tried and the SHORTEST result wins, mirroring
+/// [`take_damage_source_subject_clause`].
 ///
-/// The terminator is returned rather than discarded so the caller can tell
-/// same-sentence chaining from end-of-clause; both are `peek`ed, leaving the
-/// delimiter unconsumed for the next iteration's `take_until`.
-fn parse_enters_with_keyword_rider_candidate(
-    input: &str,
-) -> OracleResult<'_, (&str, EntersWithRiderTerminator)> {
-    let candidates: [OracleResult<'_, (&str, EntersWithRiderTerminator)>; 2] = [
+/// The caller clips its input to one sentence, so the period branch is a
+/// belt-and-braces bound for a trailing period rather than the primary defense.
+/// Terminators are `peek`ed, leaving the delimiter for the next `take_until`.
+fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &str> {
+    let candidates: [OracleResult<'_, &str>; 2] = [
         terminated(
             take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER),
             peek(tag::<_, _, OracleError<'_>>(
                 ENTERS_WITH_KEYWORD_RIDER_MARKER,
             )),
         )
-        .map(|rider| (rider, EntersWithRiderTerminator::ChainedMarker))
         .parse(input),
         terminated(
             take_until::<_, _, OracleError<'_>>("."),
             peek(tag::<_, _, OracleError<'_>>(".")),
         )
-        .map(|rider| (rider, EntersWithRiderTerminator::SentenceEnd))
         .parse(input),
     ];
     candidates
         .into_iter()
         .filter_map(std::result::Result::ok)
-        .min_by_key(|(_, (rider, _)): &(&str, (&str, EntersWithRiderTerminator))| rider.len())
-        // No delimiter at all: the rider runs to the end of the input, which is
-        // equally the end of its sentence.
-        .map_or_else(
-            || {
-                rest(input)
-                    .map(|(tail, rider)| (tail, (rider, EntersWithRiderTerminator::SentenceEnd)))
-            },
-            Ok,
-        )
+        .min_by_key(|(_, rider): &(&str, &str)| rider.len())
+        .map_or_else(|| rest(input), Ok)
 }
 
 /// CR 611.2a: wrap `inner` so the entering permanent also gains `keywords` for
@@ -18643,6 +18638,48 @@ mod tests {
             collect_granted_keywords(execute),
             vec![Keyword::Flying],
             "only the enters-with sentence's rider may reach the grant"
+        );
+    }
+
+    /// CR 614.1c: when the entering sentence carries NO rider at all, a
+    /// `" and with "` in a LATER sentence must not be lifted onto this
+    /// replacement.
+    ///
+    /// Distinct from `..._stops_at_the_sentence_it_belongs_to`, which starts with
+    /// a valid rider in the first sentence and so only exercises the bound
+    /// applied AFTER a marker is selected. Here there is no marker in the
+    /// entering sentence, so the very first `take_until` is what would cross the
+    /// period — a per-candidate bound cannot repair that, only clipping the
+    /// scan's input to one sentence can. `work_text` really does carry trailing
+    /// sentences (Slumbering Trudge prints "If X is 2 or less, it enters
+    /// tapped."), so this is reachable, not hypothetical.
+    #[test]
+    fn enters_with_keyword_rider_ignores_a_later_sentence_when_the_first_has_none() {
+        // Scanner level: nothing to lift, despite a clean bare keyword rider
+        // sitting in the following sentence.
+        assert_eq!(
+            parse_enters_with_keyword_riders(
+                "it enters with two +1/+1 counters on it. exile it and with trample."
+            ),
+            Vec::<Keyword>::new(),
+            "a later sentence's rider must not be lifted when the entering sentence has none"
+        );
+
+        // Composed level: the replacement places counters and grants nothing.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with two +1/+1 counters on it.              Exile it and with trample.",
+            "Synthetic No First Sentence Rider",
+        )
+        .expect("line must parse");
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(
+            collect_granted_keywords(execute),
+            Vec::<Keyword>::new(),
+            "no keyword may be granted when the entering sentence carries no rider"
+        );
+        assert!(
+            find_put_counter(execute).is_some(),
+            "the counters must still be placed"
         );
     }
 
