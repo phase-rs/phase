@@ -1863,11 +1863,16 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "AuthoritativeStateExport": {
-        const data = msg.data as { state?: unknown };
+        const data = msg.data;
         const pending = this.pendingAuthoritativeStateExport;
         this.pendingAuthoritativeStateExport = null;
         if (pending) {
-          if (typeof data.state === "string") {
+          if (
+            typeof data === "object"
+            && data !== null
+            && "state" in data
+            && typeof data.state === "string"
+          ) {
             pending.resolve(data.state);
           } else {
             pending.reject(new AdapterError(
@@ -1881,12 +1886,17 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "AuthoritativeStateExportFailed": {
-        const data = msg.data as { message?: unknown };
+        const data = msg.data;
         const pending = this.pendingAuthoritativeStateExport;
         this.pendingAuthoritativeStateExport = null;
         pending?.reject(new AdapterError(
           "WS_ERROR",
-          typeof data.message === "string" ? data.message : "Authoritative-state export failed.",
+          typeof data === "object"
+            && data !== null
+            && "message" in data
+            && typeof data.message === "string"
+            ? data.message
+            : "Authoritative-state export failed.",
           false,
         ));
         break;

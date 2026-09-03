@@ -181,6 +181,25 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+  it("rejects a malformed authoritative export and clears the pending request", async () => {
+    const malformed = adapter.exportPersistenceState();
+    ws.dispatchSynthetic("message", JSON.stringify({ type: "AuthoritativeStateExport" }));
+
+    await expect(malformed).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "Server sent an invalid authoritative-state export.",
+      recoverable: false,
+    });
+
+    const retried = adapter.exportPersistenceState();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "AuthoritativeStateExport", data: { state: "{\"state\":{}}" } }),
+    );
+
+    await expect(retried).resolves.toBe("{\"state\":{}}");
+  });
+
   it("does not request an authoritative export over cleartext WebSocket", async () => {
     const insecure = new WebSocketAdapter(
       "ws://localhost:9374/ws",

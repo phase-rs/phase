@@ -726,7 +726,7 @@ describe("P2PDraftHost persistence disposal", () => {
       };
       let draftView: DraftPlayerView;
       privateHost.adapter.draftProcedure = vi.fn(async () => ({
-        packs_per_player: 3, min_deck_size: 40, launch_capability: "None",
+        packs_per_player: 3, min_deck_size: 40, launch_capability: "None", commanders_required: 0,
         pick_selection_mode: "Direct", match_config: { match_type: "Bo1" },
       }));
       privateHost.adapter.createMultiplayerDraft = vi.fn(async () => {});

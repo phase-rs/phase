@@ -1018,7 +1018,7 @@ mod tests {
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 55);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 56);
     }
 
     #[test]
