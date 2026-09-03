@@ -192,12 +192,10 @@ function PackCard({
     card.name,
     { setCode: card.set_code, collectorNumber: card.collector_number },
   );
-  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const touchMoved = useRef(false);
   const lastTouchTapAt = useRef<number | null>(null);
   const ignoreCompatibilityClickUntil = useRef(0);
-  const imageLoaded = src !== null && loadedSrc === src;
   const longPress = useLongPress(() => onHover(cardInfo(card)), { delay: 500 });
 
   return (
@@ -306,11 +304,7 @@ function PackCard({
             alt={displayName}
             draggable={false}
             className="h-full w-full object-contain"
-            onLoad={() => setLoadedSrc(src)}
-            onError={() => {
-              setLoadedSrc(null);
-              advanceFailedSource?.(src);
-            }}
+            onError={() => advanceFailedSource?.(src)}
           />
         )}
       </button>
@@ -327,11 +321,6 @@ function PackCard({
         >
           ↺
         </button>
-      )}
-      {!imageLoaded && (
-        <div className="absolute inset-x-1 bottom-1 flex items-center gap-1 rounded bg-black/80 p-1">
-          <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-white/85">{card.name}</span>
-        </div>
       )}
       {local !== null && (
         <>
@@ -635,7 +624,7 @@ export function PackDisplay({
       )}
       <div
         data-pack-toolbar
-        className={`flex min-w-0 shrink-0 flex-nowrap items-center gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${phoneToolbarPinned ? "sticky top-0 z-20 bg-slate-950 py-1" : ""}`}
+        className={`flex min-w-0 shrink-0 flex-nowrap items-center gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${phoneToolbarPinned ? "sticky top-0 z-20 bg-slate-950 py-1" : "min-h-9"}`}
       >
         <div data-pack-status-controls className="flex shrink-0 items-center gap-2">
           <span className="text-sm text-fg">

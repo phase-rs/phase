@@ -318,6 +318,7 @@ describe("PackDisplay local workspace controller", () => {
       "overflow-x-auto",
       "[scrollbar-width:none]",
       "[&::-webkit-scrollbar]:hidden",
+      "min-h-9",
     );
     expect(screen.queryByText(/cards? in pack/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Mythic Rare")).not.toBeInTheDocument();
@@ -334,7 +335,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(scaleControls[1]).not.toHaveTextContent(`${DRAFT_WORKSPACE_PACK_SCALE_DEFAULT}×`);
     expect(scaleControls[1].querySelector("svg")).toHaveAttribute("viewBox", "0 0 20 20");
     const firstCard = container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
-    expect(firstCard.querySelector(".absolute.bottom-1 > span")).toHaveTextContent("Same");
+    expect(within(firstCard).getByText("Same")).toHaveClass("text-white/50");
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Deck" })).toHaveClass("sr-only");
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Sideboard" })).toHaveClass("sr-only");
   });
@@ -450,16 +451,13 @@ describe("PackDisplay local workspace controller", () => {
     expect(localDrag.handlePointerUp).toHaveBeenCalled();
   });
 
-  it("hides_each_name_footer_after_that_card_image_loads", () => {
+  it("keeps_resolved_pack_images_free_of_name_footers_before_native_load", () => {
     imageState.src = "/card.png";
     const { container } = render(<PackDisplay controller={controller()} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     const firstCard = container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
-    const footer = () => firstCard.querySelector(".absolute.bottom-1");
 
-    expect(footer()).toHaveTextContent("Same");
-    fireEvent.load(within(firstCard).getByRole("img", { name: "Same" }));
-
-    expect(footer()).not.toBeInTheDocument();
+    expect(within(firstCard).getByRole("img", { name: "Same" })).toHaveAttribute("src", "/card.png");
+    expect(firstCard.querySelector(".absolute.bottom-1")).not.toBeInTheDocument();
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Deck" })).toHaveClass("sr-only");
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Sideboard" })).toHaveClass("sr-only");
   });
@@ -1123,10 +1121,10 @@ describe("PackDisplay local workspace controller", () => {
     }
     expect(confirmButton).toHaveClass("!min-h-9", "select-none", "!py-0", "caret-transparent");
     expect(confirmButton.parentElement).toHaveAttribute("data-pack-status-controls");
-    expect(confirmButton.closest("[data-pack-toolbar]")).toHaveClass("flex-nowrap", "overflow-x-auto");
+    expect(confirmButton.closest("[data-pack-toolbar]")).toHaveClass("flex-nowrap", "overflow-x-auto", "min-h-9");
     fireEvent.click(confirmButton);
     expect(confirmPick).toHaveBeenCalledWith("deck");
-    expect(within(firstCard).getByText("Same", { selector: "div > span" })).toBeInTheDocument();
+    expect(within(firstCard).getByRole("button", { name: "Same" })).toHaveTextContent("Same");
   });
 
   it("blocks_incomplete_duplicate_and_stale_effect_sources_but_dispatches_a_complete_live_pair", async () => {
