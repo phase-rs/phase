@@ -254,6 +254,46 @@ describe("serverMetrics", () => {
       visibility.mockReturnValue("visible");
       document.dispatchEvent(new Event("visibilitychange"));
       expect(sendBeacon).not.toHaveBeenCalled();
+
+      // The double-registration negative: a reset must UNREGISTER, not merely
+      // clear the latch, or each reset+install leaks a listener pair and one
+      // hide drains once per pair.
+      //
+      // Counted on the DOM registrations, deliberately: a second drain is
+      // INVISIBLE to `sendBeacon`, because `flushMetricsNow` returns early on
+      // an empty queue and the first drain already emptied it. Asserting a
+      // send count here would be vacuous — it passes with or without the
+      // removal — so what is measured is the live-listener balance instead.
+      const removeDoc = vi.spyOn(document, "removeEventListener");
+      const removeWin = vi.spyOn(window, "removeEventListener");
+      const addDoc = vi.spyOn(document, "addEventListener");
+      try {
+        __resetServerMetricsForTests();
+        // The reset takes both listeners off, by reference.
+        expect(removeDoc).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+        expect(removeWin).toHaveBeenCalledWith("pagehide", expect.any(Function));
+
+        installServerMetricsLifecycle();
+        // ...so the install that follows re-registers exactly one, leaving one
+        // live pair rather than two.
+        expect(
+          addDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
+        ).toHaveLength(1);
+        expect(
+          removeDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
+        ).toHaveLength(1);
+
+        // And the drain still works through the freshly registered handler.
+        sendBeacon.mockClear();
+        reportConnectOutcome(URL_A, "connect_ok", 10);
+        visibility.mockReturnValue("hidden");
+        document.dispatchEvent(new Event("visibilitychange"));
+        expect(sendBeacon).toHaveBeenCalledTimes(1);
+      } finally {
+        removeDoc.mockRestore();
+        removeWin.mockRestore();
+        addDoc.mockRestore();
+      }
     } finally {
       visibility.mockRestore();
     }

@@ -139,9 +139,18 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let reportsThisSession = 0;
 let lifecycleInstalled = false;
 
+/** The `visibilitychange` handler, held at module scope rather than inlined at
+ *  registration: `removeEventListener` matches on identity, so an inline arrow
+ *  would be unremovable and {@link __resetServerMetricsForTests} could only
+ *  pretend to undo an install. Paired with {@link lifecycleInstalled}. */
+function onVisibilityChange(): void {
+  if (document.visibilityState === "hidden") flushMetricsNow();
+}
+
 /**
  * Drop every piece of this module's state: the queue, any armed timer, the
- * per-session counter and the lifecycle latch.
+ * per-session counter, and the lifecycle latch TOGETHER WITH the two listeners
+ * it guards.
  *
  * TEST-ONLY. Module state that no case can clear makes a suite order-dependent
  * — the session cap is consumed cumulatively across cases, and
@@ -156,6 +165,14 @@ export function __resetServerMetricsForTests(): void {
     flushTimer = null;
   }
   reportsThisSession = 0;
+  // The listeners come off with the latch. Clearing the latch alone would let
+  // the next install register a SECOND pair, so a single hide would drain
+  // twice — and the "installs once" assertion would pass while the module
+  // leaked a listener per reset.
+  if (lifecycleInstalled && typeof window !== "undefined") {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    window.removeEventListener("pagehide", flushMetricsNow);
+  }
   lifecycleInstalled = false;
 }
 
@@ -273,8 +290,6 @@ export function installServerMetricsLifecycle(): void {
   if (lifecycleInstalled || typeof window === "undefined") return;
   lifecycleInstalled = true;
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushMetricsNow();
-  });
+  document.addEventListener("visibilitychange", onVisibilityChange);
   window.addEventListener("pagehide", flushMetricsNow);
 }

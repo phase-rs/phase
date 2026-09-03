@@ -56,20 +56,24 @@ import {
 // it anyway (see there).
 import type { DirectorySource } from "../services/serverDirectory";
 // A VALUE import, and with it a real runtime edge: `serverMetrics` value-imports
-// `directoryUrl` from `serverDirectory`, which imports `serverDetection`, which
-// imports this store. The store must take this edge — it is the single
-// authority for opening a lobby socket, so it is the only place a connect
-// outcome can be observed.
+// `directoryUrl` from `serverDirectory`, which closes back on this store TWICE
+// — directly (`serverDirectory.ts:23` imports `useMultiplayerStore`) and via
+// `serverDetection`. The store must take this edge: it is the single authority
+// for opening a lobby socket, so it is the only place a connect outcome can be
+// observed.
 //
-// THE INVARIANT THAT ACTUALLY MATTERS, and that this chain must keep: no module
-// in `serverMetrics` → `serverDirectory` → `serverDetection` may read store
-// state or `SERVER_PRESETS` during MODULE EVALUATION. Every such access in all
-// three sits inside a function body, so the cycle is resolved by the time
-// anything calls them. That is the only window `create()`, `migrate` and
-// `merge` care about, and it is what a change to any of those three files has
-// to preserve — a top-level `useMultiplayerStore.getState()` or
-// `SERVER_PRESETS` read added there is a temporal-dead-zone crash at boot, not
-// a lint nit.
+// THE INVARIANT THAT ACTUALLY MATTERS, and that this cycle must keep: no module
+// in it may reach INTO ANOTHER MODULE OF THE CYCLE during MODULE EVALUATION.
+// Every cross-module access in `serverMetrics`, `serverDirectory` and
+// `serverDetection` sits inside a function body, so the cycle is resolved by
+// the time anything calls them. Intra-module top-level work is fine and does
+// happen — `serverDetection.ts:37`'s `DEFAULT_SERVER = SERVER_PRESETS[0].url`
+// reads a constant declared in its own file, which no cycle can starve.
+// Module evaluation is the only window `create()`, `migrate` and `merge` care
+// about, and this is what a change to any of those three files has to preserve:
+// a top-level `useMultiplayerStore.getState()` — or a `SERVER_PRESETS` read
+// from a file that does not declare it — is a temporal-dead-zone crash at boot,
+// not a lint nit.
 import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,

@@ -637,11 +637,11 @@ export function HostSetup({
    * are not persisted, so on a cold session this form can mount before either
    * has been populated. `fullHostCandidates` is then empty and the initial
    * state above falls through to `DEFAULT_MULTIPLAYER_SERVER_URL` — the
-   * official broker, which is `LobbyOnly` and which the picker's own filter
-   * therefore excludes. A latched value would freeze there and submit a server
-   * the dropdown does not even offer, which the parent's mode probe would then
-   * route down the P2P branch while the user is looking at a list of Full
-   * servers.
+   * official broker, which carries no `kind` before its handshake and is not
+   * yet announced, so the picker's mode filter excludes it. A latched value
+   * would freeze there and submit a server the dropdown does not even offer,
+   * which the parent's mode probe would then route down the P2P branch while
+   * the user is looking at a list of Full servers.
    *
    * So: honour the explicit pick only while it is still a candidate, and
    * otherwise fall back to the best-evidenced one that currently exists. This
