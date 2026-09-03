@@ -41,6 +41,7 @@ import {
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
   userLobbySource,
+  type AmbientLobbyFrame,
   type HostingSettings,
   type LobbyGameEntry,
   type LobbySource,
@@ -229,6 +230,59 @@ function driveReconnect(): void {
     })();
     return { current: () => current, close: vi.fn() };
   });
+}
+
+/**
+ * `driveReconnect` plus a per-URL handle that drives a flap: `drop()` puts
+ * the channel in `"reconnecting"`, `reopen(socket)` brings it back `"open"`
+ * on a DIFFERENT socket — which is what a real reconnect does
+ * (`withReconnect` assigns the brand-new `PhaseSocket` before it notifies).
+ * Keyed off the URL each fake socket remembers.
+ */
+function driveReconnectWithFlaps(): Map<
+  string,
+  { drop: () => void; reopen: (socket: ReturnType<typeof fakeSocket>) => void }
+> {
+  const controls = new Map<
+    string,
+    { drop: () => void; reopen: (socket: ReturnType<typeof fakeSocket>) => void }
+  >();
+  vi.mocked(withReconnect).mockImplementation((factory, opts) => {
+    let current: Awaited<ReturnType<typeof factory>> | null = null;
+    void (async () => {
+      try {
+        current = await factory(0);
+        const { url } = current as unknown as { url: string };
+        controls.set(url, {
+          drop: () => opts?.onStateChange?.("reconnecting"),
+          reopen: (socket) => {
+            current = socket as unknown as Awaited<ReturnType<typeof factory>>;
+            opts?.onStateChange?.("open");
+          },
+        });
+        opts?.onStateChange?.("open");
+      } catch {
+        opts?.onStateChange?.("offline");
+      }
+    })();
+    return { current: () => current, close: vi.fn() };
+  });
+  return controls;
+}
+
+/** Push a raw server frame at a fake socket. The store's ambient listener is
+ * a real `message` listener registered through `addEventListener`, so this
+ * delivers it exactly the way a broker frame would — and only to listeners
+ * bound to THIS socket, which is what makes a rebinding claim measurable. */
+function emitAmbient(
+  socket: ReturnType<typeof fakeSocket>,
+  type: string,
+  data: unknown,
+): void {
+  const event = { data: JSON.stringify({ type, data }) } as MessageEvent;
+  for (const [, listener] of socket.ws.addEventListener.mock.calls) {
+    (listener as (e: MessageEvent) => void)(event);
+  }
 }
 
 function lobbyGame(overrides: Partial<LobbyGame> & { game_code: string }): LobbyGame {
@@ -1436,6 +1490,105 @@ describe("multiplayerStore", () => {
     // A URL that is no source at all resolves to nothing rather than falling
     // back to a global scan.
     expect(findLobbyGameByCode("onb22", "wss://nobody.example/ws")).toBeUndefined();
+    detach?.();
+  });
+
+  /** Two browsed sources, each dialed through the flap-capable driver, with
+   * every socket the store opened kept so a test can push frames at one
+   * specific socket — including the pre-reconnect one. */
+  function twoFlappableSources() {
+    const A = "wss://a.example/ws";
+    const B = "wss://b.example/ws";
+    useMultiplayerStore.setState({
+      hostingServer: A,
+      userLobbySources: [
+        { url: A, name: "a.example", origin: "user" },
+        { url: B, name: "b.example", origin: "user" },
+      ],
+      sourceStatus: new Map(),
+    });
+    const controls = driveReconnectWithFlaps();
+    const opened = new Map<string, ReturnType<typeof fakeSocket>>();
+    vi.mocked(openPhaseSocket).mockImplementation(async (url: string) => {
+      const socket = fakeSocket(url);
+      opened.set(url, socket);
+      return socket as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
+    });
+    return { A, B, controls, opened };
+  }
+
+  it("rebinds a source's ambient listener to the socket its reconnect produced", async () => {
+    const { A, B, controls, opened } = twoFlappableSources();
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+
+    emitAmbient(opened.get(A)!, "PlayerCount", { count: 3 });
+    emitAmbient(opened.get(B)!, "PlayerCount", { count: 5 });
+    // Reach-guard: each source's pre-flap frame really did land, on its own
+    // row, so the assertions below measure the flap and not an empty map.
+    expect(useMultiplayerStore.getState().sourceStatus.get(A)?.playerCount).toBe(3);
+    expect(useMultiplayerStore.getState().sourceStatus.get(B)?.playerCount).toBe(5);
+
+    controls.get(B)!.drop();
+
+    // Leaving "open" clears the count with the row: the socket that reported
+    // it is gone, so nothing live is backing the number any more.
+    expect(useMultiplayerStore.getState().sourceStatus.get(B)).toMatchObject({
+      state: "reconnecting",
+      playerCount: null,
+    });
+
+    const reopened = fakeSocket(B);
+    controls.get(B)!.reopen(reopened);
+
+    // Back open on a new socket that has reported nothing yet — the old
+    // count must not return with the connection.
+    expect(useMultiplayerStore.getState().sourceStatus.get(B)).toMatchObject({
+      state: "open",
+      playerCount: null,
+    });
+
+    emitAmbient(reopened, "PlayerCount", { count: 2 });
+
+    // Heard on the POST-reconnect socket: the listener followed the socket
+    // instead of staying bound to the dead one (which is the whole defect —
+    // a source that flapped once would otherwise be deaf for the session).
+    expect(useMultiplayerStore.getState().sourceStatus.get(B)?.playerCount).toBe(2);
+    // The source that never flapped is untouched.
+    expect(useMultiplayerStore.getState().sourceStatus.get(A)?.playerCount).toBe(3);
+    detach?.();
+  });
+
+  it("fans a post-reconnect PasswordRequired frame out tagged with its source", async () => {
+    const { B, controls, opened } = twoFlappableSources();
+    const frames: { frame: AmbientLobbyFrame; url: string }[] = [];
+    const detachAmbient = useMultiplayerStore
+      .getState()
+      .subscribeAmbientLobby((frame, source) => {
+        frames.push({ frame, url: source.url });
+      });
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+
+    emitAmbient(opened.get(B)!, "PasswordRequired", { game_code: "PRE111" });
+
+    // Reach-guard: the fan-out reaches this subscriber before the flap...
+    expect(frames).toEqual([
+      { frame: { kind: "passwordRequired", gameCode: "PRE111" }, url: B },
+    ]);
+
+    controls.get(B)!.drop();
+    const reopened = fakeSocket(B);
+    controls.get(B)!.reopen(reopened);
+    emitAmbient(reopened, "PasswordRequired", { game_code: "ABC123" });
+
+    // ...and still after it, from the new socket, tagged with the authority
+    // that asked for the password. A subscriber holds no socket, so this is
+    // only true because the store re-attached its own listener.
+    expect(frames).toHaveLength(2);
+    expect(frames[frames.length - 1]).toEqual({
+      frame: { kind: "passwordRequired", gameCode: "ABC123" },
+      url: B,
+    });
+    detachAmbient();
     detach?.();
   });
 

@@ -106,7 +106,6 @@ export function LobbyView({
   const [listings, setListings] = useState<
     Map<string, { source: LobbySource; games: LobbyGame[] }>
   >(new Map());
-  const [playerCounts, setPlayerCounts] = useState<Map<string, number>>(new Map());
   const [joinCode, setJoinCode] = useState("");
   const [passwordModal, setPasswordModal] = useState<{
     gameCode: string;
@@ -123,8 +122,8 @@ export function LobbyView({
   const [roomTypeFilter, setRoomTypeFilter] = useState<RoomTypeFilter>("all");
   const [serverPickerOpen, setServerPickerOpen] = useState(false);
   const subscribeLobby = useMultiplayerStore((s) => s.subscribeLobby);
-  const ensureSubscriptionSocket = useMultiplayerStore(
-    (s) => s.ensureSubscriptionSocket,
+  const subscribeAmbientLobby = useMultiplayerStore(
+    (s) => s.subscribeAmbientLobby,
   );
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
   const hostGameCode = useMultiplayerStore((s) => s.hostGameCode);
@@ -146,11 +145,44 @@ export function LobbyView({
     if (isP2P) return;
 
     let cancelled = false;
-    const ambientDetachers: (() => void)[] = [];
-    const detachAmbient = () => {
-      while (ambientDetachers.length > 0) ambientDetachers.pop()?.();
-    };
     let lobbyDetach: (() => void) | null = null;
+
+    // `PlayerCount` and reactive `PasswordRequired` are ambient on each
+    // source's subscription socket, beside the `LobbyUpdate` family. The
+    // store owns those sockets and re-attaches its listener to the new one
+    // every reconnect produces, so subscribing to its fan-out — rather than
+    // binding to a `ws` here — is what keeps this view live across a flap:
+    // a listener bound to one socket goes permanently deaf the first time
+    // its source drops. Registered synchronously, before the dial below, so
+    // a fast source's first frame is never missed.
+    const detachAmbient = subscribeAmbientLobby((frame, source) => {
+      switch (frame.kind) {
+        case "playerCount":
+          // Recorded by the store on this source's status row; the chip
+          // reads it from there, where it cannot outlive its socket.
+          return;
+        case "passwordRequired": {
+          // Reactive fallback: the proactive path in `handleJoinFromList`
+          // opens the modal before any server round-trip, so this only
+          // fires for stale rows where the client thought the room was
+          // open and the server said otherwise. Every field comes from the
+          // authority the frame arrived on: `game_code` is unique per
+          // authority, not across the merged list, so an unscoped rescan
+          // could name a server that never asked for a password, and its
+          // row would then route the join (a `draft_metadata` row sends
+          // `MultiplayerPage` down the draft flow) on the wrong authority.
+          const listed = findLobbyGameByCode(frame.gameCode, source.url);
+          setPasswordModal({
+            gameCode: frame.gameCode,
+            origin: source,
+            format: listed?.game.format,
+            context: listed?.game,
+          });
+          setPasswordInput("");
+          return;
+        }
+      }
+    });
 
     // Delegate lobby traffic to the shared per-source subscription sockets
     // owned by `multiplayerStore`. The store re-handshakes on drops, re-sends
@@ -173,58 +205,6 @@ export function LobbyView({
         return;
       }
       lobbyDetach = detach;
-
-      // The store's `subscribeLobby` exposes only `LobbyUpdate`-family
-      // frames; `PlayerCount` and reactive `PasswordRequired` frames are
-      // ambient on each source's socket. Attach a thin listener per source
-      // to catch them without opening a second WS — `ensureSubscriptionSocket`
-      // is idempotent here since `subscribeLobby` has already opened them.
-      for (const source of lobbySources(useMultiplayerStore.getState())) {
-        const socket = await ensureSubscriptionSocket(source.url);
-        if (cancelled) {
-          detachAmbient();
-          return;
-        }
-        if (!socket) continue;
-        const ambientListener = (event: MessageEvent) => {
-          let msg: { type: string; data?: unknown };
-          try {
-            msg = JSON.parse(event.data as string) as {
-              type: string;
-              data?: unknown;
-            };
-          } catch {
-            return;
-          }
-          if (msg.type === "PlayerCount") {
-            const data = msg.data as { count: number };
-            setPlayerCounts((prev) => new Map(prev).set(source.url, data.count));
-          } else if (msg.type === "PasswordRequired") {
-            // Reactive fallback: the proactive path in `handleJoinFromList`
-            // opens the modal before any server round-trip, so this only
-            // fires for stale rows where the client thought the room was
-            // open and the server said otherwise. Every field comes from the
-            // socket the frame arrived on: `game_code` is unique per
-            // authority, not across the merged list, so an unscoped rescan
-            // could name a server that never asked for a password, and its
-            // row would then route the join (a `draft_metadata` row sends
-            // `MultiplayerPage` down the draft flow) on the wrong authority.
-            const data = msg.data as { game_code: string };
-            const listed = findLobbyGameByCode(data.game_code, source.url);
-            setPasswordModal({
-              gameCode: data.game_code,
-              origin: source,
-              format: listed?.game.format,
-              context: listed?.game,
-            });
-            setPasswordInput("");
-          }
-        };
-        socket.ws.addEventListener("message", ambientListener);
-        ambientDetachers.push(() => {
-          socket.ws.removeEventListener("message", ambientListener);
-        });
-      }
     })();
 
     return () => {
@@ -234,7 +214,7 @@ export function LobbyView({
     };
     // Depends on `userLobbySources` (identity changes only on add/remove),
     // never on `sourceStatus` — a status flap must not churn subscriptions.
-  }, [isP2P, userLobbySources, subscribeLobby, ensureSubscriptionSocket, onServerOffline]);
+  }, [isP2P, userLobbySources, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
 
   const handleJoinFromList = useCallback(
     (entry: LobbyGameEntry) => {
@@ -365,20 +345,23 @@ export function LobbyView({
   }, [entries, formatFilter, roomTypeFilter]);
 
   // Every enabled source reports its own online count; the chip shows the
-  // total reach of the lobby the user is browsing. Summed over the CURRENT
-  // sources rather than every key ever seen: `playerCounts` is never pruned,
-  // so a removed source would otherwise keep its last count in the total for
-  // the life of the mounted view. Same membership rule as `entries`.
+  // total reach of the lobby the user is browsing. Two rules, both
+  // structural:
+  //   membership — summed over the CURRENT sources (as in `entries`), so a
+  //     source the user has removed leaves the total immediately;
+  //   liveness   — the count is read from that source's status row, which
+  //     the store rewrites on every connection state change and refills
+  //     only from a frame on the socket that is live now. A source that is
+  //     reconnecting, offline, or freshly re-opened without having reported
+  //     since therefore contributes nothing; there is no cached number here
+  //     that could outlive the socket that sent it.
   const playerCount = useMemo(
     () =>
-      sources
-        // `"open"` is the only state whose last `PlayerCount` frame is still
-        // live: a source that is "reconnecting"/"connecting" (or "offline",
-        // which the picker is simultaneously showing as down) is delivering
-        // no frames, so its cached count is stale and must leave the total.
-        .filter((source) => sourceStatus.get(source.url)?.state === "open")
-        .reduce((sum, source) => sum + (playerCounts.get(source.url) ?? 0), 0),
-    [playerCounts, sources, sourceStatus],
+      sources.reduce(
+        (sum, source) => sum + (sourceStatus.get(source.url)?.playerCount ?? 0),
+        0,
+      ),
+    [sources, sourceStatus],
   );
 
   // Count-free by design: the picker lists each source with its own status,

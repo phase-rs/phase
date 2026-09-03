@@ -169,7 +169,7 @@ describe("ServerPicker", () => {
     useMultiplayerStore.setState({
       userLobbySources: [source],
       sourceStatus: new Map([
-        [source.url, { state: "offline" as const, serverInfo: null }],
+        [source.url, { state: "offline" as const, serverInfo: null, playerCount: null }],
       ]),
     });
     render(<ServerPicker onClose={vi.fn()} />);

@@ -3,11 +3,11 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { LobbyGame } from "../../../adapter/types";
-import type { PhaseSocket } from "../../../services/openPhaseSocket";
 import { LobbyView } from "../LobbyView";
 import { SERVER_PRESETS } from "../../../services/serverDetection";
 import {
   useMultiplayerStore,
+  type AmbientLobbyFrame,
   type LobbySource,
   type LobbySourceStatus,
 } from "../../../stores/multiplayerStore";
@@ -28,12 +28,12 @@ vi.mock("../../../stores/multiplayerStore", async (importOriginal) => ({
 }));
 
 /**
- * LobbyView now delegates to the shared subscription socket via the
- * multiplayer store's `subscribeLobby` / `ensureSubscriptionSocket`
- * actions, rather than opening its own `WebSocket` directly. Tests stub
- * those store actions with promise-returning mocks so the component's
- * cleanup paths (offline fallback, unmount-before-subscribe) stay
- * observable without a real socket.
+ * LobbyView holds no socket of its own: listings arrive through the store's
+ * `subscribeLobby` fan-out, ambient frames through `subscribeAmbientLobby`,
+ * and per-source player counts through `sourceStatus`. Tests stub those two
+ * store actions, so every case drives the component through exactly the
+ * surface production drives it through — including across a reconnect,
+ * which replaces the socket underneath the store but not the subscription.
  */
 const HOSTING_URL = "wss://us.phase-rs.dev/ws";
 
@@ -49,29 +49,41 @@ function lobbyGame(code: string, roomName: string, createdAt: number): LobbyGame
 }
 
 /**
- * Stand-in for a source's subscription socket: `LobbyView` attaches its
- * ambient (`PlayerCount` / `PasswordRequired`) listener to `ws`, so the test
- * can push server frames onto one specific source's socket.
+ * Stand-in for the store's ambient fan-out. The store owns each source's
+ * socket and re-attaches its listener to whatever socket a reconnect
+ * produces, so what the view actually consumes is a `(frame, source)` pair —
+ * which is what a test delivers here.
  */
-function ambientSocket() {
-  const listeners = new Set<(event: MessageEvent) => void>();
+function ambientFanOut() {
+  const subscribers = new Set<
+    (frame: AmbientLobbyFrame, source: LobbySource) => void
+  >();
   return {
-    socket: {
-      ws: {
-        addEventListener: (_type: string, fn: (event: MessageEvent) => void) => {
-          listeners.add(fn);
-        },
-        removeEventListener: (_type: string, fn: (event: MessageEvent) => void) => {
-          listeners.delete(fn);
-        },
-      },
-    } as unknown as PhaseSocket,
-    listenerCount: () => listeners.size,
-    emit: (type: string, data: unknown) => {
-      const event = { data: JSON.stringify({ type, data }) } as MessageEvent;
-      for (const fn of [...listeners]) fn(event);
+    subscribe: vi.fn((onFrame: (frame: AmbientLobbyFrame, source: LobbySource) => void) => {
+      subscribers.add(onFrame);
+      return () => {
+        subscribers.delete(onFrame);
+      };
+    }),
+    subscriberCount: () => subscribers.size,
+    emit: (frame: AmbientLobbyFrame, source: LobbySource) => {
+      for (const fn of [...subscribers]) fn(frame, source);
     },
   };
+}
+
+/** Per-source status rows as the store writes them: one row per channel,
+ * carrying that channel's state and the count it last reported ON ITS
+ * CURRENT SOCKET (`null` = has reported none since it last opened). */
+function statusRows(
+  ...rows: [url: string, state: LobbySourceStatus["state"], playerCount: number | null][]
+): Map<string, LobbySourceStatus> {
+  return new Map(
+    rows.map(([url, state, playerCount]) => [
+      url,
+      { state, serverInfo: null, playerCount } satisfies LobbySourceStatus,
+    ]),
+  );
 }
 
 function renderLobby(props: {
@@ -91,8 +103,8 @@ function renderLobby(props: {
 
 describe("LobbyView", () => {
   const originalSubscribeLobby = useMultiplayerStore.getState().subscribeLobby;
-  const originalEnsureSubscription =
-    useMultiplayerStore.getState().ensureSubscriptionSocket;
+  const originalSubscribeAmbient =
+    useMultiplayerStore.getState().subscribeAmbientLobby;
 
   beforeEach(() => {
     useMultiplayerStore.setState({
@@ -110,7 +122,7 @@ describe("LobbyView", () => {
     storeMocks.findLobbyGameByCode.mockReset();
     useMultiplayerStore.setState({
       subscribeLobby: originalSubscribeLobby,
-      ensureSubscriptionSocket: originalEnsureSubscription,
+      subscribeAmbientLobby: originalSubscribeAmbient,
     });
   });
 
@@ -119,7 +131,6 @@ describe("LobbyView", () => {
     // exhausted, invalid URL, etc.). LobbyView's offline fallback fires.
     useMultiplayerStore.setState({
       subscribeLobby: vi.fn().mockResolvedValue(null),
-      ensureSubscriptionSocket: vi.fn().mockResolvedValue(null),
     });
     const onServerOffline = vi.fn();
     render(
@@ -150,7 +161,6 @@ describe("LobbyView", () => {
             resolveSubscribe = r;
           }),
         ),
-      ensureSubscriptionSocket: vi.fn().mockResolvedValue(null),
     });
     const onServerOffline = vi.fn();
     const { unmount } = render(
@@ -171,10 +181,7 @@ describe("LobbyView", () => {
 
   it("does not subscribe in p2p mode", () => {
     const subscribeLobby = vi.fn();
-    useMultiplayerStore.setState({
-      subscribeLobby,
-      ensureSubscriptionSocket: vi.fn(),
-    });
+    useMultiplayerStore.setState({ subscribeLobby });
     render(
       <LobbyView
         onHostGame={vi.fn()}
@@ -198,7 +205,6 @@ describe("LobbyView", () => {
       // The real store's `subscribeLobby` resolves `null` only when EVERY
       // source's first open settled null; mirror that contract here.
       subscribeLobby: vi.fn().mockResolvedValue(null),
-      ensureSubscriptionSocket: vi.fn().mockResolvedValue(null),
     });
     const onServerOffline = vi.fn();
 
@@ -359,7 +365,6 @@ describe("LobbyView", () => {
         onUpdate([lobbyGame("OFFI1", "Table Official", 400)], official);
         return () => {};
       }),
-      ensureSubscriptionSocket: vi.fn().mockResolvedValue(null),
     });
 
     renderLobby({});
@@ -379,39 +384,23 @@ describe("LobbyView", () => {
   const SOURCE_A: LobbySource = { url: "wss://a.example/ws", name: "a.example", origin: "user" };
   const SOURCE_B: LobbySource = { url: "wss://b.example/ws", name: "b.example", origin: "user" };
 
-  /** Both sources browsed and handshaken, each with its own ambient socket.
-   * `sourceStatus` mirrors production: a source only ever delivers ambient
-   * frames after `ensureSubscriptionSocket` has recorded it `"open"`. */
+  /** Both sources browsed, handshaken and each reporting a count on its
+   * current socket — the store's status rows are where a live count lives,
+   * so this is the whole per-source surface the view reads. */
   function renderTwoSources(onJoinGame?: (...args: unknown[]) => void) {
-    const sockets = new Map([
-      [SOURCE_A.url, ambientSocket()],
-      [SOURCE_B.url, ambientSocket()],
-    ]);
+    const ambient = ambientFanOut();
     useMultiplayerStore.setState({
       userLobbySources: [SOURCE_A, SOURCE_B],
-      sourceStatus: new Map([
-        [SOURCE_A.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
-        [SOURCE_B.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
-      ]),
+      sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", 5]),
       subscribeLobby: vi.fn(async () => () => {}),
-      ensureSubscriptionSocket: vi.fn(
-        async (url: string) => sockets.get(url)?.socket ?? null,
-      ),
+      subscribeAmbientLobby: ambient.subscribe,
     });
     renderLobby(onJoinGame ? { onJoinGame } : {});
-    return sockets;
+    return ambient;
   }
 
   it("counts only the sources still being browsed", async () => {
-    const sockets = renderTwoSources();
-    await waitFor(() => {
-      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
-    });
-
-    act(() => {
-      sockets.get(SOURCE_A.url)!.emit("PlayerCount", { count: 3 });
-      sockets.get(SOURCE_B.url)!.emit("PlayerCount", { count: 5 });
-    });
+    renderTwoSources();
 
     // Reach-guard: both counts really are in the total before the removal, so
     // the assertion after it measures the drop and not an empty chip.
@@ -421,22 +410,14 @@ describe("LobbyView", () => {
       useMultiplayerStore.setState({ userLobbySources: [SOURCE_A] });
     });
 
-    // B's last reported count is still in `playerCounts` (never pruned); the
+    // B's status row (and its count) survives until its channel closes; the
     // chip must not keep counting a server nobody browses.
     expect(await screen.findByText("3 online")).toBeInTheDocument();
     expect(screen.queryByText("8 online")).not.toBeInTheDocument();
   });
 
   it("drops a source's count from the total once that source goes offline", async () => {
-    const sockets = renderTwoSources();
-    await waitFor(() => {
-      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
-    });
-
-    act(() => {
-      sockets.get(SOURCE_A.url)!.emit("PlayerCount", { count: 3 });
-      sockets.get(SOURCE_B.url)!.emit("PlayerCount", { count: 5 });
-    });
+    renderTwoSources();
 
     // Reach-guard: both counts really are in the total while both sources are
     // open, so the assertion after the flap measures the drop.
@@ -444,18 +425,86 @@ describe("LobbyView", () => {
 
     act(() => {
       useMultiplayerStore.setState({
-        sourceStatus: new Map([
-          [SOURCE_A.url, { state: "open", serverInfo: null } satisfies LobbySourceStatus],
-          [SOURCE_B.url, { state: "offline", serverInfo: null } satisfies LobbySourceStatus],
-        ]),
+        // Leaving `"open"` rewrites the row without a count — exactly what
+        // the store does on the `"offline"` transition.
+        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "offline", null]),
       });
     });
 
-    // B is still a browsed source (the picker shows it, marked down) and its
-    // last count is still in `playerCounts`, but it is delivering nothing —
-    // counting it would advertise players on a server shown as offline.
+    // B is still a browsed source (the picker shows it, marked down), but it
+    // is delivering nothing — counting it would advertise players on a
+    // server shown as offline.
     expect(await screen.findByText("3 online")).toBeInTheDocument();
     expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+  });
+
+  it("does not re-admit a source's old count when it reconnects without reporting", async () => {
+    // The state a flapped source spends the rest of the session in: back to
+    // `"open"`, on a NEW socket that has sent no `PlayerCount` yet. The old
+    // number must not come back — nothing live is backing it.
+    renderTwoSources();
+
+    // Reach-guard: the pre-flap total is really 8, so the assertions below
+    // measure the count staying out and not an empty chip.
+    expect(await screen.findByText("8 online")).toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({
+        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "offline", null]),
+      });
+    });
+    expect(await screen.findByText("3 online")).toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({
+        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", null]),
+      });
+    });
+
+    expect(await screen.findByText("3 online")).toBeInTheDocument();
+    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+  });
+
+  it("keeps its ambient subscription across a source's connection flap", async () => {
+    // The subscribe effect deliberately excludes `sourceStatus` from its
+    // deps, so it must not need to re-run: the store re-attaches its own
+    // listener to the post-reconnect socket and keeps fanning out to the
+    // subscriber registered here.
+    const onJoinGame = vi.fn();
+    const ambient = renderTwoSources(onJoinGame);
+    await waitFor(() => {
+      expect(ambient.subscriberCount()).toBe(1);
+    });
+
+    act(() => {
+      useMultiplayerStore.setState({
+        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "reconnecting", null]),
+      });
+    });
+    act(() => {
+      useMultiplayerStore.setState({
+        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", null]),
+      });
+    });
+
+    // Subscribed exactly once across the flap — no churn, no second listener
+    // (which would open the modal twice on one frame).
+    expect(ambient.subscribe).toHaveBeenCalledTimes(1);
+    expect(ambient.subscriberCount()).toBe(1);
+
+    act(() => {
+      ambient.emit({ kind: "passwordRequired", gameCode: "ABC123" }, SOURCE_B);
+    });
+
+    const user = userEvent.setup();
+    await user.type(await screen.findByPlaceholderText("Enter password"), "hunter2{Enter}");
+    expect(onJoinGame).toHaveBeenCalledWith(
+      "ABC123",
+      SOURCE_B,
+      "hunter2",
+      undefined,
+      undefined,
+    );
   });
 
   it("sends a reactive password retry to the source the frame arrived on", async () => {
@@ -472,13 +521,13 @@ describe("LobbyView", () => {
           : { game: listedOnA, source: SOURCE_A },
     );
     const onJoinGame = vi.fn();
-    const sockets = renderTwoSources(onJoinGame);
+    const ambient = renderTwoSources(onJoinGame);
     await waitFor(() => {
-      expect(sockets.get(SOURCE_B.url)!.listenerCount()).toBe(1);
+      expect(ambient.subscriberCount()).toBe(1);
     });
 
     act(() => {
-      sockets.get(SOURCE_B.url)!.emit("PasswordRequired", { game_code: "ABC123" });
+      ambient.emit({ kind: "passwordRequired", gameCode: "ABC123" }, SOURCE_B);
     });
 
     const user = userEvent.setup();

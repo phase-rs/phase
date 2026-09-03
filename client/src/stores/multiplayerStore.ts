@@ -162,6 +162,15 @@ export interface LobbyGameEntry {
 export interface LobbySourceStatus {
   state: ReconnectState;
   serverInfo: ServerInfo | null;
+  /**
+   * Last `PlayerCount` this source reported *on its current socket*, or
+   * `null` when it has reported none. Required-and-nullable rather than
+   * optional (mirrors `serverInfo`) so every construction site has to state
+   * the count: the row is rebuilt on each state change, and a count that
+   * outlived the socket that sent it would otherwise be advertised as live
+   * for the rest of the session after a single reconnect.
+   */
+  playerCount: number | null;
 }
 
 /** Result of {@link MultiplayerActions.addUserLobbySource}. Mirrors the
@@ -290,6 +299,10 @@ interface SourceChannel {
   /** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
    * reconnect; `null` when no listener is attached. */
   attachDetach: (() => void) | null;
+  /** Per-socket detach for this channel's ambient-frame listener. Bound and
+   * dropped in lockstep with `attachDetach` — both listen on the same
+   * socket and must follow it across a reconnect. */
+  ambientDetach: (() => void) | null;
   /** Most recent `LobbyUpdate` snapshot from this source, used to seed new
    * subscribers and to resolve a typed code to its listing authority. */
   snapshot: LobbyGame[] | null;
@@ -307,6 +320,22 @@ const subscriptionChannels = new Map<string, SourceChannel>();
  */
 const lobbySubscribers: Set<(games: LobbyGame[], source: LobbySource) => void> = new Set();
 
+/**
+ * A frame a subscription socket carries outside the `LobbyUpdate` family.
+ * Typed as a union rather than raw wire messages so consumers never parse
+ * JSON, never see a frame they don't handle, and get an exhaustiveness
+ * error here when the broker grows another ambient frame.
+ */
+export type AmbientLobbyFrame =
+  | { kind: "playerCount"; count: number }
+  | { kind: "passwordRequired"; gameCode: string };
+
+/** Registered ambient-frame subscribers, multiplexed over one listener per
+ * channel exactly like {@link lobbySubscribers}. */
+const ambientSubscribers: Set<
+  (frame: AmbientLobbyFrame, source: LobbySource) => void
+> = new Set();
+
 function channelFor(url: string): SourceChannel {
   const existing = subscriptionChannels.get(url);
   if (existing) return existing;
@@ -315,6 +344,7 @@ function channelFor(url: string): SourceChannel {
     firstOpen: null,
     pendingRpcAborts: new Set(),
     attachDetach: null,
+    ambientDetach: null,
     snapshot: null,
   };
   subscriptionChannels.set(url, channel);
@@ -330,6 +360,8 @@ function closeChannel(set: MultiplayerSet, get: MultiplayerGet, url: string): vo
   channel.pendingRpcAborts.clear();
   channel.attachDetach?.();
   channel.attachDetach = null;
+  channel.ambientDetach?.();
+  channel.ambientDetach = null;
   channel.snapshot = null;
   channel.firstOpen = null;
   channel.reconnect?.close();
@@ -364,6 +396,74 @@ function attachLobbyListener(
     if (!source) return;
     for (const cb of lobbySubscribers) cb(games, source);
   });
+}
+
+/** Map a raw frame to the ambient union, or `null` for anything this
+ * listener does not own — `LobbyUpdate`-family frames belong to the lobby
+ * listener and RPC replies to their callers. */
+function parseAmbientFrame(msg: {
+  type: string;
+  data?: unknown;
+}): AmbientLobbyFrame | null {
+  switch (msg.type) {
+    case "PlayerCount":
+      return { kind: "playerCount", count: (msg.data as { count: number }).count };
+    case "PasswordRequired":
+      return {
+        kind: "passwordRequired",
+        gameCode: (msg.data as { game_code: string }).game_code,
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Attach this channel's ambient-frame listener and fan its frames out to
+ * every subscriber, tagged with the source they arrived on. Bound on every
+ * `"open"` alongside the lobby listener, so a reconnect's brand-new socket
+ * keeps both flowing — a consumer that held a socket reference itself would
+ * be listening to the pre-drop socket forever.
+ *
+ * `PlayerCount` is recorded on the source's own status row rather than
+ * fanned out as the number to store: the count is per-source state the
+ * store already owns a home for, and tying it to the status row is what
+ * makes "this count is live" structural — every state change rewrites the
+ * row, so a count can never outlive the socket that sent it.
+ */
+function attachAmbientListener(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  channel: SourceChannel,
+  url: string,
+  socket: PhaseSocket,
+): void {
+  const listener = (event: MessageEvent) => {
+    let msg: { type: string; data?: unknown };
+    try {
+      msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
+    } catch {
+      return;
+    }
+    const frame = parseAmbientFrame(msg);
+    if (!frame) return;
+    if (frame.kind === "playerCount") {
+      const status = get().sourceStatus.get(url);
+      // No status row means this channel is not tracked (closed, or never
+      // opened as a browsed source); a count with no live row to sit on is
+      // dropped rather than resurrecting one.
+      if (status) {
+        setSourceStatus(set, get, url, { ...status, playerCount: frame.count });
+      }
+    }
+    const source = lobbySources(get()).find((s) => s.url === url);
+    if (!source) return;
+    for (const cb of ambientSubscribers) cb(frame, source);
+  };
+  socket.ws.addEventListener("message", listener);
+  channel.ambientDetach = () => {
+    socket.ws.removeEventListener("message", listener);
+  };
 }
 
 /** Lobby row for a game/draft code, with the source that listed it, from the
@@ -671,6 +771,18 @@ interface MultiplayerActions {
   subscribeLobby: (
     onUpdate: (games: LobbyGame[], source: LobbySource) => void,
   ) => Promise<(() => void) | null>;
+  /**
+   * Subscribe to the ambient frames every source's subscription socket
+   * carries beside its listings, tagged with the source they arrived on.
+   * Synchronous and dial-free: it rides the channels `subscribeLobby`
+   * opens, and each channel re-attaches its listener on every reconnect, so
+   * a subscriber keeps receiving frames across a flap without ever holding
+   * a socket reference. Player counts are recorded on `sourceStatus` as
+   * well as fanned out — read them from there.
+   */
+  subscribeAmbientLobby: (
+    onFrame: (frame: AmbientLobbyFrame, source: LobbySource) => void,
+  ) => () => void;
   /**
    * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
    * its joinDraft method, then stores the adapter and initial view.
@@ -2017,6 +2129,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                     setSourceStatus(set, get, url, {
                       state,
                       serverInfo: socket.serverInfo,
+                      // A reconnect hands us a brand-new socket that has
+                      // sent no `PlayerCount` yet. Carrying the pre-drop
+                      // number over would advertise a count no live socket
+                      // is backing; the next frame fills it in.
+                      playerCount: null,
                     });
                     // `serverInfo` is the *hosting* server's identity — the
                     // LobbyOnly-vs-Full host branch reads it. Another
@@ -2035,26 +2152,43 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                       && lobbySources(get()).some((source) => source.url === url)
                     ) {
                       attachLobbyListener(get, channel, url, socket);
+                      // Same socket, same condition, same lifetime: the
+                      // ambient listener has to follow the reconnect too,
+                      // or this source silently stops reporting its player
+                      // count and its `PasswordRequired` frames.
+                      attachAmbientListener(set, get, channel, url, socket);
                     }
                   }
                   settle(socket);
                 } else if (state === "reconnecting") {
-                  setSourceStatus(set, get, url, { state, serverInfo: null });
+                  // The row is rewritten, not merged: leaving `"open"` drops
+                  // this source's `serverInfo` AND its player count, because
+                  // the socket that reported them is gone.
+                  setSourceStatus(set, get, url, {
+                    state,
+                    serverInfo: null,
+                    playerCount: null,
+                  });
                   // In-flight RPCs would otherwise hang until their own
                   // timeout. Abort them now so the caller can branch
                   // immediately. New RPCs registered after this point
                   // use fresh controllers and are unaffected.
                   for (const ac of channel.pendingRpcAborts) ac.abort();
                   channel.pendingRpcAborts.clear();
-                  // Drop the handle to the old socket's listener; it
-                  // will be re-bound on the next "open".
+                  // Drop the handles to the old socket's listeners; both
+                  // are re-bound on the next "open".
                   channel.attachDetach = null;
+                  channel.ambientDetach = null;
                 } else if (state === "offline") {
                   // Reconnect exhausted. This source is degraded; the others
                   // keep streaming. `ensureSubscriptionSocket` resolves
                   // `null` so the caller renders a fallback. Also drain any
                   // stragglers that joined between reconnecting and offline.
-                  setSourceStatus(set, get, url, { state, serverInfo: null });
+                  setSourceStatus(set, get, url, {
+                    state,
+                    serverInfo: null,
+                    playerCount: null,
+                  });
                   for (const ac of channel.pendingRpcAborts) ac.abort();
                   channel.pendingRpcAborts.clear();
                   settle(null);
@@ -2071,6 +2205,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       closeSubscriptionSocket: () => {
         lobbySubscribers.clear();
+        ambientSubscribers.clear();
         for (const url of [...subscriptionChannels.keys()]) {
           closeChannel(set, get, url);
         }
@@ -2113,6 +2248,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         set({ draftAdapter: adapter, draftView: null, draftPhase: "lobby" });
       },
 
+      subscribeAmbientLobby: (onFrame) => {
+        ambientSubscribers.add(onFrame);
+        return () => {
+          ambientSubscribers.delete(onFrame);
+        };
+      },
+
       subscribeLobby: async (onUpdate) => {
         // Register before dialing: each channel's "open" handler attaches its
         // own listener when subscribers exist, so a source that connects
@@ -2138,6 +2280,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           // they don't wait on the next server push to render anything.
           if (channel.attachDetach === null) {
             attachLobbyListener(get, channel, source.url, socket);
+            attachAmbientListener(set, get, channel, source.url, socket);
           } else if (channel.snapshot) {
             onUpdate(channel.snapshot, source);
           }
@@ -2159,6 +2302,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             for (const channel of subscriptionChannels.values()) {
               channel.attachDetach?.();
               channel.attachDetach = null;
+              channel.ambientDetach?.();
+              channel.ambientDetach = null;
               channel.snapshot = null;
             }
           }
