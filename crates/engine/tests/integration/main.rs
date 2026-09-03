@@ -178,6 +178,7 @@ mod curse_of_deaths_hold_continuous_effect;
 mod curse_of_predation_attacks_enchanted_player_4744;
 mod curse_of_the_nightly_hunt_must_attack;
 mod curse_of_the_restless_dead_land_enters_trigger;
+mod curse_of_vengeance_player_loss;
 mod curse_spell_cast_triggers;
 mod curse_static_effects;
 mod curse_upkeep_triggers;

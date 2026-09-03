@@ -13478,7 +13478,8 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some(result);
     }
 
-    // CR 104.3a: "Whenever [player] loses the game" — player-loss trigger.
+    // CR 104.3b: "Whenever [player] loses the game" — player-loss trigger.
+    // (CR 104.3a is conceding, a different loss condition.)
     if let Some(valid_target) = parse_loses_game_trigger(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LosesGame;
@@ -13564,6 +13565,11 @@ fn parse_loses_game_actor(input: &str) -> OracleResult<'_, Option<TargetFilter>>
             tag("an opponent "),
         ),
         value((Some(TargetFilter::Player), true), tag("a player ")),
+        // CR 303.4b: "enchanted player" is the player this Aura is attached to.
+        value(
+            (Some(TargetFilter::AttachedTo), true),
+            tag("enchanted player "),
+        ),
     ))
     .parse(input)?;
     let verb = if third_person { "loses" } else { "lose" };
