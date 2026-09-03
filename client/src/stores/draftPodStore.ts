@@ -468,7 +468,11 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           || !procedureTargetMatchesConfig(target, get().config)
           || get().config !== config
         ) return;
-        set({ configError: err instanceof Error ? err.message : String(err) });
+        set({
+          configError: err instanceof Error ? err.message : String(err),
+          loadingPool: false,
+        });
+        return;
       }
 
       if (poolMode === "set") {

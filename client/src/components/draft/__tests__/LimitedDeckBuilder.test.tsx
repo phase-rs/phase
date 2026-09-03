@@ -2360,8 +2360,85 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await commanderPanelScope().findByText("Vehicle Commander");
     await act(async () => resolvePairing());
 
-    expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+    expect(commanderPanelScope().queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
   });
+
+  it.each(["controlled", "workspace"] as const)(
+    "clears commander state when engine authority becomes zero in the %s builder",
+    async (mode) => {
+      onlyVehicleIsEligible();
+      const submitSpy = vi.fn();
+
+      function AuthorityHarness() {
+        const [commandersRequired, setCommandersRequired] = useState(1);
+        const view = {
+          ...COMMANDER_VIEW,
+          commanders_required: commandersRequired,
+          min_deck_size: 1,
+          pool: [VEHICLE_COMMANDER],
+        };
+        return (
+          <>
+            <button onClick={() => setCommandersRequired(0)}>Disable designation</button>
+            <button onClick={() => setCommandersRequired(1)}>Enable designation</button>
+            {mode === "controlled" ? (
+              <LimitedDeckBuilder
+                view={view}
+                mainDeck={["Vehicle Commander"]}
+                landCounts={NO_LANDS}
+                onAddToDeck={() => {}}
+                onRemoveFromDeck={() => {}}
+                onSetLandCount={() => {}}
+                onSubmitDeck={submitSpy}
+                showSuggestions={false}
+              />
+            ) : (
+              <LimitedDeckBuilder
+                local={{
+                  view,
+                  workspace: {
+                    schemaVersion: 1,
+                    placements: {
+                      "cmd-1": { zone: "deck", row: 0, column: 0, order: 0 },
+                    },
+                    virtualBasics: [],
+                  },
+                  preferences: createDefaultDraftWorkspacePreferences(),
+                  interactionLocked: false,
+                  capabilities: { kind: "editable-pool", suggestions: false },
+                  onWorkspaceChange: () => {},
+                  onPreferencesChange: () => {},
+                  onSubmitDeck: submitSpy,
+                  onAddBasicLand: () => {},
+                  onRemoveBasicLand: () => {},
+                }}
+                responsiveLayout="desktop"
+                showSuggestions={false}
+              />
+            )}
+          </>
+        );
+      }
+
+      render(<AuthorityHarness />);
+      fireEvent.click(await commanderPanelScope().findByRole("button", { name: "Vehicle Commander" }));
+      await waitFor(() => expect(
+        commanderPanelScope().getAllByRole("button", { name: "Remove" }),
+      ).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole("button", { name: "Disable designation" }));
+      await waitFor(() => expect(
+        screen.queryByRole("heading", { name: "Commander", level: 4 }),
+      ).not.toBeInTheDocument());
+      const submit = screen.getByRole("button", { name: "Submit Deck" });
+      expect(submit).not.toBeDisabled();
+      fireEvent.click(submit);
+      await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
+
+      fireEvent.click(screen.getByRole("button", { name: "Enable designation" }));
+      expect(commanderPanelScope().queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+    },
+  );
 
   it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
     "designates and submits two backed copies of The Prismatic Piper on %s",

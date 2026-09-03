@@ -1168,17 +1168,8 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState().configError).toBe("Select a set first");
     });
 
-    it("keeps the loadProcedure failure visible past the pool fetch", async () => {
-      // `__DRAFT_POOLS_URL__` is a vite define that `vitest.config.ts` does not
-      // declare, so it is a free identifier here and must be supplied, or the
-      // fetch throws and the set branch's own catch overwrites the message
-      // under test.
-      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ eoe: {} }) })),
-      );
-      mocks.draftProcedure.mockRejectedValue(new Error("wasm unavailable"));
+    it("stops creation when loadProcedure fails", async () => {
+      mocks.draftProcedure.mockReset().mockRejectedValue(new Error("wasm unavailable"));
       useDraftPodStore.setState((prev) => ({
         config: {
           ...prev.config,
@@ -1190,15 +1181,61 @@ describe("draftPodStore", () => {
 
       await useDraftPodStore.getState().createPod();
 
-      // Reach guard: creation ran to completion, so the assertion below reads a
-      // message that survived the whole set-pool path rather than one left by an
-      // early return. Without this, a `return` added to the catch would pass too.
-      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
-      // REVERT-FAILING: restore `configError: null` to the `loadingPool` write
-      // and this reads `null` -- the catch's message is erased three statements
-      // later, so a `draftProcedure` failure is silent on the branch Sealed
-      // always takes.
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
       expect(useDraftPodStore.getState().configError).toBe("wasm unavailable");
+    });
+
+    it("clears an older creation's loading state when a newer procedure read fails", async () => {
+      let resolveFetch!: (response: {
+        ok: boolean;
+        status: number;
+        json: () => Promise<Record<string, unknown>>;
+      }) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => {
+        resolveFetch = resolve;
+      })));
+      mocks.draftProcedure
+        .mockReset()
+        .mockResolvedValueOnce({
+          pod_size: 8,
+          human_seats: 1,
+          min_pod_size: 2,
+          max_pod_size: 8,
+          allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+          packs_per_player: 3,
+          cards_per_pick: 1,
+          distribution: "PickAndPass",
+          min_deck_size: 40,
+          post_draft_play: "TournamentPairings",
+          match_config: { best_of: 3 },
+        })
+        .mockRejectedValueOnce(new Error("new procedure failed"));
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [{ code: "ISD", name: "Innistrad" }],
+          setCode: "ISD",
+        },
+        hostDisplayName: "Host",
+      }));
+
+      const olderCreation = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(useDraftPodStore.getState().loadingPool).toBe(true));
+      await useDraftPodStore.getState().createPod();
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        loadingPool: false,
+        configError: "new procedure failed",
+      });
+      resolveFetch({
+        ok: true,
+        status: 200,
+        json: async () => ({ isd: { code: "ISD" } }),
+      });
+      await olderCreation;
+      expect(useDraftPodStore.getState().loadingPool).toBe(false);
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
     });
   });
 });

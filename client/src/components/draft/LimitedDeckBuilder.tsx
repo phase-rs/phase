@@ -302,6 +302,9 @@ function useCommanderDesignation({
 
   useEffect(() => {
     if (commandersRequired === 0 || !deckFormat) {
+      requestGenerationRef.current += 1;
+      commandersRef.current = [];
+      setCommanders((current) => current.length === 0 ? current : []);
       setCommanderEligibleNames(null);
       setEligibilityFailed(false);
       return;
@@ -783,7 +786,7 @@ function ControlledDeckBuilder({
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
-      await submitDeck(commanders);
+      await submitDeck(commandersRequired > 0 ? commanders : []);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
@@ -1174,7 +1177,7 @@ function WorkspaceDeckBuilder({
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
-      await onSubmitDeck(commanders);
+      await onSubmitDeck(commandersRequired > 0 ? commanders : []);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
