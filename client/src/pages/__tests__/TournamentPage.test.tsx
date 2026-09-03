@@ -989,6 +989,147 @@ describe("TournamentPage catalog completeness", () => {
   });
 });
 
+// ── One action in flight holds EVERY control ─────────────────────────────
+//
+// A different axis from the `:code` block below. Those tests are about
+// cross-TOURNAMENT staleness (one page, two codes); these are about
+// cross-KIND interference (one page, one code, two different action types).
+// `busy` is a single slot, so a control gated on `busy === "<its own kind>"`
+// is re-enabled the instant a DIFFERENT action claims the slot — with its own
+// request still unanswered.
+
+describe("TournamentPage concurrent action gating", () => {
+  it("holds End Tournament while Start Round is in flight, and releases both after", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({ tournamentCredentials: { TOUR01: ORGANIZER } });
+    await mountWith(fake, h2hView());
+
+    const start = () =>
+      screen.getByRole("button", { name: /^(Start Round|Starting…)$/ }) as HTMLButtonElement;
+    const end = () =>
+      screen.getByRole("button", {
+        name: /^(End Tournament|Ending…)$/,
+      }) as HTMLButtonElement;
+
+    // Reach-guard: both controls are live before anything is dispatched, so
+    // the disabled assertions below cannot pass against a page that simply
+    // renders every button disabled.
+    expect(start().disabled).toBe(false);
+    expect(end().disabled).toBe(false);
+
+    await user.click(start());
+    await settle();
+    // Reach-guard: Start's request really is in flight and unanswered.
+    expect(fake.tally("StartTournamentRound")).toBe(1);
+
+    // The label stays kind-specific — only Start says it is running...
+    expect(start().textContent).toBe("Starting…");
+    expect(end().textContent).toBe("End Tournament");
+    // ...while the disabled state is page-wide.
+    expect(start().disabled).toBe(true);
+    expect(end().disabled).toBe(true);
+
+    // The actual exploit: clicking End here used to dispatch a second frame
+    // AND, via `setBusy("end")`, re-enable Start's own control mid-flight.
+    await user.click(end());
+    await settle();
+    expect(fake.tally("EndTournament")).toBe(0);
+    expect(start().textContent).toBe("Starting…");
+    expect(start().disabled).toBe(true);
+
+    // Paired positive: once Start's OWN response settles, both controls come
+    // back. Without this, a page that could never re-enable anything would
+    // satisfy every assertion above.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView() });
+    });
+    await settle();
+    expect(start().disabled).toBe(false);
+    expect(end().disabled).toBe(false);
+    expect(start().textContent).toBe("Start Round");
+
+    // ...and End really is dispatchable again, which is what proves the hold
+    // was the guard rather than a control that had died.
+    await user.click(end());
+    await settle();
+    expect(fake.tally("EndTournament")).toBe(1);
+  });
+
+  it("holds the organizer controls and the report dialog while a Drop is in flight", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    // A playing organizer, so all four controls this page owns are on screen
+    // at once: Start, End, Drop, and the report dialog's submit.
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "org-token",
+          playerToken: "player-token",
+          playerKey: "alice",
+          updatedAt: 1,
+        },
+      },
+    });
+    await mountWith(fake, h2hView());
+
+    const drop = () =>
+      screen.getByRole("button", { name: /^(Drop|Dropping…)$/ }) as HTMLButtonElement;
+    expect(drop().disabled).toBe(false);
+
+    await user.click(drop());
+    await settle();
+    expect(fake.tally("DropFromTournament")).toBe(1);
+    expect(drop().textContent).toBe("Dropping…");
+
+    // Both organizer controls are held by an action neither of them owns.
+    expect(
+      (screen.getByRole("button", { name: "Start Round" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "End Tournament" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    // The dialog is reachable while the drop is in flight (opening it is not
+    // itself a dispatch), and its submit control is held too — labelled for
+    // the OTHER action, which is the accepted cost of `submitting` being one
+    // boolean driving both the disabled state and the label.
+    await user.click(
+      within(yourMatchSection()).getByRole("button", { name: "Report Result" }),
+    );
+    const dialog = within(screen.getByRole("dialog"));
+    // A winner is selected first: without one the submit control is disabled
+    // for an unrelated reason (`selection === null`) and the assertion would
+    // hold with or without this fix.
+    await user.click(dialog.getByLabelText("Alice"));
+    const submit = dialog.getByRole("button", {
+      name: "Submitting…",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+
+    await user.click(submit);
+    await settle();
+    expect(fake.tally("ReportMatchResult")).toBe(0);
+
+    // Paired positive: the drop settles, and the same dialog becomes
+    // submittable — with the report frame going out for real.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView() });
+    });
+    await settle();
+    const released = within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Submit Result",
+    }) as HTMLButtonElement;
+    expect(released.disabled).toBe(false);
+    await user.click(released);
+    await settle();
+    expect(fake.tally("ReportMatchResult")).toBe(1);
+  });
+});
+
 // ── A `:code` change re-scopes the whole page ────────────────────────────
 //
 // The route param is the page's ONE identity binding, and nothing else in

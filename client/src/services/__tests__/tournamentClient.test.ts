@@ -567,6 +567,60 @@ describe("tournament frame trust boundary", () => {
     await expect(promise).resolves.toMatchObject({ ok: true });
   });
 
+  // The reply filter and the broadcast listener read the SAME `TournamentUpdate`
+  // frames, so they must refuse the same malformed ones. The broadcast half is
+  // already pinned in section E ("ignores malformed and payload-less broadcast
+  // frames", `{ code: CODE }` with no view); these are the point-reply half.
+  it("ignores a reply payload missing its view, exactly as the broadcast listener does", async () => {
+    const ws = new MockWebSocket();
+    const promise = getTournamentOver(makePhaseSocket(ws), CODE);
+
+    // Right tag, right code, no `view`. Settling `{ok: true}` here would hand
+    // the caller a `TournamentUpdateReply` whose `view` the wire never sent.
+    ws.deliver(JSON.stringify({ type: "TournamentUpdate", data: { code: CODE } }));
+    expect(await settledOrPending(promise)).toBe("pending");
+    // The refusal consumed nothing: the request is still listening.
+    expect(ws.listenerCount("message")).toBe(1);
+
+    // Paired positive: the same tag and code WITH a view does settle it.
+    ws.deliver(JSON.stringify({ type: "TournamentUpdate", data: { code: CODE, view: OWN_VIEW } }));
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.view).toEqual(OWN_VIEW);
+  });
+
+  it("ignores a TournamentCreated payload missing the code the broker mints", async () => {
+    const ws = new MockWebSocket();
+    const promise = createTournamentOver(makePhaseSocket(ws), {
+      name: "Friday Night",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+    });
+
+    // `TournamentCreated` correlates on its tag alone, so the presence check is
+    // the only thing between a code-less payload and a caller navigating to the
+    // tournament it just created with nothing to navigate to.
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCreated",
+        data: { organizer_token: "tok", view: OWN_VIEW },
+      }),
+    );
+    expect(await settledOrPending(promise)).toBe("pending");
+    expect(ws.listenerCount("message")).toBe(1);
+
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCreated",
+        data: { code: "TOUR01", organizer_token: "tok", view: OWN_VIEW },
+      }),
+    );
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.code).toBe("TOUR01");
+  });
+
   it("falls back to a generic message when an Error frame carries no text", async () => {
     const ws = new MockWebSocket();
     const promise = getTournamentOver(makePhaseSocket(ws), CODE);

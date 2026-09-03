@@ -31,7 +31,23 @@ import {
   type FailureLabel,
 } from "./tournamentPageState";
 
-/** Which control is mid-flight. One value, so two controls cannot both spin. */
+/**
+ * Which action is mid-flight, or `null` for none.
+ *
+ * One slot — but the slot's arity is not what makes concurrent dispatch
+ * impossible, the CONTROLS are: every action-dispatching control on this page
+ * is disabled whenever `busy !== null`, never merely when `busy` equals its own
+ * kind. Gating each control on its own kind alone left a live double-dispatch
+ * window, since a second action's `setBusy` overwrites the slot and thereby
+ * re-enables the FIRST action's control while its request is still in flight
+ * (click Start, then End: `busy` moves `"start"` → `"end"` and Start's button
+ * becomes clickable again with its own request unanswered).
+ *
+ * The value is therefore read for two different jobs. `!== null` gates every
+ * control; the equality test picks one control's in-flight LABEL, and only
+ * that. Keeping the label kind-specific is what still tells the viewer which
+ * action is running while all of them are held.
+ */
 type BusyKind = "start" | "end" | "drop" | "report";
 
 /**
@@ -412,15 +428,20 @@ export function TournamentPage() {
                     <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
                       {t("detail.organizerControls")}
                     </h2>
+                    {/* `busy !== null` on both controls, `busy === "<kind>"`
+                        on both labels — see `BusyKind`. The two tests are
+                        deliberately different: one action in flight holds
+                        EVERY control, while only the control whose action is
+                        actually running changes what it says. */}
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={handleStart}
-                        disabled={busy === "start"}
+                        disabled={busy !== null}
                         className={menuButtonClass({
                           tone: "emerald",
                           size: "sm",
-                          disabled: busy === "start",
+                          disabled: busy !== null,
                         })}
                       >
                         {busy === "start"
@@ -430,11 +451,11 @@ export function TournamentPage() {
                       <button
                         type="button"
                         onClick={handleEnd}
-                        disabled={busy === "end"}
+                        disabled={busy !== null}
                         className={menuButtonClass({
                           tone: "red",
                           size: "sm",
-                          disabled: busy === "end",
+                          disabled: busy !== null,
                         })}
                       >
                         {busy === "end"
@@ -455,11 +476,11 @@ export function TournamentPage() {
                   <button
                     type="button"
                     onClick={handleDrop}
-                    disabled={busy === "drop"}
+                    disabled={busy !== null}
                     className={menuButtonClass({
                       tone: "amber",
                       size: "sm",
-                      disabled: busy === "drop",
+                      disabled: busy !== null,
                     })}
                   >
                     {busy === "drop" ? t("detail.dropBusy") : t("detail.drop")}
@@ -503,10 +524,22 @@ export function TournamentPage() {
               </section>
 
               {freshPairing !== null && (
+                /* `busy !== null`, for the same reason the buttons above use
+                   it: `submitting` is what disables the dialog's own submit
+                   control, and gating it on `"report"` alone let a Drop or a
+                   round start in flight leave the dialog live — and, in the
+                   other direction, let a later action's `setBusy` clear the
+                   flag with the report itself unanswered.
+                   The cost, taken knowingly: `submitting` is ONE boolean
+                   driving both the disabled state and the label, so a dialog
+                   opened while some other action is in flight reads
+                   "Submitting…" for that other action. Correct gating beats a
+                   precise label here, and splitting the prop would mean
+                   changing `ReportResultDialog`'s frozen interface. */
                 <ReportResultDialog
                   isOpen
                   pairing={freshPairing}
-                  submitting={busy === "report"}
+                  submitting={busy !== null}
                   onSubmit={handleReport}
                   onCancel={() => setReporting(null)}
                 />

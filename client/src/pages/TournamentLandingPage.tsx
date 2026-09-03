@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
@@ -47,6 +47,43 @@ export function TournamentLandingPage() {
   const [busy, setBusy] = useState<"create" | "join" | null>(null);
   const [joinCode, setJoinCode] = useState("");
   const [joinName, setJoinName] = useState("");
+
+  /**
+   * Whether this page is still on screen, readable from an async continuation.
+   *
+   * `handleCreate` and `handleJoin` both `await` an RPC and then write, and one
+   * of those writes is a `navigate()` — which, unlike a `setState`, is NOT a
+   * silent no-op after unmount. A viewer who clicks Create and then leaves for
+   * another route before the broker answers would otherwise be yanked to
+   * `/tournament/<code>` from wherever they had gone.
+   *
+   * This is `TournamentPage`'s `shownCode` guard in the shape this page needs.
+   * There the identity worth scoping to is the `:code` route param, so the
+   * comparison is against the code on screen; this is the list page and has no
+   * `:code`, so the identity is simply "still mounted" — the same
+   * effect-cleanup `cancelled` idiom the subscription effect below already uses
+   * (`components/lobby/LobbyView.tsx`), lifted to a ref because a promise, un-
+   * like a subscription handler, has no cleanup that could detach it.
+   *
+   * Declining these writes strands nothing. `createTournament` /
+   * `joinTournament` have already recorded the minted credential in the store
+   * before returning, so the tournament stays reachable from the list (badged
+   * "Organizer"/"Entered") and by code — only this page's own navigation and
+   * alert are dropped.
+   *
+   * Re-armed on every run rather than only on the first: `StrictMode`
+   * (`App.tsx`) deliberately mounts, cleans up and re-mounts in development, so
+   * a ref initialised once at `useRef(true)` and only ever cleared would leave
+   * the guard permanently closed after that second mount.
+   */
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // One selector per action, as `MultiplayerPage` does — zustand actions are
   // stable across renders, so these are safe effect dependencies.
@@ -104,6 +141,10 @@ export function TournamentLandingPage() {
       setBusy("create");
       setFailure(null);
       const r = await createTournament(req);
+      // Every write below belongs to a page the viewer may already have left —
+      // see `mounted`. The guard covers the whole continuation, `navigate`
+      // included, because that is the write with a visible effect after unmount.
+      if (!mounted.current) return;
       setBusy(null);
       if (!r.ok) {
         setFailure(failureLabel(r));
@@ -122,6 +163,9 @@ export function TournamentLandingPage() {
     // No client-side pre-validation of the code or the display name: the
     // broker validates both, and a second copy of its rules here would drift.
     const r = await joinTournament(joinCode, joinName);
+    // Scoped exactly as `handleCreate`'s continuation is, and for the same
+    // reason: a stale join must not navigate a page the viewer has left.
+    if (!mounted.current) return;
     setBusy(null);
     if (!r.ok) {
       setFailure(failureLabel(r));

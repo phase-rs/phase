@@ -211,6 +211,36 @@ describe("PairingsList report affordance", () => {
   });
 });
 
+// The >= 44pt touch-target rule from `.coderabbit.yaml`'s `client/src/**` path
+// instructions. `min-h-[44px]` is this repo's spelling of it
+// (`components/lobby/LobbyView.tsx:332,348`, `components/lobby/HostSetup.tsx:664`),
+// and a class assertion is how it is already pinned elsewhere
+// (`components/draft/__tests__/LimitedDeckBuilder.test.tsx:927`) — happy-dom runs
+// no layout, so every box reports a height of 0 and a measured assertion would
+// pass against anything.
+describe("PairingsList touch targets", () => {
+  it("gives every interactive control at least a 44px hit area", () => {
+    render(
+      <PairingsList
+        pairings={[
+          { id: 1, round: 1, players: seatsOf(2), outcome: null },
+          { id: 2, round: 2, players: seatsOf(2), outcome: { Reported: "Draw" } },
+        ]}
+        onReport={vi.fn()}
+      />,
+    );
+
+    // The whole render, not just the report button: a control added later is
+    // caught by the same sweep. Two reportable arms, so two controls — the
+    // reach-guard, since an empty list would satisfy the loop trivially.
+    const controls = screen.getAllByRole("button");
+    expect(controls).toHaveLength(2);
+    for (const control of controls) {
+      expect(control.className).toContain("min-h-[44px]");
+    }
+  });
+});
+
 // V32 — game-wins lines render only on the `Decisive` arm, and only through
 // `decisiveGameWins`. Five pairings in ONE render, with NO arity check
 // anywhere in the component.

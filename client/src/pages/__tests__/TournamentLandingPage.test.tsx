@@ -403,6 +403,106 @@ describe("TournamentLandingPage create and join", () => {
   });
 });
 
+// ── A reply that lands after the page is gone writes nothing ─────────────
+//
+// The same staleness class `TournamentPage`'s `shownCode` guard covers, in the
+// shape this page needs: no `:code` to compare against, so the identity is
+// "still mounted". `navigate` is the write that matters — a `setState` after
+// unmount is a silent no-op, but a `navigate` genuinely moves the viewer off
+// whatever route they had gone to.
+
+describe("TournamentLandingPage stale continuations", () => {
+  it("navigates on a reply that lands while the page is still up", async () => {
+    // The paired positive for the two tests below: `navigate` IS reachable in
+    // this harness, so "never navigates" cannot be what makes them pass.
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    renderPage();
+    await settle();
+
+    await user.type(screen.getByLabelText("Tournament name"), "Friday Night Magic");
+    await user.click(screen.getByRole("button", { name: "Create Tournament" }));
+    await settle();
+    expect(fake.tally("CreateTournament")).toBe(1);
+
+    await act(async () => {
+      fake.deliver("TournamentCreated", {
+        code: "NEWC01",
+        organizer_token: "org-token",
+        view: viewFor("NEWC01"),
+      });
+    });
+    await settle();
+
+    expect(mocks.navigate).toHaveBeenCalledWith("/tournament/NEWC01");
+  });
+
+  it("does not navigate when a create reply lands after the page is gone", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { unmount } = renderPage();
+    await settle();
+
+    await user.type(screen.getByLabelText("Tournament name"), "Friday Night Magic");
+    await user.click(screen.getByRole("button", { name: "Create Tournament" }));
+    await settle();
+    // Reach-guard: the request really is in flight across the unmount below,
+    // so the reply has something of this page's to settle.
+    expect(fake.tally("CreateTournament")).toBe(1);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    unmount();
+
+    await act(async () => {
+      fake.deliver("TournamentCreated", {
+        code: "NEWC01",
+        organizer_token: "org-token",
+        view: viewFor("NEWC01"),
+      });
+    });
+    await settle();
+
+    expect(mocks.navigate).not.toHaveBeenCalledWith("/tournament/NEWC01");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    // Second reach-guard, and the reason declining is lossless rather than
+    // merely quiet: the RPC really did settle `ok` — the store recorded the
+    // minted credential — so the navigation was reached and refused, not
+    // skipped because nothing ever arrived.
+    expect(store().tournamentCredentials.NEWC01?.organizerToken).toBe("org-token");
+  });
+
+  it("does not navigate when a join reply lands after the page is gone", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { unmount } = renderPage();
+    await settle();
+
+    await user.type(screen.getByLabelText("Tournament code"), "TOUR01");
+    await user.type(screen.getByLabelText("Display name"), "Alice");
+    await user.click(screen.getByRole("button", { name: "Join" }));
+    await settle();
+    expect(fake.tally("JoinTournament")).toBe(1);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    unmount();
+
+    await act(async () => {
+      fake.deliver("TournamentJoined", {
+        code: "TOUR01",
+        player_token: "player-token",
+        view: viewFor("TOUR01"),
+      });
+    });
+    await settle();
+
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(store().tournamentCredentials.TOUR01?.playerToken).toBe("player-token");
+  });
+});
+
 // ── V20 — failures render catalog copy, with the server's text interpolated ─
 
 describe("TournamentLandingPage failures", () => {

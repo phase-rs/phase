@@ -81,11 +81,21 @@ export function PairingsList({ pairings, onReport }: PairingsListProps) {
                         overwritten at `:1755`) — correcting a mistyped tally
                         is a legitimate organizer action — so the guard is
                         arm-selective, never "unresolved only". */}
+                    {/* The one interactive control this component renders, and
+                        therefore the only one the >= 44pt touch-target rule
+                        applies to. `min-h-[44px]` is this repo's established
+                        spelling of it (`components/lobby/LobbyView.tsx:332,348`,
+                        `components/lobby/HostSetup.tsx:664`) — the `text-xs`
+                        padding alone leaves the hit area well under it, and the
+                        raw utility classes here bypass `menuButtonClass`, whose
+                        `sm` size would otherwise have supplied `min-h-11`.
+                        `inline-flex items-center` keeps the label centred once
+                        the box is taller than its text. */}
                     {onReport && isReportable(pairing.outcome) && (
                       <button
                         type="button"
                         onClick={() => onReport(pairing)}
-                        className="rounded-[6px] bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
+                        className="inline-flex min-h-[44px] items-center rounded-[6px] bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
                       >
                         {t("detail.reportResult")}
                       </button>

@@ -269,17 +269,34 @@ export function requestOver<T>(
  * `"TournamentUpdate"` that distinction matters — see the module header,
  * part 4: a same-code frame produced by someone else's action passes this
  * filter, because on the wire it is the same frame.
+ *
+ * Both fields every tournament reply carries — `code` and `view` — are
+ * *presence*-checked, not merely cast. This is the same trust-boundary rule
+ * {@link subscribeTournamentsOver}'s listener applies to the very same
+ * `TournamentUpdate` frames, and the two must agree: a payload missing its
+ * `view` is not a reply, and settling a caller `{ok: true}` on one would hand
+ * out a value the type says is there and the wire did not send. Note this is
+ * strictly a well-formedness check and nothing more — it cannot and does not
+ * address part 4's provenance limitation, which is about a perfectly
+ * well-formed frame belonging to someone else's action.
  */
-function matchReply<T extends { code: string }>(
+function matchReply<T extends { code: string; view: TournamentView }>(
   replyType: string,
   code: string | null,
 ): ReplyMatcher<T> {
   return (msg) => {
     if (msg.type !== replyType) return null;
-    const data = msg.data as T | undefined | null;
+    // Read as optional-everything: at this boundary `T` is what the frame is
+    // claimed to be, not what has been established about it yet.
+    const data = msg.data as Partial<T> | undefined | null;
     if (data == null) return null;
+    if (data.code == null || data.view == null) return null;
+    // `code === null` is `TournamentCreated`, whose code the broker mints in
+    // the reply — nothing to correlate against, but the presence check above
+    // still applies, since that minted code is the caller's only route to the
+    // tournament it just created.
     if (code !== null && data.code !== code) return null;
-    return data;
+    return data as T;
   };
 }
 
