@@ -928,6 +928,28 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 text[offset..].to_string(),
             );
         }
+        // CR 608.2c + CR 701.25a: active-voice "you put [type] into your
+        // graveyard this way" — the condition following a preceding
+        // "surveil N" instruction (Chandra, Chill of Compliance; Enlightened
+        // Confidant). Runs under both prefixes for the same reason as the
+        // put-onto-battlefield sibling above. Unlike discard/sacrifice/exile
+        // below (cause-bound: the graveyard is inherent to the verb), a
+        // surveilled card's fate is a genuine choice, so this clause stays
+        // destination-bound like put-onto-battlefield — a redirect away from
+        // the graveyard as the card moves defeats it.
+        if let Ok((after_clause, (filter, _negated))) =
+            nom_cond::parse_you_put_into_graveyard_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: Some(Zone::Graveyard),
+                }),
+                text[offset..].to_string(),
+            );
+        }
         // CR 603.12 + CR 701.16a: active-voice "you exile[d] a[n] X this way,
         // [body]" — the reflexive gate created by a preceding "exile [target]
         // X" instruction. Runs under BOTH prefixes because the printed idiom

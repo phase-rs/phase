@@ -345,6 +345,10 @@ class NativeP2PBridge {
     return this.clientFor(playerId).previewManaPayment(action, playerId);
   }
 
+  async exportPersistenceState(): Promise<string> {
+    return this.clientFor(0).exportPersistenceState();
+  }
+
   async getState(): Promise<GameState> {
     return this.clientFor(0).getState();
   }
@@ -736,6 +740,8 @@ function hostDisposedError(): AdapterError {
 export class P2PHostAdapter implements EngineAdapter {
   private wasm = getHostAdapter();
   private nativeBridge: NativeP2PBridge | null = null;
+  /** Present for a P2P host, whether its authority is browser WASM or native. */
+  exportPersistenceState?: () => Promise<string>;
   private nativeInitialSetupPending = false;
   private listeners: P2PAdapterEventListener[] = [];
   /**
@@ -972,17 +978,24 @@ export class P2PHostAdapter implements EngineAdapter {
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         nativeResume,
       );
-    } else {
-      this.attachBrowserAiDecisionDiagnostics();
     }
+    this.attachAuthorityDiagnostics();
   }
 
   /**
-   * Installs the local-only diagnostics capability once this host is backed by
-   * browser WASM. It deliberately remains an instance property: native hosts
-   * and P2P guests must fail capability detection rather than receive a no-op.
+   * Installs the local authority diagnostics capability. Native hosts request
+   * the server's trusted envelope; browser hosts obtain it from their WASM
+   * engine. P2P guests never construct this adapter.
    */
-  private attachBrowserAiDecisionDiagnostics(): void {
+  private attachAuthorityDiagnostics(): void {
+    this.exportPersistenceState = async () => {
+      this.assertNotDisposed();
+      if (!this.ownsAuthority()) {
+        throw new AdapterError("P2P_ERROR", "P2P host authority changed", false);
+      }
+      if (this.nativeBridge) return this.nativeBridge.exportPersistenceState();
+      return this.wasm.exportPersistenceState();
+    };
     if (this.nativeBridge) return;
     Object.assign(this, {
       setAiDecisionDiagnosticsEnabled: (enabled: boolean) =>
@@ -1584,7 +1597,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
-          this.attachBrowserAiDecisionDiagnostics();
+          this.attachAuthorityDiagnostics();
         }
       }
       // A teardown may have landed while `wasm.initialize()` (and the native
@@ -1806,7 +1819,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
-          this.attachBrowserAiDecisionDiagnostics();
+          this.attachAuthorityDiagnostics();
         }
       }
       if (!this.ownsAuthority()) {
@@ -1921,7 +1934,7 @@ export class P2PHostAdapter implements EngineAdapter {
       });
       this.nativeBridge.dispose();
       this.nativeBridge = null;
-      this.attachBrowserAiDecisionDiagnostics();
+      this.attachAuthorityDiagnostics();
     }
   }
 
@@ -3868,6 +3881,17 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "state_update": {
         if (this.authenticatedSession !== session) return;
+        // PeerJS normally preserves message order, but state resync after a
+        // reconnect can race a previously queued delivery. Never let that old
+        // view overwrite a newer authority revision: it can leave two peers
+        // each waiting for the other to act.
+        if (
+          msg.revision !== undefined
+          && this.cachedRevision !== null
+          && msg.revision < this.cachedRevision
+        ) {
+          return;
+        }
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         if (this.pendingResolve) {

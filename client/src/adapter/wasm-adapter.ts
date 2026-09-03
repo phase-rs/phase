@@ -178,6 +178,22 @@ export function getHostAdapter(): WasmAdapter {
  * Falls back to direct main-thread WASM calls if Worker creation fails
  * (e.g., restrictive CSP, very old browser).
  */
+/** How much of a card-database load failure to put in a user-facing message.
+ *  serde's "unknown variant" error enumerates every variant of the enum it
+ *  rejected, which runs to thousands of characters; everything diagnostic is in
+ *  the opening clause, so the tail is noise in a toast. */
+const CARD_DB_ERROR_MAX_CHARS = 180;
+
+function describeCardDbError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  if (!message) return "";
+  const trimmed =
+    message.length > CARD_DB_ERROR_MAX_CHARS
+      ? `${message.slice(0, CARD_DB_ERROR_MAX_CHARS)}…`
+      : message;
+  return `: ${trimmed}`;
+}
+
 export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   cardDbLoaded = false;
@@ -328,6 +344,14 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   // Concurrent callers now share one load; mirrors `initPromise` above.
   private cardDbPromise: Promise<void> | null = null;
 
+  // Why the failure is kept rather than only logged: `ensureCardDb` is
+  // best-effort by design and resolves even when the load failed, so callers
+  // that require the database cannot tell *why* it is absent. Without this the
+  // engine worker answers them with "Card database not loaded", which names a
+  // missing call rather than the real cause -- a schema-rejected pool reads as
+  // a forgotten `loadCardDb`.
+  private cardDbError: unknown = null;
+
   private ensureCardDb(): Promise<void> {
     if (this.cardDbLoaded) return Promise.resolve();
     if (this.cardDbPromise) return this.cardDbPromise;
@@ -344,7 +368,9 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
           await this.ensureAiPool();
         }
+        this.cardDbError = null;
       } catch (err) {
+        this.cardDbError = err;
         console.warn("Failed to load card database:", err);
       }
     })();
@@ -735,20 +761,28 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
-  private async requireCardDbForRestore(): Promise<void> {
+  private async requireCardDb(): Promise<void> {
     await this.ensureCardDb();
     // Soft-failed ensureCardDb leaves cardDbLoaded false and skips
     // rehydrate_game_from_card_db — restored CardName NamedChoices then have
     // empty legal actions and softlock the AI (#6393). Refuse DB-less restore
     // / P2P host resume the same way warmCardDatabase surfaces load failure.
+    // Every caller that reads CARD_DB goes through here, so the cause travels
+    // with the refusal instead of staying behind in a console warning.
     if (!this.cardDbLoaded) {
-      throw new Error("Card database failed to load");
+      // `new Error(msg, { cause })` is ES2022 and this bundle targets ES2020,
+      // so the cause is attached the way `network/connection.ts` does it.
+      const error = new Error(
+        `Card database failed to load${describeCardDbError(this.cardDbError)}`,
+      );
+      Object.assign(error, { cause: this.cardDbError });
+      throw error;
     }
   }
 
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
-    await this.requireCardDbForRestore();
+    await this.requireCardDb();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
@@ -851,7 +885,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     this.assertInitialized();
     // Same CARD_DB requirement as restoreState — resume rehydrates abilities
     // only when the DB is loaded (engine-wasm resume_multiplayer_host_state).
-    await this.requireCardDbForRestore();
+    await this.requireCardDb();
     const json = JSON.stringify(state);
     const resumed = this.engine
       ? await this.engine.resumeMultiplayerHostState(json)
@@ -897,7 +931,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    */
   async warmCardDatabase(): Promise<void> {
     await this.initialize();
-    await this.requireCardDbForRestore();
+    await this.requireCardDb();
   }
 
   /**
@@ -908,7 +942,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    */
   async checkDeckCompatibility(request: unknown): Promise<unknown> {
     await this.initialize();
-    await this.ensureCardDb();
+    await this.requireCardDb();
     if (this.engine) {
       return this.engine.evaluateDeckCompatibility(request);
     }
@@ -929,7 +963,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    */
   async evaluateDeckFormatGate(request: unknown): Promise<unknown> {
     await this.initialize();
-    await this.ensureCardDb();
+    await this.requireCardDb();
     if (this.engine) {
       return this.engine.evaluateDeckFormatGate(request);
     }
@@ -971,21 +1005,21 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    */
   async getCardFaceData(cardName: string): Promise<unknown> {
     await this.initialize();
-    await this.ensureCardDb();
+    await this.requireCardDb();
     if (this.engine) return this.engine.getCardFaceData(cardName);
     return this.fallback!.getCardFaceData(cardName);
   }
 
   async getCardParseDetails(cardName: string): Promise<unknown> {
     await this.initialize();
-    await this.ensureCardDb();
+    await this.requireCardDb();
     if (this.engine) return this.engine.getCardParseDetails(cardName);
     return this.fallback!.getCardParseDetails(cardName);
   }
 
   async getCardRulings(cardName: string): Promise<unknown> {
     await this.initialize();
-    await this.ensureCardDb();
+    await this.requireCardDb();
     if (this.engine) return this.engine.getCardRulings(cardName);
     return this.fallback!.getCardRulings(cardName);
   }
@@ -1059,7 +1093,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   ): Promise<SubmitResult> {
     this.assertInitialized();
     if (deckData) {
-      await this.ensureCardDb();
+      await this.requireCardDb();
     }
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {
@@ -1103,7 +1137,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   ): Promise<SubmitResult> {
     this.assertInitialized();
     if (deckData) {
-      await this.ensureCardDb();
+      await this.requireCardDb();
     }
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {

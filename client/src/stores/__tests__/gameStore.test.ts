@@ -59,15 +59,15 @@ describe("game mode classification", () => {
     expect(isAuthorityRemote("local")).toBe(false);
   });
 
-  it.each(["ai", "local", "native-ai"] as GameMode[])(
-    "allows authoritative bug reports in private %s games",
+  it.each(["ai", "local", "native-ai", "p2p-host"] as GameMode[])(
+    "allows authoritative bug reports when %s owns the state",
     (mode) => {
       expect(canExportAuthoritativeState(mode)).toBe(true);
     },
   );
 
-  it.each(["online", "p2p-host", "p2p-join", "draft-match", "spectate"] as GameMode[])(
-    "blocks authoritative bug reports in shared %s games",
+  it.each(["online", "p2p-join", "draft-match", "spectate"] as GameMode[])(
+    "blocks authoritative bug reports when %s only has a redacted view",
     (mode) => {
       expect(canExportAuthoritativeState(mode)).toBe(false);
     },

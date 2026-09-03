@@ -5806,12 +5806,7 @@ fn rw_effect(
             player: _,
             count: _,
         }
-        | Effect::ChooseObjectsIntoTrackedSet {
-            chooser: _,
-            filter: _,
-            min: _,
-            max: _,
-        }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk

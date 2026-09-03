@@ -26,6 +26,7 @@ import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, Dra
 import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/types";
 import type { DraftCardPlacement, DraftWorkspaceState } from "../components/draft/workspace/types";
 import {
+  appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
   reconcileWorkspaceState,
@@ -468,8 +469,7 @@ function applyDestination(
   for (const instanceId of instanceIds) {
     const placement = next.placements[instanceId];
     if (!placement) continue;
-    next = updateWorkspacePlacement(next, pool, instanceId, {
-      ...placement,
+    next = appendWorkspaceInstanceToResolvedDestination(next, pool, instanceId, {
       zone: destination,
       column: placementHint?.column ?? placement.column,
       row: placementHint?.row ?? placement.row,
@@ -1366,6 +1366,7 @@ export const useMultiplayerDraftStore = create<
   }),
 
   selectCard: (cardInstanceId) => {
+    if (get().pickInteractionLocked) return;
     set({ selectedCard: cardInstanceId });
   },
 

@@ -738,6 +738,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
   });
 
+  it("exposes authoritative export from every P2P host", async () => {
+    const { adapter } = makeHost(2);
+
+    expect(adapter.exportPersistenceState).toBeDefined();
+    await expect(adapter.exportPersistenceState!()).resolves.toBe(
+      JSON.stringify({ players: [], objects: {} }),
+    );
+    expect(mocks.exportPersistenceState).toHaveBeenCalledOnce();
+
+    const { adapter: nativeHost } = makeNativeHost();
+    expect(nativeHost.exportPersistenceState).toBeDefined();
+  });
+
   it("exposes local diagnostics after native guest attachment falls back to WASM", async () => {
     const { adapter, emitConnection } = makeNativeHost();
     nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
@@ -2893,6 +2906,59 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         logEntries: unsolicitedLogs,
       }),
     );
+  });
+
+  it("does not replace a guest's newer snapshot with a stale state revision", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 8,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    emitted.mockClear();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 9,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    emitted.mockClear();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 8,
+      state: remoteState("stale"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+
+    expect(((await adapter.getState()) as unknown as { label: string }).label).toBe("current");
+    expect(emitted).not.toHaveBeenCalled();
   });
 
   it("guest receive path resolves action_noop without replacing its cached snapshot", async () => {

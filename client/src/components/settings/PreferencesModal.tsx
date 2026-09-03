@@ -40,7 +40,6 @@ import type {
   CardSizePreference,
   CommandZoneDisplay,
   DraftCardPreviewMode,
-  LogDefaultState,
   MultiplayerBoardLayout,
   SpellPaymentMode,
   ZoneCollapseMode,
@@ -87,7 +86,6 @@ const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const DRAFT_CARD_PREVIEW_MODES: DraftCardPreviewMode[] = ["none", ...CARD_PREVIEW_MODES];
 const DRAFT_DOUBLE_CLICK_CONFIRM_PICK_OPTIONS: Array<"disabled" | "enabled"> = ["disabled", "enabled"];
 const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
-const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["auto", "focused", "split"];
 
@@ -177,7 +175,6 @@ export function PreferencesModal({
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
   const collapseLands = usePreferencesStore((s) => s.collapseLands);
   const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
-  const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
@@ -189,7 +186,6 @@ export function PreferencesModal({
   const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
   const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
   const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
-  const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
@@ -438,15 +434,6 @@ export function PreferencesModal({
                       value={collapseSupport}
                       onChange={setCollapseSupport}
                       renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
-                    />
-                  </SettingGroup>
-
-                  <SettingGroup label={t("gameplay.logDefault")}>
-                    <SegmentedControl
-                      options={LOG_DEFAULTS}
-                      value={logDefaultState}
-                      onChange={setLogDefaultState}
-                      renderLabel={(opt) => t(`gameplay.logDefaultOptions.${opt}`)}
                     />
                   </SettingGroup>
 

@@ -26,7 +26,6 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Omitir ventanas de prioridad de poco uso (experimental)",
     "skipLowUsePriorityWindowsDescription": "Pasa automáticamente tus propias ventanas de prioridad con la pila vacía durante el mantenimiento, el paso de robar y el paso final. Las paradas de fase y el Control total siguen pausando.",
-    "logDefault": "Registro predeterminado",
     "logDockSide": "Posición del registro de la partida",
     "spellPayment": "Pago de hechizos",
     "manualManaPayment": "Pago manual de maná para hechizos",
@@ -56,10 +55,6 @@
       "small": "Pequeño",
       "medium": "Mediano",
       "large": "Grande"
-    },
-    "logDefaultOptions": {
-      "open": "Abierto",
-      "closed": "Cerrado"
     },
     "logDockSideOptions": {
       "left": "Izquierda",

@@ -57,6 +57,22 @@ pub enum Chooser {
     OwningPlayer,
 }
 
+/// CR 608.2d: Resolution-time choice cardinality.
+///
+/// Unlike the legacy `min`/`max` range, an exact selection is infeasible when
+/// fewer eligible objects exist and is therefore suitable for optional actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ObjectSelectionCardinality {
+    Exactly { count: u32 },
+}
+
+/// CR 608.2d + CR 101.2: Additional eligibility required before an object may
+/// be selected for a counter-removal instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectSelectionEligibility {
+    RemovableCounter { counter_type: Option<CounterType> },
+}
+
 #[cfg(test)]
 mod trigger_occurrence_tests {
     use super::*;
@@ -16219,6 +16235,14 @@ pub enum Effect {
         min: u32,
         /// Maximum number of objects selectable (`None` = "any number").
         max: Option<u32>,
+        /// An exact-cardinality selection. `None` preserves legacy min/max
+        /// semantics and its serialized shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cardinality: Option<ObjectSelectionCardinality>,
+        /// Extra resolution-time eligibility beyond the printed object filter.
+        /// `None` preserves legacy selection behavior and wire format.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eligibility: Option<ObjectSelectionEligibility>,
     },
     /// CR 101.4 + CR 701.21a: Each player chooses one permanent per type category
     /// from among the permanents they control, then sacrifices the rest.

@@ -13,9 +13,9 @@ use crate::types::ability::{
     CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, OpponentMayScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    ForEachCategoryAction, ForwardedResultContext, ManaProduction, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
     TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
 };
@@ -7416,6 +7416,11 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
         }
+        // CR 608.2d + CR 122.1: an optional exact counter-removal selection
+        // cannot be accepted unless every required permanent is selectable.
+        Effect::ChooseObjectsIntoTrackedSet { .. } => {
+            choose_objects_into_tracked_set::optional_exact_selection_is_infeasible(state, ability)
+        }
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
@@ -11773,18 +11778,27 @@ fn resolve_chain_body(
 
     let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction does
-    // not happen. Route every such CastFromZone outcome through the existing
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction or
+    // exact object selection does not happen. Route either outcome through the existing
     // decline authority instead of merely suppressing the prompt and falling
     // through to `resolve_effect`: a missing exact parent could consume an
     // unrelated inherited target, while another current-legality failure (such
     // as trying to cast a land) could mutate casting permissions before the
-    // cast authority rejects it. The decline path also preserves the printed
+    // cast authority rejects it. An impossible exact selection must likewise
+    // decline instead of surfacing an unsatisfiable waiting state. The decline path preserves the printed
     // tail semantics: dependent "if you do" riders stay gated while independent
     // sequential siblings and explicit decline branches continue. Other
     // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
     // established resolver no-op.
-    if optional_is_infeasible && matches!(ability.effect, Effect::CastFromZone { .. }) {
+    let auto_decline_infeasible_optional = matches!(
+        &ability.effect,
+        Effect::CastFromZone { .. }
+            | Effect::ChooseObjectsIntoTrackedSet {
+                cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
+                ..
+            }
+    );
+    if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision(
             state,
             ability.clone(),

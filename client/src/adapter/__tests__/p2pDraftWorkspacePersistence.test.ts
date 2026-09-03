@@ -36,7 +36,8 @@ vi.mock("../draft-adapter", () => ({
 import type { DraftPlayerView } from "../draft-adapter";
 import { P2PDraftGuest } from "../p2p-draft-guest";
 import { P2PDraftHost } from "../p2p-draft-host";
-import { DRAFT_PROTOCOL_VERSION, type DraftP2PMessage } from "../../network/draftProtocol";
+import { DRAFT_PROTOCOL_VERSION, encodeDraftWireMessage, type DraftP2PMessage } from "../../network/draftProtocol";
+import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataConnection";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 
@@ -535,35 +536,48 @@ describe("P2P draft workspace persistence", () => {
     await expect(guest.updateWorkspace(workspace())).rejects.toThrow("send failed");
   });
 
-  it("guest resolves persistence before restoration, lifecycle, view, and outbox events", async () => {
+  it.each(["new", "reconnect"] as const)("guest resolves persistence before restoration, lifecycle, view, and outbox events (%s)", async (kind) => {
+    const conn = new FakeDraftDataConnection();
     const guest = new P2PDraftGuest(
-      {} as never, "host", {} as never, { kind: "new", roomCode: "ABCDE", displayName: "Guest" },
+      {} as never, "host", conn as never,
+      kind === "new"
+        ? { kind, roomCode: "ABCDE", displayName: "Guest" }
+        : { kind, roomCode: "ABCDE", displayName: "Guest", draftToken: "token" },
     );
     const events: string[] = [];
     guest.onEvent((event) => events.push(`${event.type}:${"workspaceState" in event ? String(event.workspaceState === null) : ""}`));
-    const privateGuest = guest as unknown as { handleHostMessage: (message: DraftP2PMessage) => Promise<void> };
-
-    await privateGuest.handleHostMessage({
-      type: "draft_welcome",
-      draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
-      draftToken: "token",
-      seatIndex: 1,
-      view: view("one"),
-      draftCode: "code",
-      workspaceState: null,
+    const saved = deferred<void>();
+    persistenceMocks.saveDraftGuestSession.mockReturnValueOnce(saved.promise);
+    let eventsAtReplay: string[] = [];
+    persistenceMocks.loadDraftDeckSubmission.mockImplementationOnce(async () => {
+      eventsAtReplay = [...events];
+      return null;
     });
-    expect(events.slice(-3)).toEqual(["workspaceRestored:true", "joined:", "viewUpdated:"]);
-
     const restored = workspace({ two: { zone: "sideboard", row: 1, column: 2, order: 0 } });
-    await privateGuest.handleHostMessage({
-      type: "draft_reconnect_ack",
+    const fields = {
       draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       seatIndex: 1,
-      view: view("two"),
+      view: view(kind === "new" ? "one" : "two"),
       draftCode: "code",
-      workspaceState: restored,
-    });
-    expect(events.slice(-3)).toEqual(["workspaceRestored:false", "reconnected:", "viewUpdated:"]);
+      workspaceState: kind === "new" ? null : restored,
+    };
+    const message: DraftP2PMessage = kind === "new"
+      ? { type: "draft_welcome", draftToken: "token", ...fields }
+      : { type: "draft_reconnect_ack", ...fields };
+    const initialized = guest.initialize();
+    const received = conn.receiveRaw(await encodeDraftWireMessage(message));
+    await vi.waitFor(() => expect(persistenceMocks.saveDraftGuestSession).toHaveBeenCalledOnce());
+    expect(events).toEqual([]);
+    expect(persistenceMocks.loadDraftDeckSubmission).not.toHaveBeenCalled();
+
+    saved.resolve();
+    await Promise.all([received, initialized]);
+
+    expect(events).toEqual(kind === "new"
+      ? ["workspaceRestored:true", "joined:", "viewUpdated:"]
+      : ["workspaceRestored:false", "reconnected:", "viewUpdated:"]);
+    expect(eventsAtReplay).toEqual(events);
+    guest.dispose();
   });
 
   it("restores an exact host-owned update through reconnect to the guest", async () => {
@@ -597,19 +611,22 @@ describe("P2P draft workspace persistence", () => {
 
     const message = await acknowledgement.promise;
     expect(message).toMatchObject({ workspaceState: state });
+    const conn = new FakeDraftDataConnection();
     const guest = new P2PDraftGuest(
       {} as never,
       "host",
-      {} as never,
+      conn as never,
       { kind: "reconnect", roomCode: "ABCDE", displayName: "Guest", draftToken: "seat-1-token" },
     );
     const restored = deferred<DraftWorkspaceState | null>();
     guest.onEvent((event) => {
       if (event.type === "workspaceRestored") restored.resolve(event.workspaceState);
     });
-    await (guest as unknown as { handleHostMessage: (message: DraftP2PMessage) => Promise<void> })
-      .handleHostMessage(message);
+    const initialized = guest.initialize();
+    await conn.receiveRaw(await encodeDraftWireMessage(message));
+    await initialized;
     await expect(restored.promise).resolves.toEqual(state);
+    guest.dispose();
   });
 
   it("reconnect defensively drops only a corrupt bound entry", async () => {

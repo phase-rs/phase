@@ -8307,11 +8307,13 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
             };
         }
     };
-    // CR 601.2c + CR 601.2d: a triggered divided effect ("deals N damage
-    // divided as you choose among any number of targets") offers at most one
-    // slot per divisible unit, the same cap `cast_spell` applies. Each chosen
-    // target must receive at least one, so a target set wider than the pool has
-    // no legal division and the prompt would have no acceptable answer.
+    // CR 603.3d: putting a triggered ability on the stack follows the spell
+    // process of CR 601.2c–d for choosing targets and dividing an effect, so a
+    // triggered divided effect ("deals N damage divided as you choose among any
+    // number of targets") offers at most one slot per divisible unit, the same
+    // cap `cast_spell` applies. CR 601.2d: each chosen target must receive at
+    // least one, so a target set wider than the pool has no legal division and
+    // the prompt would have no acceptable answer.
     super::ability_utils::cap_distribution_target_slots(
         state,
         &trigger.ability,
@@ -25740,12 +25742,13 @@ pub mod tests {
         );
     }
 
-    /// CR 601.2c + CR 601.2d: a triggered "1 damage divided as you choose among
-    /// any number of target creatures" facing two legal targets offers ONE
-    /// slot, not two. Each chosen target must receive at least one point, so a
-    /// two-target choice could never be divided, and the prompt it opened
-    /// would have no answer `apply` accepts — the same cap `cast_spell`
-    /// already applies (issue #2856).
+    /// CR 603.3d + CR 601.2c + CR 601.2d: a triggered "1 damage divided as you
+    /// choose among any number of target creatures" facing two legal targets
+    /// offers ONE slot, not two — the triggered ability follows the spell's
+    /// target-and-division process. Each chosen target must receive at least
+    /// one point, so a two-target choice could never be divided, and the
+    /// prompt it opened would have no answer `apply` accepts — the same cap
+    /// `cast_spell` already applies (issue #2856).
     #[test]
     fn divided_trigger_caps_target_slots_to_the_pool() {
         let mut state = setup();
