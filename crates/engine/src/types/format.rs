@@ -616,21 +616,21 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
         ));
     }
 
-    // range_of_influence: Locked (None) — has a default (None) but every
-    // built-in is None, so the default agrees everywhere and equality is
-    // legacy-safe. Independently corroborated by engine-wasm's
-    // reject_unimplemented_range_of_influence, which already refuses any
-    // Some at the session boundary. Compared against `rules` (not a bare
-    // `is_some()` on either side) so the error message still correctly names
-    // whichever side actually diverges if a future built-in's registry value
-    // is ever non-`None`.
-    if config.range_of_influence != rules.range_of_influence {
-        return Err(format!(
-            "FormatConfig.range_of_influence is {:?}, but {} requires exactly {:?} — this axis \
-             is fixed by the Comprehensive Rules for built-in formats",
-            config.range_of_influence, config.format, rules.range_of_influence,
-        ));
-    }
+    // range_of_influence: Deferred, NOT checked here — a hard equality row
+    // was tried and reverted. It's unsound: legacy payloads don't only omit
+    // this field (which would resolve to the `None` default and be safe),
+    // they can also carry the OLD LEGACY SCALAR SHAPE that
+    // `RangeOfInfluenceConfigWire::Legacy` (this file, ~line 380) exists
+    // specifically to deserialize and migrate into `Some(RangeOfInfluenceConfig
+    // { .. })` — see `legacy_scalar_range_of_influence_deserializes_and_
+    // remains_rejected` in this file's own test module. A hard equality check
+    // here would turn that legitimate legacy payload into a `FormatConfig::
+    // deserialize` failure instead of letting it deserialize and then be
+    // cleanly rejected downstream. Admission for this field is the sole
+    // responsibility of the existing single authority,
+    // `reject_unimplemented_range_of_influence`, which already runs at every
+    // real ingress boundary (engine-wasm, lobby-broker, phase-server,
+    // server-core, game_state) — not re-checked here.
 
     // team_based: Locked — no serde default.
     if config.team_based != rules.team_based {

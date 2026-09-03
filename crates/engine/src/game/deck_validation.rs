@@ -510,9 +510,11 @@ pub fn validate_name_deck_for_format_full(
     validate_deck_for_format(db, &request)
 }
 
-/// Format-INDEPENDENT reference column — `evaluate_deck_compatibility:221`
-/// and `validate_deck_for_format:352` run this for EVERY request regardless
-/// of selection, and `result.standard` renders as the STD badge
+/// Format-INDEPENDENT reference column — `evaluate_deck_compatibility:222` is
+/// its sole caller (a fix round removed `validate_deck_for_format`'s own use
+/// of this reference column; it now calls `evaluate_constructed` fresh via
+/// `evaluate_selected_format` instead), and runs this for EVERY request
+/// regardless of selection. `result.standard` renders as the STD badge
 /// (`client/src/components/menu/MyDecks.tsx:411`,
 /// `client/src/pages/GameSetupPage.tsx:438`). It must therefore read the
 /// REGISTRY config for its own format, never `request`'s resolved rules —
@@ -848,9 +850,10 @@ fn validate_scheme_deck(db: &CardDatabase, scheme_deck: &[String], reasons: &mut
 }
 
 /// Format-INDEPENDENT reference column — see the doc comment on
-/// `evaluate_standard`, which states the same invariant for its own format.
-/// This one feeds `result.commander` / the CMD badge and must never read
-/// `request`'s resolved rules.
+/// `evaluate_standard`, which states the same invariant for its own format:
+/// `evaluate_deck_compatibility:223` is this function's sole caller. This one
+/// feeds `result.commander` / the CMD badge and must never read `request`'s
+/// resolved rules.
 fn evaluate_commander(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,

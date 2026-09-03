@@ -13,9 +13,11 @@ use engine::types::custom_format::{
     WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
-    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
+    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
+    SideboardPolicy,
 };
 use engine::types::player::PlayerId;
+use std::collections::BTreeMap;
 
 fn sample_structural() -> StructuralRules {
     StructuralRules {
@@ -918,6 +920,35 @@ fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_
     assert!(
         serde_json::from_value::<FormatConfig>(legacy).is_err(),
         "a looser explicit value must still be rejected even alongside other omitted fields"
+    );
+}
+
+/// V9b: legacy compatibility, the OTHER historical shape — real legacy data
+/// doesn't only OMIT `range_of_influence` (V9's `None`/omitted-field arm
+/// above), it can also carry the field PRESENT in the old legacy scalar wire
+/// shape (a bare integer, migrated by `RangeOfInfluenceConfigWire::Legacy` —
+/// see `format.rs`'s own `legacy_scalar_range_of_influence_deserializes_and_
+/// remains_rejected` unit test, which this fixture mirrors). That shape must
+/// still deserialize successfully on a built-in format even though the
+/// built-in's registry value is `None` — admission for this field is
+/// deferred entirely to `reject_unimplemented_range_of_influence`, not to
+/// `built_in_axes_no_looser_than_rules`.
+#[test]
+fn format_config_deserialization_legacy_scalar_range_of_influence_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .insert("range_of_influence".to_string(), serde_json::json!(1));
+
+    let restored: FormatConfig = serde_json::from_value(legacy)
+        .expect("a legacy scalar range_of_influence payload must still deserialize");
+    assert_eq!(
+        restored.range_of_influence,
+        Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 1,
+            player_overrides: BTreeMap::new(),
+        }))
     );
 }
 
