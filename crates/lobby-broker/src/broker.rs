@@ -442,9 +442,18 @@ impl Broker {
 
             LobbyClientMessage::GetTournament { code } => self.handle_get_tournament(code),
 
+            // The four gated actions bind their correlator to `_` and pass
+            // nothing on. The wire carries it as of lobby protocol 5, but this
+            // broker does not yet answer it: minting the correlated settlement
+            // is a separate change that rewrites these four arms to destructure
+            // `request_id` by name and route it through one authority. Binding
+            // it here keeps the additive contract compiling without changing
+            // any behavior — an uncorrelated caller and a correlated one get
+            // byte-identical outbounds today.
             LobbyClientMessage::StartTournamentRound {
                 code,
                 organizer_token,
+                request_id: _,
             } => self.handle_start_tournament_round(code, organizer_token, env),
 
             LobbyClientMessage::ReportMatchResult {
@@ -452,15 +461,19 @@ impl Broker {
                 pairing_id,
                 player_token,
                 outcome,
+                request_id: _,
             } => self.handle_report_match_result(code, pairing_id, player_token, outcome, env),
 
-            LobbyClientMessage::DropFromTournament { code, player_token } => {
-                self.handle_drop_from_tournament(code, player_token, env)
-            }
+            LobbyClientMessage::DropFromTournament {
+                code,
+                player_token,
+                request_id: _,
+            } => self.handle_drop_from_tournament(code, player_token, env),
 
             LobbyClientMessage::EndTournament {
                 code,
                 organizer_token,
+                request_id: _,
             } => self.handle_end_tournament(code, organizer_token, env),
         }
     }
@@ -2424,6 +2437,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             env,
         );
@@ -2598,10 +2612,12 @@ mod tests {
                 LobbyClientMessage::StartTournamentRound {
                     code: code.clone(),
                     organizer_token: wrong.to_string(),
+                    request_id: None,
                 },
                 LobbyClientMessage::EndTournament {
                     code: code.clone(),
                     organizer_token: wrong.to_string(),
+                    request_id: None,
                 },
             ] {
                 let out = broker.handle(&mut conn, msg, &env);
@@ -2623,6 +2639,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -2648,6 +2665,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code_one,
                 organizer_token: token_two,
+                request_id: None,
             },
             &env,
         );
@@ -2670,6 +2688,7 @@ mod tests {
                 LobbyClientMessage::DropFromTournament {
                     code: code.clone(),
                     player_token: wrong.to_string(),
+                    request_id: None,
                 },
                 &env,
             );
@@ -2685,6 +2704,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
@@ -2723,6 +2743,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -2752,6 +2773,7 @@ mod tests {
                 pairing_id,
                 player_token: outsider_token,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2781,6 +2803,7 @@ mod tests {
                 pairing_id,
                 player_token: seated_token,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2862,6 +2885,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -2878,6 +2902,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: tokens[0].clone(),
+                request_id: None,
             },
             &env,
         );
@@ -2905,6 +2930,7 @@ mod tests {
                     winner: "key-1".into(),
                     game_wins: std::collections::HashMap::new(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -2921,6 +2947,7 @@ mod tests {
                 pairing_id,
                 player_token: tokens[0].clone(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2954,6 +2981,7 @@ mod tests {
                     winner: "key-1".into(),
                     game_wins: std::collections::HashMap::new(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -2993,6 +3021,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3009,6 +3038,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
@@ -3045,6 +3075,7 @@ mod tests {
                 pairing_id,
                 player_token: token_a.clone(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3053,6 +3084,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3073,6 +3105,7 @@ mod tests {
                 pairing_id,
                 player_token: token_a,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3087,6 +3120,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code,
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -3131,6 +3165,7 @@ mod tests {
                     .player_token
                     .clone(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3139,6 +3174,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -3418,6 +3454,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3562,6 +3599,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -3606,6 +3644,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
