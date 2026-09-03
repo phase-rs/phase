@@ -140,6 +140,11 @@ interface PackDisplayProps {
 
 type CardVisualState = "leaving" | "submitting" | "waiting" | "failure-restored" | "selected" | "default";
 
+interface DraftStep {
+  readonly packNumber: number;
+  readonly pickNumber: number;
+}
+
 interface RetainedCard {
   readonly card: DraftCardInstance;
   readonly sourceIndex: number;
@@ -148,6 +153,7 @@ interface RetainedCard {
   readonly height: number;
   readonly token: string;
   readonly generation: number;
+  readonly step: DraftStep;
 }
 
 interface CardVisualRecord {
@@ -163,6 +169,15 @@ interface ScheduledVisual {
 
 const DOUBLE_TAP_DELAY_MS = 350;
 const TOUCH_TAP_MOVE_THRESHOLD_PX = 10;
+
+const draftStep = (view: DraftPlayerView): DraftStep => ({
+  packNumber: view.current_pack_number,
+  pickNumber: view.pick_number,
+});
+
+const sameDraftStep = (left: DraftStep, right: DraftStep) => (
+  left.packNumber === right.packNumber && left.pickNumber === right.pickNumber
+);
 
 const cardInfo = (card: DraftCardInstance): CardHoverInfo => ({
   name: card.name,
@@ -349,6 +364,7 @@ export function PackDisplay({
   const [retained, setRetained] = useState<readonly RetainedCard[]>([]);
   const statesRef = useRef<Readonly<Record<string, CardVisualRecord>>>({});
   const viewRef = useRef(controller.view);
+  const previousStepRef = useRef<DraftStep | null>(null);
   const requestOrder = useRef(0);
   const timers = useRef(new Map<string, ScheduledVisual>());
   const packSequenceRef = useRef<HTMLDivElement>(null);
@@ -391,6 +407,7 @@ export function PackDisplay({
   const draftEffects = view?.draft_effects ?? [];
   const local = controller.kind === "local-workspace" ? controller : null;
   const isOrderedSelection = view?.pick_selection_mode === "Ordered";
+  const currentStep = view === null ? null : draftStep(view);
 
   useEffect(() => {
     const live = new Set(controller.view?.current_pack?.map((card) => card.instance_id) ?? []);
@@ -409,6 +426,17 @@ export function PackDisplay({
     setStates({});
     setRetained([]);
   }, [localGeneration]);
+  useEffect(() => {
+    const previousStep = previousStepRef.current;
+    const currentStep = viewRef.current === null ? null : draftStep(viewRef.current);
+    previousStepRef.current = currentStep;
+    if (previousStep === null || currentStep === null || sameDraftStep(previousStep, currentStep)) return;
+    setRetained((current) => {
+      const stale = current.filter((entry) => !sameDraftStep(entry.step, currentStep));
+      cancelTimersFor(stale.map((entry) => entry.card.instance_id));
+      return current.filter((entry) => sameDraftStep(entry.step, currentStep));
+    });
+  }, [view?.current_pack_number, view?.pick_number]);
   useEffect(() => {
     if (pack.length === 1 && selectedCard === null && !locked) controller.selectCard(pack[0].instance_id);
   }, [controller, locked, pack, selectedCard]);
@@ -453,7 +481,8 @@ export function PackDisplay({
   }, [view?.current_pack_number, view?.pick_number]);
 
   if (!view) return null;
-  if (pack.length === 0 && retained.length === 0) return <div className="flex justify-center py-12 text-white/40">{t("pack.waitingNext")}</div>;
+  const visibleRetained = retained.filter((entry) => sameDraftStep(entry.step, currentStep!));
+  if (pack.length === 0 && visibleRetained.length === 0) return <div className="flex justify-center py-12 text-white/40">{t("pack.waitingNext")}</div>;
 
   const updateStates = (update: (current: Readonly<Record<string, CardVisualRecord>>) => Readonly<Record<string, CardVisualRecord>>) => {
     const next = update(statesRef.current);
@@ -483,7 +512,7 @@ export function PackDisplay({
     }
     return next;
   });
-  const settle = (token: string, generation: number, cards: readonly DraftCardInstance[], indices: readonly number[], sizes: readonly { width: number; height: number }[], result: PackDropSettlement) => {
+  const settle = (token: string, generation: number, step: DraftStep, cards: readonly DraftCardInstance[], indices: readonly number[], sizes: readonly { width: number; height: number }[], result: PackDropSettlement) => {
     const ids = cards.map((card) => card.instance_id);
     if (!requestIsCurrent(ids, token, generation)) return;
     if (result.kind !== "outcome") {
@@ -492,10 +521,15 @@ export function PackDisplay({
     }
     switch (result.outcome.status) {
       case "acknowledged": {
+        const currentStep = viewRef.current === null ? null : draftStep(viewRef.current);
+        if (currentStep === null || !sameDraftStep(step, currentStep)) {
+          setCardStates(ids, token, generation, null);
+          break;
+        }
         const live = new Set(viewRef.current?.current_pack?.map((card) => card.instance_id) ?? []);
         const departed = cards.flatMap((card, index): RetainedCard[] => live.has(card.instance_id) ? [] : [{
           card, sourceIndex: indices[index], requestOrder: requestOrder.current,
-          width: sizes[index]?.width ?? 0, height: sizes[index]?.height ?? 0, token, generation,
+          width: sizes[index]?.width ?? 0, height: sizes[index]?.height ?? 0, token, generation, step,
         }]);
         setCardStates(ids, token, generation, null);
         if (departed.length > 0) {
@@ -530,6 +564,7 @@ export function PackDisplay({
     const token = crypto.randomUUID();
     requestOrder.current += 1;
     const generation = local.interactionGeneration;
+    const step = draftStep(view);
     const ids = cards.map((card) => card.instance_id);
     const indices = cards.map((card) => pack.indexOf(card));
     beginRequest(ids, token, generation);
@@ -538,7 +573,7 @@ export function PackDisplay({
       : ids.length === 1
         ? await local.pickCard(ids[0], destination)
         : await local.pickCardStep(ids, destination);
-    settle(token, generation, cards, indices, cards.map(() => ({ width: 0, height: 0 })), { kind: "outcome", outcome });
+    settle(token, generation, step, cards, indices, cards.map(() => ({ width: 0, height: 0 })), { kind: "outcome", outcome });
   };
   const select = (id: string) => {
     if (locked) return;
@@ -592,7 +627,7 @@ export function PackDisplay({
     && selectedCards.length === requiredCount;
   const slots = [
     ...pack.map((card, sourceIndex) => ({ kind: "live" as const, card, sourceIndex, requestOrder: -1 })),
-    ...retained.map((entry) => ({ kind: "retained" as const, ...entry })),
+    ...visibleRetained.map((entry) => ({ kind: "retained" as const, ...entry })),
   ].sort((left, right) => left.sourceIndex - right.sourceIndex || left.requestOrder - right.requestOrder);
 
   const mobileLayout = responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape";
@@ -735,6 +770,7 @@ export function PackDisplay({
                 const ids = cards.map((candidate) => candidate.instance_id);
                 const indices = cards.map((candidate) => pack.indexOf(candidate));
                 const generation = local.interactionGeneration;
+                const step = draftStep(view);
                 let admission: PackDropAdmission | null = null;
                 return {
                   kind: cards.length === 2 ? "draft-effect" : "pick",
@@ -753,7 +789,7 @@ export function PackDisplay({
                   },
                   onSettled: (result) => {
                     if (admission === null) return;
-                    settle(admission.requestToken, admission.interactionGeneration, cards, indices, cards.map(() => ({ width, height: width * 680 / 488 })), result);
+                    settle(admission.requestToken, admission.interactionGeneration, step, cards, indices, cards.map(() => ({ width, height: width * 680 / 488 })), result);
                   },
                 } as PackDropSource;
               }}

@@ -220,15 +220,18 @@ function RealDragPackHarness({
   confirmPick,
   onSelectionChange,
   viewOverride,
+  advancedView,
   responsiveLayout = "desktop",
 }: {
   onDrop(request: DraftDropRequest): DraftDropDispatch;
   confirmPick?: ConfirmPick;
   onSelectionChange?(instanceId: string | null): void;
   viewOverride?: DraftPlayerView;
+  advancedView?: DraftPlayerView;
   responsiveLayout?: "desktop" | "tablet-portrait";
 }) {
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  const [renderedView, setRenderedView] = useState(viewOverride ?? view);
   const [interaction, setInteraction] = useState<DraftPickInteractionSnapshot>({
     interactionGeneration: 4,
     pickInteractionLocked: false,
@@ -267,7 +270,7 @@ function RealDragPackHarness({
     <>
       <PackDisplay
         controller={controller({
-          view: viewOverride ?? view,
+          view: renderedView,
           dragController: drag,
           pendingIntent: interaction.pendingPickIntent,
           interactionLocked: interaction.pickInteractionLocked,
@@ -280,6 +283,7 @@ function RealDragPackHarness({
         responsiveLayout={responsiveLayout}
       />
       <div data-testid="real-drag-target" ref={drag.registerCollapsedSideboard} />
+      {advancedView !== undefined && <button type="button" onClick={() => setRenderedView(advancedView)}>advance pack</button>}
       <button type="button" onClick={() => publish({ interactionGeneration: 4, pickInteractionLocked: false, pendingPickIntent: null })}>unlock</button>
     </>
   );
@@ -1260,6 +1264,78 @@ describe("PackDisplay local workspace controller", () => {
     await act(async () => resolveOutcome({ status: "ignored", reason: "busy" }));
     fireEvent.click(screen.getByRole("button", { name: "unlock" }));
     expect(source).toHaveAttribute("data-visual-state", "default");
+  });
+
+  it("does_not_retain_a_direct_pick_after_the_engine_advances_to_the_next_pick", async () => {
+    vi.useFakeTimers();
+    let resolvePick!: (outcome: { status: "acknowledged" }) => void;
+    const pickCard = vi.fn().mockReturnValue(new Promise((resolve) => { resolvePick = resolve; }));
+    const initial = controller({ pickCard });
+    const rendered = render(<PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    const picked = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    fireEvent.click(within(picked).getByRole("button", { name: "Pick Same to Deck" }));
+    rendered.rerender(<PackDisplay controller={{ ...initial, view: { ...view, pick_number: 1, current_pack: [cards[1]] } }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    await act(async () => resolvePick({ status: "acknowledged" }));
+
+    expect(rendered.container.querySelector('[data-instance-id="unknown"]')).not.toBeInTheDocument();
+    expect(rendered.container.querySelector('[data-visual-state="leaving"]')).not.toBeInTheDocument();
+    expect(rendered.container.querySelector('[data-instance-id="common"]')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps_same_step_departures_but_clears_them_and_their_timers_on_a_new_pack", async () => {
+    vi.useFakeTimers();
+    let resolvePick!: (outcome: { status: "acknowledged" }) => void;
+    const pickCard = vi.fn().mockReturnValue(new Promise((resolve) => { resolvePick = resolve; }));
+    const initial = controller({ pickCard });
+    const rendered = render(<PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    const picked = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    fireEvent.click(within(picked).getByRole("button", { name: "Pick Same to Deck" }));
+    rendered.rerender(<PackDisplay controller={{ ...initial, view: { ...view, current_pack: [cards[1]] } }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+    await act(async () => resolvePick({ status: "acknowledged" }));
+    expect(rendered.container.querySelector('[data-instance-id="unknown"][data-visual-state="leaving"]')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(1);
+
+    rendered.rerender(<PackDisplay controller={{ ...initial, view: { ...view, current_pack_number: 1, pick_number: 0, current_pack: [] } }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
+
+    expect(screen.getByText("Waiting for next pack...")).toBeInTheDocument();
+    expect(rendered.container.querySelector('[data-instance-id="unknown"]')).not.toBeInTheDocument();
+    expect(rendered.container.querySelector('[data-visual-state="leaving"]')).not.toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does_not_retain_a_real_drag_pick_after_the_engine_advances_to_an_empty_pack", async () => {
+    vi.useFakeTimers();
+    let resolveOutcome!: (outcome: { status: "acknowledged" }) => void;
+    const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => ({
+      requestToken: request.requestToken,
+      interactionGeneration: request.interactionGeneration,
+      outcome: new Promise((resolve) => { resolveOutcome = resolve; }),
+    }));
+    const rendered = render(<RealDragPackHarness onDrop={onDrop} advancedView={{ ...view, current_pack_number: 1, pick_number: 0, current_pack: [] }} />);
+    const source = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const target = screen.getByTestId("real-drag-target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 5, clientY: 5, isPrimary: true, pointerId: 96, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 20, clientY: 20, pointerId: 96, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 20, clientY: 20, pointerId: 96, pointerType: "mouse" });
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(source).toHaveAttribute("data-visual-state", "waiting");
+
+    fireEvent.click(screen.getByRole("button", { name: "advance pack" }));
+    expect(screen.getByText("Waiting for next pack...")).toBeInTheDocument();
+    await act(async () => resolveOutcome({ status: "acknowledged" }));
+    fireEvent.click(screen.getByRole("button", { name: "unlock" }));
+
+    expect(rendered.container.querySelector('[data-instance-id="unknown"]')).not.toBeInTheDocument();
+    expect(rendered.container.querySelector('[data-visual-state="leaving"]')).not.toBeInTheDocument();
+    expect(screen.getByText("Waiting for next pack...")).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("suppresses_the_trailing_desktop_shell_click_after_a_collapsed_sideboard_drop", async () => {
