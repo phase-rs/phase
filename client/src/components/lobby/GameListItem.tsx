@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { FormatGroup, LobbyGame } from "../../adapter/types";
 import { formatMetadata } from "../../data/formatRegistry";
 import { SERVER_PRESETS } from "../../services/serverDetection";
+import type { HealthHint } from "../../services/serverDirectory";
 import type { LobbyGameEntry } from "../../stores/multiplayerStore";
 
 // Re-export so existing `import { LobbyGame } from "./GameListItem"` call
@@ -27,6 +28,14 @@ interface GameListItemProps {
    * from joining their own hosted game.
    */
   hostGameCode?: string | null;
+  /**
+   * How this row's listing server reads — "slow", "unreliable", or nothing.
+   *
+   * A verdict, computed by the parent from the listing's raw score components
+   * and passed down; this row holds no store selector and does no lookup,
+   * because a `LobbyGameEntry` cannot reach those components at all.
+   */
+  healthHint?: HealthHint | null;
 }
 
 // Badge color keyed on the format's group so we don't maintain a
@@ -51,7 +60,13 @@ function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string 
   return t("gameListItem.waitTimeHours", { count: hours });
 }
 
-export function GameListItem({ entry, onJoin, compatible = true, hostGameCode }: GameListItemProps) {
+export function GameListItem({
+  entry,
+  onJoin,
+  compatible = true,
+  hostGameCode,
+  healthHint,
+}: GameListItemProps) {
   const { t } = useTranslation("multiplayer");
   const { game, source } = entry;
   const format = game.format ?? "Standard";
@@ -169,6 +184,26 @@ export function GameListItem({ entry, onJoin, compatible = true, hostGameCode }:
       >
         {sourceLabel}
       </span>
+
+      {/* Health hint — how the listing server itself has been performing, as
+          the directory's own evidence reads. A warning tone rather than the
+          origin badge's neutral sky, because it is a caution about the row's
+          authority and not a label for it. Absent when the parent computed no
+          verdict, which includes every case with too little evidence. */}
+      {healthHint && (
+        <span
+          className="flex-shrink-0 rounded-[5px] border border-amber-300/25 bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-200"
+          title={
+            healthHint === "slow"
+              ? t("gameListItem.hintSlowTitle")
+              : t("gameListItem.hintUnreliableTitle")
+          }
+        >
+          {healthHint === "slow"
+            ? t("gameListItem.hintSlow")
+            : t("gameListItem.hintUnreliable")}
+        </span>
+      )}
 
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name

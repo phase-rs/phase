@@ -90,6 +90,36 @@ describe("GameListItem", () => {
     expect(screen.getByText("Official")).toBeInTheDocument();
   });
 
+  // V-U19f
+  it("renders the health badge from the prop, and nothing without one", () => {
+    render(<GameListItem entry={entry(userSource)} onJoin={vi.fn()} healthHint="slow" />);
+    expect(screen.getByText("SLOW")).toBeInTheDocument();
+    // Paired WITHIN the component: the origin badge is asserted present in all
+    // three renders, so "no hint" is never "nothing rendered at all".
+    expect(screen.getByText("play.example.com")).toBeInTheDocument();
+
+    cleanup();
+    render(<GameListItem entry={entry(userSource)} onJoin={vi.fn()} healthHint={null} />);
+    expect(screen.queryByText("SLOW")).not.toBeInTheDocument();
+    expect(screen.queryByText("UNRELIABLE")).not.toBeInTheDocument();
+    expect(screen.getByText("play.example.com")).toBeInTheDocument();
+
+    cleanup();
+    render(<GameListItem entry={entry(userSource)} onJoin={vi.fn()} />);
+    expect(screen.queryByText("SLOW")).not.toBeInTheDocument();
+    expect(screen.queryByText("UNRELIABLE")).not.toBeInTheDocument();
+    expect(screen.getByText("play.example.com")).toBeInTheDocument();
+
+    // The other verdict renders its own label, so the badge is keyed on the
+    // value and not merely on the prop being truthy.
+    cleanup();
+    render(
+      <GameListItem entry={entry(userSource)} onJoin={vi.fn()} healthHint="unreliable" />,
+    );
+    expect(screen.getByText("UNRELIABLE")).toBeInTheDocument();
+    expect(screen.queryByText("SLOW")).not.toBeInTheDocument();
+  });
+
   it("omits the server kind until that source's handshake has landed", () => {
     const unknownKind: LobbySource = { ...userSource, kind: undefined };
 

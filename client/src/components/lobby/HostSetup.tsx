@@ -14,9 +14,16 @@ import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
   isKnownFormat,
+  lobbySources,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore";
-import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
+import type {
+  AiSeatConfig,
+  HostingSettings,
+  LobbySource,
+} from "../../stores/multiplayerStore";
+import type { DirectorySource } from "../../services/serverDirectory";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   deleteSavedCustomFormat,
@@ -35,7 +42,16 @@ export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
 
 interface HostSetupProps {
-  onHost: (settings: HostSettings) => void | Promise<boolean>;
+  /**
+   * `serverUrl` is the server this submit chose to host on, and `null` means
+   * exactly one thing: this submit chose no server, which is the P2P case.
+   *
+   * The nullability stops at this boundary. It is deliberately NOT
+   * `hostingServer`: the parent runs the action later (deck-select can come
+   * between), so a value captured here would be a latch, whereas `null` lets
+   * the parent make the same live read it makes today.
+   */
+  onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
   connectionMode: "server" | "p2p";
   /** When true, the host-submit button is disabled (e.g. live deck check
@@ -67,6 +83,30 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 };
 
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
+
+/**
+ * The servers this client may place a hosted game on, best-evidenced first.
+ *
+ * A candidate runs games: either its handshake reported `Full`, or its
+ * directory row announces `mode: "Full"`. A `LobbyOnly` broker only brokers
+ * peer ids — it cannot run a match however well it scores, which is why the
+ * filter is on the mode and never on the rank.
+ *
+ * Ordering matches `compareLobbyGameEntries`' convention (`?? -1`), so an
+ * unranked server sorts last rather than first.
+ */
+function fullHostCandidates(
+  state: Parameters<typeof lobbySources>[0] & { directorySources: DirectorySource[] },
+): LobbySource[] {
+  const announcedModes = new Map(
+    state.directorySources.map((entry) => [entry.source.url, entry.row.mode]),
+  );
+  return lobbySources(state)
+    .filter(
+      (source) => source.kind === "Full" || announcedModes.get(source.url) === "Full",
+    )
+    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+}
 
 /** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
  * the host holds one connection per guest and fans out filtered state, which
@@ -210,6 +250,13 @@ export function HostSetup({
     (s) => s.setCompatibilityPlayerCount,
   );
   const hostingStatus = useMultiplayerStore((s) => s.hostingStatus);
+  // The host-target picker's inputs. Read through selectors rather than
+  // `getState()` so a directory refresh re-renders the list.
+  const hostingServer = useMultiplayerStore((s) => s.hostingServer);
+  const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
+  const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore((s) => s.disabledDirectorySources);
 
   // Seed the format picker from whatever the user last selected (persisted
   // in the store). This means navigating away and back to host-setup keeps
@@ -512,22 +559,29 @@ export function HostSetup({
       aiSeats: effectiveAiSeats,
     });
     try {
-      const ok = await onHost({
-        displayName,
-        public: isPublic,
-        password: showPassword ? password : "",
-        timerSeconds: null,
-        formatConfig: finalConfig,
-        matchType: effectiveMatchType,
-        loopDetection,
-        aiSeats: effectiveAiSeats.map((seat) => ({
-          ...seat,
-          ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-        })),
-        startWhenFull,
-        ranked: false,
-        roomName: resolvedRoomName,
-      });
+      const ok = await onHost(
+        {
+          displayName,
+          public: isPublic,
+          password: showPassword ? password : "",
+          timerSeconds: null,
+          formatConfig: finalConfig,
+          matchType: effectiveMatchType,
+          loopDetection,
+          aiSeats: effectiveAiSeats.map((seat) => ({
+            ...seat,
+            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
+          })),
+          startWhenFull,
+          ranked: false,
+          roomName: resolvedRoomName,
+        },
+        // `null` in P2P — this submit chose no server, and the parent then
+        // makes the same live `hostingServer` read it makes today. Passing the
+        // anchor here instead would latch it at submit time, which is wrong for
+        // a flow that can route through deck-select before it runs.
+        isP2P ? null : hostServerUrl,
+      );
       if (ok !== false) return;
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
@@ -549,6 +603,34 @@ export function HostSetup({
           )
         : FORMAT_OPTIONS,
     [isP2P],
+  );
+
+  const hostCandidates = useMemo(
+    () =>
+      fullHostCandidates({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+
+  /**
+   * Which server THIS game is hosted on. Session-local: choosing a game server
+   * for one match must not repoint `hostingServer`, which is the P2P broker
+   * target, the direct-codes sentinel and the browsing anchor all at once.
+   *
+   * The initial value walks a chain that terminates in a non-null constant, so
+   * the server leg's selection is a `string` by construction and never by
+   * assumption: the current anchor if it is itself a hostable candidate, else
+   * the best-evidenced candidate, else the build's default server.
+   */
+  const [hostServerUrl, setHostServerUrl] = useState<string>(
+    () =>
+      hostCandidates.find((candidate) => candidate.url === hostingServer)?.url
+      ?? hostCandidates[0]?.url
+      ?? DEFAULT_MULTIPLAYER_SERVER_URL,
   );
 
   // Shared field-input grammar (mockup Host-setup inputs).
@@ -869,6 +951,39 @@ export function HostSetup({
           </div>
 
           <div className="border-t border-hairline-strong" />
+
+          {/* Host target — which server runs this match. Server mode only:
+              P2P has no server to place the game on, so there is no selection
+              to make and none is reported. */}
+          {!isP2P && (
+            <Field label={t("hostSetup.hostServer")} hint={t("hostSetup.hostServerHelp")}>
+              <MenuSelect
+                ariaLabel={t("hostSetup.hostServer")}
+                label={
+                  hostCandidates.find((candidate) => candidate.url === hostServerUrl)?.name
+                  ?? hostServerUrl
+                }
+                selectedValue={hostServerUrl}
+                items={hostCandidates.map((candidate) => ({
+                  value: candidate.url,
+                  // The score is the directory's own 0–100 rank, rendered
+                  // rather than recomputed; `undefined` is its "unranked".
+                  label:
+                    candidate.score === undefined
+                      ? t("hostSetup.hostServerUnscored", { name: candidate.name })
+                      : t("hostSetup.hostServerScore", {
+                          name: candidate.name,
+                          score: candidate.score,
+                        }),
+                }))}
+                onSelect={setHostServerUrl}
+                menuLayout="dropdown"
+                fitContainer
+                wrapperClassName="w-full min-w-0"
+                className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
+              />
+            </Field>
+          )}
 
           {/* Privacy / timing options — iOS-toggle rows (design mockup). */}
           {!isP2P && (

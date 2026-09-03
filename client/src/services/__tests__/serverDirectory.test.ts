@@ -1,7 +1,3 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,9 +8,13 @@ import {
   MAX_DIRECTORY_LOBBY_SOURCES,
   WIRE_SCORE_KEYS,
   projectDirectoryBody,
+  SLOW_MEDIAN_RTT_MS,
+  UNRELIABLE_SUCCESS_RATE,
+  healthHint,
   projectDirectoryRow,
   refreshServerDirectory,
   type DirectoryRow,
+  type WireScore,
 } from "../serverDirectory";
 import {
   lobbySources,
@@ -27,8 +27,12 @@ import {
   LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
-
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+import {
+  ddlColumns,
+  interfaceFields,
+  workerDirectory,
+  workerLobbyDo,
+} from "./workerSourceExtractors";
 
 function row(overrides: Partial<DirectoryRow> & { url: string }): DirectoryRow {
   return {
@@ -392,37 +396,6 @@ describe("serverDirectory", () => {
 
   // ── The mirror gate: this client's duplicate declaration vs the Worker's ──
 
-  const workerDirectory = readFileSync(
-    resolve(repoRoot, "lobby-worker/src/directory.ts"),
-    "utf8",
-  );
-  const workerLobbyDo = readFileSync(
-    resolve(repoRoot, "lobby-worker/src/lobby-do.ts"),
-    "utf8",
-  );
-
-  /** Field names declared directly in one interface body. Stops at the first
-   * column-0 `}`, so it reads exactly one declaration. */
-  function interfaceFields(source: string, name: string): string[] {
-    const start = source.match(new RegExp(`export interface ${name}[^{]*\\{`));
-    if (!start?.index) return [];
-    const bodyStart = start.index + start[0].length;
-    const end = source.indexOf("\n}", bodyStart);
-    if (end === -1) return [];
-    return [...source.slice(bodyStart, end).matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]);
-  }
-
-  /** Column names of one `CREATE TABLE IF NOT EXISTS` statement. */
-  function ddlColumns(source: string, table: string): string[] {
-    const start = source.indexOf(`CREATE TABLE IF NOT EXISTS ${table} (`);
-    if (start === -1) return [];
-    const end = source.indexOf(")", start);
-    if (end === -1) return [];
-    return [
-      ...source.slice(start, end).matchAll(/^\s+(\w+)\s+(?:TEXT|INTEGER|REAL|BLOB)/gm),
-    ].map((m) => m[1]);
-  }
-
   // V-M0 — guard the guard. An extractor that silently returned [] would make
   // every comparison below pass over nothing.
   it("extracts non-empty declarations from the Worker's source", () => {
@@ -465,5 +438,76 @@ describe("serverDirectory", () => {
     expect(new Set(DIRECTORY_BODY_KEYS)).toEqual(
       new Set(interfaceFields(workerDirectory, "DirectoryBody")),
     );
+  });
+
+  // ── U19: how a listing's raw score components read to a human ───────────
+
+  /** A fully-ranked listing. Every case below varies exactly one component of
+   * this, so a verdict is attributable to that component and not to the shape
+   * of a hand-built object. */
+  function score(overrides: Partial<WireScore> = {}): WireScore {
+    return {
+      value: 60,
+      samples: 40,
+      success_rate: 1,
+      completion_rate: 1,
+      median_rtt_ms: 50,
+      ...overrides,
+    };
+  }
+
+  // V-U19a
+  it("reads a slow median as slow, at a real histogram edge", () => {
+    expect(healthHint(score({ median_rtt_ms: SLOW_MEDIAN_RTT_MS }))).toBe("slow");
+    // Boundary pair: the edge BELOW the threshold is silent, so the comparison
+    // is `>=` against a real cell edge and not "any RTT at all".
+    expect(healthHint(score({ median_rtt_ms: 200 }))).toBeNull();
+  });
+
+  // V-U19b
+  it("reads a low success rate as unreliable, ahead of slow", () => {
+    // Hostile precedence case: BOTH conditions hold. A swapped `if` order
+    // returns "slow" and reds this row.
+    expect(
+      healthHint(score({ success_rate: 0.5, median_rtt_ms: 3200 })),
+    ).toBe("unreliable");
+    // The threshold itself is not a hint: exactly at the rate, the server is
+    // still reliable enough to say nothing about.
+    expect(
+      healthHint(score({ success_rate: UNRELIABLE_SUCCESS_RATE, median_rtt_ms: 50 })),
+    ).toBeNull();
+  });
+
+  // V-U19c — the inherited gate: evidence exists but is below Rust's
+  // `SCORE_MIN_SAMPLES`, so it arrives as a PRESENT object whose `value` is
+  // null. A consumer gating on `score === null` alone renders a hint off a
+  // three-sample window.
+  it("says nothing when the score is present but unranked", () => {
+    const unranked = score({
+      value: null,
+      samples: 3,
+      success_rate: 0.1,
+      completion_rate: 0,
+      median_rtt_ms: 3200,
+    });
+    expect(healthHint(unranked)).toBeNull();
+    // Paired positive, byte-identical but for `value`: without it a
+    // `healthHint` that always returned null would pass the assertion above.
+    expect(healthHint({ ...unranked, value: 60 })).toBe("unreliable");
+  });
+
+  // V-U19d — the OTHER "no score" kind, asserted separately from V-U19c
+  // because the two are distinguishable in the wire shape and Rust keeps them
+  // distinct on purpose.
+  it("says nothing when there is no score at all", () => {
+    expect(healthHint(null)).toBeNull();
+  });
+
+  // V-U19e
+  it("never reads a null median as slow", () => {
+    expect(healthHint(score({ value: 90, median_rtt_ms: null }))).toBeNull();
+    // Paired: the same object with a slow median DOES read as slow, so the
+    // silence above is the null guard and not the fixture.
+    expect(healthHint(score({ value: 90, median_rtt_ms: 800 }))).toBe("slow");
   });
 });

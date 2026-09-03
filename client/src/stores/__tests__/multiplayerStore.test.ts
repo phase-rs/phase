@@ -144,6 +144,27 @@ vi.mock("../../services/brokerClient", () => ({
   resolveGuestOver: brokerMocks.resolveGuestOver,
 }));
 
+/**
+ * The metrics module is MOCKED here, module-level, and that is the mitigation —
+ * not the stubbed socket factories.
+ *
+ * The store's own wrapper around the factory enqueues on the RESOLVE leg, so an
+ * unmocked module would build a real queue against `metricsUrl()` on the REAL
+ * official host (`vitest.config.ts` defines
+ * `__OFFICIAL_MULTIPLAYER_SERVER_URL__` as the production URL, unlike
+ * `__TELEMETRY_URL__`, which is `""`), with `telemetryEnabled` defaulting true —
+ * and this suite dials directory sources in a dozen cases. The recording stub
+ * lets every row below assert on calls instead, and V-U12d additionally asserts
+ * that neither transport was reached.
+ */
+const metricsMocks = vi.hoisted(() => ({
+  reportConnectOutcome: vi.fn(),
+  flushMetricsNow: vi.fn(),
+  installServerMetricsLifecycle: vi.fn(),
+  metricsUrl: vi.fn(() => "https://metrics.test/servers/metrics"),
+}));
+vi.mock("../../services/serverMetrics", () => metricsMocks);
+
 vi.mock("../../services/openPhaseSocket", () => ({
   // Argument order mirrors the production class: `(kind, message)`.
   HandshakeError: class HandshakeError extends Error {
@@ -250,11 +271,19 @@ function driveReconnect(): void {
  */
 function driveReconnectWithFlaps(): Map<
   string,
-  { drop: () => void; reopen: (socket: ReturnType<typeof fakeSocket>) => void }
+  {
+    drop: () => void;
+    reopen: (socket: ReturnType<typeof fakeSocket>) => void;
+    reopenViaFactory: () => Promise<void>;
+  }
 > {
   const controls = new Map<
     string,
-    { drop: () => void; reopen: (socket: ReturnType<typeof fakeSocket>) => void }
+    {
+      drop: () => void;
+      reopen: (socket: ReturnType<typeof fakeSocket>) => void;
+      reopenViaFactory: () => Promise<void>;
+    }
   >();
   vi.mocked(withReconnect).mockImplementation((factory, opts) => {
     let current: Awaited<ReturnType<typeof factory>> | null = null;
@@ -266,6 +295,20 @@ function driveReconnectWithFlaps(): Map<
           drop: () => opts?.onStateChange?.("reconnecting"),
           reopen: (socket) => {
             current = socket as unknown as Awaited<ReturnType<typeof factory>>;
+            opts?.onStateChange?.("open");
+          },
+          // The factory-faithful control, beside `reopen` rather than
+          // replacing it: the real `withReconnect` RE-INVOKES the factory on a
+          // re-dial, while `reopen` assigns a caller-supplied socket the two
+          // flap tests below then push frames at. Anything that asserts on
+          // what the factory does across a flap must drive this one.
+          //
+          // Production passes 1: `attempt` is reset to 0 on each successful
+          // open (`client/src/services/openPhaseSocket.ts:400`) and bumped once
+          // by `scheduleRetry` (`:422`) before `connect` awaits
+          // `factory(attempt)` (`:393`).
+          reopenViaFactory: async () => {
+            current = await factory(1);
             opts?.onStateChange?.("open");
           },
         });
@@ -304,6 +347,10 @@ function lobbyGame(overrides: Partial<LobbyGame> & { game_code: string }): Lobby
 }
 
 const PRESET_URL = SERVER_PRESETS[0].url;
+/** The URL `beforeEach` puts in `hostingServer`. Passed explicitly to
+ * `startHosting` by the cases that predate the host-target parameter, so their
+ * assertions keep measuring what they always measured. */
+const HOST_URL = "ws://localhost:8787";
 
 describe("multiplayerStore", () => {
   beforeEach(() => {
@@ -327,6 +374,11 @@ describe("multiplayerStore", () => {
       unregister: brokerMocks.unregister,
       close: brokerMocks.close,
     });
+    // Egress guards. The metrics module is mocked away above, so nothing in
+    // this suite should reach a transport at all — these exist so V-U12d can
+    // ASSERT that, rather than the suite merely believing it.
+    vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     socketMocks.currentWs = null;
     localStorageItems.clear();
     clearWsSession();
@@ -945,6 +997,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: [],
       },
+      HOST_URL,
     );
 
     await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
@@ -963,6 +1016,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
+      HOST_URL,
     );
 
     await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
@@ -980,6 +1034,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
+      HOST_URL,
     );
 
     await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
@@ -1077,6 +1132,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
+      HOST_URL,
     );
     await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
     emitServerMessage("GameCreated", {
@@ -1094,6 +1150,120 @@ describe("multiplayerStore", () => {
       serverUrl: "ws://localhost:8787",
     });
     expect(loadWsSession()?.hostSession).toBeUndefined();
+  });
+
+  // ── U15: the chosen host server ─────────────────────────────────────────
+
+  // V-U15d
+  it("dials the server startHosting was given, not the browsing anchor", async () => {
+    const URL_A = "ws://anchor.example:8787";
+    const URL_B = "ws://chosen.example:8787";
+    useMultiplayerStore.setState({ hostingServer: URL_A });
+
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      URL_B,
+    );
+
+    // Positive FIRST: without it the negative below would be satisfied by a
+    // `startHosting` that opened nothing at all.
+    await waitFor(() => expect(openPhaseSocket).toHaveBeenCalledWith(URL_B));
+    expect(openPhaseSocket).not.toHaveBeenCalledWith(URL_A);
+  });
+
+  // V-U15e
+  it("records the chosen server in the session and resumes on it", async () => {
+    const URL_A = "ws://anchor.example:8787";
+    const URL_B = "ws://chosen.example:8787";
+    useMultiplayerStore.setState({ hostingServer: URL_A });
+
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      URL_B,
+    );
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    // `full_key.game_code === game_code` is a PRECONDITION, not decoration:
+    // without it `savePregameHostSession` early-returns and no session is
+    // written for the resume to find.
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
+    });
+
+    // The two authorities disagree by construction: the anchor says A, the
+    // session says B.
+    const written = loadWsSession()!;
+    expect(written.serverUrl).toBe(URL_B);
+
+    // Put the store back in the state a fresh page load starts from. The
+    // session is re-saved because `cancelHosting` clears storage, and it is the
+    // session THIS run's production path wrote — not a hand-built one.
+    useMultiplayerStore.getState().cancelHosting();
+    saveWsSession(written);
+    vi.mocked(openPhaseSocket).mockClear();
+    expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+    await waitFor(() => expect(openPhaseSocket).toHaveBeenCalledWith(URL_B));
+    expect(openPhaseSocket).not.toHaveBeenCalledWith(URL_A);
+
+    // Paired negative: with the session cleared there is nothing to resume.
+    useMultiplayerStore.getState().cancelHosting();
+    clearWsSession();
+    expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(false);
+  });
+
+  // V-U15h — the LIVE mid-game reconnect, the third `openServerHostSocket`
+  // call site. The only case in this file that needs fake timers, so they are
+  // scoped to this block: installing them suite-wide would perturb two
+  // thousand lines of real-timer tests.
+  it("re-dials the latched server after a mid-game host-socket drop", async () => {
+    const URL_A = "ws://anchor.example:8787";
+    const URL_B = "ws://chosen.example:8787";
+    const URL_C = "ws://moved.example:8787";
+    vi.useFakeTimers();
+    try {
+      useMultiplayerStore.setState({ hostingServer: URL_A });
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings(),
+        { main_deck: ["Forest"], sideboard: [], commander: [] },
+        URL_B,
+      );
+
+      // A microtask drain, NOT `waitFor`: RTL's fake-timer detector keys on a
+      // `jest` global that vitest does not define, so `waitFor` would arm its
+      // own timers on the frozen clock and spin to its 15 s cap. It must come
+      // BEFORE the emit — `socket.ws.onmessage` is assigned only after the
+      // awaited `openPhaseSocket` resolves.
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Reach-guard: the INITIAL open was already B, so the assertion after
+      // the drop cannot pass on a reconnect that never fired.
+      expect(openPhaseSocket).toHaveBeenCalledWith(URL_B);
+      const opensBefore = vi.mocked(openPhaseSocket).mock.calls.length;
+
+      emitServerMessage("GameCreated", {
+        game_code: "ABCDE",
+        player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
+      });
+      expect(loadWsSession()?.serverUrl).toBe(URL_B);
+
+      // Hostile multi-authority: the anchor MOVES between the open and the
+      // re-dial. A reconnect that re-read it would land on C.
+      useMultiplayerStore.getState().setHostingServer(URL_C);
+
+      socketMocks.currentWs?.onclose?.();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // The call count rose, so this is not passing on a timer that never ran.
+      expect(vi.mocked(openPhaseSocket).mock.calls.length).toBeGreaterThan(opensBefore);
+      expect(openPhaseSocket).toHaveBeenLastCalledWith(URL_B);
+      expect(openPhaseSocket).not.toHaveBeenCalledWith(URL_C);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("applies setup-time AI seats when starting a P2P host session", async () => {
@@ -1875,9 +2045,11 @@ describe("multiplayerStore", () => {
     detach?.();
   });
 
-  // V-U11p — hosting placement over a directory listing is a later phase's
-  // decision; this pins today's fall-through.
-  it("never resolves a directory listing as the hosting source", () => {
+  // V-U15f — the inversion of phase 4's V-U11p. Hosting placement over a
+  // directory listing is now a supported, disclosed choice, so the listing
+  // RESOLVES instead of falling through — and the join-origin fallback that
+  // consumes the result must still dial the same URL.
+  it("resolves a directory listing as the hosting source without moving the dial target", async () => {
     // Pathful ON PURPOSE: a pathless announced URL projects to a DIFFERENT
     // `source.url`, so a pathless fixture whose two spellings drift would make
     // every `find` below return undefined and the row would pass whatever the
@@ -1910,8 +2082,24 @@ describe("multiplayerStore", () => {
     ).toBe(true);
 
     const resolved = hostingLobbySource(useMultiplayerStore.getState());
-    expect(resolved?.origin).toBe("user");
-    expect(resolved?.score).toBeUndefined();
+    // Was "user" / undefined before this phase: the listing was filtered out
+    // and the fall-through synthesised an ad-hoc source at the same URL.
+    expect(resolved?.origin).toBe("directory");
+    expect(resolved?.score).toBe(88);
+
+    // The inertness leg. `hostingLobbySource` feeds the join-origin fallback in
+    // both of its production consumers, so what must NOT have changed is the
+    // URL a join opens on — only the label and score attached to it.
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+    brokerMocks.lookupJoinTargetOver.mockResolvedValue({ ok: true, info: {} });
+    await useMultiplayerStore
+      .getState()
+      .lookupJoinTarget("ABCDE", hostingLobbySource(useMultiplayerStore.getState())!);
+    expect(openPhaseSocket).toHaveBeenCalledWith(URL_D, { surface: "lobby" });
 
     // Discriminating control. `adHocLobbySource` IS `userLobbySource`, so a
     // hand-added entry with no status row is deep-equal to the synthesis of
@@ -1933,6 +2121,158 @@ describe("multiplayerStore", () => {
       ]),
     });
     expect(hostingLobbySource(useMultiplayerStore.getState())?.kind).toBe("Full");
+  });
+
+  // ── U12: connect-outcome reporting ──────────────────────────────────────
+
+  /** Open every enabled source's channel through the mocked `withReconnect`,
+   * with a fake socket per URL. */
+  function stubSocketsPerUrl(): void {
+    vi.mocked(openPhaseSocket).mockImplementation(
+      async (url: string) =>
+        fakeSocket(url) as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+  }
+
+  // V-U12a
+  it("reports one connect_ok per dialed directory source, with its rtt", async () => {
+    const LISTED = "wss://listed.example/ws";
+    const OFF = "wss://off.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: LISTED }, { url: OFF }),
+      // Paired negative: LISTED-BUT-DISABLED. It is in the directory and is not
+      // dialed, so a reporter keyed on the LISTING rather than on the DIAL
+      // would report it too.
+      disabledDirectorySources: [OFF],
+      hostingServer: LISTED,
+    });
+    driveReconnect();
+    stubSocketsPerUrl();
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(LISTED)).toBe(true);
+    });
+
+    const reported = metricsMocks.reportConnectOutcome.mock.calls;
+    expect(reported).toHaveLength(1);
+    expect(reported[0][0]).toBe(LISTED);
+    expect(reported[0][1]).toBe("connect_ok");
+    expect(typeof reported[0][2]).toBe("number");
+    expect(reported.some(([url]) => url === OFF)).toBe(false);
+    detach?.();
+  });
+
+  // V-U12b
+  it("reports the announced key, and reports nothing for a shadowed listing", async () => {
+    // Pathless ON PURPOSE: `wss://a.example` canonicalises to
+    // `wss://a.example/`, so the announced and client spellings provably
+    // DIFFER here. With a pathful fixture the two coincide and this row would
+    // pass whichever one the code sent.
+    const ANNOUNCED = "wss://a.example";
+    const CLIENT = "wss://a.example/";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: ANNOUNCED }),
+      userLobbySources: [],
+      hostingServer: CLIENT,
+    });
+    driveReconnect();
+    stubSocketsPerUrl();
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(CLIENT)).toBe(true);
+    });
+
+    expect(metricsMocks.reportConnectOutcome).toHaveBeenCalledTimes(1);
+    expect(metricsMocks.reportConnectOutcome.mock.calls[0][0]).toBe(ANNOUNCED);
+    expect(metricsMocks.reportConnectOutcome.mock.calls[0][0]).not.toBe(CLIENT);
+    detach?.();
+
+    // Second half, the control: the SAME host, now also claimed by a
+    // hand-added entry, so the listing is shadowed out of the join and the
+    // client can no longer name it to the directory. No report at all.
+    useMultiplayerStore.getState().closeSubscriptionSocket();
+    metricsMocks.reportConnectOutcome.mockClear();
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: ANNOUNCED }),
+      userLobbySources: [userLobbySource(CLIENT)!],
+    });
+    driveReconnect();
+    const detachTwo = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().sourceStatus.has(CLIENT)).toBe(true);
+    });
+    expect(metricsMocks.reportConnectOutcome).not.toHaveBeenCalled();
+    detachTwo?.();
+  });
+
+  // V-U12c
+  it("reports connect_fail with no rtt, and still lets the error propagate", async () => {
+    const LISTED = "wss://listed.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: LISTED }),
+      hostingServer: LISTED,
+    });
+    driveReconnect();
+    vi.mocked(openPhaseSocket).mockRejectedValue(
+      new HandshakeError("ws_error", "could not reach the server"),
+    );
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      // Reach-guard on the RETHROW: the store only reaches "offline" because
+      // the factory's rejection propagated past the reporter.
+      expect(useMultiplayerStore.getState().sourceStatus.get(LISTED)?.state).toBe("offline");
+    });
+
+    expect(metricsMocks.reportConnectOutcome).toHaveBeenCalledTimes(1);
+    const [url, outcome, rtt] = metricsMocks.reportConnectOutcome.mock.calls[0];
+    expect(url).toBe(LISTED);
+    expect(outcome).toBe("connect_fail");
+    expect(rtt).toBeUndefined();
+    detach?.();
+  });
+
+  // V-U12d
+  it("reports only the first attempt of a channel, not every re-dial", async () => {
+    const A = "wss://a-listed.example/ws";
+    const B = "wss://b-listed.example/ws";
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries({ url: A }, { url: B }),
+      hostingServer: A,
+    });
+    const controls = driveReconnectWithFlaps();
+    stubSocketsPerUrl();
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    await waitFor(() => {
+      expect(controls.has(A)).toBe(true);
+    });
+    // Paired positive: a SECOND, different source opening does add a call, so
+    // "exactly one for A" is not "the emitter never fires twice".
+    expect(metricsMocks.reportConnectOutcome).toHaveBeenCalledTimes(2);
+
+    const opensBefore = vi.mocked(openPhaseSocket).mock.calls.length;
+    controls.get(A)!.drop();
+    // The factory-faithful reopen: the real `withReconnect` re-invokes the
+    // factory with a bumped attempt index. `reopen` would not, which is what
+    // made this row vacuous against the harness as it stood.
+    await controls.get(A)!.reopenViaFactory();
+
+    // Reach-guard on the reopen: the factory really did run again.
+    expect(vi.mocked(openPhaseSocket).mock.calls.length).toBe(opensBefore + 1);
+    // Still two: the re-dial reported nothing.
+    expect(metricsMocks.reportConnectOutcome).toHaveBeenCalledTimes(2);
+    expect(
+      metricsMocks.reportConnectOutcome.mock.calls.filter(([url]) => url === A),
+    ).toHaveLength(1);
+
+    // The egress assertion. Nothing in this suite may reach a transport: the
+    // recording stub, not the network, received every report above.
+    expect(navigator.sendBeacon).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    detach?.();
   });
 
   // ── U18: the dial gate ──────────────────────────────────────────────────

@@ -32,9 +32,29 @@ const storeMocks = vi.hoisted(() => ({ findLobbyGameByCode: vi.fn() }));
 const directoryMocks = vi.hoisted(() => ({
   refreshServerDirectory: vi.fn(() => Promise.resolve()),
 }));
-vi.mock("../../../services/serverDirectory", () => ({
+/**
+ * Only `refreshServerDirectory` is replaced. Everything else — `healthHint`
+ * above all — stays REAL, so the U19 row measures the production
+ * classification and not a stub of it.
+ */
+vi.mock("../../../services/serverDirectory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../services/serverDirectory")>()),
   refreshServerDirectory: directoryMocks.refreshServerDirectory,
 }));
+/**
+ * The real `LobbyView` can dial a directory source, and the store's factory
+ * wrapper reports the outcome. Left unmocked, this suite would build a queue
+ * against the REAL official host — `vitest.config.ts` defines
+ * `__OFFICIAL_MULTIPLAYER_SERVER_URL__` as the production URL. A recording
+ * stub, plus the never-called transport assertion in V-U12ra.
+ */
+const metricsMocks = vi.hoisted(() => ({
+  reportConnectOutcome: vi.fn(),
+  flushMetricsNow: vi.fn(),
+  installServerMetricsLifecycle: vi.fn(),
+  metricsUrl: vi.fn(() => "https://metrics.test/servers/metrics"),
+}));
+vi.mock("../../../services/serverMetrics", () => metricsMocks);
 vi.mock("../../../stores/multiplayerStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../stores/multiplayerStore")>()),
   findLobbyGameByCode: storeMocks.findLobbyGameByCode,
@@ -120,6 +140,10 @@ describe("LobbyView", () => {
     useMultiplayerStore.getState().subscribeAmbientLobby;
 
   beforeEach(() => {
+    // Egress guards, so V-U12ra can ASSERT that no transport was reached
+    // rather than the suite merely believing it.
+    vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     useMultiplayerStore.setState({
       hostingServer: HOSTING_URL,
       userLobbySources: [],
@@ -133,7 +157,11 @@ describe("LobbyView", () => {
 
   /** A minimal projected listing. Built by hand rather than through
    * `projectDirectoryBody`, whose module this file mocks away. */
-  function directoryEntry(url: string, score: number | undefined): DirectorySource {
+  function directoryEntry(
+    url: string,
+    score: number | undefined,
+    rowScore: DirectorySource["row"]["score"] = null,
+  ): DirectorySource {
     return {
       source: { url, name: url, origin: "directory", kind: "LobbyOnly", score },
       row: {
@@ -146,7 +174,7 @@ describe("LobbyView", () => {
         current_players: 0,
         first_seen_ms: 1,
         last_seen_ms: 2,
-        score: null,
+        score: rowScore,
       },
       rejection: null,
     };
@@ -154,6 +182,7 @@ describe("LobbyView", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
     // `clearAllMocks` drops calls but keeps queued return values.
     storeMocks.findLobbyGameByCode.mockReset();
@@ -646,5 +675,114 @@ describe("LobbyView", () => {
     await waitFor(() => {
       expect(subscribeLobby).toHaveBeenCalledTimes(2);
     });
+  });
+
+  // ── U12r + U19 ──────────────────────────────────────────────────────────
+
+  // V-U12ra
+  it("refreshes the directory when the tab becomes visible again", () => {
+    const visibility = vi.spyOn(document, "visibilityState", "get");
+    try {
+      renderLobby({});
+      // Reach-guard: the mount effect already fired once, so the increment
+      // below is attributable to the event and not to the mount.
+      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(1);
+
+      visibility.mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(2);
+
+      // Paired negative: going HIDDEN is not a refresh trigger.
+      visibility.mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(2);
+
+      // Egress: nothing in this suite may reach a transport.
+      expect(navigator.sendBeacon).not.toHaveBeenCalled();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  // V-U12rb
+  it("installs no visibility refresh in p2p mode and removes it on unmount", () => {
+    const visibility = vi.spyOn(document, "visibilityState", "get");
+    try {
+      visibility.mockReturnValue("visible");
+
+      // (i) P2P has no lobby to browse and no directory to read.
+      render(
+        <LobbyView
+          onHostGame={vi.fn()}
+          onHostP2P={vi.fn()}
+          onJoinGame={vi.fn()}
+          onSpectate={vi.fn()}
+          onServerOffline={vi.fn()}
+          connectionMode="p2p"
+        />,
+      );
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(0);
+
+      // (ii) Server mode: the listener works, and is gone after unmount.
+      cleanup();
+      const { unmount } = renderLobby({});
+      document.dispatchEvent(new Event("visibilitychange"));
+      const beforeUnmount = directoryMocks.refreshServerDirectory.mock.calls.length;
+      // Its own reach-guard: the listener really was installed, so the
+      // unchanged count below is the CLEANUP and not a listener that never ran.
+      expect(beforeUnmount).toBeGreaterThan(1);
+
+      unmount();
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(beforeUnmount);
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  // V-U19g
+  it("hints a row from its own listing's raw components, and only that row", async () => {
+    const LISTED = "wss://listed.example/ws";
+    const listedSource: LobbySource = {
+      url: LISTED,
+      name: "listed.example",
+      origin: "directory",
+      kind: "Full",
+      score: 60,
+    };
+    const presetSource: LobbySource = {
+      url: SERVER_PRESETS[0].url,
+      name: "lobby.phase-rs.dev",
+      origin: "official",
+    };
+    useMultiplayerStore.setState({
+      // Ranked (`value` non-null, samples above Rust's floor) and slow.
+      directorySources: [
+        directoryEntry(LISTED, 60, {
+          value: 60,
+          samples: 40,
+          success_rate: 1,
+          completion_rate: 1,
+          median_rtt_ms: 800,
+        }),
+      ],
+      subscribeLobby: vi.fn(async (onUpdate) => {
+        onUpdate([lobbyGame("LST01", "Table Listed", 100)], listedSource);
+        onUpdate([lobbyGame("PRE01", "Table Preset", 200)], presetSource);
+        return () => {};
+      }),
+      subscribeAmbientLobby: vi.fn(() => () => {}),
+    });
+
+    renderLobby({});
+
+    const listedRow = await screen.findByRole("button", { name: /Table Listed/ });
+    expect(listedRow.textContent).toContain("SLOW");
+    // Paired negative: a row from a source with NO listing carries no hint, so
+    // the join is by source URL and not applied to every row.
+    const presetRow = screen.getByRole("button", { name: /Table Preset/ });
+    expect(presetRow.textContent).not.toContain("SLOW");
   });
 });

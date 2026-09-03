@@ -86,9 +86,19 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
 
 import { HostSetup } from "../HostSetup";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
+import {
+  DIRECTORY_VERSION,
+  projectDirectoryBody,
+  type DirectoryRow,
+  type DirectorySource,
+} from "../../../services/serverDirectory";
 import { saveCustomFormat } from "../../../services/customFormats";
 import enMultiplayer from "../../../i18n/locales/en/multiplayer.json";
 import deMultiplayer from "../../../i18n/locales/de/multiplayer.json";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+} from "../../../adapter/ws-adapter";
 
 describe("HostSetup", () => {
   beforeEach(() => {
@@ -97,7 +107,110 @@ describe("HostSetup", () => {
       displayName: "",
       formatConfig: null,
       lastHostConfig: null,
+      // Without these four a picker fixture leaks into every following case.
+      userLobbySources: [],
+      sourceStatus: new Map(),
+      directorySources: [],
+      disabledDirectorySources: [],
     });
+  });
+
+  /** Project fixtures through the PRODUCTION projection, so a listing carries
+   * the same canonical URL, the same `kind` and the same score a real one
+   * would — the picker filters on exactly those. */
+  function directoryEntries(
+    ...rows: (Partial<DirectoryRow> & { url: string })[]
+  ): DirectorySource[] {
+    return projectDirectoryBody({
+      directory_version: DIRECTORY_VERSION,
+      servers: rows.map((overrides) => ({
+        name: "example",
+        mode: "LobbyOnly",
+        server_version: "0.71.0",
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        current_players: 0,
+        first_seen_ms: 1_700_000_000_000,
+        last_seen_ms: 1_700_000_060_000,
+        score: null,
+        ...overrides,
+      })),
+    })!;
+  }
+
+  const FAST = "wss://fast.example/ws";
+  const SLOW = "wss://slow.example/ws";
+  const BROKER = "wss://broker.example/ws";
+
+  /** Two hostable servers and one high-scoring `LobbyOnly` broker. The broker's
+   * score is the HIGHEST of the three on purpose: it is what proves the filter
+   * is on the announced mode and not on the rank. */
+  function seedCandidates(): void {
+    const scored = (value: number) => ({
+      value,
+      samples: 40,
+      success_rate: 1,
+      completion_rate: 1,
+      median_rtt_ms: 50,
+    });
+    useMultiplayerStore.setState({
+      directorySources: directoryEntries(
+        { url: FAST, name: "fast.example", mode: "Full", score: scored(80) },
+        { url: SLOW, name: "slow.example", mode: "Full", score: scored(20) },
+        { url: BROKER, name: "broker.example", mode: "LobbyOnly", score: scored(99) },
+      ),
+    });
+  }
+
+  // V-U15a
+  it("lists the Full servers in score order and omits a LobbyOnly broker", async () => {
+    const user = userEvent.setup();
+    seedCandidates();
+
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    const options = screen.getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "fast.example — health 80",
+      "slow.example — health 20",
+    ]);
+    // A LobbyOnly server brokers peer ids; it cannot run a match however well
+    // it scores, and it scores highest here.
+    expect(screen.queryByRole("option", { name: /broker\.example/ })).not.toBeInTheDocument();
+  });
+
+  // V-U15b
+  it("renders no host-target picker in p2p mode", () => {
+    seedCandidates();
+
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+
+    // Paired positive: V-U15a renders it from this very fixture.
+    expect(screen.queryByText("Host on")).not.toBeInTheDocument();
+  });
+
+  // V-U15c
+  it("submits the selected host server, defaulting to the best-evidenced one", async () => {
+    const user = userEvent.setup();
+    // `false` is the parent's "I did not proceed" signal, which is what lets
+    // the form stay usable for the second submit below.
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+
+    // Paired half ONE: submitting without touching the picker passes the
+    // default, so the assertion below is not passing on a constant.
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), FAST);
+
+    // Paired half TWO: choosing the other candidate changes what is submitted.
+    onHost.mockClear();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
   });
 
   afterEach(async () => {
@@ -324,6 +437,7 @@ describe("HostSetup", () => {
           deck_size: { type: "Minimum", data: 40 },
         }),
       }),
+      expect.any(String),
     );
   });
 
@@ -344,6 +458,7 @@ describe("HostSetup", () => {
 
     expect(onHost).toHaveBeenCalledWith(
       expect.objectContaining({ loopDetection: { type: "Interactive" } }),
+      expect.any(String),
     );
   });
 
@@ -377,6 +492,7 @@ describe("HostSetup", () => {
         }),
         aiSeats: [],
       }),
+      expect.any(String),
     );
   });
 
@@ -416,6 +532,7 @@ describe("HostSetup", () => {
         formatConfig: expect.objectContaining({ format: "TwoHeadedGiant" }),
         aiSeats: [],
       }),
+      expect.any(String),
     );
     expect(useMultiplayerStore.getState().lastHostConfig?.aiSeats).toEqual([]);
   });
@@ -463,6 +580,7 @@ describe("HostSetup", () => {
       expect.objectContaining({
         formatConfig: expect.objectContaining({ starting_life: 25 }),
       }),
+      expect.any(String),
     );
   });
 
@@ -483,6 +601,7 @@ describe("HostSetup", () => {
           starting_life: FORMAT_DEFAULTS.Commander.starting_life,
         }),
       }),
+      expect.any(String),
     );
   });
 

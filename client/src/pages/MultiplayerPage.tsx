@@ -26,6 +26,7 @@ import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
+import { installServerMetricsLifecycle } from "../services/serverMetrics";
 import {
   adHocLobbySource,
   findLobbyGameByCode,
@@ -49,7 +50,18 @@ function parseViewParam(value: string | null): MultiplayerView {
 }
 
 type PendingAction =
-  | { type: "host"; settings: HostSettings; connectionMode: ConnectionMode }
+  | {
+      type: "host";
+      settings: HostSettings;
+      connectionMode: ConnectionMode;
+      /**
+       * The server this host action chose, latched when the user submitted
+       * host-setup. `null` is the P2P case — "this submit chose no server" —
+       * and it deliberately reduces to the live `hostingServer` read below
+       * rather than to a value captured at submit time.
+       */
+      serverUrl: string | null;
+    }
   | {
       type: "join";
       code: string;
@@ -85,6 +97,13 @@ export function MultiplayerPage() {
   // Idempotent; closes the deep-link hole when opening /multiplayer directly.
   useEffect(() => {
     void useCardDataStore.getState().warm();
+  }, []);
+
+  // Not at app boot, for the same reason the lobby's directory read is not: a
+  // player who never opens multiplayer registers no listeners and queues
+  // nothing. Idempotent, so a remount installs one set of hooks.
+  useEffect(() => {
+    installServerMetricsLifecycle();
   }, []);
 
   const startHosting = useMultiplayerStore((s) => s.startHosting);
@@ -458,10 +477,14 @@ export function MultiplayerPage() {
         // (server mode) against such a server is implicitly asking for a
         // broker-advertised P2P game.
         const store = useMultiplayerStore.getState();
-        const hosting = store.hostingServer;
-        const socket = hosting === null
+        // The server this action targets: the host-setup choice in server
+        // mode, and — because that choice is `null` in P2P — the same live
+        // `hostingServer` read this line has always made, in the same
+        // statement, whenever the action is a P2P one.
+        const target = action.serverUrl ?? store.hostingServer;
+        const socket = target === null
           ? null
-          : await store.ensureSubscriptionSocket(hosting);
+          : await store.ensureSubscriptionSocket(target);
         const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
 
         if (action.connectionMode === "p2p" || mode === "LobbyOnly") {
@@ -482,11 +505,14 @@ export function MultiplayerPage() {
           // offline prompt and offer a P2P fallback rather than handing
           // the action off to `startHosting`, which would hang on the WS
           // handshake and leave the user staring at the host-setup screen.
-          if (!socket) {
+          // The `target === null` disjunct adds no behaviour — `socket` is
+          // already null whenever `target` is — it narrows `target` to the
+          // `string` `startHosting` requires.
+          if (target === null || !socket) {
             setBrokerOfflinePrompt({ action });
             return false;
           }
-          startHosting(action.settings, deck);
+          startHosting(action.settings, deck, target);
           navigate("/");
         }
       } else {
@@ -534,8 +560,8 @@ export function MultiplayerPage() {
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
   const handleHostSetupComplete = useCallback(
-    async (settings: HostSettings): Promise<boolean> => {
-      const action: PendingAction = { type: "host", settings, connectionMode };
+    async (settings: HostSettings, serverUrl: string | null): Promise<boolean> => {
+      const action: PendingAction = { type: "host", settings, connectionMode, serverUrl };
       if (activeDeckName) {
         return executeAction(action);
       }

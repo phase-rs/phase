@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { FormatGroup, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { flagForServer, parseJoinCode } from "../../services/serverDetection";
-import { refreshServerDirectory } from "../../services/serverDirectory";
+import { healthHint, refreshServerDirectory } from "../../services/serverDirectory";
 import {
   FORMAT_DEFAULTS,
   adHocLobbySource,
@@ -255,6 +255,42 @@ export function LobbyView({
     if (isP2P) return;
     void refreshServerDirectory();
   }, [isP2P]);
+
+  useEffect(() => {
+    // A lobby left open in a background tab goes stale: the listing and each
+    // row's stored verdict otherwise refresh only on a remount. Returning to
+    // the tab is the cheapest correct trigger — and it cannot storm the
+    // endpoint, because `refreshServerDirectory` self-guards on both its TTL
+    // and its in-flight promise. A timer would fire in a backgrounded tab and
+    // buy nothing this does not.
+    if (isP2P) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshServerDirectory();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isP2P]);
+
+  /**
+   * Each browsed source's raw score components, keyed by the CLIENT url a row
+   * carries — the join `GameListItem` cannot make for itself, since a
+   * `LobbyGameEntry` holds the collapsed `LobbySource.score` number and never
+   * the `WireScore` a hint has to read.
+   *
+   * Built here because this component already owns the merged list and already
+   * subscribes to `directorySources`; a selector in the leaf would re-render
+   * every row on any directory change and put a data join in a presentational
+   * component.
+   */
+  const hintByUrl = useMemo(
+    () =>
+      new Map(
+        directorySources.map((entry) => [entry.source.url, healthHint(entry.row.score)]),
+      ),
+    [directorySources],
+  );
 
   const handleJoinFromList = useCallback(
     (entry: LobbyGameEntry) => {
@@ -554,6 +590,7 @@ export function LobbyView({
                   onJoin={handleJoinFromList}
                   compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
                   hostGameCode={hostGameCode}
+                  healthHint={hintByUrl.get(entry.source.url) ?? null}
                 />
               ))}
             </div>

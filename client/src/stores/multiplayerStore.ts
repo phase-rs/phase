@@ -56,6 +56,14 @@ import {
 // evaluation graph, beside the `serverDetection` ⇄ `multiplayerStore` cycle
 // that already constrains what `create()`/`migrate`/`merge` may read.
 import type { DirectorySource } from "../services/serverDirectory";
+// A VALUE import, unavoidably: the store is the single authority for opening a
+// lobby socket, so it is the only place that can observe a connect outcome.
+// `serverMetrics` reaches `serverDirectory` for the official-host derivation,
+// so this does give the store a transitive runtime edge to the fetching
+// service — inert by construction, because neither module reads anything from
+// this store during MODULE EVALUATION (every access is inside a function
+// body), which is the only window `create()`/`migrate`/`merge` care about.
+import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
@@ -300,6 +308,29 @@ function unshadowedDirectorySources(
   );
 }
 
+/**
+ * The ANNOUNCED key for a URL this client dialed, or `null` when the URL is not
+ * a directory listing this client can name to the directory.
+ *
+ * Two spellings of "that server" exist and they are not always the same string:
+ * `entry.source.url` is the CLIENT key (`parseWebSocketUrl(...).href`) and
+ * `entry.row.url` is the ANNOUNCED key — the `servers` PRIMARY KEY, and the
+ * only spelling the Worker's fold will accept. The client key is not invertible
+ * back to it, so a caller that has to name a server TO the directory must come
+ * through here.
+ *
+ * `null` is returned for a preset, a hand-added source, a one-off join origin,
+ * and for a listing SHADOWED by either — which is also what keeps a user's
+ * private or LAN address off the wire, since only announced servers can match.
+ */
+function announcedUrlFor(
+  state: Pick<MultiplayerState, "userLobbySources" | "directorySources">,
+  url: string,
+): string | null {
+  return unshadowedDirectorySources(state).find((entry) => entry.source.url === url)?.row.url
+    ?? null;
+}
+
 /** Every unshadowed directory entry with its enabled flag — including the
  * DISABLED ones, which {@link lobbySources} omits by construction. The picker
  * is the only place a disabled entry can be switched back on, so it needs the
@@ -342,14 +373,16 @@ export function hostingLobbySource(
   const { hostingServer } = state;
   if (hostingServer === null) return null;
   return (
-    // Hosting placement over a directory-listed server is a later phase's
-    // decision — it needs its own operator disclosure — so a `hostingServer`
-    // that happens to match a listing still falls through to
-    // `adHocLobbySource`, exactly as it does today. This phase changes nothing
-    // about where a game registers.
-    lobbySources(state).find(
-      (source) => source.origin !== "directory" && source.url === hostingServer,
-    ) ?? adHocLobbySource(hostingServer)
+    // Hosting placement over a directory-listed server is now a supported
+    // choice, disclosed in the host-setup picker, so a `hostingServer` that
+    // matches a listing resolves AS that listing — carrying its name, kind and
+    // score — instead of falling through to `adHocLobbySource`. The dial target
+    // is unchanged either way: both spellings are the same URL, and a
+    // `LobbySource` is consumed as a dial target by URL. What the listing adds
+    // is its label and its stored compatibility verdict, so an incompatible
+    // listed server is refused before the socket rather than at the handshake.
+    lobbySources(state).find((source) => source.url === hostingServer)
+    ?? adHocLobbySource(hostingServer)
   );
 }
 
@@ -817,7 +850,11 @@ interface MultiplayerActions {
   setActionPending: (pending: boolean) => void;
   setLatency: (ms: number | null) => void;
   // Hosting session actions
-  startHosting: (settings: HostingSettings, deck: HostingDeck) => void;
+  /** `serverUrl` is the server THIS game is hosted on, chosen at host-setup
+   *  submit. It is deliberately not `hostingServer`: that field is the P2P /
+   *  browsing anchor and choosing a game server for one match must not move
+   *  it. */
+  startHosting: (settings: HostingSettings, deck: HostingDeck, serverUrl: string) => void;
   resumeServerHosting: () => boolean;
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
@@ -1482,11 +1519,16 @@ async function openServerHostSocket(
   get: MultiplayerGet,
   setupFrame: () => unknown,
   onReopen: () => void,
+  serverUrl: string,
 ): Promise<void> {
-  // Read the hosting server once: every frame this socket sends, and the
-  // session it records, must belong to the URL we actually dialed.
-  const url = get().hostingServer;
-  if (url === null || !isValidWebSocketUrl(url)) {
+  // The dialed URL arrives as an argument rather than being read from store
+  // state, and every caller supplies the one the session records: every frame
+  // this socket sends, and the session it records, must belong to the URL we
+  // actually dialed. `startHosting` passes the host's choice for this game;
+  // both re-dial paths pass `session.serverUrl`, which IS the record of what
+  // was dialed — so a `setHostingServer` mid-game moves nothing here.
+  const url = serverUrl;
+  if (!isValidWebSocketUrl(url)) {
     resetServerHostSession(set);
     get().showToast("Invalid server address. Update it in Settings.");
     return;
@@ -1566,6 +1608,10 @@ function attemptServerHostReconnect(
         },
       }),
       () => attemptServerHostReconnect(set, get),
+      // The session, never `hostingServer`: this is the live re-dial after a
+      // mid-game host-socket drop, and it must return to the server the game
+      // is actually on even if the browsing anchor has since moved.
+      session.serverUrl,
     );
   }, delay);
 }
@@ -1806,7 +1852,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setActionPending: (pending) => set({ actionPending: pending }),
       setLatency: (ms) => set({ latencyMs: ms }),
 
-      startHosting: (settings, deck) => {
+      startHosting: (settings, deck, serverUrl) => {
         const aiSeats = effectiveAiSeats(settings);
         // Clean up any existing hosting session (server or P2P).
         closeHostWebSocket();
@@ -1859,6 +1905,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             },
           }),
           () => attemptServerHostReconnect(set, get),
+          serverUrl,
         );
       },
 
@@ -1868,7 +1915,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
 
         const session = loadWsSession();
-        if (!session?.hostSession || session.serverUrl !== get().hostingServer) {
+        // No comparison against `hostingServer`: the persisted session IS the
+        // record of which server this game was hosted on, and a game hosted on
+        // a server other than the browsing anchor is now an ordinary case, not
+        // a reason to refuse the resume.
+        if (!session?.hostSession) {
           return false;
         }
 
@@ -1895,6 +1946,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             },
           }),
           () => attemptServerHostReconnect(set, get),
+          session.serverUrl,
         );
 
         return true;
@@ -2304,26 +2356,54 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           };
 
           channel.reconnect = withReconnect(
-            () =>
+            (attempt) => {
+              // The announced key for this dial, resolved BEFORE the socket is
+              // opened and latched into whatever report follows. `null` for a
+              // preset, a hand-added source or a shadowed listing — those are
+              // never reported, both because the directory would drop them and
+              // because a private address must not leave this machine.
+              const announced = announcedUrlFor(get(), url);
+              // The full handshake round trip, not a ping: `openPhaseSocket`
+              // resolves only after `ServerHello` is parsed, validated against
+              // the protocol window, and `ClientHello` is sent. That is the
+              // quantity the directory's histogram edges are scaled for.
+              const startedAt = Date.now();
               // The shared subscription socket carries lobby frames only —
               // `SubscribeLobby`, the join-target RPCs, `PlayerCount`. Declaring
               // the surface keeps it usable against a server whose full-game
               // protocol has drifted from this build's, which is the whole point
               // of versioning the lobby separately. Server-run hosting and
               // joining open their own sockets and keep the exact-match window.
-              openPhaseSocket(url, { surface: "lobby" }).catch((err) => {
-                // Protocol mismatch is not retryable — surface the toast
-                // on the *first* handshake attempt, then let
-                // `withReconnect` treat subsequent attempts as plain
-                // errors (they'll keep rejecting until "offline" fires).
-                if (
-                  err instanceof HandshakeError &&
-                  err.kind === "protocol_mismatch"
-                ) {
-                  get().showToast(err.message);
-                }
-                throw err;
-              }),
+              return openPhaseSocket(url, { surface: "lobby" })
+                .then((socket) => {
+                  // FIRST attempt only. The handle re-arms on every drop and
+                  // re-invokes this factory with a bumped index, resetting it
+                  // to 0 on each successful open — so `attempt === 0` means
+                  // "the first open of this handle", and a flapping server
+                  // reports one outcome per channel open instead of drowning
+                  // the window in identical retries.
+                  if (announced !== null && attempt === 0) {
+                    reportConnectOutcome(announced, "connect_ok", Date.now() - startedAt);
+                  }
+                  return socket;
+                })
+                .catch((err) => {
+                  if (announced !== null && attempt === 0) {
+                    reportConnectOutcome(announced, "connect_fail");
+                  }
+                  // Protocol mismatch is not retryable — surface the toast
+                  // on the *first* handshake attempt, then let
+                  // `withReconnect` treat subsequent attempts as plain
+                  // errors (they'll keep rejecting until "offline" fires).
+                  if (
+                    err instanceof HandshakeError &&
+                    err.kind === "protocol_mismatch"
+                  ) {
+                    get().showToast(err.message);
+                  }
+                  throw err;
+                });
+            },
             {
               // One retry on the initial open (~500ms to "offline") so the
               // user sees the `ServerOfflinePrompt` quickly when the server

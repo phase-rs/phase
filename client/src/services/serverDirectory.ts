@@ -182,6 +182,57 @@ export interface DirectorySource {
   rejection: string | null;
 }
 
+/** A listing's health, as a reader of its raw score components would describe
+ *  it. A typed union rather than an `isSlow` boolean: a second reading would
+ *  otherwise need a second flag, and two flags can contradict each other. */
+export type HealthHint = "slow" | "unreliable";
+
+/** Median handshake RTT at or above which a listing reads as slow.
+ *
+ *  MUST be one of Rust's `RTT_BUCKET_EDGES_MS` — `median_rtt_ms` is the upper
+ *  edge of a histogram cell (`crates/lobby-broker/src/directory.rs`), never an
+ *  arbitrary number, so a threshold between two edges would behave identically
+ *  to the next edge down while reading as if it discriminated. `400` is the
+ *  fourth edge: two cells above Rust's own full-credit `RTT_FAST_MS` point, and
+ *  below where its latency component is already near zero. */
+export const SLOW_MEDIAN_RTT_MS = 400;
+
+/** Connect success rate below which a listing reads as unreliable — one failed
+ *  connect in ten. */
+export const UNRELIABLE_SUCCESS_RATE = 0.9;
+
+/**
+ * How a listing's raw score components read to a human, or `null` for "say
+ * nothing".
+ *
+ * Takes the whole {@link WireScore} and not `LobbySource.score`, because the
+ * two "no score" cases are DIFFERENT and only one is visible from the collapsed
+ * number: `score === null` means Rust found no live evidence at all, while
+ * `score.value === null` means evidence exists but is below its
+ * `SCORE_MIN_SAMPLES` (or carries zero total weight). Both must stay silent —
+ * rendering a hint off a three-sample window is the specific defect this gate
+ * exists to prevent.
+ *
+ * PRECEDENCE: unreliable before slow, stated here so the ordering is a decision
+ * and not an accident of `if` order. A server you often cannot reach is worse
+ * to not know about than one you reach slowly, and a row has space for one
+ * badge.
+ *
+ * Nothing is recomputed: every number read here is produced by
+ * `lobby_broker::directory::score` in Rust and served whole by the Worker,
+ * whose own comment states the contract from the other side — a client renders
+ * "slow" or "unreliable" from these components and must never recompute the
+ * score itself. This function performs two comparisons and returns a label,
+ * which is presentation.
+ */
+export function healthHint(score: WireScore | null): HealthHint | null {
+  if (score === null) return null;
+  if (score.value === null) return null;
+  if (score.success_rate < UNRELIABLE_SUCCESS_RATE) return "unreliable";
+  if (score.median_rtt_ms !== null && score.median_rtt_ms >= SLOW_MEDIAN_RTT_MS) return "slow";
+  return null;
+}
+
 /**
  * The `GET /servers` endpoint for this build's official lobby.
  *
