@@ -620,13 +620,15 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // built-in is None, so the default agrees everywhere and equality is
     // legacy-safe. Independently corroborated by engine-wasm's
     // reject_unimplemented_range_of_influence, which already refuses any
-    // Some at the session boundary.
-    if config.range_of_influence.is_some() || rules.range_of_influence.is_some() {
+    // Some at the session boundary. Compared against `rules` (not a bare
+    // `is_some()` on either side) so the error message still correctly names
+    // whichever side actually diverges if a future built-in's registry value
+    // is ever non-`None`.
+    if config.range_of_influence != rules.range_of_influence {
         return Err(format!(
-            "FormatConfig.range_of_influence is set, but {} does not support a range of \
-             influence override — this axis is fixed by the Comprehensive Rules for built-in \
-             formats",
-            config.format,
+            "FormatConfig.range_of_influence is {:?}, but {} requires exactly {:?} — this axis \
+             is fixed by the Comprehensive Rules for built-in formats",
+            config.range_of_influence, config.format, rules.range_of_influence,
         ));
     }
 
@@ -639,21 +641,28 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
         ));
     }
 
-    // archenemy_player: NoLooserThan over Option<PlayerId>'s bottom-lifted
-    // flat order: None <= Some(x) for all x, and Some(a) <= Some(b) iff
-    // a == b. None is the bottom, i.e. the serde fallback. CR 904.2a /
-    // CR 904.6.
-    match (config.archenemy_player, rules.archenemy_player) {
-        (None, _) => {}
-        (Some(declared), Some(expected)) if declared == expected => {}
-        (Some(declared), expected) => {
-            return Err(format!(
-                "FormatConfig.archenemy_player is {declared:?}, but {} requires {expected:?} — a \
-                 built-in format's archenemy designation is fixed by the Comprehensive Rules; a \
-                 payload may omit it but never declare a different one",
-                config.format,
-            ));
-        }
+    // archenemy_player: HostChoice, NOT Locked/NoLooserThan. CR 904.2a /
+    // CR 904.6 only fix that an archenemy exists and takes the first turn —
+    // not which numbered seat holds it. Which seat is designated is per-
+    // seating-table state (see `custom_format::validate_custom_rules_
+    // consistency`'s doc comment on this same field), and the engine already
+    // supports a non-zero archenemy seat: `FormatConfig::validate_for_
+    // player_count` bounds-checks a *variable* seat index against the actual
+    // player count, and both `lobby-broker::inbound_guard` and
+    // `phase-server::main` carry tests for the non-zero-seat path. Seat 0
+    // being the only reachable value today is a client-side limitation
+    // (`client/src/data/formatRegistry.ts` hardcodes it), not an engine
+    // invariant this gate should encode as a hard rejection.
+    //
+    // The one thing still worth rejecting: a built-in format outside the
+    // Archenemy family (whose registry value is always `None`) declaring a
+    // seat at all, since only Archenemy-family formats use this field.
+    if rules.archenemy_player.is_none() && config.archenemy_player.is_some() {
+        return Err(format!(
+            "FormatConfig.archenemy_player is {:?}, but {} does not use an archenemy \
+             designation at all — only Archenemy-family formats may declare this field",
+            config.archenemy_player, config.format,
+        ));
     }
 
     // uses_commander: Derived — command_zone && commander_damage_threshold
@@ -844,12 +853,23 @@ impl FormatTopology {
 ///     externally-tagged `{"Tag":…}` / `{"Resolved":…}` envelope.
 ///
 /// (2) The complete, exhaustive list of places `SelectedFormat::Resolved` is
-///     constructed is exactly one: `validate_name_deck_for_format_full` in
+///     CONSTRUCTED is exactly one: `validate_name_deck_for_format_full` in
 ///     `game::deck_validation`, trusted Rust that already holds a
-///     `&FormatConfig` supplied by its caller. Re-run
-///     `grep -rn "SelectedFormat::Resolved" --include=*.rs crates/ | grep -v
-///     "tests/\|#\[cfg(test)\]"` after any change touching this type — it
-///     must return exactly one production line.
+///     `&FormatConfig` supplied by its caller. After any change touching
+///     this type, run `grep -rn "SelectedFormat::Resolved" --include=*.rs
+///     crates/` and manually triage every hit into one of three buckets: the
+///     single production construction site above; a `match`/pattern-match
+///     arm that only READS an already-existing value (e.g. `tag()`'s and
+///     `rules()`'s own arms in this file, and this doc comment's own prose)
+///     — expected and unlimited in count, never a violation; or a
+///     `#[cfg(test)] mod tests` block. A naive `grep -v
+///     "tests/\|#\[cfg(test)\]"` text filter looks appealing but does NOT
+///     work here: `deck_validation.rs` and this very file each have their
+///     own `#[cfg(test)] mod tests` block thousands of lines above their
+///     in-module test construction sites, and a line-based `grep -v` cannot
+///     see "this line lives inside that module" — it can only filter lines
+///     that literally contain the attribute text. Do not trust a bare
+///     non-test-directory line count from this command; read each hit.
 ///
 /// (3) The gate `built_in_axes_no_looser_than_rules` runs at every
 ///     `FormatConfig` construction site with no exceptions, because every
@@ -2117,6 +2137,38 @@ mod tests {
         assert!(!Unlimited.permits_no_more_than(Forbidden));
     }
 
+    /// Compiler-enforced completeness guard for `built_in_axes_no_looser_
+    /// than_rules`: adding a field to `FormatConfig` without updating this
+    /// exhaustive destructure is a compile error, which forces the author to
+    /// also confirm the new field is classified (Locked / NoLooserThan /
+    /// HostChoice / Derived) in that gate. Replaces a prior arithmetic guard
+    /// (`serialized_json_object.len() + 2 == 17`) that a future field
+    /// sharing `archenemy_player`/`custom_rules`'s `skip_serializing_if`-
+    /// when-`None` shape could silently defeat without moving the count.
+    #[test]
+    fn format_config_field_destructure_is_exhaustive() {
+        let config = FormatConfig::standard();
+        let FormatConfig {
+            format: _,
+            starting_life: _,
+            min_players: _,
+            max_players: _,
+            deck_size: _,
+            singleton: _,
+            command_zone: _,
+            commander_damage_threshold: _,
+            range_of_influence: _,
+            team_based: _,
+            archenemy_player: _,
+            uses_commander: _,
+            supplies_fixed_deck: _,
+            sideboard_policy: _,
+            default_deck_copy_limit: _,
+            allow_debug_actions: _,
+            custom_rules: _,
+        } = config;
+    }
+
     /// V1 (Verification Matrix): `SelectedFormat`'s wire form is the bare
     /// `GameFormat` tag in BOTH directions.
     #[test]
@@ -2128,13 +2180,12 @@ mod tests {
         let to_wire = serde_json::to_value(SelectedFormat::Tag(GameFormat::Standard)).unwrap();
         assert_eq!(to_wire, serde_json::json!("Standard"));
 
-        let custom: SelectedFormat =
-            serde_json::from_value(serde_json::json!("Custom:7")).unwrap();
+        let custom: SelectedFormat = serde_json::from_value(serde_json::json!("Custom:7")).unwrap();
         assert_eq!(
             custom,
-            SelectedFormat::Tag(GameFormat::Custom(crate::types::custom_format::CustomFormatId(
-                7
-            )))
+            SelectedFormat::Tag(GameFormat::Custom(
+                crate::types::custom_format::CustomFormatId(7)
+            ))
         );
 
         assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!("Nonsense")).is_err());
@@ -2160,10 +2211,10 @@ mod tests {
     /// V3: neither externally-tagged envelope shape deserializes.
     #[test]
     fn selected_format_rejects_both_externally_tagged_envelopes() {
-        assert!(serde_json::from_value::<SelectedFormat>(
-            serde_json::json!({"Tag": "Standard"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<SelectedFormat>(serde_json::json!({"Tag": "Standard"}))
+                .is_err()
+        );
         assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!({
             "Resolved": serde_json::to_value(FormatConfig::standard()).unwrap()
         }))

@@ -817,7 +817,11 @@ fn format_config_deserialization_rejects_a_forged_looser_sideboard_policy() {
 /// pre-existing live hole this phase's gate closes.
 #[test]
 fn format_config_deserialization_rejects_forged_supplies_fixed_deck() {
-    for builder in [FormatConfig::standard, FormatConfig::commander, FormatConfig::archenemy] {
+    for builder in [
+        FormatConfig::standard,
+        FormatConfig::commander,
+        FormatConfig::archenemy,
+    ] {
         let mut forged = builder();
         forged.supplies_fixed_deck = true;
         let json = serde_json::to_value(&forged).unwrap();
@@ -830,28 +834,29 @@ fn format_config_deserialization_rejects_forged_supplies_fixed_deck() {
     }
 }
 
-/// V7: `archenemy_player` follows the bottom-lifted flat order — `None` is
-/// always admitted (the fallback/bottom), a mismatched `Some` is rejected,
-/// and a built-in that is never Archenemy (e.g. Standard) rejects any
-/// declared `Some` at all (CR 904.2a / CR 904.6).
+/// V7: `archenemy_player` is `HostChoice`, not `Locked`/`NoLooserThan` — CR
+/// 904.2a / CR 904.6 only fix that an archenemy exists and takes the first
+/// turn, not which numbered seat holds it. Any seat (including a non-zero
+/// one, bounds-checked separately by `FormatConfig::validate_for_player_
+/// count`) is admitted on an Archenemy-family format; only a built-in that
+/// is never Archenemy (e.g. Standard) rejects a declared `Some` at all.
 #[test]
-fn format_config_deserialization_archenemy_player_follows_the_bottom_lifted_order() {
+fn format_config_deserialization_archenemy_player_is_a_free_host_choice_on_archenemy() {
     let mut none_declared = FormatConfig::archenemy();
     none_declared.archenemy_player = None;
     let json = serde_json::to_value(&none_declared).unwrap();
     assert!(
         serde_json::from_value::<FormatConfig>(json).is_ok(),
-        "None must be admitted as the bottom element of the order"
+        "None must always be admitted"
     );
 
-    let mut mismatched = FormatConfig::archenemy();
-    mismatched.archenemy_player = Some(PlayerId(3));
-    let json = serde_json::to_value(&mismatched).unwrap();
-    let error = serde_json::from_value::<FormatConfig>(json)
-        .expect_err("a mismatched archenemy_player must be rejected");
+    let mut different_seat = FormatConfig::archenemy();
+    different_seat.archenemy_player = Some(PlayerId(2));
+    let json = serde_json::to_value(&different_seat).unwrap();
     assert!(
-        error.to_string().contains("archenemy_player"),
-        "expected the archenemy_player rejection message, got: {error}"
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "a different, valid non-zero archenemy seat must be admitted — the seat is per-seating- \
+         table state, not a value the built-in-axes gate locks to the registry default"
     );
 
     let mut forged_on_standard = FormatConfig::standard();
@@ -936,10 +941,10 @@ fn format_config_deserialization_accepts_stricter_than_truth_on_every_no_looser_
 
     let mut stricter_copies = FormatConfig::standard();
     stricter_copies.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
-    assert!(
-        serde_json::from_value::<FormatConfig>(serde_json::to_value(&stricter_copies).unwrap())
-            .is_ok()
-    );
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_copies).unwrap()
+    )
+    .is_ok());
 }
 
 /// V11: `Locked` axes reject any inequality against the registry value,
@@ -950,8 +955,7 @@ fn format_config_deserialization_rejects_any_inequality_on_locked_axes() {
     let mut wrong_life = FormatConfig::standard();
     wrong_life.starting_life = 40;
     assert!(
-        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_life).unwrap())
-            .is_err(),
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_life).unwrap()).is_err(),
         "starting_life is Locked; any declared inequality must be rejected"
     );
 
@@ -972,27 +976,15 @@ fn format_config_deserialization_rejects_any_inequality_on_locked_axes() {
     );
 }
 
-/// V19: the gate is exhaustive over all 17 `FormatConfig` fields — a
-/// regenerable guard so a future 18th field cannot be silently unclassified.
-/// Field count is derived from the live JSON object rather than hardcoded,
-/// so this test itself fails loudly (rather than silently under-counting)
-/// the moment a field is added or removed.
-#[test]
-fn format_config_has_exactly_seventeen_fields() {
-    let json = serde_json::to_value(FormatConfig::standard()).unwrap();
-    let object = json.as_object().unwrap();
-    // `archenemy_player` and `custom_rules` are both
-    // `skip_serializing_if = "Option::is_none"` and both `None` for
-    // Standard, so they are absent from this object — account for them
-    // explicitly rather than undercounting the true field set.
-    let visible_field_count = object.len();
-    assert_eq!(
-        visible_field_count + 2,
-        17,
-        "FormatConfig's field count changed — re-audit built_in_axes_no_looser_than_rules' \
-         17-row field walk against the current struct definition before trusting this count"
-    );
-}
+// V19: the gate is exhaustive over every `FormatConfig` field — enforced by
+// `format_config_field_destructure_is_exhaustive` in
+// `engine::types::format`'s own `#[cfg(test)] mod tests`, which exhaustively
+// destructures the (private-module-adjacent) struct so a future field added
+// without updating that pattern is a compile error. That replaces this
+// test's prior JSON-object-length arithmetic (`serialized_json_object.len()
+// + 2 == 17`), which a future field sharing `archenemy_player`/
+// `custom_rules`'s `skip_serializing_if`-when-`None` shape could silently
+// defeat without moving the count.
 
 #[test]
 fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
