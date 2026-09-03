@@ -630,6 +630,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(localDrag.handlePointerDown).toHaveBeenCalledWith(expect.anything(), expect.anything());
     fireEvent.click(within(cardElement).getByRole("button", { name: "Same" }));
     expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    expect(within(cardElement).getByRole("button", { name: "Same" })).toHaveAttribute("aria-pressed", "true");
     expect(cardElement).toHaveClass(
       "transition-transform",
       "duration-150",

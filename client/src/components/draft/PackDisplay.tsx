@@ -329,6 +329,7 @@ function PackCard({
       <button
         type="button"
         data-pack-card-activation
+        aria-pressed={state === "selected"}
         disabled={locked}
         onClick={(event) => {
           if (Date.now() < ignoreCompatibilityClickUntil.current) return;
