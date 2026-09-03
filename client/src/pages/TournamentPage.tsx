@@ -59,12 +59,21 @@ export function TournamentPage() {
   /**
    * The code the page is showing **now**, readable from an async continuation.
    *
-   * `run` and `seed` close over the code their request was issued FOR, so
-   * comparing that closed-over `code` against `shownCode.current` scopes a
-   * settling RPC exactly as `onTournamentUpdate` scopes a broadcast with
-   * `broadcastCode === code`. The ref is needed only because a promise, unlike
-   * a subscription handler, has no cleanup that could detach it when the route
-   * changes: the closure alone can only ever compare a code to itself.
+   * `seed`, `run` and `handleReport` close over the code their request was
+   * issued FOR, so comparing that closed-over `code` against
+   * `shownCode.current` scopes a settling RPC exactly as `onTournamentUpdate`
+   * scopes a broadcast with `broadcastCode === code`. The ref is needed only
+   * because a promise, unlike a subscription handler, has no cleanup that
+   * could detach it when the route changes: the closure alone can only ever
+   * compare a code to itself.
+   *
+   * EVERY write a continuation makes is behind this guard — the two failure
+   * alerts, `run`'s `setBusy(null)` and `handleReport`'s `setReporting(null)`.
+   * That is the whole rule, and it is deliberately not "guard the writes that
+   * looked reachable": each unguarded one found so far turned out to have a
+   * concrete repro against a successor tournament's page. The counterpart is
+   * that the subscription effect resets each of those same pieces of state on
+   * a `:code` change, so declining a stale write here never strands anything.
    *
    * Assigned in the subscription effect rather than during render, and
    * deliberately immediately before the state resets there. That placement
@@ -135,9 +144,17 @@ export function TournamentPage() {
     let detach: (() => void) | null = null;
 
     // Everything below is scoped to ONE code. Re-running for a different code
-    // must not leave the previous tournament's view, removal or alert on
-    // screen; React bails out of these when the value is already identical, so
-    // this costs nothing on mount.
+    // must not leave the previous tournament's view, removal, alert or
+    // in-flight control state on screen; React bails out of these when the
+    // value is already identical, so this costs nothing on mount.
+    //
+    // `busy` is reset for the same reason as the rest, and the reset is the
+    // ONLY thing that clears it across a navigation: the settling continuation
+    // in `run` deliberately declines to (see there), so without this line an
+    // action dispatched against the PREVIOUS tournament would render a stuck,
+    // disabled control — "Ending…" — on a successor page that never dispatched
+    // it. The two halves are a pair: this reset owns the navigation case, the
+    // guard in `run` owns the stale-settlement case.
     //
     // The ref moves first, so that an RPC settling in the window between this
     // commit and this effect is covered by the reset that follows rather than
@@ -148,6 +165,7 @@ export function TournamentPage() {
     setFailure(null);
     setReporting(null);
     setOffline(false);
+    setBusy(null);
 
     // Built here, not per render: `tournamentSubscribers` is a `Set` keyed by
     // object identity, so a fresh handlers object on every render would churn
@@ -240,13 +258,23 @@ export function TournamentPage() {
       setBusy(kind);
       setFailure(null);
       const r = await action();
-      setBusy(null);
       // `code` is the tournament this action was dispatched for; every caller
-      // below sends it in the frame. Dropping the write when the viewer has
+      // below sends it in the frame. Dropping these writes when the viewer has
       // moved on is the same scoping `onTournamentUpdate` applies to a
       // broadcast — one tournament's rejection must never be attributed to
-      // another tournament's page.
-      if (!r.ok && shownCode.current === code) setFailure(failureLabel(r));
+      // another tournament's page, and neither must its settlement.
+      //
+      // `setBusy(null)` is inside the guard for a reason distinct from the
+      // alert's: an unscoped clear lets a PREVIOUS tournament's settlement
+      // re-enable a control that the tournament now on screen is holding
+      // disabled for its OWN in-flight action, which is exactly the window a
+      // duplicate dispatch needs. Skipping it strands nothing — the
+      // subscription effect already cleared `busy` on the navigation that made
+      // this continuation stale.
+      if (shownCode.current === code) {
+        setBusy(null);
+        if (!r.ok) setFailure(failureLabel(r));
+      }
       return r.ok;
     },
     [code],
@@ -274,7 +302,13 @@ export function TournamentPage() {
         const ok = await run("report", () =>
           reportMatchResult(code, pairingId, outcome),
         );
-        if (ok) setReporting(null);
+        // Scoped like every other continuation on this page. Not a no-op after
+        // a navigation: the viewer may already have opened the SUCCESSOR
+        // tournament's own report dialog, and an unscoped clear would close it
+        // under them, silently discarding the selection they had entered
+        // there. The dialog belonging to `code` was already dismissed by the
+        // subscription effect's `setReporting(null)` reset.
+        if (ok && shownCode.current === code) setReporting(null);
       })();
     },
     [run, reportMatchResult, code, reporting],

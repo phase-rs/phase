@@ -1153,4 +1153,174 @@ describe("TournamentPage :code navigation", () => {
       "The server rejected that: TOUR02 seed said no",
     );
   });
+
+  // The remaining three continuations, one test each. Every one of them leaves
+  // TOUR01's request UNSETTLED across the navigation, which is only possible
+  // because each gated helper filters its reply on `code`
+  // (`tournamentClient.ts`, `matchReply`): a `TournamentUpdate` for TOUR02
+  // cannot settle a TOUR01 request, and vice versa. That is what lets a stale
+  // settlement be delivered on its own, with nothing of the successor's in the
+  // same frame.
+
+  it("clears a busy control left in flight by the tournament the viewer left", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: ORGANIZER, TOUR02: ORGANIZER },
+    });
+    const { router } = await mountRoutedWith(fake, "TOUR01");
+
+    await user.click(screen.getByRole("button", { name: "End Tournament" }));
+    await settle();
+    // Two reach-guards: TOUR01's request really is in flight, and the control
+    // really is holding the busy label. Without the second, the assertion after
+    // the navigation would also pass against a page where `busy` was never set.
+    expect(fake.tally("EndTournament")).toBe(1);
+    expect(screen.getByRole("button", { name: "Ending…" })).toBeTruthy();
+
+    await navigateToCode(router, "TOUR02");
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+    expect(screen.getByText("Event TOUR02")).toBeTruthy();
+
+    // TOUR02 dispatched nothing, so nothing of TOUR02's may be held. TOUR01's
+    // `EndTournament` is still in flight at this point — the clear under test
+    // is the subscription effect's reset, not a settlement.
+    expect(fake.tally("EndTournament")).toBe(1);
+    const end = screen.getByRole("button", { name: "End Tournament" });
+    expect((end as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Ending…" })).toBeNull();
+  });
+
+  it("keeps the current tournament's busy control held when a stale action settles", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: ORGANIZER, TOUR02: ORGANIZER },
+    });
+    const { router } = await mountRoutedWith(fake, "TOUR01");
+
+    await user.click(screen.getByRole("button", { name: "End Tournament" }));
+    await settle();
+    expect(fake.tally("EndTournament")).toBe(1);
+
+    await navigateToCode(router, "TOUR02");
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+
+    // TOUR02 dispatches its OWN action, so `busy` now belongs to TOUR02 and
+    // its control is deliberately held disabled against a second dispatch.
+    await user.click(screen.getByRole("button", { name: "End Tournament" }));
+    await settle();
+    expect(fake.tally("EndTournament")).toBe(2);
+    expect((fake.frame("EndTournament", 1)?.data as { code: string }).code).toBe(
+      "TOUR02",
+    );
+    expect(screen.getByRole("button", { name: "Ending…" })).toBeTruthy();
+
+    // TOUR01's stale action settles now. Code-scoped, so this frame answers
+    // TOUR01's request and leaves TOUR02's in flight — the tally below pins
+    // that, since a settled TOUR02 request would make the assertion vacuous.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView("TOUR01") });
+    });
+    await settle();
+
+    expect(screen.getByRole("button", { name: "Ending…" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "End Tournament" })).toBeNull();
+
+    // Paired positive control: TOUR02's OWN settlement does release the
+    // control. Without it, a page that could never re-enable the button at all
+    // would satisfy the two assertions above.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+    expect(screen.getByRole("button", { name: "End Tournament" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Ending…" })).toBeNull();
+  });
+
+  it("keeps the successor tournament's open report dialog when a stale report settles", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: playerCredential("alice"),
+        TOUR02: playerCredential("alice"),
+      },
+    });
+    const { router } = await mountRoutedWith(fake, "TOUR01");
+
+    // A report is submitted on TOUR01 and left in flight.
+    await user.click(
+      within(yourMatchSection()).getByRole("button", { name: "Report Result" }),
+    );
+    await user.click(within(screen.getByRole("dialog")).getByLabelText("Alice"));
+    await user.click(screen.getByRole("button", { name: "Submit Result" }));
+    await settle();
+    expect(fake.tally("ReportMatchResult")).toBe(1);
+
+    await navigateToCode(router, "TOUR02");
+    // A distinct pairing id, so the dialog opened below is unambiguously
+    // TOUR02's own rather than a latched TOUR01 pairing that happens to match.
+    const tour02 = h2hView("TOUR02", {
+      pairings: [{ id: 2, round: 1, players: [ALICE, BOB], outcome: null }],
+    });
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: tour02 });
+    });
+    await settle();
+    // Reach-guard: the navigation already dismissed TOUR01's dialog, via the
+    // subscription effect's `setReporting(null)`.
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // The viewer opens TOUR02's dialog and enters a selection into it.
+    await user.click(
+      within(yourMatchSection()).getByRole("button", { name: "Report Result" }),
+    );
+    await user.click(within(screen.getByRole("dialog")).getByLabelText("Bob"));
+    expect(
+      (within(screen.getByRole("dialog")).getByLabelText("Bob") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+
+    // TOUR01's stale report settles SUCCESSFULLY now — the `ok` branch is the
+    // one that clears `reporting`, so an unscoped clear fires here.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView("TOUR01") });
+    });
+    await settle();
+
+    // TOUR02's dialog is untouched: still open, and the selection survives.
+    const dialog = within(screen.getByRole("dialog"));
+    expect((dialog.getByLabelText("Bob") as HTMLInputElement).checked).toBe(true);
+
+    // Paired positive control: TOUR02's OWN report does close TOUR02's dialog,
+    // so the assertions above are not measuring a dialog that can never close.
+    // The submitted frame is also what proves the surviving dialog was TOUR02's
+    // own — pairing 2, TOUR02 — and not a latched TOUR01 one.
+    await user.click(screen.getByRole("button", { name: "Submit Result" }));
+    await settle();
+    expect(fake.tally("ReportMatchResult")).toBe(2);
+    const sent = fake.frame("ReportMatchResult", 1)?.data as {
+      code: string;
+      pairing_id: number;
+      outcome: { Decisive: { winner: string } };
+    };
+    expect(sent.code).toBe("TOUR02");
+    expect(sent.pairing_id).toBe(2);
+    expect(sent.outcome.Decisive.winner).toBe("bob");
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: tour02 });
+    });
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
 });
