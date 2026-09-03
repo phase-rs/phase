@@ -16,6 +16,7 @@ import {
   type LobbyGameEntry,
   type LobbySource,
 } from "../../stores/multiplayerStore";
+import { assertNever } from "../../utils/assertNever";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
@@ -181,6 +182,12 @@ export function LobbyView({
           setPasswordInput("");
           return;
         }
+        default:
+          // The site that makes `AmbientLobbyFrame`'s exhaustiveness promise
+          // real. This is the union's only consumer, and a `void` callback
+          // swallows an unhandled `kind` silently, so without this arm a new
+          // broker frame would type-check and then be dropped by the view.
+          return assertNever(frame);
       }
     });
 

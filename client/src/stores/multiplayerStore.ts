@@ -323,8 +323,11 @@ const lobbySubscribers: Set<(games: LobbyGame[], source: LobbySource) => void> =
 /**
  * A frame a subscription socket carries outside the `LobbyUpdate` family.
  * Typed as a union rather than raw wire messages so consumers never parse
- * JSON, never see a frame they don't handle, and get an exhaustiveness
- * error here when the broker grows another ambient frame.
+ * JSON and never see a frame they don't handle. Growing this union is a
+ * compile error at every consumer that closes its `kind` switch with
+ * `assertNever` — today that is `LobbyView`'s `subscribeAmbientLobby`
+ * handler, the sole consumer, whose `default` arm is what turns a new
+ * variant into a `type-check` failure instead of a frame the view drops.
  */
 export type AmbientLobbyFrame =
   | { kind: "playerCount"; count: number }
@@ -779,6 +782,16 @@ interface MultiplayerActions {
    * a subscriber keeps receiving frames across a flap without ever holding
    * a socket reference. Player counts are recorded on `sourceStatus` as
    * well as fanned out — read them from there.
+   *
+   * Delivery is coupled to `subscribeLobby`, not to this registration: the
+   * per-channel ambient listeners attach only once a lobby subscriber is
+   * registered and are dropped when the *last* one leaves. So a caller that
+   * registers here without a live `subscribeLobby` subscription receives
+   * nothing — silently, with no error and no dial of its own; this action
+   * never opens a channel on its own behalf. Detaching is still required in
+   * that case: an un-detached callback would start receiving frames again
+   * the moment some other consumer's `subscribeLobby` re-attaches the
+   * listeners.
    */
   subscribeAmbientLobby: (
     onFrame: (frame: AmbientLobbyFrame, source: LobbySource) => void,
