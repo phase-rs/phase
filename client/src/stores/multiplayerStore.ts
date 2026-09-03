@@ -2262,8 +2262,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // client cannot speak, ON THE VERSIONS THAT SERVER LAST ANNOUNCED, can
         // only produce a rejected handshake and a toast. The qualifier is load
         // bearing: the verdict is a snapshot, so a server that upgrades is
-        // refused for up to the announce interval plus this client's directory
-        // TTL (~6 min today) before the next projection clears it. That is the
+        // refused for up to the announce interval plus the directory TTL after
+        // the next `LobbyView` mount (~6 min today); there is no timer, so a
+        // session that never remounts the lobby keeps the verdict. That is the
         // cost of deciding before the socket, and the escape hatch below is
         // what makes it recoverable. The verdict is READ here, never recomputed:
         // `serverProtocolRejection` stays the only protocol-window authority
