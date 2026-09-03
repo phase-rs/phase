@@ -705,12 +705,29 @@ export class LobbyDO {
    *  `AbortSignal.timeout`: the abort tears down the response body stream as
    *  well as the connection, so a server that trickles bytes throws inside the
    *  reader rather than hanging past the timeout. Nothing throws out of here —
-   *  the announcer gets a 4xx, never a 5xx. */
+   *  the announcer gets a 4xx, never a 5xx.
+   *
+   *  `redirect: "error"` is load-bearing twice over. The question this fetch
+   *  asks is whether THIS host serves an info document matching THIS
+   *  announcement, and a redirect answers a different question — some other
+   *  host does — so following one would verify the wrong server even with no
+   *  attacker present. It also closes the pivot: announcing is open by design
+   *  (see the charter), so a follower would let any caller aim the verifier at
+   *  a public hostname that redirects wherever it likes. Failing closed on a
+   *  redirect keeps the destination equal to the announced one.
+   *
+   *  What this deliberately does NOT do is resolve the hostname and reject
+   *  private, loopback or link-local addresses. Workers exposes no DNS
+   *  resolution API and no connection-time hook, so that check cannot be
+   *  written here; the platform's own edge is what keeps a Worker fetch off
+   *  RFC1918 space. Stated rather than left implied, so nobody reads the
+   *  absence as an oversight. */
   private async fetchInfoDocument(infoUrl: string): Promise<InfoFetch> {
     try {
       const response = await fetch(infoUrl, {
         signal: AbortSignal.timeout(INFO_FETCH_TIMEOUT_MS),
         headers: { accept: "application/json" },
+        redirect: "error",
       });
       // A 404 and a refused connection are one fact here: no usable document.
       // `body === null` is handled explicitly rather than optional-chained,
