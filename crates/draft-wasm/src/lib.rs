@@ -1177,20 +1177,10 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
             );
 
             // CR 903.13f(1): "A player's deck must contain at least 60 cards".
-            // This check enforces THIS SESSION'S configured floor,
-            // `min_deck_size`, not that literal 60 -- and on the only pod shape
-            // that can reach it, the two are not the same number.
-            // `DeckAddableCardPolicy::CustomOnly` is written only by
-            // `create_multiplayer_draft_inner`'s Cube arm, which also takes
-            // `min_deck_size` from the host's cube settings, where the Set arm
-            // takes it from the procedure table and hardcodes
-            // `standard_basics()`. The host's control is
-            // `client/src/components/draft/CubeSetupPanel.tsx`, range 1..=100,
-            // default 40. So on a cube-hosted Commander pod this refuses a deck
-            // short of the SESSION's floor; a 40..=59-card deck at the default
-            // floor is still short of CR 903.13f(1) and is NOT caught here.
-            // Making the floor itself CR-correct is a separate, pre-existing gap
-            // and is deliberately out of this phase's scope.
+            // New Commander Cube sessions clamp configured `min_deck_size` to
+            // the engine-published Cube floor, so this guard enforces at least
+            // 60 for them. Restored sessions retain their persisted floor; this
+            // guard enforces that stored value without rewriting snapshot history.
             //
             // `min_deck_size` is also the same value `apply_submit_deck` hands
             // `validate_limited_deck` for the human on this pod
