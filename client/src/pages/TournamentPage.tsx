@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router";
 
@@ -56,6 +56,28 @@ export function TournamentPage() {
     null,
   );
 
+  /**
+   * The code the page is showing **now**, readable from an async continuation.
+   *
+   * `run` and `seed` close over the code their request was issued FOR, so
+   * comparing that closed-over `code` against `shownCode.current` scopes a
+   * settling RPC exactly as `onTournamentUpdate` scopes a broadcast with
+   * `broadcastCode === code`. The ref is needed only because a promise, unlike
+   * a subscription handler, has no cleanup that could detach it when the route
+   * changes: the closure alone can only ever compare a code to itself.
+   *
+   * Assigned in the subscription effect rather than during render, and
+   * deliberately immediately before the state resets there. That placement
+   * covers the one window the guard alone cannot: a continuation landing
+   * between the commit that changed `code` and that effect still passes the
+   * guard, but its write is then cleared by the `setFailure(null)` reset
+   * queued behind it — React flushes pending passive effects before starting
+   * the next render, so the two updates apply in that order. That much is
+   * reasoned from React's scheduling; what the tests measure is the guard's
+   * own path, where the effect has already run.
+   */
+  const shownCode = useRef(code);
+
   const subscribeTournaments = useMultiplayerStore(
     (s) => s.subscribeTournaments,
   );
@@ -101,7 +123,11 @@ export function TournamentPage() {
    */
   const seed = useCallback(async () => {
     const r = await getTournament(code);
-    if (!r.ok) setFailure(failureLabel(r));
+    // Code-scoped like `onTournamentUpdate` below: `code` is the tournament
+    // this request was issued for, `shownCode.current` the one on screen when
+    // it settled. A failure for a tournament the viewer has already navigated
+    // away from is dropped, never rendered against its successor.
+    if (!r.ok && shownCode.current === code) setFailure(failureLabel(r));
   }, [getTournament, code]);
 
   useEffect(() => {
@@ -112,6 +138,11 @@ export function TournamentPage() {
     // must not leave the previous tournament's view, removal or alert on
     // screen; React bails out of these when the value is already identical, so
     // this costs nothing on mount.
+    //
+    // The ref moves first, so that an RPC settling in the window between this
+    // commit and this effect is covered by the reset that follows rather than
+    // by the guard — see `shownCode`.
+    shownCode.current = code;
     setView(null);
     setRemoved(false);
     setFailure(null);
@@ -119,8 +150,28 @@ export function TournamentPage() {
     setOffline(false);
 
     // Built here, not per render: `tournamentSubscribers` is a `Set` keyed by
-    // object identity, so exactly one handlers object must serve the whole
-    // subscription lifetime or the shared acquire/release refcount thrashes.
+    // object identity, so a fresh handlers object on every render would churn
+    // the shared acquire/release refcount on every keystroke of page state.
+    // What this buys is ONE handlers object per subscribed code — not one for
+    // the component's whole lifetime, which a `code` in the dependency array
+    // rules out by construction.
+    //
+    // A `:code` change therefore really does re-subscribe, and with this page
+    // as the only subscriber the refcount really does touch 0 on the way: React
+    // runs the old cleanup (delete + `UnsubscribeLobby`) before this effect's
+    // async `subscribeTournaments` re-acquires and sends a fresh
+    // `SubscribeLobby`. Safe rather than free, on three counts — the first two
+    // measured by the `:code` navigation test, the third by construction:
+    //  1. the release drops the cached list snapshot
+    //     (`detachSharedSubscription`), so the re-acquire cannot fan a previous
+    //     tournament's stale list into the new handlers — a re-fan would show
+    //     up there as a second seed for the new code;
+    //  2. the re-acquire re-registers this connection with the broker's
+    //     delivery set, which is per-connection, not per-subscriber
+    //     (`multiplayerStore.ts`, `lobbySubscriptionRefCount`), and the new
+    //     code's broadcasts do land on the re-attached handlers;
+    //  3. any broadcast missed inside the gap is superseded by this run's own
+    //     `seed()` below, which re-fetches the new code's view unconditionally.
     const handlers: TournamentSubscriptionHandlers = {
       // The code conjunct is load-bearing: `TournamentUpdate` is a broadcast
       // for every tournament on the socket, not just this one.
@@ -176,6 +227,10 @@ export function TournamentPage() {
    * already settled the promise. The alert is therefore **best-effort**, and
    * the rendered state is always the ambient subscription's. Do not "fix" this
    * into an authoritative signal.
+   *
+   * Best-effort is not the same as unscoped, though: the alert belongs to the
+   * tournament the action was dispatched for, so the write is gated on the
+   * page still showing that tournament — see `shownCode`.
    */
   const run = useCallback(
     async (
@@ -186,10 +241,15 @@ export function TournamentPage() {
       setFailure(null);
       const r = await action();
       setBusy(null);
-      if (!r.ok) setFailure(failureLabel(r));
+      // `code` is the tournament this action was dispatched for; every caller
+      // below sends it in the frame. Dropping the write when the viewer has
+      // moved on is the same scoping `onTournamentUpdate` applies to a
+      // broadcast — one tournament's rejection must never be attributed to
+      // another tournament's page.
+      if (!r.ok && shownCode.current === code) setFailure(failureLabel(r));
       return r.ok;
     },
-    [],
+    [code],
   );
 
   const handleStart = useCallback(() => {

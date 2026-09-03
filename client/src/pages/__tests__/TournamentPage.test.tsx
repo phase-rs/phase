@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router";
+import {
+  MemoryRouter,
+  Route,
+  RouterProvider,
+  Routes,
+  createMemoryRouter,
+} from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // See `TournamentLandingPage.test.tsx` for why this shim is copied rather than
@@ -293,6 +299,49 @@ function renderPage(code = "TOUR01") {
       </Routes>
     </MemoryRouter>,
   );
+}
+
+/**
+ * Mounts the page under a DATA router, so a test can perform a real `:code`
+ * navigation. `renderPage`'s `MemoryRouter` cannot: `initialEntries` is read
+ * once at mount, and re-rendering it with a different entry changes nothing.
+ *
+ * The route pattern is `App.tsx`'s own, so `/tournament/TOUR01` →
+ * `/tournament/TOUR02` re-matches the SAME route and React keeps the SAME
+ * `TournamentPage` instance — which is the scenario under test. A remount
+ * would make the stale-failure test below vacuous, because a `setState` from
+ * an unmounted component's continuation is a silent no-op and would "pass"
+ * with the guard removed.
+ */
+function renderRoutedPage(code = "TOUR01") {
+  const router = createMemoryRouter(
+    [{ path: "/tournament/:code", element: <TournamentPage /> }],
+    { initialEntries: [`/tournament/${code}`] },
+  );
+  return { ...render(<RouterProvider router={router} />), router };
+}
+
+type TestRouter = ReturnType<typeof createMemoryRouter>;
+
+async function navigateToCode(router: TestRouter, code: string): Promise<void> {
+  await act(async () => {
+    await router.navigate(`/tournament/${code}`);
+  });
+  await settle();
+}
+
+/** `renderRoutedPage` + the mount seed, settled and answered for `code`. */
+async function mountRoutedWith(
+  fake: FakeSocket,
+  code: string,
+): Promise<{ router: TestRouter }> {
+  const { router } = renderRoutedPage(code);
+  await settle();
+  await act(async () => {
+    fake.deliver("TournamentUpdate", { code, view: h2hView(code) });
+  });
+  await settle();
+  return { router };
 }
 
 /** Mounts the page, settles the subscription, and seeds it with `view`. */
@@ -937,5 +986,171 @@ describe("TournamentPage catalog completeness", () => {
       const cell = within(bodyRows[index]).getAllByRole("cell")[1];
       expect(cell.textContent).toMatch(new RegExp(`^${name}`));
     });
+  });
+});
+
+// ── A `:code` change re-scopes the whole page ────────────────────────────
+//
+// The route param is the page's ONE identity binding, and nothing else in
+// this file exercises a change to it. All three tests below navigate for
+// real, within one mounted `TournamentPage` instance.
+
+describe("TournamentPage :code navigation", () => {
+  it("re-seeds for the new code and clears the previous tournament first", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { router } = await mountRoutedWith(fake, "TOUR01");
+
+    // Reach-guards: the first tournament really rendered, from its own seed.
+    expect(screen.getByText("Event TOUR01")).toBeTruthy();
+    expect(fake.tally("GetTournament")).toBe(1);
+
+    // Put a list push on the wire BEFORE navigating, so the store is holding a
+    // `tournamentListSnapshot` when the subscription is released. Its own
+    // re-seed (tally 1 → 2) is the reach-guard that the snapshot is really
+    // cached: `subscribeTournaments` fans a cached snapshot straight into a
+    // newly attached handlers object, so if the release did not drop it, the
+    // re-acquire below would fire a SECOND seed for the new code.
+    await act(async () => {
+      fake.deliver("TournamentListUpdate", { tournaments: [] });
+    });
+    await settle();
+    expect(fake.tally("GetTournament")).toBe(2);
+    fake.clearSent();
+
+    await navigateToCode(router, "TOUR02");
+
+    // (b) The previous tournament is off the screen BEFORE the new one loads —
+    // this is the effect's `setView(null)` reset, not a slow re-render.
+    expect(screen.queryByText("Event TOUR01")).toBeNull();
+    expect(screen.getByText("Loading tournament…")).toBeTruthy();
+    expect(screen.getByText("Tournament TOUR02")).toBeTruthy();
+
+    // (a) ...and a fresh `GetTournament` went out, for the NEW code.
+    //
+    // What this pins is that the subscription effect RE-RUNS on a `:code`
+    // change — measured, not assumed: with the effect's dependency array cut
+    // to `[subscribeTournaments]` all three tests in this block redden. It is
+    // deliberately not phrased as "`code` is in the deps", because two deps
+    // carry that today (`code` itself, and `seed`, which closes over `code`),
+    // so removing either one alone leaves the effect re-running and every
+    // assertion here green.
+    //
+    // EXACTLY one is the second half of the assertion: it is also what proves
+    // the release dropped its cached list snapshot, since a re-fanned snapshot
+    // would have added a second `GetTournament` for TOUR02 here.
+    expect(fake.tally("GetTournament")).toBe(1);
+    expect((fake.frame("GetTournament")?.data as { code: string }).code).toBe(
+      "TOUR02",
+    );
+
+    // The re-subscribe the effect's comment describes, measured rather than
+    // asserted: with this page as the sole subscriber the shared refcount does
+    // reach 0 (one `UnsubscribeLobby` from the old cleanup) and is then
+    // re-acquired (one fresh `SubscribeLobby`) — the mount's own subscribe is
+    // excluded by the `clearSent()` above.
+    expect(fake.tally("UnsubscribeLobby")).toBe(1);
+    expect(fake.tally("SubscribeLobby")).toBe(1);
+
+    // And the new code's broadcast lands on the re-attached handlers, which is
+    // what makes that transient release harmless.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+    expect(screen.getByText("Event TOUR02")).toBeTruthy();
+  });
+
+  it("drops an in-flight failure for the tournament the viewer left", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: ORGANIZER, TOUR02: ORGANIZER },
+    });
+    const { router } = await mountRoutedWith(fake, "TOUR01");
+
+    await user.click(screen.getByRole("button", { name: "End Tournament" }));
+    await settle();
+    // Reach-guard: TOUR01's request really is in flight, so the `Error` frame
+    // below has something of TOUR01's to settle.
+    expect(fake.tally("EndTournament")).toBe(1);
+
+    await navigateToCode(router, "TOUR02");
+    // Settle TOUR02's OWN seed before the shared `Error` frame goes out: an
+    // `Error` carries no correlator and settles every request in flight on the
+    // socket (`tournamentClient.ts` header, part 5), and a failure for TOUR02's
+    // seed would be a legitimate alert that masks what this test measures.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+    expect(screen.getByText("Event TOUR02")).toBeTruthy();
+
+    // TOUR01's rejection arrives now, against a page showing TOUR02.
+    await act(async () => {
+      fake.deliver("Error", { message: "TOUR01 said no" });
+    });
+    await settle();
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/TOUR01 said no/)).toBeNull();
+
+    // Paired positive control, same page and same frame type: TOUR02's own
+    // rejection DOES render. Without it, a page that had simply lost its alert
+    // region would satisfy the two assertions above.
+    await user.click(screen.getByRole("button", { name: "End Tournament" }));
+    await settle();
+    expect(fake.tally("EndTournament")).toBe(2);
+    await act(async () => {
+      fake.deliver("Error", { message: "TOUR02 said no" });
+    });
+    await settle();
+    expect(screen.getByRole("alert").textContent).toBe(
+      "The server rejected that: TOUR02 said no",
+    );
+  });
+
+  // The same scoping on the OTHER writer. `seed` is the second of the two
+  // `setFailure` call sites, and it settles on a different frame from `run`'s.
+  it("drops an in-flight seed failure for the tournament the viewer left", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { router } = renderRoutedPage("TOUR01");
+    await settle();
+    // TOUR01's mount seed is deliberately left UNANSWERED, so it is still in
+    // flight across the navigation below.
+    expect(fake.tally("GetTournament")).toBe(1);
+
+    await navigateToCode(router, "TOUR02");
+    // TOUR02's own seed is answered first, for the same reason as above: the
+    // `Error` frame settles everything still in flight.
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+    });
+    await settle();
+    expect(screen.getByText("Event TOUR02")).toBeTruthy();
+
+    await act(async () => {
+      fake.deliver("Error", { message: "TOUR01 seed said no" });
+    });
+    await settle();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/TOUR01 seed said no/)).toBeNull();
+
+    // Paired positive control on the seed path itself: a list push re-seeds
+    // TOUR02, and THAT failure renders.
+    await act(async () => {
+      fake.deliver("TournamentListUpdate", { tournaments: [] });
+    });
+    await settle();
+    expect(fake.tally("GetTournament")).toBe(3);
+    await act(async () => {
+      fake.deliver("Error", { message: "TOUR02 seed said no" });
+    });
+    await settle();
+    expect(screen.getByRole("alert").textContent).toBe(
+      "The server rejected that: TOUR02 seed said no",
+    );
   });
 });
