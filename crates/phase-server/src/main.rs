@@ -33,7 +33,7 @@ use engine::game::validate_name_deck_for_format_full;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, TrustedGameStateEnvelope};
 use engine::types::interaction::InteractionSubmission;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
@@ -1158,6 +1158,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
@@ -1417,6 +1418,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -5272,6 +5274,9 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
                 message,
             })
         }
+        ClientMessage::ExportAuthoritativeState => {
+            Some(ServerMessage::AuthoritativeStateExportFailed { message })
+        }
         ClientMessage::ClientHello { .. }
         | ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -6482,6 +6487,49 @@ async fn handle_client_message(
                 }
                 _ => ServerMessage::ManaPaymentPreviewFailed {
                     request_id,
+                    message: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
+        ClientMessage::ExportAuthoritativeState => {
+            // The native P2P host is always Player 1 (seat zero). Its local
+            // server deliberately redacts normal broadcast snapshots per
+            // viewer, but the host needs an unredacted snapshot to report an
+            // engine stall. The export is a trusted engine envelope, not a
+            // PersistedSession, so reconnect tokens and server metadata never
+            // leave the server.
+            let response = match (identity.game_code.as_deref(), identity.player_id) {
+                (Some(game_code), Some(PlayerId(0))) => {
+                    let mut manager = state.lock().await;
+                    match manager.sessions.get_mut(game_code) {
+                        Some(session) => {
+                            let mut snapshot = session.state.clone();
+                            snapshot.capture_rng_word_pos();
+                            match serde_json::to_string(&TrustedGameStateEnvelope::capture(
+                                snapshot,
+                            )) {
+                                Ok(state) => ServerMessage::AuthoritativeStateExport { state },
+                                Err(error) => ServerMessage::AuthoritativeStateExportFailed {
+                                    message: format!(
+                                        "Failed to serialize authoritative game state: {error}"
+                                    ),
+                                },
+                            }
+                        }
+                        None => ServerMessage::AuthoritativeStateExportFailed {
+                            message: "Game session is no longer available".to_string(),
+                        },
+                    }
+                }
+                (Some(_), Some(_)) => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Only the game host can export authoritative state".to_string(),
+                },
+                _ => ServerMessage::AuthoritativeStateExportFailed {
                     message: "Not in a game".to_string(),
                 },
             };
@@ -12621,6 +12669,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -12708,6 +12757,13 @@ mod mode_gate_tests {
             ),
             Some(ServerMessage::ManaPaymentPreviewFailed { request_id: 5, message }) if message == "disabled"
         ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::ExportAuthoritativeState,
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::AuthoritativeStateExportFailed { message }) if message == "disabled"
+        ));
         assert!(
             operation_failed_message(&ClientMessage::ConcedeMatch, "disabled".to_string(),)
                 .is_none()
@@ -12777,6 +12833,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
             ClientMessage::ConcedeMatch,

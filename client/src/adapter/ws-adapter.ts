@@ -203,6 +203,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 56 — Host-only authoritative-state export request/response variants. Native
+ *      P2P sends each player a redacted view, so the host must ask its local
+ *      server for the trusted engine envelope rather than export that view.
  * 55 — DerivedViews.room_half_identities publishes both halves of every
  *      battlefield Room in printed order, resolved through the COPIED halves
  *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
@@ -388,7 +391,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 55;
+export const PROTOCOL_VERSION = 56;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -616,6 +619,10 @@ export class WebSocketAdapter implements EngineAdapter {
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
   >();
+  private pendingAuthoritativeStateExport: {
+    resolve: (state: string) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   /** Starting-player contest event captured from the initial GameStarted
@@ -974,6 +981,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
+      this.rejectAuthoritativeStateExport(
+        new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
+      );
       this.rejectPregameMutation(
         new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
       );
@@ -1070,6 +1080,27 @@ export class WebSocketAdapter implements EngineAdapter {
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  /**
+   * Requests the server-owned trusted engine envelope. The server authorizes
+   * this separately from ordinary redacted state broadcasts.
+   */
+  async exportPersistenceState(): Promise<string> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    if (this.pendingAuthoritativeStateExport) {
+      throw new AdapterError("WS_ERROR", "Authoritative-state export already in progress", false);
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.pendingAuthoritativeStateExport = { resolve, reject };
+      if (!this.send({ type: "ExportAuthoritativeState" })) {
+        this.pendingAuthoritativeStateExport = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to request authoritative state", true));
       }
     });
   }
@@ -1198,6 +1229,9 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingReject = null;
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectAuthoritativeStateExport(
+      new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
     );
     this.rejectPregameMutation(
       new AdapterError("WS_CLOSED", "Adapter disposed during seat mutation", true),
@@ -1431,6 +1465,11 @@ export class WebSocketAdapter implements EngineAdapter {
       reject(error);
     }
     this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectAuthoritativeStateExport(error: Error): void {
+    this.pendingAuthoritativeStateExport?.reject(error);
+    this.pendingAuthoritativeStateExport = null;
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -1805,6 +1844,36 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingManaPaymentPreviews.delete(data.request_id);
           pending.reject(new AdapterError("WS_ERROR", data.message, false));
         }
+        break;
+      }
+
+      case "AuthoritativeStateExport": {
+        const data = msg.data as { state?: unknown };
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        if (pending) {
+          if (typeof data.state === "string") {
+            pending.resolve(data.state);
+          } else {
+            pending.reject(new AdapterError(
+              "WS_ERROR",
+              "Server sent an invalid authoritative-state export.",
+              false,
+            ));
+          }
+        }
+        break;
+      }
+
+      case "AuthoritativeStateExportFailed": {
+        const data = msg.data as { message?: unknown };
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        pending?.reject(new AdapterError(
+          "WS_ERROR",
+          typeof data.message === "string" ? data.message : "Authoritative-state export failed.",
+          false,
+        ));
         break;
       }
 

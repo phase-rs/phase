@@ -151,6 +151,36 @@ describe("WebSocketAdapter", () => {
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
   });
 
+  it("exports only the trusted snapshot returned by the server", async () => {
+    const exported = adapter.exportPersistenceState();
+
+    expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ExportAuthoritativeState" }));
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "AuthoritativeStateExport", data: { state: "{\"state\":{}}" } }),
+    );
+
+    await expect(exported).resolves.toBe("{\"state\":{}}");
+  });
+
+  it("rejects an authoritative export failure without ending the session", async () => {
+    const exported = adapter.exportPersistenceState();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "AuthoritativeStateExportFailed",
+        data: { message: "Only the game host can export authoritative state" },
+      }),
+    );
+
+    await expect(exported).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "Only the game host can export authoritative state",
+      recoverable: false,
+    });
+  });
+
 /* Legacy browser-owned Resolve All transport coverage removed with the transport.
   it("publishes a Resolve All decision state before resolving its acknowledgement", async () => {
     const listener = vi.fn();
