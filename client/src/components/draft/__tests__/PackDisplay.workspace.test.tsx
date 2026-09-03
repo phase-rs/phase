@@ -777,7 +777,11 @@ describe("PackDisplay local workspace controller", () => {
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
   });
 
-  it.each(["desktop", "phone-portrait", "tablet-landscape"] as const)("keeps_%s_pack_cards_geometry_stable_on_hover", (responsiveLayout) => {
+  it.each([
+    ["desktop", true],
+    ["phone-portrait", false],
+    ["tablet-landscape", false],
+  ] as const)("uses_the_desktop_hover_scale_only_for_%s", (responsiveLayout, hasDesktopHover) => {
     const rendered = render(
       <PackDisplay
         controller={controller()}
@@ -789,7 +793,7 @@ describe("PackDisplay local workspace controller", () => {
     const packCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
 
     expect(packCard).toHaveClass("cursor-pointer", "hover:ring-white/20");
-    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(false);
+    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(hasDesktopHover);
     expect(packCard.classList.contains("hover:scale-[1.08]")).toBe(false);
   });
 
@@ -1098,8 +1102,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const firstCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const cardButton = within(firstCard).getByRole("button", { name: "Same" });
-    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:ring-white/20");
-    expect(firstCard).not.toHaveClass("hover:scale-[1.05]");
+    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.05]", "hover:ring-white/20");
 
     fireEvent.click(cardButton, { detail: 1, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
