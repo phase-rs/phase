@@ -4997,6 +4997,109 @@ mod tests {
         assert!(state.objects[&source_id].counters.is_empty());
     }
 
+    /// CR 122.1 + CR 614.1 + CR 608.2h: a v1 save parked an accepted
+    /// counter-removal replacement after removing its current tuple from the
+    /// queue. Restore reconstructs that tuple from `pending_replacement`, so
+    /// accepting the replacement counts it before the queued tail drains.
+    #[test]
+    fn legacy_counter_removal_replacement_pause_recovers_in_flight_removal() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(916),
+            PlayerId(0),
+            "Legacy Counter Removal Source".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter-removal source exists");
+            source.counters.insert(CounterType::Plus1Plus1, 1);
+            source.counters.insert(charge.clone(), 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            pending_effect: Box::new(make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: None,
+                    count: QuantityExpr::Fixed { value: -1 },
+                    target: TargetFilter::Any,
+                },
+                source_id,
+            )),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![
+                    CounterRemoveChoice {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: 1,
+                    },
+                    CounterRemoveChoice {
+                        counter_type: charge.clone(),
+                        count: 1,
+                    },
+                ],
+            },
+        )
+        .expect("production removal choice creates its first replacement prompt");
+
+        let queue = state
+            .active_counter_removals()
+            .expect("counter-removals queue owns the paused prompt")
+            .clone();
+        let mut legacy_queue = serde_json::to_value(queue).expect("queue serializes");
+        legacy_queue["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
+        legacy_queue["remaining"] =
+            serde_json::to_value(vec![(charge.clone(), 1_u32)]).expect("legacy tail serializes");
+        legacy_queue
+            .as_object_mut()
+            .expect("queue is an object")
+            .remove("in_flight");
+
+        let mut v1 = serde_json::to_value(state).expect("paused game state serializes");
+        v1.as_object_mut()
+            .expect("game state is an object")
+            .remove("resolution_stack");
+        v1["pending_counter_removals"] = legacy_queue;
+        v1["resolution_state_version"] = serde_json::json!(1);
+
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 counter-removal prompt restores");
+        let mut state = restored.into_game_state();
+        let in_flight = state
+            .active_counter_removals()
+            .expect("restored counter-removals queue owns the prompt")
+            .in_flight
+            .as_ref()
+            .expect("legacy replacement prompt recovers its current removal");
+        assert_eq!(in_flight.removal.object_id, source_id);
+        assert_eq!(in_flight.removal.counter_type, CounterType::Plus1Plus1);
+        assert_eq!(in_flight.removal.count, 1);
+        assert_eq!(in_flight.counter_count_before, 1);
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("replacement choice resumes the legacy counter-removals queue");
+        }
+
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.objects[&source_id].counters.is_empty());
+    }
+
     /// CR 122.1 + CR 616.1: the production multi-target counter-addition
     /// resolver parks its remaining recipients and completion in CounterAdditions
     /// while each recipient's placement chooses among noncommuting replacements.
