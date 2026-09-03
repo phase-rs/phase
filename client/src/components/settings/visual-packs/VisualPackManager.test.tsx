@@ -2179,9 +2179,8 @@ describe("VisualPackManager offline network boundary", () => {
     vi.mocked(fixture.value.curatedSelector).mockReturnValue(selector.promise);
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Offline card images/i);
-
-    fireEvent.click(screen.getByRole("radio", { name: /one image per card/i }));
+    const curatedSelection = await screen.findByRole("radio", { name: /one image per card/i });
+    fireEvent.click(curatedSelection);
     await waitFor(() => expect(fixture.value.curatedSelector).toHaveBeenCalledTimes(1));
     await act(async () => { selector.resolve({ kind: "curated", membershipDigest: CURATED_DIGEST }); });
     expect(screen.getByRole("button", { name: /recalculate size/i })).toBeEnabled();
@@ -2200,9 +2199,8 @@ describe("VisualPackManager offline network boundary", () => {
     const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: curatedSummary() })));
     platform.load.mockResolvedValue(fixture.value);
     render(<VisualPackManager />);
-    await screen.findByText(/Offline card images/i);
-
-    fireEvent.click(screen.getByRole("radio", { name: /one image per card/i }));
+    const curatedSelection = await screen.findByRole("radio", { name: /one image per card/i });
+    fireEvent.click(curatedSelection);
     const sync = await screen.findByRole("button", { name: /sync images/i });
     await waitFor(() => expect(sync).toBeEnabled());
     expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
