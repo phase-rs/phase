@@ -292,11 +292,15 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
             })}
             {/* Directory listings, in the same list rather than a section of
                 their own: one list, distinguished by an origin badge. A row
-                this client cannot speak to has nothing to enable, so it carries
-                no control — the greyed line with the server's version is the
-                whole affordance. Directory rows never get `Remove` or `Use for
-                hosting`: nothing is stored to remove, and hosting placement
-                over a listing is a later phase's decision. */}
+                this client cannot speak to carries no toggle at all — it is
+                never dialed, so there is nothing to enable and nothing to
+                switch off, and the greyed line with the server's version is the
+                whole affordance. (It does stay in `lobbySources`, and the store
+                refuses it a socket on every pass — the toggle is absent because
+                it would be inert, not because the row is gone.) Directory rows
+                never get `Remove` or `Use for hosting`: nothing is stored to
+                remove, and hosting placement over a listing is a later phase's
+                decision. */}
             {directoryRows.map(({ entry, enabled }) => {
               const incompatible = entry.rejection !== null;
               const status = enabled

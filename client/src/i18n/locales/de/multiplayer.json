@@ -149,7 +149,7 @@
     "sourceDuplicate": "Dieser Server ist bereits eine Lobby-Quelle.",
     "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden.",
     "directoryOrigin": "Verzeichnis",
-    "sourceScore": "Bewertung {{score}}",
+    "sourceScore": "Punktzahl {{score}}",
     "enable": "Aktivieren",
     "disable": "Deaktivieren",
     "incompatibleVersion": "Inkompatibel — Serverversion {{version}}"

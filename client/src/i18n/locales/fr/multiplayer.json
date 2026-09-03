@@ -152,7 +152,7 @@
     "sourceScore": "Score {{score}}",
     "enable": "Activer",
     "disable": "Désactiver",
-    "incompatibleVersion": "Incompatible — version du serveur {{version}}"
+    "incompatibleVersion": "Incompatible — version du serveur {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Aucune salle de draft disponible",

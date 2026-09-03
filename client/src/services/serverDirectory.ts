@@ -38,7 +38,11 @@ export const DIRECTORY_TTL_MS = 5 * 60_000;
  *  `MAX_USER_LOBBY_SOURCES`. The directory is operator-curated, but its body is
  *  still external input and a list of unbounded length is an unbounded number
  *  of WebSockets. Rows are ranked by score before the cut, so the cap drops the
- *  worst-evidenced servers, never an arbitrary suffix of a SQL scan order. */
+ *  worst-evidenced servers among rows the directory could actually rank. When
+ *  scores TIE — including the all-unranked case, where every row is below
+ *  Rust's `SCORE_MIN_SAMPLES` (or has zero total weight) and so projects to
+ *  `undefined` — the sort is stable and leaves the directory's own order
+ *  intact, so the cut is scan-order among equals. */
 export const MAX_DIRECTORY_LOBBY_SOURCES = 8;
 
 /** Bound on one directory read. One precedent in the client:
@@ -48,12 +52,14 @@ const DIRECTORY_FETCH_TIMEOUT_MS = 5_000;
 /** Rust's `lobby_broker::directory::Score` in its serde form, as the Worker
  *  re-declares it. The field names are Rust's, not a TypeScript restatement.
  *
- *  `value` is null below Rust's `SCORE_MIN_SAMPLES` while `samples` is still
- *  populated — that is what lets a consumer tell "too little evidence to rank"
+ *  `value` is null when Rust could not rank the server — below its
+ *  `SCORE_MIN_SAMPLES`, or with zero total weight — while `samples` is still
+ *  populated, which is what lets a consumer tell "too little evidence to rank"
  *  from "never reported". A consumer gating a health hint on `score === null`
- *  alone will render one off a three-sample window. Nothing in this build reads
- *  the components; they are carried on `DirectorySource.row.score` for the
- *  phase that adds health hints. */
+ *  alone will render one off a three-sample window, because that window arrives
+ *  as a present object whose `value` is null. Nothing in this build reads the
+ *  components; they are carried on `DirectorySource.row.score` for the phase
+ *  that adds health hints. */
 export interface WireScore {
   /** 0–100, or null when there is too little evidence to rank. */
   value: number | null;
@@ -182,9 +188,12 @@ export interface DirectorySource {
  * Rebuilt from `host` rather than by mutating `URL.protocol`, because the
  * announced path (`/ws`) has to be dropped too: `/servers` is served at the
  * Worker root. A self-hosted build whose official URL is its own phase-server
- * will `GET /servers` on a server with no such route, take the non-2xx path and
- * list presets plus hand-added sources only — the intended behaviour, not a
- * degradation.
+ * will `GET /servers` on a server with no such route and list presets plus
+ * hand-added sources only — the intended behaviour, not a degradation. Which
+ * arm it lands on depends on that server's CORS: under phase-server's default
+ * permissive policy the GET resolves 404 and backs off for the TTL, while a
+ * pinned `--cors-origin` makes the browser reject it, so nothing is stamped and
+ * the next lobby mount retries.
  */
 export function directoryUrl(): string {
   const parsed = parseWebSocketUrl(OFFICIAL_MULTIPLAYER_SERVER_URL);
@@ -252,8 +261,10 @@ export function projectDirectoryRow(value: unknown): DirectorySource | null {
   // A row is an authority the user never typed, so it must never downgrade this
   // client to plaintext. Rust already refuses a non-`wss` announcement; this is
   // the client refusing to TRUST that, which is what a boundary validator is
-  // for. A `ws://` row would in any case be blocked by mixed-content policy at
-  // handshake time, i.e. as an indistinguishable "unreachable".
+  // for. This guard is the ONLY refusal on the paths where mixed-content policy
+  // does not apply — the Tauri shell and an `http://localhost` dev page both
+  // allow a plaintext socket — so it cannot be justified as a redundant
+  // belt-and-braces check on top of the browser's.
   if (!parsed || parsed.protocol !== "wss:") return null;
 
   const row: DirectoryRow = {
@@ -328,8 +339,19 @@ export function projectDirectoryBody(value: unknown): DirectorySource[] | null {
     if (projected.some((existing) => existing.source.url === source.source.url)) continue;
     projected.push(source);
   }
+  // Dedupe runs BEFORE the sort, so a canonicalisation collision keeps the
+  // FIRST row in body order rather than the better-scored one. Deliberate: two
+  // rows that canonicalise to one client URL are one server announcing itself
+  // twice, and the directory's own order is the only tie-break that does not
+  // invent a preference between two records of the same authority.
+  //
   // Rank before the cut so the bound drops the worst-evidenced servers rather
-  // than an arbitrary suffix of the directory's scan order.
+  // than an arbitrary suffix of the directory's scan order — but only among
+  // rows the directory could rank. When scores tie, including the all-unranked
+  // case below `SCORE_MIN_SAMPLES`, every row projects to `undefined` (→ -1),
+  // the comparator returns 0, and this stable sort leaves the directory's own
+  // order, so the cut is scan-order among equals. V-U11f pins that semantics,
+  // so introducing a tie-breaker later is a visible test change.
   projected.sort((a, b) => (b.source.score ?? -1) - (a.source.score ?? -1));
   return projected.slice(0, MAX_DIRECTORY_LOBBY_SOURCES);
 }
@@ -368,8 +390,10 @@ export function refreshServerDirectory(): Promise<void> {
       // RESOLVES, whatever the status. A resolved response is an answer, so a
       // self-hosted build taking a permanent 404 — or a client too old for the
       // deployed `directory_version` — backs off for the TTL instead of
-      // re-asking on every lobby mount. A REJECTION (offline, DNS, CORS,
-      // timeout) writes nothing, so the next mount retries immediately.
+      // re-asking on every lobby mount. A REJECTION (offline, DNS, timeout, or
+      // a CORS policy that refuses this origin, which a phase-server pinned
+      // with `--cors-origin` will do) writes nothing, so the next mount retries
+      // immediately.
       useMultiplayerStore.setState({ directoryFetchedAtMs: Date.now() });
       if (!res.ok) return;
       const projected = projectDirectoryBody(await res.json());

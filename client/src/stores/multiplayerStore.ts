@@ -2259,8 +2259,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // authority arrives with its versions already confirmed against that
         // server's own `/info` at announce time, so a verdict exists before any
         // handshake — and opening a socket to a server whose lobby version this
-        // client cannot speak can only produce a rejected handshake and a
-        // toast. The verdict is READ here, never recomputed:
+        // client cannot speak, ON THE VERSIONS THAT SERVER LAST ANNOUNCED, can
+        // only produce a rejected handshake and a toast. The qualifier is load
+        // bearing: the verdict is a snapshot, so a server that upgrades is
+        // refused for up to the announce interval plus this client's directory
+        // TTL (~6 min today) before the next projection clears it. That is the
+        // cost of deciding before the socket, and the escape hatch below is
+        // what makes it recoverable. The verdict is READ here, never recomputed:
         // `serverProtocolRejection` stays the only protocol-window authority
         // and `serverDirectory.ts` is the only place it is applied to a row.
         //

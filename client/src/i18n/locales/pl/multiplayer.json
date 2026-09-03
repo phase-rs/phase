@@ -149,7 +149,7 @@
     "sourceDuplicate": "Ten serwer jest już źródłem poczekalni.",
     "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł.",
     "directoryOrigin": "Katalog",
-    "sourceScore": "Ocena {{score}}",
+    "sourceScore": "Wynik {{score}}",
     "enable": "Włącz",
     "disable": "Wyłącz",
     "incompatibleVersion": "Niezgodny — wersja serwera {{version}}"

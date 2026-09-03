@@ -22,6 +22,7 @@ import {
   userLobbySource,
 } from "../../stores/multiplayerStore";
 import { SERVER_PRESETS, parseWebSocketUrl } from "../serverDetection";
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
@@ -56,7 +57,10 @@ function stubFetch(...responses: (
   | { reject: true }
 )[]) {
   let index = 0;
-  const mock = vi.fn(async () => {
+  // The URL parameter is declared so every call RECORDS it: `directoryUrl()` is
+  // otherwise a silent-by-contract path that no assertion can reach, and a stub
+  // that ignores its argument stays green against any endpoint at all.
+  const mock = vi.fn(async (_url: string, _init?: RequestInit) => {
     const next = responses[Math.min(index, responses.length - 1)];
     index += 1;
     if ("reject" in next) throw new TypeError("Failed to fetch");
@@ -212,15 +216,46 @@ describe("serverDirectory", () => {
   });
 
   // V-U11d
-  it("suppresses a second read within the TTL and re-reads after it expires", async () => {
+  it("reads the official /servers URL, suppresses a second read within the TTL, and backs off after any resolved status", async () => {
     const fetchMock = stubFetch({ ok: true, json: body([row({ url: "wss://a.example/ws" })]) });
     await refreshServerDirectory();
     await refreshServerDirectory();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
+    // The endpoint itself, derived here from the SAME authority `directoryUrl`
+    // reads (`OFFICIAL_MULTIPLAYER_SERVER_URL`) rather than from a literal.
+    // Deliberately NOT derived from `SERVER_PRESETS[0].url`: that is the build
+    // DEFAULT, which equals the official URL only when no self-hosted default
+    // is configured. Under a self-hosted build `SERVER_PRESETS[0]` is the
+    // self-hosted preset and the two diverge, so keying on it would assert the
+    // wrong endpoint while passing today by coincidence.
+    const officialHost = parseWebSocketUrl(OFFICIAL_MULTIPLAYER_SERVER_URL)!.host;
+    const calledUrl = fetchMock.mock.calls[0][0];
+    expect(calledUrl).toBe(`https://${officialHost}/servers`);
+    // Paired negative: the announced socket path is DROPPED, not carried over.
+    // `/servers` lives at the Worker root, so a URL retaining `/ws` would 404
+    // against the real deployment while every other assertion here stayed green.
+    expect(calledUrl).not.toContain("/ws");
+
     useMultiplayerStore.setState({ directoryFetchedAtMs: Date.now() - DIRECTORY_TTL_MS - 1 });
     await refreshServerDirectory();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // A RESOLVED non-2xx is an answer and must be stamped, so a self-hosted
+    // build permanently 404ing backs off for the TTL instead of re-asking on
+    // every LobbyView mount. Distinct from a rejection (V-U11a), which stamps
+    // nothing and retries immediately.
+    useMultiplayerStore.setState({ directoryFetchedAtMs: null });
+    fetchMock.mockImplementation(
+      async () => ({ ok: false, status: 404, json: async () => ({}) }) as never,
+    );
+    await refreshServerDirectory();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(useMultiplayerStore.getState().directoryFetchedAtMs).not.toBeNull();
+    // The stamp is what suppresses the retry — this second call is the whole
+    // point of the leg, and it reds if the write moves below `if (!res.ok)`.
+    await refreshServerDirectory();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   // V-U11e
@@ -269,6 +304,43 @@ describe("serverDirectory", () => {
     // Paired: a short body is not truncated, so the cap is a bound and not an
     // unconditional slice.
     expect(projectDirectoryBody(body(many.slice(0, 3)))).toHaveLength(3);
+
+    // All-unranked: below Rust's `SCORE_MIN_SAMPLES` (or at zero total weight)
+    // every row arrives with `value: null` and projects to `undefined`, so the
+    // comparator returns 0 for every pair and the stable sort leaves the
+    // directory's own order. The cut is therefore SCAN-ORDER among equals, not
+    // a ranking. Pinned explicitly so that adding a tie-breaker later (last
+    // seen, player count, RTT) is a visible change to this assertion rather
+    // than a silent reordering of which eight servers a client dials.
+    const unranked = Array.from({ length: 12 }, (_, i) =>
+      row({
+        url: `wss://u${i}.example/ws`,
+        score: {
+          value: null,
+          samples: 3,
+          success_rate: 1,
+          completion_rate: 1,
+          median_rtt_ms: null,
+        },
+      }),
+    );
+    const cutUnranked = projectDirectoryBody(body(unranked));
+    expect(cutUnranked).toHaveLength(MAX_DIRECTORY_LOBBY_SOURCES);
+    expect(cutUnranked?.map((e) => e.source.url)).toEqual(
+      unranked.slice(0, MAX_DIRECTORY_LOBBY_SOURCES).map((r) => r.url),
+    );
+    // Reach-guard: every survivor really is unranked, so the order above is the
+    // tie path and not a ranking that happened to agree with body order.
+    expect(cutUnranked?.every((e) => e.source.score === undefined)).toBe(true);
+
+    // Same, with `score: null` ("never reported") rather than a present-but-
+    // unrankable object — both project to `undefined` and must tie identically.
+    const silent = Array.from({ length: 12 }, (_, i) =>
+      row({ url: `wss://q${i}.example/ws`, score: null }),
+    );
+    expect(projectDirectoryBody(body(silent))?.map((e) => e.source.url)).toEqual(
+      silent.slice(0, MAX_DIRECTORY_LOBBY_SOURCES).map((r) => r.url),
+    );
   });
 
   // V-U11g
